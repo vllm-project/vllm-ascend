@@ -27,6 +27,7 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.utils import (
     ASCEND_QUANTIZATION_METHOD,
     COMPRESSED_TENSORS_METHOD,
+    enable_sfa,
     FP8_METHOD,
 )
 
@@ -265,6 +266,11 @@ def maybe_auto_detect_quantization(vllm_config) -> None:
 
 
 def enable_fa_quant(vllm_config, layer_name=None) -> bool:
+    model_config = getattr(vllm_config, "model_config", None)
+    if model_config is None or not model_config.use_mla:
+        return False
+    if enable_sfa(vllm_config):
+        return False
     cache_config = getattr(vllm_config, "cache_config", None)
     if cache_config is None or cache_config.cache_dtype not in ["fp8", "int8"]:
         return False
