@@ -94,7 +94,7 @@ def _build_mxfp_params(
         QuantType.W4A4MXFP,
         QuantType.W4A8MXFP,
         QuantType.W4A16MXFP,
-        QuantType.W8A16FP,
+        QuantType.W8A16MXFP,
     ):
         return None
 
@@ -245,7 +245,7 @@ def build_mlp_compute_input(
             QuantType.W4A8MXFP,
             QuantType.W8A8FP,
             QuantType.W4A16MXFP,
-            QuantType.W8A16FP,
+            QuantType.W8A16MXFP,
         )
         and use_fusion_ops,
         activation=fused_experts_input.activation,

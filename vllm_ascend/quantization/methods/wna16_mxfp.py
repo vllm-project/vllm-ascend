@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-"""Ascend W4A16_MXFP4 quantization helpers and fused MoE method."""
+"""Ascend WnA16 MXFP quantization helpers and fused MoE methods (W4A16_MXFP4 / W8A16_MXFP8)."""
 
 from collections.abc import Callable
 from typing import Any
@@ -52,14 +52,20 @@ def unpack_uint8_to_fp4_return_float32(packed: torch.Tensor) -> torch.Tensor:
     return fp4_values[unpacked.to(torch.long)]
 
 
-@register_scheme("W4A16_MXFP4", "moe")
-class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
-    """FusedMoE method for Ascend W4A16_MXFP4."""
+class AscendWNA16MXFPFusedMoEMethod(AscendMoEScheme):
+    """Base fused MoE method for Ascend WnA16 weight-only MXFP quantization.
 
-    quant_type: QuantType = QuantType.W4A16MXFP
+    Subclasses need to provide:
+      - quant_type: class attribute declaring the scheme's QuantType
+      - weight_quant_type: passed to super().__init__(), the only difference in apply()
+      - get_weight(): weight packing format differs between W4 and W8
+      - process_weights_after_loading(): W4 needs unpack/repack, W8 does not
+    """
 
-    def __init__(self) -> None:
-        ensure_mxfp4_moe_available("W4A16_MXFP4 MoE quantization")
+    quant_type: QuantType  # declared in subclass
+
+    def __init__(self, weight_quant_type: torch.dtype) -> None:
+        self.weight_quant_type = weight_quant_type
         self.ep_group = get_ep_group()
 
         vllm_config = get_current_vllm_config()
@@ -70,28 +76,6 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
             and not vllm_config.model_config.enforce_eager
         )
         self.dynamic_eplb = ascend_config.eplb_config.dynamic_eplb
-
-    def get_weight(
-        self,
-        num_experts: int,
-        intermediate_size_per_partition: int,
-        hidden_sizes: int,
-        params_dtype: torch.dtype,
-    ) -> dict[str, Any]:
-        param_dict = {}
-        param_dict["w13_weight"] = torch.empty(
-            num_experts,
-            2 * intermediate_size_per_partition,
-            hidden_sizes // 2,
-            dtype=torch.uint8,
-        )
-        param_dict["w2_weight"] = torch.empty(
-            num_experts,
-            hidden_sizes,
-            intermediate_size_per_partition // 2,
-            dtype=torch.uint8,
-        )
-        return param_dict
 
     def get_dynamic_quant_param(
         self,
@@ -190,7 +174,7 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
                 pertoken_scale=pertoken_scale,
                 activation=activation,
                 mxfp_act_quant_type=None,
-                mxfp_weight_quant_type=torch_npu.float4_e2m1fn_x2,
+                mxfp_weight_quant_type=self.weight_quant_type,
                 mxfp_scale_dtype=FLOAT8_E8M0FNU_DTYPE,
                 mxfp_per_token_scale_dtype=None,
                 mxfp_use_bf16=(x.dtype == torch.bfloat16),
@@ -199,6 +183,40 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
                 swiglu_limit=layer.swiglu_limit,
             )
         )
+
+
+@register_scheme("W4A16_MXFP4", "moe")
+class AscendW4A16MXFP4FusedMoEMethod(AscendWNA16MXFPFusedMoEMethod):
+    """FusedMoE method for Ascend W4A16_MXFP4."""
+
+    quant_type: QuantType = QuantType.W4A16MXFP
+
+    def __init__(self) -> None:
+        ensure_mxfp4_moe_available(f"{type(self).__name__} MoE quantization")
+        super().__init__(weight_quant_type=torch_npu.float4_e2m1fn_x2)
+
+    def get_weight(
+        self,
+        num_experts: int,
+        intermediate_size_per_partition: int,
+        hidden_sizes: int,
+        params_dtype: torch.dtype,
+    ) -> dict[str, Any]:
+        param_dict = {}
+        # FP4 is packed two elements per uint8, so the K dim is halved.
+        param_dict["w13_weight"] = torch.empty(
+            num_experts,
+            2 * intermediate_size_per_partition,
+            hidden_sizes // 2,
+            dtype=torch.uint8,
+        )
+        param_dict["w2_weight"] = torch.empty(
+            num_experts,
+            hidden_sizes,
+            intermediate_size_per_partition // 2,
+            dtype=torch.uint8,
+        )
+        return param_dict
 
     def process_weights_after_loading(self, layer):
         layer.w13_weight.data = unpack_uint8_to_fp4_return_float32(layer.w13_weight.data)
@@ -213,3 +231,43 @@ class AscendW4A16MXFP4FusedMoEMethod(AscendMoEScheme):
 
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(1, 2).contiguous()
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(1, 2).contiguous()
+
+
+@register_scheme("W8A16_MXFP8", "moe")
+class AscendW8A16MXFP8FusedMoEMethod(AscendWNA16MXFPFusedMoEMethod):
+    """FusedMoE method for Ascend W8A16_MXFP8."""
+
+    quant_type: QuantType = QuantType.W8A16MXFP
+
+    def __init__(self) -> None:
+        super().__init__(weight_quant_type=torch_npu.float8_e4m3fn)
+
+    def get_weight(
+        self,
+        num_experts: int,
+        intermediate_size_per_partition: int,
+        hidden_sizes: int,
+        params_dtype: torch.dtype,
+    ) -> dict[str, Any]:
+        param_dict = {}
+        # FP8 is stored one element per slot, no packing, so the K dim is NOT halved.
+        param_dict["w13_weight"] = torch.empty(
+            num_experts,
+            2 * intermediate_size_per_partition,
+            hidden_sizes,
+            dtype=torch.float8_e4m3fn,
+        )
+        param_dict["w2_weight"] = torch.empty(
+            num_experts,
+            hidden_sizes,
+            intermediate_size_per_partition,
+            dtype=torch.float8_e4m3fn,
+        )
+        return param_dict
+
+    def process_weights_after_loading(self, layer):
+        layer.w13_weight.data = layer.w13_weight.data.transpose(1, 2)
+        layer.w2_weight.data = layer.w2_weight.data.transpose(1, 2)
+
+        layer.w13_weight_scale.data = layer.w13_weight_scale.data.contiguous()
+        layer.w2_weight_scale.data = layer.w2_weight_scale.data.contiguous()
