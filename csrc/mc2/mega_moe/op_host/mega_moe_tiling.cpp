@@ -900,10 +900,23 @@ static ge::graphStatus CheckInputParam(const gert::TilingContext *context, MegaM
     const gert::StorageShape *xStorageShape = context->GetInputShape(config.xIndex);
 
     int64_t xDim0 = xStorageShape->GetStorageShape().GetDim(0);
-    OP_TILING_CHECK(xDim0 < MIN_BS || xDim0 > MAX_BS,
+    const gert::StorageShape *topkIdsStorageShape = context->GetInputShape(config.topkIdsIndex);
+    int64_t topkIdsDim1 = topkIdsStorageShape->GetStorageShape().GetDim(1);
+
+    // 检查MAX_BS范围
+    uint64_t ubSize = 0UL;
+    auto ascendcPlatform = platform_ascendc::PlatformAscendC(context->GetPlatformInfo());
+    ascendcPlatform.GetCoreMemSize(platform_ascendc::CoreMemType::UB, ubSize);
+    auto attrs = context->GetAttrs();
+    auto epWorldSizePtr = attrs->GetAttrPointer<int64_t>((config.attrEpWorldSizeIndex));
+    int64_t worldSize = static_cast<int64_t>(*epWorldSizePtr);
+    // 当前最大bs根据ub剩余空间反算得来，bsMax = (8*(UB_SIZE-48K))/(topK*(64+worldSize))
+    int64_t maxBs = 8 * (ubSize - 48*1024) / (topkIdsDim1 * (64 + worldSize));
+    OP_TILING_CHECK(xDim0 < MIN_BS || xDim0 > maxBs,
         OP_LOGE_FOR_INVALID_VALUE(nodeName, "BS", std::to_string(xDim0).c_str(),
             (std::string("should in [") + std::to_string(MIN_BS) + ", " +
-             std::to_string(MAX_BS) + "]").c_str()),
+             std::to_string(maxBs) + "]" + ", "
+             + "maxBs = (8 * (TOTAL_UB_SIZE - 48K)) / (topK * (64 + worldSize))").c_str()),
         return ge::GRAPH_FAILED);
 
     int64_t xDim1 = xStorageShape->GetStorageShape().GetDim(1);
@@ -913,18 +926,16 @@ static ge::graphStatus CheckInputParam(const gert::TilingContext *context, MegaM
             (std::string("should in [") + std::to_string(H_BASE) + ", " +
              std::to_string(MAX_H) + "]").c_str()),
         return ge::GRAPH_FAILED);
-
     // 检查 H 是否 1024 的倍数
     OP_TILING_CHECK(xDim1 % H_BASE != 0,
         OP_LOGE_FOR_INVALID_VALUE(nodeName, "H", std::to_string(xDim1).c_str(),
             (std::string("multiple of ") + std::to_string(H_BASE)).c_str()),
         return ge::GRAPH_FAILED);
 
-    const gert::StorageShape *topkIdsStorageShape = context->GetInputShape(config.topkIdsIndex);
-    int64_t topkIdsDim1 = topkIdsStorageShape->GetStorageShape().GetDim(1);
-    OP_TILING_CHECK(topkIdsDim1 != 6LL && topkIdsDim1 != 8LL,
+    // topk范围
+    OP_TILING_CHECK(topkIdsDim1 < 1 || topkIdsDim1 > 16,
         OP_LOGE_FOR_INVALID_VALUE(nodeName, "topK", std::to_string(topkIdsDim1).c_str(),
-            "only support 6/8"),
+            "only support [1, 16]"),
         return ge::GRAPH_FAILED);
 
     auto weightOneStorageShape = context->GetDynamicInputShape(config.weight1Index, 0);
