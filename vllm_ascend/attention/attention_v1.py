@@ -325,8 +325,7 @@ class AscendAttentionMetadataBuilder(AttentionMetadataBuilder[AscendMetadata]):
         )
         if hasattr(common_attn_metadata, "kvcomp_metadata"):
             attn_metadata.kvcomp_metadata = common_attn_metadata.kvcomp_metadata
-            attn_metadata.hamming_output_records = [None] * common_attn_metadata.kvcomp_metadata.kvcomp_config.num_hidden_layers
-            attn_metadata.actual_seq_lengths_q_device = recover_request_lengths(query_start_loc)[:-1]
+            attn_metadata.actual_seq_lengths_q_device = recover_request_lengths(query_start_loc)
         return attn_metadata
 
     def build_for_graph_capture(
@@ -780,11 +779,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         if (kvcomp_config.vllm_hash_attention_skip_layers[self.layerIndex] and 
                 attn_metadata.attn_state == AscendAttentionState.DecodeOnly):
-            reuse_layer_id = kvcomp_config.top_k_index_reuse[self.layerIndex]
-            hamming_output = attn_metadata.hamming_output_records[reuse_layer_id]
-            block_table = hamming_output['new_block_table']
-            actual_seq_lengths_kv = hamming_output['new_seq_lens_list']
-            return block_table, actual_seq_lengths_kv
+            return kvcomp_metadata.hamming_output, kvcomp_metadata.seq_lens_for_hamming
         else: # padding, 指定 batch size
             sink = 1
             recent =4
@@ -823,7 +818,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
             hashq = hash_encoder.compute_hash(query[:real_batch_size])
             hashq = hashq.unsqueeze(2).contiguous()    
-            # indices = kvcomp_metadata.hamming_output[:real_batch_size]
             new_block_table = torch.ops._C_ascend.npu_hamming_dist_top_k(
                 hashq,
                 hashk_cache_op,
@@ -840,9 +834,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 kvcomp_metadata.hamming_output[:real_batch_size]
             )
             new_block_table = new_block_table.squeeze(1).contiguous()
-            attn_metadata.hamming_output_records[self.layerIndex] = {
-                'new_block_table': new_block_table, 
-                'new_seq_lens_list': new_seq_lens_list}
+            kvcomp_metadata.hamming_output = new_block_table
+            kvcomp_metadata.seq_lens_for_hamming = new_seq_lens_list
 
         return new_block_table, new_seq_lens_list
 
