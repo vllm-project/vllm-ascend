@@ -1,22 +1,64 @@
-from typing import Optional
+import os
+from typing import Optional,Tuple
+
+import torch
 
 from vllm.config import VllmConfig
 from vllm.platforms import Platform, PlatformEnum
 
 
-class NPUPlatform(Platform):
-    _enum = PlatformEnum.UNSPECIFIED
-    device_name = "npu"
+def _device_id_to_physical_device_id(device_id: int) -> int:
+    if "ASCEND_RT_VISIBLE_DEVICES" in os.environ:
+        device_ids = os.environ["ASCEND_RT_VISIBLE_DEVICES"].split(",")
+        if device_ids == [""]:
+            raise RuntimeError("ASCEND_RT_VISIBLE_DEVICES is set to empty"
+                               "string, which means Ascend NPU support is"
+                               "disabled.")
+        physical_device_id = device_ids[device_id]
+        return int(physical_device_id)
+    else:
+        return device_id
 
-    def __init__(self):
-        super().__init__()
+
+class NPUPlatform(Platform):
+    _enum = "Ascend"
+    device_type: str = "npu"
 
     @classmethod
-    def get_device_name(cls) -> str:
-        return "npu"
+    def get_device_capability(cls, device_id: int = 0):
+        return None
+
+    @classmethod
+    def get_device_name(cls, device_id: int = 0) -> str:
+        physical_device_id = _device_id_to_physical_device_id(device_id)
+        return torch.npu.get_device_name(physical_device_id)
+
+    @classmethod
+    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+        return True
+
+    @classmethod
+    def inference_mode(cls):
+        return torch.inference_mode()
+
+    @classmethod
+    def set_device(cls, device: torch.device):
+        torch.npu.set_device(device)
+
+    @classmethod
+    def empty_cache(cls):
+        torch.npu.empty_cache()
+
+    @classmethod
+    def synchronize(cls):
+        torch.npu.synchronize()
+
+    @classmethod
+    def mem_get_info(cls) -> Tuple[int, int]:
+        return torch.npu.mem_get_info()
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
-        parallel_config.worker_cls = \
-            "vllm_ascend_plugin.worker.NPUWorker"
+        if parallel_config.worker_cls == "auto":
+            parallel_config.worker_cls = "vllm.worker.npu_worker.NPUWorker"
