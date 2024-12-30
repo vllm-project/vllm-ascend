@@ -63,4 +63,4 @@ class NPUPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm.worker.npu_worker.NPUWorker"
+            parallel_config.worker_cls = "vllm_ascend_plugin.worker.NPUWorker"
