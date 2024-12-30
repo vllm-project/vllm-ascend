@@ -2,9 +2,10 @@ import os
 from typing import Optional,Tuple
 
 import torch
+import torch_npu
 
 from vllm.config import VllmConfig
-from vllm.platforms import Platform, PlatformEnum
+from vllm.platforms import Platform
 
 
 def _device_id_to_physical_device_id(device_id: int) -> int:
@@ -23,6 +24,7 @@ def _device_id_to_physical_device_id(device_id: int) -> int:
 class NPUPlatform(Platform):
     _enum = "Ascend"
     device_type: str = "npu"
+    torch_compile_backend: str = "npu"
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0):
