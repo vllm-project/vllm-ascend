@@ -373,7 +373,9 @@ class NPUModelRunner(ModelRunner):
                 self.pin_memory,
                 generators,
                 self.sampling_metadata_cache,
-                pad_for_invariant_seq_len=True)
+                # TODO (cmq): enable this after supported in vllm
+                # pad_for_invariant_seq_len=True,
+                )
         else:
             sampling_metadata = None
         is_prompt = (seq_group_metadata_list[0].is_prompt
