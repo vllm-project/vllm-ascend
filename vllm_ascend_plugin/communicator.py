@@ -5,7 +5,7 @@ from torch.distributed import ProcessGroup
 from vllm.platforms import current_platform
 
 
-class NpuCommunicator:
+class NPUCommunicator:
 
     def __init__(self, group: ProcessGroup):
         if not current_platform.is_npu():
