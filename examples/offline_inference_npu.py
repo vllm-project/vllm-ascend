@@ -26,7 +26,7 @@ prompts = [
 sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 
 # Create an LLM.
-llm = LLM(model="facebook/opt-125m")
+llm = LLM(model="facebook/opt-125m", block_size=64)
 
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.

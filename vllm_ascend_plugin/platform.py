@@ -76,5 +76,12 @@ class NPUPlatform(Platform):
         return "vllm_ascend_plugin.attention.AscendAttentionBackend"
 
     @classmethod
+    def get_current_memory_usage(cls,
+                                 device: Optional[torch.types.Device] = None
+                                 ) -> float:
+        torch.npu.reset_peak_memory_stats(device)  # type: ignore
+        return torch.npu.max_memory_allocated(device)  # type: ignore
+
+    @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm_ascend_plugin.communicator.NPUCommunicator"  # noqa: E501
