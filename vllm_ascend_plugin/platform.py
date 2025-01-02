@@ -64,3 +64,13 @@ class NPUPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm_ascend_plugin.worker.NPUWorker"
+
+    @classmethod
+    def get_attn_backend_cls(cls, selected_backend, head_size,
+                                                 dtype, kv_cache_dtype,
+                                                 block_size, use_v1):
+        return "vllm_ascend_plugin.attention.AscendAttentionBackend"
+
+    @classmethod
+    def get_device_communicator_cls(cls) -> str:
+        return "vllm_ascend_plugin.communicator.NPUCommunicator"  # noqa: E501
