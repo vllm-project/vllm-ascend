@@ -68,6 +68,9 @@ class NPUPlatform(Platform):
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm_ascend_plugin.worker.NPUWorker"
+        cache_config = vllm_config.cache_config
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = 16
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size,
