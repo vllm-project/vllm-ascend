@@ -5,8 +5,9 @@ import torch
 import torch_npu
 
 from vllm.config import VllmConfig
-from vllm.platforms import Platform
+from vllm.platforms import Platform, _Backend
 
+os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
 
 def _device_id_to_physical_device_id(device_id: int) -> int:
     if "ASCEND_RT_VISIBLE_DEVICES" in os.environ:
@@ -23,8 +24,11 @@ def _device_id_to_physical_device_id(device_id: int) -> int:
 
 class NPUPlatform(Platform):
     _enum = "Ascend"
+    device_name: str = "npu"
     device_type: str = "npu"
     torch_compile_backend: str = "npu"
+    ray_device_key: str = "NPU"
+    visible_device_name: str = "ASCEND_RT"
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0):
