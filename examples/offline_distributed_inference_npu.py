@@ -17,11 +17,16 @@ prompts = [
 sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 
 # Create an LLM.
-llm = LLM(model="facebook/opt-125m")
-
+# TODO (cmq): ray is not supported currently, need some fixes
+llm = LLM(model="facebook/opt-125m",
+          tensor_parallel_size=2,
+          distributed_executor_backend="mp",
+          trust_remote_code=True,
+          )
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
 outputs = llm.generate(prompts, sampling_params)
+
 # Print the outputs.
 for output in outputs:
     prompt = output.prompt
