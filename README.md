@@ -21,7 +21,7 @@ VLLM_TARGET_DEVICE=cpu python setup.py install
 2. Install cllm_ascend_plugin
 
 ```
-git clone https://github.com/cosdt/vllm-ascend-plugin
+git clone https://github.com/cosdt/vllm-ascend
 cd vllm-ascend-plugin
 pip install -e .
 ```
