@@ -427,6 +427,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype
         self.sliding_window = sliding_window
+        if alibi_slopes is not None:
+            alibi_slopes = torch.tensor(
+                alibi_slopes,
+                dtype=torch.float32,
+                device="npu"
+            )
         self.alibi_slopes = alibi_slopes
 
         assert self.num_heads % self.num_kv_heads == 0
@@ -498,6 +504,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     seq_len=attn_metadata.max_prefill_seq_len,
                     batch_size=num_tokens,
                 )
+
             if (len(kv_cache) == 0 or attn_metadata.block_tables is None
                     or attn_metadata.block_tables.numel() == 0):
                 max_seq_len = attn_metadata.max_prefill_seq_len
@@ -635,7 +642,7 @@ def _make_alibi_bias(
     padded_len = (seq_len + 7) // 8 * 8
     num_heads = alibi_slopes.shape[0]
     bias = torch.empty(
-        batch_size,
+        1,
         num_heads,
         seq_len,
         padded_len,
