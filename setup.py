@@ -35,6 +35,12 @@ setup(name='vllm_ascend_plugin',
       version='0.1',
       packages=['vllm_ascend_plugin'],
       install_requires=get_requirements(),
+      extras_require={
+        "tensorizer": ["tensorizer>=2.9.0"],
+        "runai": ["runai-model-streamer", "runai-model-streamer-s3", "boto3"],
+        "audio": ["librosa", "soundfile"],  # Required for audio processing
+        "video": ["decord"]  # Required for video processing
+      },
       entry_points={
           'vllm.platform_plugins':
           ["ascend_plugin = vllm_ascend_plugin:register"]
