@@ -1,6 +1,40 @@
 # Ascend NPU plugin for vLLM
 
-## Install
+## Use Docker
+
+### 1. Download vllm and vllm_ascend
+
+```bash
+git clone https://github.com/cosdt/vllm-ascend
+cd vllm-ascend
+git clone https://github.com/cosdt/vllm
+```
+
+### 2. Build Docker Image
+
+> [!NOTE]
+> Modify the base image in Dockerfile according to your device. 
+> More choices could be found at https://hub.docker.com/r/ascendai/cann
+
+```bash
+docker build -t vllm-npu .
+```
+
+### 3. Run docker container
+
+> [!NOTE]
+> Modify `--device /dev/davinci0` according to your device.
+
+```bash
+docker run -dit -v /usr/local/dcmi:/usr/local/dcmi -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi -v /usr/local/Ascend/driver:/usr/local/Ascend/driver -v /etc/ascend_install.info:/etc/ascend_install.info --device /dev/davinci0 --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc --shm-size 16G --name vllm vllm-npu:latest bash
+```
+### 4. Enter the container
+
+```bash
+docker exec -it vllm bash
+```
+
+## Install from source
 
 ### 1. Prepare CANN env
 
@@ -39,11 +73,11 @@ VLLM_TARGET_DEVICE=cpu python setup.py install
 > [!NOTE]
 > Ubuntu 22.04 is highly recommended as the installation on Ubuntu 20.04 may come across some errors.
 
-### 3. Install vllm_ascend_plugin
+### 3. Install vllm_ascend
 
 ```bash
 git clone https://github.com/cosdt/vllm-ascend
-cd vllm-ascend-plugin
+cd vllm-ascend
 pip install -e .
 ```
 
@@ -56,7 +90,7 @@ pip install -e .
 > [!NOTE]
 > Torch 2.5.1 is highly recommended because vLLM strongly depends on it.
 
-## Support Device
+## Support Devices
 
 - Atlas 800I A2 Inference Server
 - Atlas 800T A2 Training Server
