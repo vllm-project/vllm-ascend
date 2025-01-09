@@ -6,7 +6,7 @@
 
 Before install vllm_ascend_plugin, you need to install the Ascend CANN Toolkit and Kernels. Please follow the [installation tutorial](https://ascend.github.io/docs/sources/ascend/quick_install.html#id1) or use the following commands for quick installation:
 
-```
+```bash
 # replace the url according to your CANN version and devices
 # install CANN Toolkit
 wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/Milan-ASL/Milan-ASL%20V100R001C17SPC701/Ascend-cann-toolkit_8.0.RC3.alpha003_linux-"$(uname -i)".run
@@ -20,9 +20,9 @@ bash Ascend-cann-kernels-910b_8.0.RC1.alpha003_linux.run --install
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 ```
 
-### 2. Install vllm cpu
+### 2. Install vLLM cpu
 
-```
+```bash
 git clone https://github.com/cosdt/vllm -b apply_plugin
 cd vllm
 
@@ -41,7 +41,7 @@ VLLM_TARGET_DEVICE=cpu python setup.py install
 
 ### 3. Install vllm_ascend_plugin
 
-```
+```bash
 git clone https://github.com/cosdt/vllm-ascend
 cd vllm-ascend-plugin
 pip install -e .
@@ -61,3 +61,20 @@ pip install -e .
 - Atlas 800I A2 Inference Server
 - Atlas 800T A2 Training Server
 - Atals 300T A2 Training Card
+
+## Contributing
+
+Linting and formatting:
+
+```bash
+pip install -r requirements-lint.txt
+
+# 1. Do work and commit your work.
+# 2. Format files that differ from origin/main.
+bash format.sh
+# 3. Commit changed files with message 'Run yapf and ruff'
+git commit -m "Run yapf and ruff"
+```
+
+> [!NOTE]
+> The warning "F401 `torch_npu` imported but unused" doesn't matter because the api `torch.npu` will call this library indirectly while there are not `torch_npu` in the codes explicitly. 

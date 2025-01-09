@@ -12,7 +12,6 @@ from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.utils import FlexibleArgumentParser
 
-
 audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
 question_per_audio_count = {
     0: "What is 1+1?",
@@ -68,10 +67,12 @@ def run_qwen2_audio(question: str, audio_count: int):
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
+
 # TODO (cmq): test ultravox
 model_example_map = {
-    # "ultravox": run_ultravox, 
-    "qwen2_audio": run_qwen2_audio}
+    # "ultravox": run_ultravox,
+    "qwen2_audio": run_qwen2_audio
+}
 
 
 def main(args):

@@ -82,9 +82,8 @@ class NPUPlatform(Platform):
             cache_config.block_size = 16
 
     @classmethod
-    def get_attn_backend_cls(cls, selected_backend, head_size,
-                                                 dtype, kv_cache_dtype,
-                                                 block_size, use_v1):
+    def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
+                             kv_cache_dtype, block_size, use_v1):
         return "vllm_ascend_plugin.attention.AscendAttentionBackend"
 
     @classmethod
