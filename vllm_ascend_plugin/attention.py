@@ -29,7 +29,6 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        # For attention layer compatibility
         return "ASCEND"
 
     @staticmethod

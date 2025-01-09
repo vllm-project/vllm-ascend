@@ -1,13 +1,18 @@
 import os
-from typing import Optional,Tuple
+from typing import Optional, Tuple
 
 import torch
-import torch_npu
+
+try:
+    import torch_npu
+except ImportError:
+    print("Failed to import torch_npu")
 
 from vllm.config import VllmConfig
-from vllm.platforms import Platform, _Backend
+from vllm.platforms import Platform
 
 os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
+
 
 def _device_id_to_physical_device_id(device_id: int) -> int:
     if "ASCEND_RT_VISIBLE_DEVICES" in os.environ:
@@ -23,6 +28,7 @@ def _device_id_to_physical_device_id(device_id: int) -> int:
 
 
 class NPUPlatform(Platform):
+
     _enum = "Ascend"
     device_name: str = "npu"
     device_type: str = "npu"
@@ -85,9 +91,9 @@ class NPUPlatform(Platform):
     def get_current_memory_usage(cls,
                                  device: Optional[torch.types.Device] = None
                                  ) -> float:
-        torch.npu.reset_peak_memory_stats(device)  # type: ignore
-        return torch.npu.max_memory_allocated(device)  # type: ignore
+        torch.npu.reset_peak_memory_stats(device)
+        return torch.npu.max_memory_allocated(device)
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        return "vllm_ascend_plugin.communicator.NPUCommunicator"  # noqa: E501
+        return "vllm_ascend_plugin.communicator.NPUCommunicator"
