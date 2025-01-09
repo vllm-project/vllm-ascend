@@ -1,7 +1,4 @@
-import torch
-
 from vllm import LLM, SamplingParams
-
 
 prompts = [
     "Hello, my name is",
