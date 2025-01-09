@@ -2,7 +2,7 @@
 
 ## Install
 
-1. Prepare CANN env
+### 1. Prepare CANN env
 
 Before install vllm_ascend_plugin, you need to install the Ascend CANN Toolkit and Kernels. Please follow the [installation tutorial](https://ascend.github.io/docs/sources/ascend/quick_install.html#id1) or use the following commands for quick installation:
 
@@ -20,7 +20,7 @@ bash Ascend-cann-kernels-910b_8.0.RC1.alpha003_linux.run --install
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 ```
 
-2. Install vllm cpu
+### 2. Install vllm cpu
 
 ```
 git clone https://github.com/cosdt/vllm -b apply_plugin
@@ -36,7 +36,10 @@ pip install -r requirements-cpu.txt
 VLLM_TARGET_DEVICE=cpu python setup.py install
 ```
 
-3. Install vllm_ascend_plugin
+> [!NOTE]
+> Ubuntu 22.04 is highly recommended as the installation on Ubuntu 20.04 may come across some errors.
+
+### 3. Install vllm_ascend_plugin
 
 ```
 git clone https://github.com/cosdt/vllm-ascend

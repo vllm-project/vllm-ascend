@@ -8,3 +8,6 @@ __pycache__/
 
 # VSCode
 .vscode/
+
+# egg-info
+vllm_ascend_plugin.egg-info/
