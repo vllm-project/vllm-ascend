@@ -7,7 +7,7 @@
 ```bash
 git clone https://github.com/cosdt/vllm-ascend
 cd vllm-ascend
-git clone https://github.com/cosdt/vllm
+git clone https://github.com/cosdt/vllm -b apply_plugin
 ```
 
 ### 2. Build Docker Image
