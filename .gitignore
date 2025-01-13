@@ -10,4 +10,4 @@ __pycache__/
 .vscode/
 
 # egg-info
-vllm_ascend_plugin.egg-info/
+vllm_ascend.egg-info/

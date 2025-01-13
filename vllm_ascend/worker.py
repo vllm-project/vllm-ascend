@@ -18,7 +18,7 @@ from vllm.worker.pooling_model_runner import PoolingModelRunner
 from vllm.worker.worker import Worker
 from vllm.worker.worker_base import WorkerBase
 
-from vllm_ascend_plugin.model_runner import NPUModelRunner
+from vllm_ascend.model_runner import NPUModelRunner
 
 
 class NPUWorker(Worker):

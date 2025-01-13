@@ -38,7 +38,7 @@ docker exec -it vllm bash
 
 ### 1. Prepare CANN env
 
-Before install vllm_ascend_plugin, you need to install the Ascend CANN Toolkit and Kernels. Please follow the [installation tutorial](https://ascend.github.io/docs/sources/ascend/quick_install.html#id1) or use the following commands for quick installation:
+Before install vllm_ascend, you need to install the Ascend CANN Toolkit and Kernels. Please follow the [installation tutorial](https://ascend.github.io/docs/sources/ascend/quick_install.html#id1) or use the following commands for quick installation:
 
 ```bash
 # replace the url according to your CANN version and devices

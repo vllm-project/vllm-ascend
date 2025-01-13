@@ -27,13 +27,13 @@ def get_requirements() -> List[str]:
     try:
         requirements = _read_requirements("requirements.txt")
     except ValueError:
-        print("Failed to read requirements.txt in vllm_ascend_plugin.")
+        print("Failed to read requirements.txt in vllm_ascend.")
     return requirements
 
 
-setup(name='vllm_ascend_plugin',
+setup(name='vllm_ascend',
       version='0.1',
-      packages=['vllm_ascend_plugin'],
+      packages=['vllm_ascend'],
       install_requires=get_requirements(),
       extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
@@ -43,5 +43,5 @@ setup(name='vllm_ascend_plugin',
       },
       entry_points={
           'vllm.platform_plugins':
-          ["ascend_plugin = vllm_ascend_plugin:register"]
+          ["ascend_plugin = vllm_ascend:register"]
       })

@@ -4,7 +4,7 @@ import torch
 
 from vllm.model_executor.layers.layernorm import RMSNorm
 
-def forward_npu(
+def forward_oot(
     self,
     x: torch.Tensor,
     residual: Optional[torch.Tensor] = None,
@@ -20,4 +20,4 @@ def forward_npu(
                                             self.variance_epsilon)
     return x
 
-RMSNorm.set_foward_method(forward_npu)
+RMSNorm.forward_oot = forward_oot
