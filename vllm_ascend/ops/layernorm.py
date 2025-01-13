@@ -1,8 +1,8 @@
 from typing import Optional, Tuple, Union
 
 import torch
-
 from vllm.model_executor.layers.layernorm import RMSNorm
+
 
 def forward_oot(
     self,
@@ -12,12 +12,12 @@ def forward_oot(
     import torch_npu
 
     if residual is not None:
-        x, _, residual = torch_npu.npu_add_rms_norm(
-            x, residual, self.weight, self.variance_epsilon)
+        x, _, residual = torch_npu.npu_add_rms_norm(x, residual, self.weight,
+                                                    self.variance_epsilon)
         return x, residual
 
-    x, residual = torch_npu.npu_rms_norm(x, self.weight,
-                                            self.variance_epsilon)
+    x, residual = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)
     return x
+
 
 RMSNorm.forward_oot = forward_oot

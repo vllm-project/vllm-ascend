@@ -109,6 +109,3 @@ bash format.sh
 # 3. Commit changed files with message 'Run yapf and ruff'
 git commit -m "Run yapf and ruff"
 ```
-
-> [!NOTE]
-> The warning "F401 `torch_npu` imported but unused" doesn't matter because the api `torch.npu` will call this library indirectly while there are not `torch_npu` in the codes explicitly. 

@@ -5,9 +5,9 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 import torch
 
 try:
-    import torch_npu
+    import torch_npu  # noqa: F401
 except ImportError:
-    print("Failed to import torch_npu")
+    print("Failed to import torch_npu.")
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
@@ -375,7 +375,7 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
             # TODO(sang): Combine chunked prefill and prefix caching by
             # only allowing multiple of block_size chunk size.
             # NOTE: This only works for oooooooxxx style attention.
-            block_table = []
+            block_table: List[int] = []
             prefix_cache_hit = any([
                 inter_data.prefix_cache_hit
                 for inter_data in self.input_builder.inter_data_list
@@ -383,7 +383,8 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
             if prefix_cache_hit:
                 # NOTE(woosuk): For flash-attn, the block table should
                 # include the entries for the incoming prefill tokens.
-                block_table = block_tables[seq_id]
+                if block_tables is not None:
+                    block_table = block_tables[seq_id]
             elif ((chunked_prefill_enabled or not is_prompt)
                   and block_tables is not None):
                 if curr_sliding_window_block == 0:

@@ -4,9 +4,9 @@ from typing import Optional, Tuple
 import torch
 
 try:
-    import torch_npu
+    import torch_npu  # noqa: F401
 except ImportError:
-    print("Failed to import torch_npu")
+    print("Failed to import torch_npu.")
 
 from vllm.config import VllmConfig
 from vllm.platforms import Platform
@@ -72,7 +72,7 @@ class NPUPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         # Register ops when setup.
-        from vllm_ascend import ops
+        from vllm_ascend import ops  # noqa: F401
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":

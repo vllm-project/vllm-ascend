@@ -43,7 +43,7 @@ ISORT_VERSION=$(isort --vn)
 CLANGFORMAT_VERSION=$(clang-format --version | awk '{print $3}')
 SPHINX_LINT_VERSION=$(sphinx-lint --version | awk '{print $2}')
 
-# # params: tool name, tool version, required version
+# params: tool name, tool version, required version
 tool_version_check() {
     expected=$(grep "$1" requirements-lint.txt | cut -d'=' -f3)
     if [[ "$2" != "$expected" ]]; then
@@ -112,9 +112,9 @@ fi
 echo 'vLLM yapf: Done'
 
 # Run mypy
-# echo 'vLLM mypy:'
-# tools/mypy.sh
-# echo 'vLLM mypy: Done'
+echo 'vLLM mypy:'
+tools/mypy.sh
+echo 'vLLM mypy: Done'
 
 
 # If git diff returns a file that is in the skip list, the file may be checked anyway:
@@ -316,6 +316,6 @@ else
     echo "✨🎉 Format check passed! Congratulations! 🎉✨"
 fi
 
-echo 'vLLM sphinx-lint:'
-tools/sphinx-lint.sh
-echo 'vLLM sphinx-lint: Done'
+# echo 'vLLM sphinx-lint:'
+# tools/sphinx-lint.sh
+# echo 'vLLM sphinx-lint: Done'

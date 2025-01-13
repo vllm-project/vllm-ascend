@@ -3,13 +3,12 @@ from typing import Any, Dict, List, Optional, Set, Type
 
 import torch
 import torch.distributed
-
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import SamplingMetadata
-from vllm.multimodal import MultiModalKwargs
+from vllm.multimodal import MultiModalKwargs, MultiModalPlaceholderMap
 from vllm.platforms import current_platform
 from vllm.prompt_adapter.layers import PromptAdapterMapping
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -214,6 +213,218 @@ class ModelInputForNPUBuilder(ModelInputForGPUBuilder):
             prompt_adapter_mapping=prompt_adapter_mapping,
             prompt_adapter_requests=prompt_adapter_requests)
 
+    class InterDataForSeqGroup:
+        """Intermediate data for the current sequence group."""
+
+        def simple_reinit(self):
+            self.input_tokens[0].clear()  # type: ignore
+            self.input_positions[0].clear()  # type: ignore
+            self.token_types[0].clear()  # type: ignore
+            self.mrope_input_positions = None  # type: ignore
+            self.seq_lens[0] = 0  # type: ignore
+            self.orig_seq_lens[0] = 0  # type: ignore
+            self.query_lens[0] = 0  # type: ignore
+            self.context_lens[0] = 0  # type: ignore
+            self.curr_sliding_window_blocks[0] = 0  # type: ignore
+            self.lora_index_mapping.clear()  # type: ignore
+            self.lora_prompt_mapping.clear()  # type: ignore
+            self.lora_requests.clear()  # type: ignore
+            self.prompt_adapter_index_mapping.clear()  # type: ignore
+            self.prompt_adapter_prompt_mapping.clear()  # type: ignore
+
+        def __init__(
+            self,
+            *,
+            # From sequence group metadata.
+            request_id: str,
+            seq_ids: List[int],
+            is_prompt: bool,
+            block_tables: Optional[Dict[int, List[int]]],
+            computed_block_nums: List[int],
+            n_seqs: int = 0,
+
+            # Input tokens and positions.
+            input_tokens: Optional[List[List[int]]] = None,
+            input_positions: Optional[List[List[int]]] = None,
+            token_types: Optional[List[List[int]]] = None,
+            mrope_input_positions: Optional[List[List[List[int]]]] = None,
+
+            # The sequence length (may be capped to the sliding window).
+            seq_lens: Optional[List[int]] = None,
+            # The original sequence length (before applying sliding window).
+            # This is used to compute slot mapping.
+            orig_seq_lens: Optional[List[int]] = None,
+            # The query length.
+            query_lens: Optional[List[int]] = None,
+            # The number of tokens that are already computed.
+            context_lens: Optional[List[int]] = None,
+            # The current sliding window block.
+            curr_sliding_window_blocks: Optional[List[int]] = None,
+
+            # LoRA inputs.
+            lora_index_mapping: Optional[List[List[int]]] = None,
+            lora_prompt_mapping: Optional[List[List[int]]] = None,
+            lora_requests: Optional[Set[LoRARequest]] = None,
+
+            # Prompt adapter inputs.
+            prompt_adapter_index_mapping: Optional[List[int]] = None,
+            prompt_adapter_prompt_mapping: Optional[List[int]] = None,
+            prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+
+            # Multi-modal inputs.
+            multi_modal_kwargs: Optional[MultiModalKwargs] = None,
+            multi_modal_placeholder_maps: Optional[Dict[
+                str, MultiModalPlaceholderMap]] = None,
+
+            # Whether the prefix cache is hit (prefill only).
+            prefix_cache_hit: bool = False,
+            reinit: bool = False,
+            reinit_use_defaults: bool = False,
+            encoder_seq_len: int = 0,
+        ):
+            if reinit:
+                assert len(self.seq_ids) == len(seq_ids)  # type: ignore
+                for i, seq_id in enumerate(seq_ids):
+                    self.seq_ids[i] = seq_id  # type: ignore
+            else:
+                self.seq_ids = seq_ids
+
+            self.request_id = request_id
+            self.is_prompt = is_prompt
+            self.block_tables = block_tables
+            self.computed_block_nums = computed_block_nums
+            self.n_seqs = n_seqs
+            self.encoder_seq_len = encoder_seq_len
+
+            if reinit:
+                if len(self.seq_ids) == 1 and reinit_use_defaults:
+                    self.simple_reinit()
+                else:
+                    if input_tokens:
+                        self.input_tokens = input_tokens
+                    else:
+                        for seq_id in range(len(self.seq_ids)):
+                            self.input_tokens[seq_id].clear()
+
+                    if input_positions:
+                        self.input_positions = input_positions
+                    else:
+                        for seq_id in range(len(self.seq_ids)):
+                            self.input_positions[seq_id].clear()
+
+                    if token_types:
+                        self.token_types = token_types
+                    else:
+                        for seq_id in range(len(self.seq_ids)):
+                            self.token_types[seq_id].clear()
+
+                    self.mrope_input_positions = None
+
+                    if seq_lens:
+                        self.seq_lens = seq_lens
+                    else:
+                        for seq_id in range(len(self.seq_ids)):
+                            self.seq_lens[seq_id] = 0
+
+                    if orig_seq_lens:
+                        self.orig_seq_lens = orig_seq_lens
+                    else:
+                        for seq_id in range(len(self.seq_ids)):
+                            self.orig_seq_lens[seq_id] = 0
+
+                    if query_lens:
+                        self.query_lens = query_lens
+                    else:
+                        for seq_id in range(len(self.seq_ids)):
+                            self.query_lens[seq_id] = 0
+
+                    if context_lens:
+                        self.context_lens = context_lens
+                    else:
+                        for seq_id in range(len(self.seq_ids)):
+                            self.context_lens[seq_id] = 0
+
+                    if curr_sliding_window_blocks:
+                        self.curr_sliding_window_blocks = \
+                            curr_sliding_window_blocks
+                    else:
+                        for seq_id in range(len(self.seq_ids)):
+                            self.curr_sliding_window_blocks[seq_id] = 0
+
+                    if lora_index_mapping:
+                        self.lora_index_mapping = lora_index_mapping
+                    else:
+                        self.lora_index_mapping.clear()
+
+                    if lora_prompt_mapping:
+                        self.lora_prompt_mapping = lora_prompt_mapping
+                    else:
+                        self.lora_prompt_mapping.clear()
+
+                    if lora_requests:
+                        self.lora_requests = lora_requests
+                    else:
+                        self.lora_requests.clear()
+
+                    if prompt_adapter_index_mapping:
+                        self.prompt_adapter_index_mapping = \
+                            prompt_adapter_index_mapping
+                    else:
+                        self.prompt_adapter_index_mapping.clear()
+
+                    if prompt_adapter_prompt_mapping:
+                        self.prompt_adapter_prompt_mapping = \
+                            prompt_adapter_prompt_mapping
+                    else:
+                        self.prompt_adapter_prompt_mapping.clear()
+
+            else:
+                self.input_tokens = input_tokens or []
+                self.input_positions = input_positions or []
+                self.token_types = token_types or []
+                self.mrope_input_positions = mrope_input_positions or None
+                self.seq_lens = seq_lens or []
+                self.orig_seq_lens = orig_seq_lens or []
+                self.query_lens = query_lens or []
+                self.context_lens = context_lens or []
+                self.curr_sliding_window_blocks = \
+                    curr_sliding_window_blocks or []
+
+                self.lora_index_mapping = lora_index_mapping or []
+                self.lora_prompt_mapping = lora_prompt_mapping or []
+                self.lora_requests = lora_requests or set()
+
+                self.prompt_adapter_index_mapping = (
+                    prompt_adapter_index_mapping or [])
+                self.prompt_adapter_prompt_mapping = (
+                    prompt_adapter_prompt_mapping or [])
+
+            self.prompt_adapter_request = prompt_adapter_request
+            self.multi_modal_kwargs = multi_modal_kwargs
+            self.multi_modal_placeholder_maps = multi_modal_placeholder_maps
+            self.prefix_cache_hit = prefix_cache_hit
+
+            self.n_seqs = len(self.seq_ids)
+
+            if not reinit:
+                self.__post_init__()
+
+        def __post_init__(self):
+            self.n_seqs = len(self.seq_ids)
+
+            self.input_tokens = [[] for _ in range(self.n_seqs)]
+            self.input_positions = [[] for _ in range(self.n_seqs)]
+            self.token_types = [[] for _ in range(self.n_seqs)]
+            self.mrope_input_positions = None
+            self.seq_lens = [0] * self.n_seqs
+            self.orig_seq_lens = [0] * self.n_seqs
+            self.query_lens = [0] * self.n_seqs
+            self.context_lens = [0] * self.n_seqs
+            self.curr_sliding_window_blocks = [0] * self.n_seqs
+
+            self.lora_index_mapping = []
+            self.lora_prompt_mapping = []
+
 
 class NPUModelRunner(ModelRunner):
     """
@@ -375,7 +586,7 @@ class NPUModelRunner(ModelRunner):
                 self.sampling_metadata_cache,
                 # TODO (cmq): enable this after supported in vllm
                 # pad_for_invariant_seq_len=True,
-                )
+            )
         else:
             sampling_metadata = None
         is_prompt = (seq_group_metadata_list[0].is_prompt

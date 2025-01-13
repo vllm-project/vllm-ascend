@@ -7,7 +7,6 @@ on HuggingFace model repository.
 """
 
 from transformers import AutoTokenizer
-
 from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.utils import FlexibleArgumentParser

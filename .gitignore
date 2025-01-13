@@ -11,3 +11,12 @@ __pycache__/
 
 # egg-info
 vllm_ascend.egg-info/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Linting
+actionlint
+shellcheck*/
