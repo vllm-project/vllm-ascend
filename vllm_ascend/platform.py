@@ -32,7 +32,7 @@ class NPUPlatform(Platform):
     _enum = "Ascend"
     device_name: str = "npu"
     device_type: str = "npu"
-    torch_compile_backend: str = "npu"
+    simple_compile_backend: str = "npu"
     ray_device_key: str = "NPU"
     visible_device_name: str = "ASCEND_RT"
 
@@ -72,11 +72,11 @@ class NPUPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         # Register ops when setup.
-        from vllm_ascend_plugin import ops
+        from vllm_ascend import ops
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm_ascend_plugin.worker.NPUWorker"
+            parallel_config.worker_cls = "vllm_ascend.worker.NPUWorker"
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 16
@@ -84,7 +84,7 @@ class NPUPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1):
-        return "vllm_ascend_plugin.attention.AscendAttentionBackend"
+        return "vllm_ascend.attention.AscendAttentionBackend"
 
     @classmethod
     def get_current_memory_usage(cls,
@@ -95,4 +95,4 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        return "vllm_ascend_plugin.communicator.NPUCommunicator"
+        return "vllm_ascend.communicator.NPUCommunicator"

@@ -21,7 +21,7 @@ RUN pip install cmake>=3.26 wheel packaging ninja "setuptools-scm>=8" numpy
 RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" python3 -m pip install -r /workspace/vllm_ascend//vllm/requirements-build.txt
 # build vLLM with NPU backend
 RUN PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu" VLLM_TARGET_DEVICE="cpu" python3 -m pip install /workspace/vllm_ascend/vllm/
-# install vllm_ascend_plugin
+# install vllm_ascend
 RUN python3 -m pip install /workspace/vllm_ascend/
 
 CMD ["/bin/bash"]
