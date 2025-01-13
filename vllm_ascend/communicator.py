@@ -1,8 +1,7 @@
 import torch
 import torch.distributed as dist
-
-from vllm.distributed.device_communicators.base_communicator import (
-    CommunicatorBase)
+from vllm.distributed.device_communicators.base_communicator import \
+    CommunicatorBase
 
 
 class NPUCommunicator(CommunicatorBase):

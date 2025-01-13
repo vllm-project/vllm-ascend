@@ -16,6 +16,5 @@ run_mypy() {
     mypy --follow-imports skip --python-version "${PYTHON_VERSION}" "$@"
 }
 
-run_mypy # Note that this is less strict than CI
 run_mypy vllm_ascend
 run_mypy examples

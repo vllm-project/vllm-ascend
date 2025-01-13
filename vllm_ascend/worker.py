@@ -3,7 +3,6 @@ from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 import torch.distributed
-
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
