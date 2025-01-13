@@ -19,7 +19,7 @@ from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 
 if TYPE_CHECKING:
-    from vllm_ascend.worker import ModelInputForNPUBuilder
+    from vllm_ascend.model_runner import ModelInputForNPUBuilder
 
 SHARE_MASK_TRIL_PREFIX_CACHE = None
 SHARE_MASK_TRIL = None
