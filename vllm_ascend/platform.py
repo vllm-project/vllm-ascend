@@ -9,7 +9,7 @@ except ImportError:
     print("Failed to import torch_npu.")
 
 from vllm.config import VllmConfig
-from vllm.platforms import Platform
+from vllm.platforms import Platform, PlatformEnum
 
 os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
 
@@ -29,7 +29,7 @@ def _device_id_to_physical_device_id(device_id: int) -> int:
 
 class NPUPlatform(Platform):
 
-    _enum = "Ascend"
+    _enum = PlatformEnum.OOT
     device_name: str = "npu"
     device_type: str = "npu"
     simple_compile_backend: str = "npu"

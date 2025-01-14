@@ -420,6 +420,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         kv_cache_dtype: str,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -432,6 +433,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                         dtype=torch.float32,
                                         device="npu")
         self.alibi_slopes = alibi_slopes
+        self.attn_type = attn_type
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
@@ -465,6 +467,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             shape = [batch_size, seq_len * num_heads * head_size]
         """
         assert k_scale == 1.0 and v_scale == 1.0
+        attn_type = self.attn_type
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
