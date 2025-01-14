@@ -34,7 +34,7 @@ class NPUPlatform(Platform):
     device_type: str = "npu"
     simple_compile_backend: str = "npu"
     ray_device_key: str = "NPU"
-    visible_device_name: str = "ASCEND_RT"
+    device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0):
