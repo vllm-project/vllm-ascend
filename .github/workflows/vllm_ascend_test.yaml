@@ -1,0 +1,89 @@
+# Adapted from https://github.com/cosdt/pytorch-integration-tests/tree/main/.github/workflows
+name: 'vllm_ascend_ut'
+
+on:
+  push:
+    branches:
+      - "main"
+    paths:
+      - '*.txt'
+      - '**/*.py'
+      - '.github/workflows/vllm_ascend_test.yml'
+  pull_request:
+    branches:
+      - "main"
+    paths:
+      - '*.txt'
+      - '**/*.py'
+      - '.github/workflows/vllm_ascend_test.yml'
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  test:
+    name: run ut for vllm_ascend
+    runs-on: npu-arm64  # actionlint-ignore: runner-label
+
+    container:
+      image: quay.io/ascend/cann:8.0.rc3.beta1-910b-ubuntu22.04-py3.10
+      volumes:
+        - /usr/local/dcmi:/usr/local/dcmi
+        - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
+        - /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/
+        - /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info
+        - /etc/ascend_install.info:/etc/ascend_install.info
+      options: >-
+        --network host
+        --device /dev/davinci1
+        --device /dev/davinci_manager
+        --device /dev/devmm_svm
+        --device /dev/hisi_hdc
+      env:
+        HF_ENDPOINT: https://hf-mirror.com
+        VLLM_USE_MODELSCOPE: true
+    steps:
+      - name: Check npu driver
+        run: |
+          npu-smi info
+
+      - name: Config mirrors
+        run: |
+          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          apt-get update -y
+          apt-get -y install `cat packages.txt`
+          update-alternatives --install /usr/bin/gcc \
+          gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
+
+      - name: Install dependencies
+        run: |
+          pip install cmake>=3.26 wheel packaging ninja "setuptools-scm>=8" numpy
+          pip install -r requirements-dev.txt
+
+      - name: Install vLLM from source
+        env:
+          HTTPS_PROXY: http://139.9.155.20:1234
+        run: |
+          git clone https://github.com/cosdt/vllm -b apply_plugin
+          cd vllm
+          pip install -r requirements-cpu.txt
+          VLLM_TARGET_DEVICE=cpu python setup.py install
+
+      - name: Install vllm_ascend
+        run: |
+          pip install -e .
+
+      - name: Run test
+        run: |
+          pytest tests

@@ -1,0 +1,12 @@
+git
+vim
+gcc-12
+g++-12
+libnuma-dev
+make
+cmake
+ninja-build
+curl
+libgl1
+libglib2.0-0
+libsndfile1
