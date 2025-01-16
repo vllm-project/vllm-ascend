@@ -5,13 +5,13 @@ on:
   # but only for the main branch
   push:
     branches:
-      - main
+      - "*"
     paths:
       - "**/*.py"
       - .github/workflows/yapf.yml
   pull_request:
     branches:
-      - main
+      - "*"
     paths:
       - "**/*.py"
       - .github/workflows/yapf.yml
