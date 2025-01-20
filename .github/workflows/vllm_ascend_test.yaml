@@ -73,7 +73,7 @@ jobs:
 
       - name: Install vLLM from source
         env:
-          HTTPS_PROXY: http://139.9.155.20:1234
+          HTTPS_PROXY: ${{ secrets.MY_PROXY }}
         run: |
           git clone https://github.com/cosdt/vllm -b apply_plugin
           cd vllm
