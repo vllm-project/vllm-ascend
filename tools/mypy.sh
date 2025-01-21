@@ -18,3 +18,4 @@ run_mypy() {
 
 run_mypy vllm_ascend
 run_mypy examples
+run_mypy tests
