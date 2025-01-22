@@ -3,10 +3,13 @@ from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 import torch.distributed
+import torch_npu
+from vllm import envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
+from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.sequence import SequenceGroupMetadata
@@ -18,6 +21,8 @@ from vllm.worker.worker import Worker
 from vllm.worker.worker_base import WorkerBase
 
 from vllm_ascend.model_runner import NPUModelRunner
+
+logger = init_logger(__name__)
 
 
 class NPUWorker(Worker):
@@ -92,6 +97,40 @@ class NPUWorker(Worker):
         # Initialize gpu_cache as embedding models don't initialize kv_caches
         self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
         self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
+
+        # Torch profiler. Enabled and configured through env vars:
+        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
+        if envs.VLLM_TORCH_PROFILER_DIR:
+            print(envs.VLLM_TORCH_PROFILER_DIR)
+            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
+            logger.info("Profiling enabled. Traces will be saved to: %s",
+                        torch_profiler_trace_dir)
+
+            experimental_config = torch_npu.profiler._ExperimentalConfig(
+                export_type=torch_npu.profiler.ExportType.Text,
+                profiler_level=torch_npu.profiler.ProfilerLevel.Level0,
+                msprof_tx=False,
+                aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
+                l2_cache=False,
+                op_attr=False,
+                data_simplification=False,
+                record_op_args=False,
+                gc_detect_threshold=None,
+            )
+
+            self.profiler = torch_npu.profiler.profile(
+                activities=[
+                    torch_npu.profiler.ProfilerActivity.CPU,
+                    torch_npu.profiler.ProfilerActivity.NPU,
+                ],
+                with_stack=True,
+                profile_memory=True,
+                with_modules=True,
+                experimental_config=experimental_config,
+                on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
+                    torch_profiler_trace_dir))
+        else:
+            self.profiler = None
 
     def init_device(self) -> None:
         if self.device_config.device.type == "npu":
