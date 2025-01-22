@@ -8,14 +8,14 @@ on:
     paths:
       - '*.txt'
       - '**/*.py'
-      - '.github/workflows/vllm_ascend_test.yml'
+      - '.github/workflows/vllm_ascend_test.yaml'
   pull_request:
     branches:
       - "main"
     paths:
       - '*.txt'
       - '**/*.py'
-      - '.github/workflows/vllm_ascend_test.yml'
+      - '.github/workflows/vllm_ascend_test.yaml'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -37,6 +37,7 @@ jobs:
         - /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/
         - /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info
         - /etc/ascend_install.info:/etc/ascend_install.info
+        - /data/disk1/actions-runner/_work/_repo/vllm:/root/vllm
       options: >-
         --network host
         --device /dev/davinci1
@@ -71,12 +72,16 @@ jobs:
           pip install cmake>=3.26 wheel packaging ninja "setuptools-scm>=8" numpy
           pip install -r requirements-dev.txt
 
+      - name: copy vllm
+        run: |
+          cp -r /root/vllm /root/vllm-cpu
+
       - name: Install vLLM from source
+        working-directory: /root/vllm-cpu
         env:
           HTTPS_PROXY: ${{ secrets.MY_PROXY }}
+        # TODO: pull the latest code of vLLM
         run: |
-          git clone https://github.com/cosdt/vllm -b apply_plugin
-          cd vllm
           pip install -r requirements-cpu.txt
           VLLM_TARGET_DEVICE=cpu python setup.py install
 
