@@ -98,14 +98,4 @@ pip install -e .
 
 ## Contributing
 
-Linting and formatting:
-
-```bash
-pip install -r requirements-lint.txt
-
-# 1. Do work and commit your work.
-# 2. Format files that differ from origin/main.
-bash format.sh
-# 3. Commit changed files with message 'Run yapf and ruff'
-git commit -m "Run yapf and ruff"
-```
+Please see [<u>CONTRIBUTING</u>](./CONTRIBUTING.md).
