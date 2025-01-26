@@ -108,3 +108,7 @@ jobs:
       - name: Run test
         run: |
           pytest tests
+
+      - name: Run vLLM native test
+        run: |
+          bash tools/npu-vllm-test.sh
