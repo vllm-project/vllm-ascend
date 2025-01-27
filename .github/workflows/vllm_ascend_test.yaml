@@ -85,18 +85,20 @@ jobs:
           pip install cmake>=3.26 wheel packaging ninja "setuptools-scm>=8" numpy
           pip install -r requirements-dev.txt
 
+      # This is the base vllm master code cached in the container to speed up
+      # the test. There are two branch by default:
+      # - up-main: the latest code of vllm
+      # - apply_plugin: the code of vllm with the plugin applied
       - name: copy vllm
         run: |
           cp -r /root/vllm /root/vllm-cpu
 
       - name: Install vLLM from source
         working-directory: /root/vllm-cpu
-        env:
-          HTTPS_PROXY: ${{ secrets.MY_PROXY }}
-        # TODO: pull the latest code of vLLM
         run: |
+          git checkout up-main
           pip install -r requirements-cpu.txt
-          VLLM_TARGET_DEVICE=cpu python setup.py install
+          VLLM_TARGET_DEVICE=empty python setup.py install
 
       - name: Install vllm_ascend
         run: |
