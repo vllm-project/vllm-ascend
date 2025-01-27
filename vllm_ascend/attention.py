@@ -29,6 +29,7 @@ except ImportError:
     print("Failed to import torch_npu.")
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
                                            CommonMetadataBuilder,
@@ -260,7 +261,8 @@ class AscendMetadata(AttentionMetadata, PagedAttentionMetadata):
             multi_modal_placeholder_index_maps=self.
             multi_modal_placeholder_index_maps,
             cross_slot_mapping=self.cross_slot_mapping,
-            cross_block_tables=self.cross_block_tables)
+            cross_block_tables=self.cross_block_tables,
+            enable_kv_scales_calculation=False)
         return self._cached_prefill_metadata
 
     @property
@@ -310,7 +312,8 @@ class AscendMetadata(AttentionMetadata, PagedAttentionMetadata):
             multi_modal_placeholder_index_maps=self.
             multi_modal_placeholder_index_maps,
             cross_slot_mapping=self.cross_slot_mapping,
-            cross_block_tables=self.cross_block_tables)
+            cross_block_tables=self.cross_block_tables,
+            enable_kv_scales_calculation=False)
         return self._cached_decode_metadata
 
 
@@ -459,13 +462,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
     def forward(
         self,
+        layer: AttentionLayer,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: List[torch.Tensor],
         attn_metadata: AscendMetadata,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
         attn_type: str = AttentionType.DECODER,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -485,7 +487,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         Returns:
             shape = [batch_size, seq_len * num_heads * head_size]
         """
-        assert k_scale == 1.0 and v_scale == 1.0
+        assert layer._k_scale == 1.0 and layer._v_scale == 1.0
         attn_type = self.attn_type
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
