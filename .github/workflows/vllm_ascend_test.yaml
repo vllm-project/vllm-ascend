@@ -51,8 +51,6 @@ jobs:
         - /usr/local/dcmi:/usr/local/dcmi
         - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
         - /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/
-        - /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info
-        - /etc/ascend_install.info:/etc/ascend_install.info
         - /data/disk1/actions-runner/_work/_repo/vllm:/root/vllm
       options: >-
         --network host
@@ -62,7 +60,6 @@ jobs:
         --device /dev/hisi_hdc
       env:
         HF_ENDPOINT: https://hf-mirror.com
-        VLLM_USE_MODELSCOPE: true
     steps:
       - name: Check npu driver
         run: |

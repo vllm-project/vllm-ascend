@@ -20,17 +20,17 @@
 
 set -o pipefail
 
-TEST_DIR="/root/vllm-cpu/tests"
+TEST_DIR="/home/cmq/code/vllm-cpu/vllm/tests"
 TEST_FILES=(
     test_sequence.py
     # test_utils.py
-    test_config.py
-    # test_cache_block_hashing.py
+    # test_config.py
+    test_cache_block_hashing.py
     # test_scalartype.py
     # test_embedded_commit.py
     # test_inputs.py
     # test_sharded_state_loader.py
-    # test_sampling_params.py
+    test_sampling_params.py
     # test_logger.py
     # test_logits_processor.py
     # test_regression.py
@@ -407,6 +407,13 @@ for test_file in "${TEST_FILES[@]}"; do
     if [ -f "$full_path" ]; then
         echo "Running $test_file..."
         pytest -sv "$full_path"
+
+        # Check if pytest ran successfully
+        if [ $? -ne 0 ]; then
+            echo "Error: $test_file failed."
+            exit 1
+        fi
+
         echo "Completed $test_file."
     else
         echo "Error: $test_file not found in $TEST_DIR."

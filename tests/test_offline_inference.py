@@ -31,6 +31,7 @@ import vllm_ascend  # noqa: F401
 MODELS = [
     "Qwen/Qwen2.5-0.5B-Instruct",
 ]
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
 
 TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
 
