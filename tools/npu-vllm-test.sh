@@ -20,7 +20,7 @@
 
 set -o pipefail
 
-TEST_DIR="/root/vllm-cpu/tests"
+TEST_DIR="/root/vllm-empty/tests"
 TEST_FILES=(
     test_sequence.py
     # test_utils.py

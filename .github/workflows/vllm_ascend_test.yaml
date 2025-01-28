@@ -77,12 +77,9 @@ jobs:
         run: |
           apt-get update -y
           apt-get -y install `cat packages.txt`
-          update-alternatives --install /usr/bin/gcc \
-          gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 
       - name: Install dependencies
         run: |
-          pip install cmake>=3.26 wheel packaging ninja "setuptools-scm>=8" numpy
           pip install -r requirements-dev.txt
 
       # This is the base vllm master code cached in the container to speed up
@@ -91,14 +88,13 @@ jobs:
       # - apply_plugin: the code of vllm with the plugin applied
       - name: copy vllm
         run: |
-          cp -r /root/vllm /root/vllm-cpu
+          cp -r /root/vllm /root/vllm-empty
 
       - name: Install vLLM from source
-        working-directory: /root/vllm-cpu
+        working-directory: /root/vllm-empty
         run: |
           git checkout up-main
-          pip install -r requirements-cpu.txt
-          VLLM_TARGET_DEVICE=empty python setup.py install
+          VLLM_TARGET_DEVICE=empty pip install -e .
 
       - name: Install vllm_ascend
         run: |
