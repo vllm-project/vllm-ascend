@@ -30,6 +30,8 @@ docker run \
     -it quay.io/ascend/cann:8.0.rc3.beta1-910b-ubuntu22.04-py3.10 bash
 ```
 
+You do not need to install `torch` and `torch_npu` manually, they will be automatically installed as `vllm-ascend` dependencies.
+
 #### Manual installation
 
 Or follow the instructions provided in the [Ascend Installation Guide](https://ascend.github.io/docs/sources/ascend/quick_install.html) to set up the environment.
