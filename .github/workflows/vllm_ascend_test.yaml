@@ -1,0 +1,109 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+name: 'vllm_ascend_ut'
+
+on:
+  push:
+    branches:
+      - "main"
+    paths:
+      - '*.txt'
+      - '**/*.py'
+      - '.github/workflows/vllm_ascend_test.yaml'
+  pull_request:
+    branches:
+      - "main"
+    paths:
+      - '*.txt'
+      - '**/*.py'
+      - '.github/workflows/vllm_ascend_test.yaml'
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  test:
+    name: run ut for vllm_ascend
+    runs-on: npu-arm64  # actionlint-ignore: runner-label
+
+    container:
+      image: quay.io/ascend/cann:8.0.rc3.beta1-910b-ubuntu22.04-py3.10
+      volumes:
+        - /usr/local/dcmi:/usr/local/dcmi
+        - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
+        - /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/
+        - /data/disk1/actions-runner/_work/_repo/vllm:/root/vllm
+      options: >-
+        --network host
+        --device /dev/davinci1
+        --device /dev/davinci_manager
+        --device /dev/devmm_svm
+        --device /dev/hisi_hdc
+      env:
+        HF_ENDPOINT: https://hf-mirror.com
+    steps:
+      - name: Check npu driver
+        run: |
+          npu-smi info
+
+      - name: Config mirrors
+        run: |
+          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          apt-get update -y
+          apt-get -y install `cat packages.txt`
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-dev.txt
+
+      # This is the base vllm master code cached in the container to speed up
+      # the test. There are two branch by default:
+      # - up-main: the latest code of vllm
+      # - apply_plugin: the code of vllm with the plugin applied
+      - name: copy vllm
+        run: |
+          cp -r /root/vllm /root/vllm-empty
+
+      - name: Install vLLM from source
+        working-directory: /root/vllm-empty
+        run: |
+          git checkout up-main
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Install vllm_ascend
+        run: |
+          pip install -e .
+
+      - name: Run test
+        run: |
+          pytest tests
+
+      - name: Run vLLM native test
+        run: |
+          bash tools/npu-vllm-test.sh
