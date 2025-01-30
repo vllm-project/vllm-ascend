@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-name: 'vllm_ascend_ut'
+name: 'e2e test'
 
 on:
   push:
@@ -42,8 +42,8 @@ defaults:
 
 jobs:
   test:
-    name: run ut for vllm_ascend
-    runs-on: npu-arm64  # actionlint-ignore: runner-label
+    name: vLLM Ascend test (self-host)
+    runs-on: ascend-arm64  # actionlint-ignore: runner-label
 
     container:
       image: quay.io/ascend/cann:8.0.rc3.beta1-910b-ubuntu22.04-py3.10
@@ -51,10 +51,10 @@ jobs:
         - /usr/local/dcmi:/usr/local/dcmi
         - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
         - /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/
-        - /data/disk1/actions-runner/_work/_repo/vllm:/root/vllm
+        # Use self-host cache speed up pip and model download
+        - /home/action/actions-runner/_work/cache:/github/home/.cache/
       options: >-
-        --network host
-        --device /dev/davinci1
+        --device /dev/davinci6
         --device /dev/davinci_manager
         --device /dev/devmm_svm
         --device /dev/hisi_hdc
@@ -70,7 +70,7 @@ jobs:
           sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
           pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 
-      - name: Checkout
+      - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
 
       - name: Install system dependencies
@@ -82,28 +82,25 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
 
-      # This is the base vllm master code cached in the container to speed up
-      # the test. There are two branch by default:
-      # - up-main: the latest code of vllm
-      # - apply_plugin: the code of vllm with the plugin applied
-      - name: copy vllm
-        run: |
-          cp -r /root/vllm /root/vllm-empty
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          path: ./vllm-empty
 
-      - name: Install vLLM from source
-        working-directory: /root/vllm-empty
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
         run: |
-          git checkout up-main
           VLLM_TARGET_DEVICE=empty pip install -e .
 
-      - name: Install vllm_ascend
+      - name: Install vllm-project/vllm-ascend
         run: |
           pip install -e .
 
-      - name: Run test
+      - name: Run vllm-project/vllm-ascend test
         run: |
-          pytest tests
+          pytest -sv tests
 
-      - name: Run vLLM native test
+      - name: Run vllm-project/vllm test
         run: |
           bash tools/npu-vllm-test.sh
