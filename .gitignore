@@ -192,3 +192,4 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 
+kernel_meta/
