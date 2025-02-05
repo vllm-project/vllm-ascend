@@ -908,6 +908,7 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         - input_tokens[num_prefill_tokens:] contains decode tokens.
         """
         builder = self._builder_cls(weakref.proxy(self), finished_requests_ids)
+        builder.prepare(finished_requests_ids)
         for seq_group_metadata in seq_group_metadata_list:
             builder.add_seq_group(seq_group_metadata)
 
