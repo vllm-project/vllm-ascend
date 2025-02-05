@@ -53,6 +53,10 @@ class NPUPlatform(Platform):
     ray_device_key: str = "NPU"
     device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
 
+    supported_quantization: list[str] = [
+        "ascend"
+    ]
+
     @classmethod
     def get_device_capability(cls, device_id: int = 0):
         return None
