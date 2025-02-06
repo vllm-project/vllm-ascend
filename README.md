@@ -39,7 +39,7 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
 | Python      | >= 3.9            | [3.10](https://www.python.org/downloads/) | Required for vllm                        |
 | CANN        | >= 8.0.RC2        | [8.0.RC3](https://www.hiascend.com/developer/download/community/result?module=cann&cann=8.0.0.beta1) | Required for vllm-ascend and torch-npu   |
 | torch-npu   | >= 2.4.0          | [2.5.1rc1](https://gitee.com/ascend/pytorch/releases/tag/v6.0.0.alpha001-pytorch2.5.1)    | Required for vllm-ascend                 |
-| torch       | >= 2.4.0          | [2.5.1](https://github.com/pytorch/pytorch/releases/tag/v2.5.1)      | Required for torch-npu and vllm required |
+| torch       | >= 2.4.0          | [2.5.1](https://github.com/pytorch/pytorch/releases/tag/v2.5.1)      | Required for torch-npu and vllm |
 
 Find more about how to setup your environment in [here](docs/environment.md).
 
@@ -91,6 +91,51 @@ docker build -t vllm-ascend-dev-image -f ./Dockerfile .
 ```
 
 See [Building and Testing](./CONTRIBUTING.md) for more details, which is a step-by-step guide to help you set up development environment, build and test.
+
+## Feature Support Matrix
+| Feature | Supported | Note |
+|---------|-----------|------|
+| Chunked Prefill | ✗ | Plan in 2025 Q1 |
+| Automatic Prefix Caching | ✅ | Imporve performance in 2025 Q1 |
+| LoRA | ✗ | Plan in 2025 Q1 |
+| Prompt adapter | ✅ ||
+| Speculative decoding | ✅ | Impore accuracy in 2025 Q1|
+| Pooling | ✗ | Plan in 2025 Q1 |
+| Enc-dec | ✗ | Plan in 2025 Q1 |
+| Multi Modality | ✅ (LLaVA/Qwen2-vl/Qwen2-audio/internVL)| Add more model support in 2025 Q1 |
+| LogProbs | ✅ ||
+| Prompt logProbs | ✅ ||
+| Async output | ✅ ||
+| Multi step scheduler | ✅ ||
+| Best of | ✅ ||
+| Beam search | ✅ ||
+| Guided Decoding | ✗ | Plan in 2025 Q1 |
+
+## Model Support Matrix
+
+The list here is a subset of the supported models. See [supported_models](docs/supported_models.md) for more details:
+| Model | Supported | Note |
+|---------|-----------|------|
+| Qwen 2.5 | ✅ ||
+| Mistral |  | Need test |
+| DeepSeek v2.5 | |Need test |
+| LLama3.1/3.2 | ✅ ||
+| Gemma-2 |  |Need test|
+| baichuan |  |Need test|
+| minicpm |  |Need test|
+| internlm | ✅ ||
+| ChatGLM | ✅ ||
+| InternVL 2.5 | ✅ ||
+| Qwen2-VL | ✅ ||
+| GLM-4v |  |Need test|
+| Molomo | ✅ ||
+| LLaVA 1.5 | ✅ ||
+| Mllama |  |Need test|
+| LLaVA-Next |  |Need test|
+| LLaVA-Next-Video |  |Need test|
+| Phi-3-Vison/Phi-3.5-Vison |  |Need test|
+| Ultravox |  |Need test|
+| Qwen2-Audio | ✅ ||
 
 ## Contributing
 We welcome and value any contributions and collaborations:
