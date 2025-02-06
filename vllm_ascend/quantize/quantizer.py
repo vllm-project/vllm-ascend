@@ -15,11 +15,11 @@
 # limitations under the License.
 #
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from vllm_ascend.ops.layernorm import enable_rmsnorm_with_antioutlier
 
-CUSTOMIZED_QUANTIZER_TYPE = []
+CUSTOMIZED_QUANTIZER_TYPE: List[str] = []
 
 class AscendQuantizer:
     """An iterface to different quantization implementations for ascend hardwares."""

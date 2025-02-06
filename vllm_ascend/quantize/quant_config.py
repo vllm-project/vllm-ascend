@@ -23,10 +23,9 @@ import torch_npu
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase, RowParallelLinear)
 from vllm.model_executor.layers.quantization import (register_quantization_config)
-from vllm.model_executor.layers.quantization.base_config import (QuantizationConfig)
+from vllm.model_executor.layers.quantization.base_config import (QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            ChannelQuantScaleParameter,
-                                           PackedvLLMParameter,
                                            ModelWeightParameter)
 from vllm.distributed import get_tensor_model_parallel_rank
 from .quantizer import AscendQuantizer
