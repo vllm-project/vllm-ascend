@@ -14,6 +14,10 @@ vLLM Ascend Plugin
 | <a href="https://www.hiascend.com/en/"><b>About Ascend</b></a> | <a href="https://slack.vllm.ai"><b>Developer Slack (#sig-ascend)</b></a> |
 </p>
 
+<p align="center">
+<a ><b>English</b></a> | <a href="README.zh.md"><b>中文</b></a>
+</p>
+
 ---
 *Latest News* 🔥
 
