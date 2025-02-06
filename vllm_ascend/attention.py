@@ -321,6 +321,12 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
 
     _metadata_cls = AscendMetadata
 
+    def __init__(self, input_builder: "ModelInputForNPUBuilder"):
+        self.input_builder = input_builder
+        self.runner = input_builder.runner
+        self.sliding_window = input_builder.sliding_window
+        self.block_size = input_builder.block_size
+
     def compute_npu_slot_indices(self, is_profile_run, slot_indices, seq_id,
                                  seq_len, context_len, start_idx, block_size,
                                  block_tables, max_query_len):
