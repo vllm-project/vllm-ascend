@@ -75,8 +75,36 @@ class AscendQuantConfig(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
         if isinstance(layer, LinearBase):
+            if self.is_layer_skipped_ascend(prefix):
+                return UnquantizedLinearMethod()
             return AscendLinearMethod(self)
         return None
+
+    def is_layer_skipped_ascend(self, prefix: str):
+        # adapted from vllm.model_executor.layers.quantization.utils.quant_utils.is_layer_skipped
+        proj_name = prefix.split(".")[-1]
+        if proj_name in FUSED_LAYER_NAME_MAPPING:
+            shard_prefixes = [
+                prefix.replace(proj_name, shard_proj_name)
+                for shard_proj_name in FUSED_LAYER_NAME_MAPPING[proj_name]
+            ]
+
+            is_skipped = None
+            for shard_prefix in shard_prefixes:
+                is_shard_skipped = self.quant_description[shard_prefix + '.weight'] == "FLOAT"
+
+                if is_skipped is None:
+                    is_skipped = is_shard_skipped
+                elif is_shard_skipped != is_skipped:
+                    raise ValueError(
+                        f"Detected some but not all shards of {prefix} "
+                        "are quantized. All shards of fused layers "
+                        "to have the same precision.")
+        else:
+            is_skipped = self.quant_description[prefix + '.weight'] == "FLOAT"
+
+        assert is_skipped is not None
+        return is_skipped
 
     def get_scaled_act_names(self) -> List[str]:
         return []
