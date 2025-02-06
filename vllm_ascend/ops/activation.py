@@ -14,6 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import vllm_ascend.ops.activation  # noqa
-import vllm_ascend.ops.layernorm  # noqa
-import vllm_ascend.ops.rotary_embedding  # noqa
+
+import torch
+from vllm.model_executor.layers.activation import SiluAndMul
+
+
+def silu_and_mul_forward_oot(self, x: torch.Tensor) -> torch.Tensor:
+    import torch_npu
+
+    out = torch_npu.npu_swiglu(x)
+    return out
+
+
+SiluAndMul.forward_oot = silu_and_mul_forward_oot
