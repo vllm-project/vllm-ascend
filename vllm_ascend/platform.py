@@ -16,7 +16,7 @@
 #
 
 import os
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 
@@ -27,6 +27,10 @@ except ImportError:
 
 from vllm.config import VllmConfig
 from vllm.platforms import Platform, PlatformEnum
+if TYPE_CHECKING:
+    from vllm.utils import FlexibleArgumentParser
+else:
+    FlexibleArgumentParser = None
 
 os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
 
@@ -89,6 +93,16 @@ class NPUPlatform(Platform):
     @classmethod
     def mem_get_info(cls) -> Tuple[int, int]:
         return torch.npu.mem_get_info()
+
+    # Relies on this pull request https://github.com/vllm-project/vllm/pull/12432.
+    @classmethod
+    def pre_register_and_update(cls,
+                                parser: Optional[FlexibleArgumentParser] = None
+                                ) -> None:
+        """
+        Do some pre-registeration or update action for ascend platform.
+        """
+        from vllm_ascend.quantize.quant_config import AscendQuantConfig
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:

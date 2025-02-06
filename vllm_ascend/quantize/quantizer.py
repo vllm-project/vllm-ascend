@@ -35,7 +35,8 @@ class AscendQuantizer:
         try:
             from mindie_turbo import MindIETurboQuantizer
 
-            if quant_config["anti_method"] is not None:
+            # When not using anti-outlier algorithms, "anti_method" refers to an empty string.
+            if len(quant_config["anti_method"]) > 0:
                 enable_rmsnorm_with_antioutlier()
 
             return MindIETurboQuantizer.get_quantizer(quant_config)
