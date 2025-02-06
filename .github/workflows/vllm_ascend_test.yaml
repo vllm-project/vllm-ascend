@@ -52,7 +52,7 @@ jobs:
         - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
         - /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/
         # Use self-host cache speed up pip and model download
-        - /home/action/actions-runner/_work/cache:/github/home/.cache/
+        - /home/runner/actions-runner/_work/cache:/github/home/.cache/
       options: >-
         --device /dev/davinci6
         --device /dev/davinci_manager
