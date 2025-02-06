@@ -103,4 +103,4 @@ jobs:
 
       - name: Run vllm-project/vllm test
         run: |
-          bash tools/npu-vllm-test.sh
+          pytest -sv
