@@ -1,12 +1,12 @@
-# vllm昇腾插件贡献
+# 为 vLLM 昇腾插件贡献
 
 ## 构建与测试
-在提交PR之前建议在本地开发环境进行构建和测试。
+我们推荐您在提交PR之前在本地开发环境进行构建和测试。
 
 ### 环境准备与构建
 理论上，vllm-ascend 构建仅支持 Linux，因为`vllm-ascend` 依赖项 `torch_npu` 仅支持 Linux。
 
-但是您仍然可以在 Linux/Windows/macOS 上配置开发环境进行代码检查和基本测试，如下命令所示：：
+但是您仍然可以在 Linux/Windows/macOS 上配置开发环境进行代码检查和基本测试，如下命令所示：
 
 ```bash
 # 选择基础文件夹 (~/vllm-project/) ，创建python虚拟环境
@@ -30,9 +30,9 @@ pip install -r requirements-dev.txt
 bash format.sh
 
 # 构建:
-# - 仅支持Linux (torch_npu 限制)
+# - 目前仅支持在Linux上进行完整构建（torch_npu 限制）
 # pip install -e .
-# - 在其他操作系统上进行调试构建（无需安装依赖）
+# - 在其他操作系统上构建安装，需要跳过依赖
 # - build without deps for debugging in other OS
 # pip install -e . --no-deps
 
@@ -98,5 +98,5 @@ pytest tests/
 
 ## 其他
 
-您可以在 [<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing/overview.html) 上找到有关为 vLLM Ascend 后端插件做出贡献的更多信息。
+您可以在 [<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing/overview.html) 上找到更多有关为 vLLM 昇腾插件贡献的信息。
 如果您在贡献过程中发现任何问题，您可以随时提交 PR 来改进文档以帮助其他开发人员。

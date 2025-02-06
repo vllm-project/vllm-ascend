@@ -7,7 +7,7 @@
 </p>
 
 <h3 align="center">
-vLLM 昇腾插件
+vLLM Ascend Plugin
 </h3>
 
 <p align="center">
@@ -15,7 +15,7 @@ vLLM 昇腾插件
 </p>
 
 <p align="center">
-<a href="README.md"><b>English</b></a> | <a href="README.zh.md"><b>中文</b></a>
+<a href="README.md"><b>English</b></a> | <a><b>中文</b></a>
 </p>
 
 ---
@@ -25,11 +25,11 @@ vLLM 昇腾插件
 ---
 ## 总览
 
-vLLM 昇腾插件 (`vllm-ascend`) 是一个运行在昇腾NPU上的后端插件。
+vLLM 昇腾插件 (`vllm-ascend`) 是一个让vLLM在Ascend NPU无缝运行的后端插件。
 
-此插件是 vLLM 社区中支持 Ascend 后端推荐的方法。它遵循[[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162)中概述的原则：硬件可插拔，提供硬件可插拔接口，解耦 Ascend NPU 与 vLLM 的集成。
+此插件是 vLLM 社区中支持昇腾后端的推荐方式。它遵循[[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162)所述原则：通过解耦的方式提供了vLLM对Ascend NPU的支持。
 
-使用 vLLM Ascend 插件，包括类Transformer、混合专家(MOE)、嵌入、多模态等类型大语言模型在内的流行开源模型可以在 Ascend NPU 上无缝运行。
+使用 vLLM 昇腾插件，可以让类Transformer、混合专家(MOE)、嵌入、多模态等流行的大语言模型在 Ascend NPU 上无缝运行。
 
 ## 前提
 ### 支持的设备
@@ -49,7 +49,7 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个运行在昇腾NPU上的后端插件�
 
 ## 开始使用
 
-> [!注意]
+> [!NOTE]
 > 目前，我们正在积极与 vLLM 社区合作以支持 Ascend 后端插件，一旦支持，您可以使用一行命令: `pip install vllm vllm-ascend` 来完成安装。
 
 通过源码安装:
@@ -96,10 +96,56 @@ docker build -t vllm-ascend-dev-image -f ./Dockerfile .
 
 查看[构建和测试](./CONTRIBUTING.zh.md)以获取更多详细信息，其中包含逐步指南，帮助您设置开发环境、构建和测试。
 
+## 特性支持矩阵
+| Feature | Supported | Note |
+|---------|-----------|------|
+| Chunked Prefill | ✗ | Plan in 2025 Q1 |
+| Automatic Prefix Caching | ✅ | Imporve performance in 2025 Q1 |
+| LoRA | ✗ | Plan in 2025 Q1 |
+| Prompt adapter | ✅ ||
+| Speculative decoding | ✅ | Impore accuracy in 2025 Q1|
+| Pooling | ✗ | Plan in 2025 Q1 |
+| Enc-dec | ✗ | Plan in 2025 Q1 |
+| Multi Modality | ✅ (LLaVA/Qwen2-vl/Qwen2-audio/internVL)| Add more model support in 2025 Q1 |
+| LogProbs | ✅ ||
+| Prompt logProbs | ✅ ||
+| Async output | ✅ ||
+| Multi step scheduler | ✅ ||
+| Best of | ✅ ||
+| Beam search | ✅ ||
+| Guided Decoding | ✗ | Plan in 2025 Q1 |
+
+## 模型支持矩阵
+
+此处展示了部分受支持的模型。有关更多详细信息，请参阅 [supported_models](docs/supported_models.md)：
+| Model | Supported | Note |
+|---------|-----------|------|
+| Qwen 2.5 | ✅ ||
+| Mistral |  | Need test |
+| DeepSeek v2.5 | |Need test |
+| LLama3.1/3.2 | ✅ ||
+| Gemma-2 |  |Need test|
+| baichuan |  |Need test|
+| minicpm |  |Need test|
+| internlm | ✅ ||
+| ChatGLM | ✅ ||
+| InternVL 2.5 | ✅ ||
+| Qwen2-VL | ✅ ||
+| GLM-4v |  |Need test|
+| Molomo | ✅ ||
+| LLaVA 1.5 | ✅ ||
+| Mllama |  |Need test|
+| LLaVA-Next |  |Need test|
+| LLaVA-Next-Video |  |Need test|
+| Phi-3-Vison/Phi-3.5-Vison |  |Need test|
+| Ultravox |  |Need test|
+| Qwen2-Audio | ✅ ||
+
+
 ## 贡献
-我们欢迎并重视任何形式的贡献与合作者：
+我们欢迎并重视任何形式的贡献与合作：
 - 请通过[提交问题](https://github.com/vllm-project/vllm-ascend/issues)来告知我们您遇到的任何错误。
-- 请参阅 [CONTRIBUTING.md](./CONTRIBUTING.md) 中的贡献指南。
+- 请参阅 [CONTRIBUTING.zh.md](./CONTRIBUTING.zh.md) 中的贡献指南。
 ## 许可证
 
 Apache 许可证 2.0，如 [LICENSE](./LICENSE) 文件中所示。

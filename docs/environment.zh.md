@@ -10,7 +10,7 @@
 | torch       | >= 2.4.0          | [2.5.1](https://github.com/pytorch/pytorch/releases/tag/v2.5.1)      |  torch-npu and vllm 依赖 |
 
 
-以下为安装推荐版本软件的快速说明：
+以下为安装推荐版本软件的简短说明：
 
 #### 容器化安装
 
@@ -35,5 +35,4 @@ docker run \
 
 #### 手动安装
 
-按照[昇腾安装指南](https://ascend.github.io/docs/sources/ascend/quick_install.html)中提供的说明配置环境。
-
+您也可以选择手动安装，按照[昇腾安装指南](https://ascend.github.io/docs/sources/ascend/quick_install.html)中提供的说明配置环境。
