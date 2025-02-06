@@ -135,7 +135,6 @@ class AscendLinearMethod(LinearMethodBase):
         weight_loader = extra_weight_attrs.get("weight_loader")
         
         weights = self.quant_method.create_weights(
-            layer,
             input_size_per_partition,
             output_size_per_partition,
             params_dtype
