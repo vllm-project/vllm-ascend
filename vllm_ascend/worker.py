@@ -47,6 +47,7 @@ from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
 from vllm_ascend.model_runner import NPUModelRunner
+from vllm_ascend.utils import try_register_lib
 
 logger = init_logger(__name__)
 
@@ -69,6 +70,11 @@ class NPUWorker(LocalOrDistributedWorkerBase):
     ) -> None:
 
         WorkerBase.__init__(self, vllm_config=vllm_config)
+        # Try to import mindie_turbo to accelerate vLLM inference.
+        try_register_lib(
+            "mindie_turbo",
+            "MindIE Turbo is installed. vLLM inference will be accelerated with MindIE Turbo."
+        )
         # distribute related config
         self.parallel_config.rank = rank
         self.local_rank = local_rank
