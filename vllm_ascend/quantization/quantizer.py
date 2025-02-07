@@ -40,7 +40,7 @@ class AscendQuantizer:
                 enable_rmsnorm_with_antioutlier()
 
             return MindIETurboQuantizer.get_quantizer(quant_config)
-        except:
+        except Exception:
             raise NotImplementedError("There is no available ascend quantizer.")
 
     def build_linear_method(self):

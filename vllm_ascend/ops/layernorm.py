@@ -22,7 +22,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 
 try:
     from mindie_turbo import RMSNormWithAntiOutlier
-except:
+except Exception:
     pass
 
 
