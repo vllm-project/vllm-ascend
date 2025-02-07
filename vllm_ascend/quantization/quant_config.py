@@ -41,7 +41,6 @@ class AscendQuantConfig(QuantizationConfig):
     def __init__(self, quant_config: Dict[str, Any]):
         self.quant_description = quant_config.pop("quant_description")
         self.quant_config = quant_config
-        self.quantizer = AscendQuantizer.get_quantizer(quant_config)
 
     def __repr__(self) -> str:
         return "AscendQuantConfig:\n" + super().__repr__()
@@ -120,7 +119,7 @@ class AscendLinearMethod(LinearMethodBase):
     """
 
     def __init__(self, quant_config: AscendQuantConfig) -> None:
-        self.quantizer = quant_config.quantizer
+        self.quantizer = AscendQuantizer.get_quantizer(quant_config.quant_config)
         self.quant_method = self.quantizer.build_linear_method()
 
     def create_weights(
