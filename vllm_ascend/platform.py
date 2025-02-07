@@ -102,7 +102,7 @@ class NPUPlatform(Platform):
         """
         Do some pre-registeration or update action for ascend platform.
         """
-        from vllm_ascend.quantize.quant_config import AscendQuantConfig  # noqa: F401
+        from vllm_ascend.quantization.quant_config import AscendQuantConfig  # noqa: F401
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
