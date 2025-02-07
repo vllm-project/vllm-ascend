@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase, 
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                RowParallelLinear, UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import (register_quantization_config)
 from vllm.model_executor.layers.quantization.base_config import (QuantizationConfig, QuantizeMethodBase)
@@ -39,6 +39,7 @@ class AscendQuantConfig(QuantizationConfig):
     """Config class for Ascend"""
 
     def __init__(self, quant_config: Dict[str, Any]):
+        self.quant_description = quant_config.pop("quant_description")
         self.quant_config = quant_config
         self.quantizer = AscendQuantizer.get_quantizer(quant_config)
 
