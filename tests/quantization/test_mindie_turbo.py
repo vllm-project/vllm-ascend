@@ -43,7 +43,7 @@ def test_mindie_turbo(
     from ..conftest import VllmRunner
 
     import vllm_ascend  # noqa: F401
-    from vllm_ascend.quantize.quant_config import AscendLinearMethod
+    from vllm_ascend.quantization.quant_config import AscendLinearMethod
 
     prompt = "What's deep learning?"
     example_prompts = [prompt]
