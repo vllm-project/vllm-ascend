@@ -1,8 +1,7 @@
 <p align="center">
   <picture>
-    <!-- TODO: Replace tmp link to logo url after vllm-projects/vllm-ascend ready -->
-    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/4a958093-58b5-4772-a942-638b51ced646">
-    <img alt="vllm-ascend" src="https://github.com/user-attachments/assets/838afe2f-9a1d-42df-9758-d79b31556de0" width=55%>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm-ascend/main/docs/logos/vllm-ascend-logo-text-dark.png">
+    <img alt="vllm-ascend" src="https://raw.githubusercontent.com/vllm-project/vllm-ascend/main/docs/logos/vllm-ascend-logo-text-light.png" width=55%>
   </picture>
 </p>
 
@@ -144,8 +143,10 @@ docker build -t vllm-ascend-dev-image -f ./Dockerfile .
 
 ## 贡献
 我们欢迎并重视任何形式的贡献与合作：
+- 您可以在[这里](https://github.com/vllm-project/vllm-ascend/issues/19)反馈您的使用体验。
 - 请通过[提交问题](https://github.com/vllm-project/vllm-ascend/issues)来告知我们您遇到的任何错误。
 - 请参阅 [CONTRIBUTING.zh.md](./CONTRIBUTING.zh.md) 中的贡献指南。
+
 ## 许可证
 
 Apache 许可证 2.0，如 [LICENSE](./LICENSE) 文件中所示。
