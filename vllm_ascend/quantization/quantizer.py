@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+import importlib
 from typing import Any, Dict, List
 
 from vllm_ascend.ops.layernorm import enable_rmsnorm_with_antioutlier
@@ -33,15 +34,15 @@ class AscendQuantizer:
             return
 
         try:
-            from mindie_turbo import MindIETurboQuantizer
-
-            # When not using anti-outlier algorithms, "anti_method" refers to an empty string.
-            if len(quant_config["anti_method"]) > 0:
-                enable_rmsnorm_with_antioutlier()
-
-            return MindIETurboQuantizer.get_quantizer(quant_config)
+            importlib.import_module("mindie_turbo.MindIETurboQuantizer")
         except Exception:
             raise NotImplementedError("There is no available ascend quantizer.")
+
+        # When not using anti-outlier algorithms, "anti_method" refers to an empty string.
+        if len(quant_config["anti_method"]) > 0:
+            enable_rmsnorm_with_antioutlier()
+
+        return MindIETurboQuantizer.get_quantizer(quant_config)
 
     def build_linear_method(self):
         raise NotImplementedError
