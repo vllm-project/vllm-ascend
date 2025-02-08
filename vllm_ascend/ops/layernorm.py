@@ -26,7 +26,6 @@ def forward_oot(
     x: torch.Tensor,
     residual: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-    
     import torch_npu
 
     if residual is not None:
