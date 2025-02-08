@@ -23,6 +23,12 @@ Run `pytest tests/quantization/test_mindie_turbo.py`.
 
 import pytest
 
+import vllm  # noqa: F401
+
+import vllm_ascend  # noqa: F401
+from vllm_ascend.quantization.quant_config import AscendLinearMethod
+
+from ..conftest import VllmRunner
 from .utils import is_mindie_turbo_supported
 
 MODELS = [
@@ -38,12 +44,6 @@ def test_mindie_turbo(
     model_name_or_path: str,
     max_tokens: int,
 ) -> None:
-
-    import vllm  # noqa: F401
-    from ..conftest import VllmRunner
-
-    import vllm_ascend  # noqa: F401
-    from vllm_ascend.quantization.quant_config import AscendLinearMethod
 
     prompt = "What's deep learning?"
     example_prompts = [prompt]
