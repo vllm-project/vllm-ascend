@@ -18,8 +18,6 @@
 import importlib
 from typing import Any, Dict, List
 
-from vllm_ascend.ops.layernorm import enable_rmsnorm_with_antioutlier
-
 CUSTOMIZED_QUANTIZER_TYPE: List[str] = []
 
 class AscendQuantizer:
@@ -38,10 +36,6 @@ class AscendQuantizer:
             MindIETurboQuantizer = module.MindIETurboQuantizer
         except Exception:
             raise NotImplementedError("There is no available ascend quantizer.")
-
-        # When not using anti-outlier algorithms, "anti_method" refers to an empty string.
-        if len(quant_config["anti_method"]) > 0:
-            enable_rmsnorm_with_antioutlier()
 
         return MindIETurboQuantizer.get_quantizer(quant_config)
 
