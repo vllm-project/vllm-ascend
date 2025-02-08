@@ -21,6 +21,8 @@
 Run `pytest tests/quantization/test_mindie_turbo.py`.
 """
 
+import os
+
 import pytest
 
 import vllm  # noqa: F401
@@ -29,10 +31,10 @@ import vllm_ascend  # noqa: F401
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 
 from tests.conftest import VllmRunner
-from tests.quantization.utils import is_mindie_turbo_supported
+from tests.quantization.utils import is_mindie_turbo_supported, example_quantization
 
 MODELS = [
-    "LLaMA3-8B_W8A8/",
+    "/home/zyj/data/Qwen2.5-0.5B-Instruct/",
 ]
 
 
@@ -44,11 +46,17 @@ def test_mindie_turbo(
     model_name_or_path: str,
     max_tokens: int,
 ) -> None:
+    # vLLM should load weights from disk. Hence we need to save the quantized
+    # weights at first, and then load it by vLLM.
+    temp_path = os.path.join(os.path.dirname(__file__), "temp_weight")
+    if not os.path.exists(temp_path):
+        os.makedirs(temp_path)
+    example_quantization(model_name_or_path, temp_path)
 
     prompt = "What's deep learning?"
     example_prompts = [prompt]
 
-    with VllmRunner(model_name_or_path,
+    with VllmRunner(temp_path,
                     max_model_len=8192,
                     dtype="bfloat16",
                     enforce_eager=False,
