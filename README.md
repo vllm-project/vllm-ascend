@@ -1,8 +1,7 @@
 <p align="center">
   <picture>
-    <!-- TODO: Replace tmp link to logo url after vllm-projects/vllm-ascend ready -->
-    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/4a958093-58b5-4772-a942-638b51ced646">
-    <img alt="vllm-ascend" src="https://github.com/user-attachments/assets/838afe2f-9a1d-42df-9758-d79b31556de0" width=55%>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm-ascend/main/docs/logos/vllm-ascend-logo-text-dark.png">
+    <img alt="vllm-ascend" src="https://raw.githubusercontent.com/vllm-project/vllm-ascend/main/docs/logos/vllm-ascend-logo-text-light.png" width=55%>
   </picture>
 </p>
 
@@ -143,6 +142,7 @@ The list here is a subset of the supported models. See [supported_models](docs/s
 
 ## Contributing
 We welcome and value any contributions and collaborations:
+- Please feel free comments [here](https://github.com/vllm-project/vllm-ascend/issues/19) about your usage of vLLM Ascend Plugin.
 - Please let us know if you encounter a bug by [filing an issue](https://github.com/vllm-project/vllm-ascend/issues).
 - Please see the guidance on how to contribute in [CONTRIBUTING.md](./CONTRIBUTING.md).
 
