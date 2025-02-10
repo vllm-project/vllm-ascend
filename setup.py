@@ -21,8 +21,15 @@ import os
 from typing import List
 
 from setuptools import setup
+from setuptools_scm import get_version
 
 ROOT_DIR = os.path.dirname(__file__)
+try:
+    VERSION = get_version(write_to="vllm_ascend/_version.py")
+except LookupError:
+    # The checkout action in github action CI does not checkout the tag. It
+    # only checks out the commit. In this case, we set a dummy version.
+    VERSION = "0.0.0"
 
 
 def get_path(*filepath) -> str:
@@ -66,7 +73,7 @@ setup(
     name='vllm_ascend',
     # Follow:
     # https://packaging.python.org/en/latest/specifications/version-specifiers
-    version='0.1.0a1',
+    version=VERSION,
     author="vLLM-Ascend team",
     license="Apache 2.0",
     description=("vLLM Ascend backend plugin"),
