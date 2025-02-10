@@ -18,4 +18,8 @@
 
 def register():
     """Register the NPU platform."""
+    # TODO: https://github.com/vllm-project/vllm/pull/12432 Once this pr is merged, 
+    # the following module can be imported using pre_register_and_update function.
+    from vllm_ascend.quantization.quant_config import AscendQuantConfig  # noqa: F401
+
     return "vllm_ascend.platform.NPUPlatform"

@@ -94,16 +94,6 @@ class NPUPlatform(Platform):
     def mem_get_info(cls) -> Tuple[int, int]:
         return torch.npu.mem_get_info()
 
-    # Relies on this pull request https://github.com/vllm-project/vllm/pull/12432.
-    @classmethod
-    def pre_register_and_update(cls,
-                                parser: Optional[FlexibleArgumentParser] = None
-                                ) -> None:
-        """
-        Do some pre-registeration or update action for ascend platform.
-        """
-        from vllm_ascend.quantization.quant_config import AscendQuantConfig  # noqa: F401
-
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         # Register ops when setup.
