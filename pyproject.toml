@@ -1,0 +1,11 @@
+[build-system]
+# Should be mirrored in requirements.txt
+requires = [
+    "setuptools>=64",
+    "setuptools-scm>=8",
+    "decorator",
+    "pyyaml",
+    "scipy",
+    "torch-npu == 2.5.1rc1"
+]
+build-backend = "setuptools.build_meta"
