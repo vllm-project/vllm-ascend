@@ -99,10 +99,10 @@ See [Building and Testing](./CONTRIBUTING.md) for more details, which is a step-
 | Feature | Supported | Note |
 |---------|-----------|------|
 | Chunked Prefill | ✗ | Plan in 2025 Q1 |
-| Automatic Prefix Caching | ✅ | Imporve performance in 2025 Q1 |
+| Automatic Prefix Caching | ✅ | Improve performance in 2025 Q1 |
 | LoRA | ✗ | Plan in 2025 Q1 |
 | Prompt adapter | ✅ ||
-| Speculative decoding | ✅ | Impore accuracy in 2025 Q1|
+| Speculative decoding | ✅ | Improve accuracy in 2025 Q1|
 | Pooling | ✗ | Plan in 2025 Q1 |
 | Enc-dec | ✗ | Plan in 2025 Q1 |
 | Multi Modality | ✅ (LLaVA/Qwen2-vl/Qwen2-audio/internVL)| Add more model support in 2025 Q1 |
