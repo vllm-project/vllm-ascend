@@ -34,7 +34,7 @@ from tests.conftest import VllmRunner
 from tests.quantization.utils import is_mindie_turbo_supported, example_quantization
 
 MODELS = [
-    "/home/zyj/data/Qwen2.5-0.5B-Instruct/",
+    "Qwen/Qwen2.5-0.5B-Instruct",
 ]
 
 
@@ -46,7 +46,7 @@ def test_mindie_turbo(
     model_name_or_path: str,
     max_tokens: int,
 ) -> None:
-    # vLLM should load weights from disk. Hence we need to save the quantized
+    # vLLM must load weights from disk. Hence we need to save the quantized
     # weights at first, and then load it by vLLM.
     temp_path = os.path.join(os.path.dirname(__file__), "temp_weight")
     if not os.path.exists(temp_path):
