@@ -1,6 +1,7 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
+# Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -18,6 +19,7 @@
 from typing import Any, Dict, List, Optional
 
 import torch
+import torch_npu
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
@@ -39,8 +41,7 @@ class AscendQuantConfig(QuantizationConfig):
     """Config class for Ascend"""
 
     def __init__(self, quant_config: Dict[str, Any]):
-        self.quant_description = quant_config.pop("quant_description")
-        self.quant_config = quant_config
+        self.quant_description = quant_config
 
     def __repr__(self) -> str:
         return "AscendQuantConfig:\n" + super().__repr__()
@@ -68,8 +69,7 @@ class AscendQuantConfig(QuantizationConfig):
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
                                      user_quant) -> Optional[str]:
-        dev_type = hf_quant_cfg.get("dev_type", None)
-        if dev_type == "npu":
+        if torch.npu.is_available():
             return "ascend"
         return None
 
@@ -119,7 +119,7 @@ class AscendLinearMethod(LinearMethodBase):
     """
 
     def __init__(self, quant_config: AscendQuantConfig) -> None:
-        self.quantizer = AscendQuantizer.get_quantizer(quant_config.quant_config)
+        self.quantizer = AscendQuantizer.get_quantizer(quant_config.quant_description)
         self.quant_method = self.quantizer.build_linear_method()
 
     def create_weights(

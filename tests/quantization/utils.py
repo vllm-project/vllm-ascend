@@ -83,32 +83,7 @@ def example_quantization(model_name_or_path: str, tmp_path: str) -> None:
         def forward(self, x):
             return x
 
-    test_quant_config = {
-        "group_size": 0,
-        "kv_quant_type": None,
-        "fa_quant_type": None,
-        "w_bit": 8,
-        "a_bit": 8,
-        "dev_type": "npu",
-        "fraction": 0.01,
-        "act_method": 3,
-        "co_sparse": False,
-        "anti_method": "m2",
-        "disable_level": "L0",
-        "do_smooth": False,
-        "use_sigma": False,
-        "sigma_factor": 3.0,
-        "is_lowbit": False,
-        "mm_tensor": False,
-        "w_sym": True,
-        "open_outlier": True,
-        "is_dynamic": False
-    }
-
-    calibrator.model.config.update({"quantization_config": test_quant_config})
-    calibrator.model.config.quantization_config.update(
-        {"quant_description": calibrator.quant_model_json_description.quant_model_description}
-    )
+    calibrator.model.config.quantization_config = calibrator.quant_model_json_description.quant_model_description
 
     calibrator.save(tmp_path, save_type=["safe_tensor"])
     calibrator.model.save_pretrained(tmp_path, state_dict=EmptyModule().state_dict())
