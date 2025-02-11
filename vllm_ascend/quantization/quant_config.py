@@ -19,7 +19,7 @@
 from typing import Any, Dict, List, Optional
 
 import torch
-import torch_npu
+import torch_npu  # noqa: F401
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
