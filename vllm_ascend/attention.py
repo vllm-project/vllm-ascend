@@ -22,12 +22,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
-
-try:
-    import torch_npu  # noqa: F401
-except ImportError:
-    print("Failed to import torch_npu.")
-
+import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata, AttentionType)

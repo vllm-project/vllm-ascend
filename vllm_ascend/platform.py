@@ -19,29 +19,13 @@ import os
 from typing import Optional, Tuple
 
 import torch
-
-try:
-    import torch_npu  # noqa: F401
-except ImportError:
-    print("Failed to import torch_npu.")
-
+import torch_npu  # noqa: F401
 from vllm.config import VllmConfig
 from vllm.platforms import Platform, PlatformEnum
 
+from vllm_ascend.utils import ASCEND_RT_VISIBLE_DEVICES
+
 os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
-
-
-def _device_id_to_physical_device_id(device_id: int) -> int:
-    if "ASCEND_RT_VISIBLE_DEVICES" in os.environ:
-        device_ids = os.environ["ASCEND_RT_VISIBLE_DEVICES"].split(",")
-        if device_ids == [""]:
-            raise RuntimeError("ASCEND_RT_VISIBLE_DEVICES is set to empty"
-                               "string, which means Ascend NPU support is"
-                               "disabled.")
-        physical_device_id = device_ids[device_id]
-        return int(physical_device_id)
-    else:
-        return device_id
 
 
 class NPUPlatform(Platform):
@@ -51,7 +35,7 @@ class NPUPlatform(Platform):
     device_type: str = "npu"
     simple_compile_backend: str = "npu"
     ray_device_key: str = "NPU"
-    device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
+    device_control_env_var: str = ASCEND_RT_VISIBLE_DEVICES
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0):
@@ -59,8 +43,15 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
-        physical_device_id = _device_id_to_physical_device_id(device_id)
-        return torch.npu.get_device_name(physical_device_id)
+        if ASCEND_RT_VISIBLE_DEVICES in os.environ:
+            device_ids = os.environ[ASCEND_RT_VISIBLE_DEVICES].split(",")
+            if device_ids == [""]:
+                raise RuntimeError("ASCEND_RT_VISIBLE_DEVICES is set to empty"
+                                   "string, which means Ascend NPU support is"
+                                   "disabled.")
+            physical_device_id = device_ids[device_id]
+            device_id = int(physical_device_id)
+        return torch.npu.get_device_name(device_id)
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:

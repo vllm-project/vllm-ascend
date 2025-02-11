@@ -25,7 +25,7 @@ import torch.distributed
 import torch_npu
 from torch import nn
 from vllm import envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
@@ -34,7 +34,6 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
@@ -47,6 +46,7 @@ from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
 from vllm_ascend.model_runner import NPUModelRunner
+from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import try_register_lib
 
 logger = init_logger(__name__)
@@ -68,13 +68,14 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         is_driver_worker: bool = False,
         model_runner_cls: Optional[Type[ModelRunnerBase]] = None,
     ) -> None:
-
         WorkerBase.__init__(self, vllm_config=vllm_config)
+
         # Try to import mindie_turbo to accelerate vLLM inference.
         try_register_lib(
             "mindie_turbo",
             "MindIE Turbo is installed. vLLM inference will be accelerated with MindIE Turbo."
         )
+
         # distribute related config
         self.parallel_config.rank = rank
         self.local_rank = local_rank
@@ -100,20 +101,21 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             or (speculative_config.draft_model_config.hf_config.model_type
                 not in ["medusa", "mlp_speculator", "eagle"]) \
                     else {"return_hidden_states": True}
-
-        ModelRunnerClass: Type[ModelRunnerBase] = NPUModelRunner
-        if model_config.runner_type == "pooling":
-            ModelRunnerClass = PoolingModelRunner
-        elif self.model_config.is_encoder_decoder:
-            ModelRunnerClass = EncoderDecoderModelRunner
-        self.model_runner: ModelRunnerBase = ModelRunnerClass(
-            vllm_config=self.vllm_config,
-            kv_cache_dtype=self.cache_config.cache_dtype,
-            is_driver_worker=is_driver_worker,
-            **speculative_args,
-        )
         if model_runner_cls is not None:
-            self.model_runner = model_runner_cls(self.model_runner)
+            self.model_runner: ModelRunnerBase = model_runner_cls(
+                self.model_runner)
+        else:
+            ModelRunnerClass: Type[ModelRunnerBase] = NPUModelRunner
+            if model_config.runner_type == "pooling":
+                ModelRunnerClass = PoolingModelRunner
+            elif self.model_config.is_encoder_decoder:
+                ModelRunnerClass = EncoderDecoderModelRunner
+            self.model_runner = ModelRunnerClass(
+                vllm_config=self.vllm_config,
+                kv_cache_dtype=self.cache_config.cache_dtype,
+                is_driver_worker=is_driver_worker,
+                **speculative_args,
+            )
 
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
@@ -170,17 +172,21 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             # # This env var set by Ray causes exceptions with graph building.
             # os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
             self.device = torch.device(f"npu:{self.local_rank}")
-            current_platform.set_device(self.device)
-
-            current_platform.empty_cache()
-            self.init_npu_memory = current_platform.mem_get_info()[0]
+            NPUPlatform.set_device(self.device)
+            NPUPlatform.empty_cache()
+            self.init_npu_memory = NPUPlatform.mem_get_info()[0]
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        init_worker_distributed_environment(self.parallel_config, self.rank,
-                                            self.distributed_init_method,
-                                            self.local_rank)
+        set_custom_all_reduce(
+            not self.parallel_config.disable_custom_all_reduce)
+        init_distributed_environment(self.parallel_config.world_size,
+                                     self.rank, self.distributed_init_method,
+                                     self.local_rank, "hccl")
+        ensure_model_parallel_initialized(
+            self.parallel_config.tensor_parallel_size,
+            self.parallel_config.pipeline_parallel_size)
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -206,7 +212,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         self.model_runner.save_tensorized_model(
             tensorizer_config=tensorizer_config, )
 
-    @current_platform.inference_mode()
+    @NPUPlatform.inference_mode()
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Profiles the peak memory usage of the model to determine how many
         KV blocks may be allocated without OOMs.
@@ -219,7 +225,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
-        current_platform.empty_cache()
+        NPUPlatform.empty_cache()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -227,7 +233,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
-        free_npu_memory, total_npu_memory = current_platform.mem_get_info()
+        free_npu_memory, total_npu_memory = NPUPlatform.mem_get_info()
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
         peak_memory = self.init_npu_memory - free_npu_memory
@@ -248,17 +254,37 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         gc.collect()
         # TODO: don`t need impl this func after empty_cache in
         # Worker.determine_num_available_blocks() unified`
-        current_platform.empty_cache()
+        NPUPlatform.empty_cache()
         return num_npu_blocks, num_cpu_blocks
+
+    def _raise_if_cache_size_invalid(self, num_gpu_blocks, block_size,
+                                     is_attention_free, max_model_len) -> None:
+        if is_attention_free and num_gpu_blocks != 0:
+            raise ValueError(
+                "No memory should be allocated for the cache blocks "
+                f"for an attention-free model, but {num_gpu_blocks}"
+                "blocks are allocated.")
+        if not is_attention_free and num_gpu_blocks <= 0:
+            raise ValueError("No available memory for the cache blocks. "
+                             "Try increasing `gpu_memory_utilization` when "
+                             "initializing the engine.")
+        max_seq_len = block_size * num_gpu_blocks
+        if not is_attention_free and max_model_len > max_seq_len:
+            raise ValueError(
+                f"The model's max seq len ({max_model_len}) "
+                "is larger than the maximum number of tokens that can be "
+                f"stored in KV cache ({max_seq_len}). Try increasing "
+                "`gpu_memory_utilization` or decreasing `max_model_len` when "
+                "initializing the engine.")
 
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         """Allocate NPU and CPU KV cache with the specified number of blocks.
         """
-        raise_if_cache_size_invalid(num_gpu_blocks,
-                                    self.cache_config.block_size,
-                                    self.cache_config.is_attention_free,
-                                    self.model_config.max_model_len)
+        self._raise_if_cache_size_invalid(num_gpu_blocks,
+                                          self.cache_config.block_size,
+                                          self.cache_config.is_attention_free,
+                                          self.model_config.max_model_len)
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -447,39 +473,3 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         return CacheEngine.get_cache_block_size(self.cache_config,
                                                 self.model_config,
                                                 self.parallel_config)
-
-
-def init_worker_distributed_environment(
-        parallel_config: ParallelConfig,
-        rank: int,
-        distributed_init_method: Optional[str] = None,
-        local_rank: int = -1,
-        backend: str = "hccl") -> None:
-    """Initialize the distributed environment."""
-    set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
-
-    init_distributed_environment(parallel_config.world_size, rank,
-                                 distributed_init_method, local_rank, backend)
-
-    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size)
-
-
-def raise_if_cache_size_invalid(num_gpu_blocks, block_size, is_attention_free,
-                                max_model_len) -> None:
-    if is_attention_free and num_gpu_blocks != 0:
-        raise ValueError("No memory should be allocated for the cache blocks "
-                         f"for an attention-free model, but {num_gpu_blocks}"
-                         "blocks are allocated.")
-    if not is_attention_free and num_gpu_blocks <= 0:
-        raise ValueError("No available memory for the cache blocks. "
-                         "Try increasing `gpu_memory_utilization` when "
-                         "initializing the engine.")
-    max_seq_len = block_size * num_gpu_blocks
-    if not is_attention_free and max_model_len > max_seq_len:
-        raise ValueError(
-            f"The model's max seq len ({max_model_len}) "
-            "is larger than the maximum number of tokens that can be "
-            f"stored in KV cache ({max_seq_len}). Try increasing "
-            "`gpu_memory_utilization` or decreasing `max_model_len` when "
-            "initializing the engine.")

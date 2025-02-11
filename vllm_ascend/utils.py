@@ -21,6 +21,8 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+ASCEND_RT_VISIBLE_DEVICES = "ASCEND_RT_VISIBLE_DEVICES"
+
 
 def try_register_lib(lib_name: str, lib_info: str = ""):
     import importlib

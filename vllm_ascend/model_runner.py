@@ -47,7 +47,6 @@ from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs, MultiModalPlaceholderMap,
                              MultiModalRegistry)
-from vllm.platforms import current_platform
 from vllm.prompt_adapter.layers import PromptAdapterMapping
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -60,6 +59,8 @@ from vllm.worker.model_runner_base import (
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
+
+from vllm_ascend.platform import NPUPlatform
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -1303,7 +1304,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
         return self.vllm_config.kv_transfer_config.is_kv_producer and (
             not is_profile_run) and is_prefill_run
 
-    @current_platform.inference_mode()
+    @NPUPlatform.inference_mode()
     def profile_run(self) -> None:
         # Enable top-k sampling to reflect the accurate memory usage.
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
@@ -1380,7 +1381,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                 dtype=self.model_config.dtype,
                 device=self.device)
         self.execute_model(model_input, kv_caches, intermediate_tensors)
-        current_platform.synchronize()
+        NPUPlatform.synchronize()
         return
 
     def get_model(self) -> nn.Module:
