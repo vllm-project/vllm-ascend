@@ -1,3 +1,23 @@
+# Installation
+
+
+## Building
+
+#### Build Python package from source
+
+```bash
+git clone https://github.com/vllm-project/vllm-ascend.git
+cd vllm-ascend
+pip install -e .
+```
+
+#### Build container image from source
+```bash
+git clone https://github.com/vllm-project/vllm-ascend.git
+cd vllm-ascend
+docker build -t vllm-ascend-dev-image -f ./Dockerfile .
+```
+
 ### Prepare Ascend NPU environment
 
 ### Dependencies
