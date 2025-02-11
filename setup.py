@@ -20,7 +20,7 @@
 import os
 from typing import List
 
-from setuptools import setup
+from setuptools import find_packages, setup
 from setuptools_scm import get_version
 
 ROOT_DIR = os.path.dirname(__file__)
@@ -95,7 +95,7 @@ setup(
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
         "Topic :: Scientific/Engineering :: Information Analysis",
     ],
-    packages=['vllm_ascend'],
+    packages=find_packages(exclude=("docs", "examples", "tests*", "patch")),
     python_requires=">=3.9",
     install_requires=get_requirements(),
     extras_require={},
