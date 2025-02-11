@@ -28,7 +28,6 @@ import pytest
 import vllm  # noqa: F401
 
 import vllm_ascend  # noqa: F401
-from vllm_ascend.quantization.quant_config import AscendLinearMethod
 
 from tests.conftest import VllmRunner
 from tests.quantization.utils import is_mindie_turbo_supported, example_quantization
