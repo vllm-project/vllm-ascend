@@ -39,7 +39,7 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
   * PyTorch >= 2.4.0, torch-npu >= 2.4.0
   * vLLM (the same version as vllm-ascend)
 
-Find more about how to setup your environment step by step in [here](docs/installation.md).
+Find more about how to setup your environment step by step in [here](docs/source/installation.md).
 
 ## Getting Started
 
@@ -68,7 +68,7 @@ Run the following command to start the vLLM server with the [Qwen/Qwen2.5-0.5B-I
 vllm serve Qwen/Qwen2.5-0.5B-Instruct
 curl http://localhost:8000/v1/models
 ```
-**Please refer to [official docs](./docs/index.md) for more details.**
+**Please refer to [official docs](https://vllm-ascend.readthedocs.io/en/latest/) for more details.**
 
 ## Contributing
 See [CONTRIBUTING](docs/source/developer_guide/contributing.md) for more details, which is a step-by-step guide to help you set up development environment, build and test.
