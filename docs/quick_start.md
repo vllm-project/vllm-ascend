@@ -11,15 +11,17 @@
 You can use the container image directly with one line command:
 
 ```bash
+# Update DEVICE according to your device (/dev/davinci[0-7])
 DEVICE=/dev/davinci7
 IMAGE=quay.io/ascend/cann:8.0.rc3.beta1-910b-ubuntu22.04-py3.10
 docker run \
-    --name $NAME --device vllm-ascend-env \
+    --name vllm-ascend-env --device $DEVICE \
     --device /dev/davinci_manager --device /dev/devmm_svm --device /dev/hisi_hdc \
     -v /usr/local/dcmi:/usr/local/dcmi -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
     -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
     -it --rm $IMAGE bash
 ```
 
@@ -60,6 +62,7 @@ Create your venv
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+pip install --upgrade pip
 ```
 
 You can install vLLM and vllm-ascend plugin by using:
@@ -94,11 +97,9 @@ With vLLM installed, you can start generating texts for list of input prompts (i
 # Use Modelscope mirror to speed up download
 pip install modelscope
 export VLLM_USE_MODELSCOPE=true
-$ python3
->>>
 ```
 
-Try to execute below script to generate texts:
+Try to run below Python script directly or use `python3` shell to generate texts:
 
 ```python
 from vllm import LLM, SamplingParams
@@ -108,7 +109,7 @@ prompts = [
     "The future of AI is",
 ]
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
-# The first run will take about 1.5 mins (10 MB/s) to download models
+# The first run will take about 3-5 mins (10 MB/s) to download models
 llm = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
 
 outputs = llm.generate(prompts, sampling_params)
@@ -129,16 +130,22 @@ the following command to start the vLLM server with the
 # Use Modelscope mirror to speed up download
 pip install modelscope
 export VLLM_USE_MODELSCOPE=true
-# Deploy vLLM server (The first run will take about 1.5 mins (10 MB/s) to download models)
-vllm serve Qwen/Qwen2.5-0.5B-Instruct
+# Deploy vLLM server (The first run will take about 3-5 mins (10 MB/s) to download models)
+vllm serve Qwen/Qwen2.5-0.5B-Instruct &
 ```
 
-Once your server is started, you can query in a new terminal:
-```bash
-docker exec -it vllm-ascend-env bash
+If you see log as below:
+
 ```
+INFO:     Started server process [3594]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+```
+Congratulations, you have successfully started the vLLM server!
 
 You can query the list the models:
+
 ```bash
 curl http://localhost:8000/v1/models | python3 -m json.tool
 ```
@@ -155,3 +162,22 @@ curl http://localhost:8000/v1/completions \
         "temperature": 0
     }' | python3 -m json.tool
 ```
+
+vLLM is serving as background process, you can use `kill -2 $VLLM_PID` to stop the background process gracefully,
+it's equal to `Ctrl-C` to stop foreground vLLM process:
+
+```bash
+ps -ef | grep "/.venv/bin/vllm serve" | grep -v grep
+VLLM_PID=`ps -ef | grep "/.venv/bin/vllm serve" | grep -v grep | awk '{print $2}'`
+kill -2 $VLLM_PID
+```
+
+You will see output as below:
+```
+INFO 02-12 03:34:10 launcher.py:59] Shutting down FastAPI HTTP server.
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+```
+
+Finally, you can exit container by using `ctrl-D`.
