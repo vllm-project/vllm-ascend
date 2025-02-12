@@ -6,6 +6,8 @@
 - Atlas A2 Training series (Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 Box16, Atlas 300T A2)
 - Atlas 800I A2 Inference series (Atlas 800I A2)
 
+<!-- TODO(yikun): replace "Prepare Environment" and "Installation" with "Running with vllm-ascend container image" -->
+
 ### Prepare Environment
 
 You can use the container image directly with one line command:
