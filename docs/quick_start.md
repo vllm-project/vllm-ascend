@@ -14,4 +14,4 @@
 | torch-npu   | >= 2.4.0          | [2.5.1rc1](https://gitee.com/ascend/pytorch/releases/tag/v6.0.0.alpha001-pytorch2.5.1)    | Required for vllm-ascend                 |
 | torch       | >= 2.4.0          | [2.5.1](https://github.com/pytorch/pytorch/releases/tag/v2.5.1)      | Required for torch-npu and vllm |
 
-Find more about how to setup your environment in [here](docs/environment.md).
+Find more about how to setup your environment in [here](installation.md).
