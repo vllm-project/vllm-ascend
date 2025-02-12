@@ -30,8 +30,10 @@ def rope_forward_oot(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     import torch_npu
 
-    if self.cos_sin_cache.device != query.device or self.cos_sin_cache.dtype != query.dtype:
-        self.cos_sin_cache = self.cos_sin_cache.to(query.device, dtype=query.dtype)
+    if self.cos_sin_cache.device != query.device:
+        self.cos_sin_cache = self.cos_sin_cache.to(query.device)
+    if self.cos_sin_cache.dtype != query.dtype:
+        self.cos_sin_cache = self.cos_sin_cache.to(query.dtype)
     if offsets is not None:
         raise NotImplementedError(
             "Batched rotary embedding is currently not supported on NPU.")
