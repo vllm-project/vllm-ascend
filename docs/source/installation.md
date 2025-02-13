@@ -1,6 +1,6 @@
 # Installation
 
-### 1. Dependencies
+## Dependencies
 | Requirement  | Supported version | Recommended version | Note |
 | ------------ | ------- | ----------- | ----------- | 
 | Python | >= 3.9 | [3.10](https://www.python.org/downloads/) | Required for vllm |
@@ -8,11 +8,11 @@
 | torch-npu    | >= 2.4.0   | [2.5.1rc1](https://gitee.com/ascend/pytorch/releases/tag/v6.0.0.alpha001-pytorch2.5.1)    | Required for vllm-ascend |
 | torch        | >= 2.4.0   | [2.5.1](https://github.com/pytorch/pytorch/releases/tag/v2.5.1)      | Required for torch-npu and vllm required |
 
-### 2. Prepare Ascend NPU environment
+## Prepare Ascend NPU environment
 
 Below is a quick note to install recommended version software:
 
-#### Containerized installation
+### Containerized installation
 
 You can use the [container image](https://hub.docker.com/r/ascendai/cann) directly with one line command:
 
@@ -33,13 +33,13 @@ docker run \
 
 You do not need to install `torch` and `torch_npu` manually, they will be automatically installed as `vllm-ascend` dependencies.
 
-#### Manual installation
+### Manual installation
 
 Or follow the instructions provided in the [Ascend Installation Guide](https://ascend.github.io/docs/sources/ascend/quick_install.html) to set up the environment.
 
-### 3. Building
+## Building
 
-#### Build Python package from source
+### Build Python package from source
 
 ```bash
 git clone https://github.com/vllm-project/vllm-ascend.git
@@ -47,7 +47,7 @@ cd vllm-ascend
 pip install -e .
 ```
 
-#### Build container image from source
+### Build container image from source
 ```bash
 git clone https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
