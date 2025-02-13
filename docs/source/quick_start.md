@@ -1,6 +1,6 @@
 # Quickstart
 
-## 1. Prerequisites
+## Prerequisites
 
 ### Supported Devices
 - Atlas A2 Training series (Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 Box16, Atlas 300T A2)
@@ -48,7 +48,7 @@ You will see following message:
 ```
 
 
-## 2. Installation
+## Installation
 
 Prepare:
 
@@ -84,7 +84,7 @@ cd ..
 ```
 
 
-## 3. Usage
+## Usage
 
 After vLLM and vLLM Ascend plugin installation, you can start to
 try [vLLM QuickStart](https://docs.vllm.ai/en/latest/getting_started/quickstart.html).
