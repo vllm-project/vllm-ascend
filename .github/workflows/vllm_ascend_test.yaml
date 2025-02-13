@@ -25,6 +25,7 @@ on:
       - '*.txt'
       - '**/*.py'
       - '.github/workflows/vllm_ascend_test.yaml'
+      - '!docs/**'
   pull_request:
     branches:
       - "main"
@@ -32,6 +33,7 @@ on:
       - '*.txt'
       - '**/*.py'
       - '.github/workflows/vllm_ascend_test.yaml'
+      - '!docs/**'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -103,4 +105,5 @@ jobs:
 
       - name: Run vllm-project/vllm test
         run: |
+          pip install -r vllm-empty/requirements-test.txt
           pytest -sv
