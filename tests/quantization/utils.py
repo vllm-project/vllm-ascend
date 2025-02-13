@@ -24,7 +24,7 @@ from msmodelslim.pytorch.llm_ptq.llm_ptq_tools import Calibrator, QuantConfig
 def is_mindie_turbo_supported() -> bool:
     try:
         import mindie_turbo  # noqa: F401
-    except Exception:
+    except ImportError:
         return False
     
     return True
