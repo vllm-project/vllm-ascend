@@ -19,11 +19,11 @@
 # https://github.com/vllm-project/vllm/pull/11324.
 
 import torch
-from vllm.distributed.parallel_state import GroupCoordinator
+import vllm
 from vllm.utils import resolve_obj_by_qualname
 
 
-class GroupCoordinatorPatch(GroupCoordinator):
+class GroupCoordinatorPatch(vllm.distributed.parallel_state.GroupCoordinator):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -66,4 +66,4 @@ class GroupCoordinatorPatch(GroupCoordinator):
         return self.communicator.all_gather(input_, dim)
 
 
-GroupCoordinator = GroupCoordinatorPatch
+vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch
