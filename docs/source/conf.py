@@ -78,7 +78,7 @@ exclude_patterns = [
     '.venv',
     'README.md',
     # TODO(yikun): Remove this after zh supported
-    'developer_guide/contributing.zh.md'
+    '**/*.zh.md'
 ]
 
 # -- Options for HTML output -------------------------------------------------
