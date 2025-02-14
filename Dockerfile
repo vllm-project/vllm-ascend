@@ -15,13 +15,15 @@
 # limitations under the License.
 #
 
-FROM quay.io/ascend/cann:8.0.rc3.beta1-910b-ubuntu22.04-py3.10
+FROM quay.io/ascend/cann:8.0.0.beta1-910b-ubuntu22.04-py3.10
 
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y && \
-    apt-get install -y python3-pip git vim
+    apt-get install -y python3-pip git vim && \
+    rm -rf /var/cache/apt/* && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 
@@ -35,6 +37,9 @@ RUN git clone --depth 1 $VLLM_REPO /workspace/vllm
 RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install /workspace/vllm/
 
 # Install vllm-ascend main
-RUN python3 -m pip install /workspace/vllm-ascend/
+RUN python3 -m pip install /workspace/vllm-ascend/ -f https://download.pytorch.org/whl/torch/
+
+# Install modelscope
+RUN python3 -m pip install modelscope
 
 CMD ["/bin/bash"]
