@@ -95,7 +95,7 @@ setup(
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
         "Topic :: Scientific/Engineering :: Information Analysis",
     ],
-    packages=find_packages(exclude=("docs", "examples", "tests*", "patch")),
+    packages=find_packages(exclude=("docs", "examples", "tests*")),
     python_requires=">=3.9",
     install_requires=get_requirements(),
     extras_require={},

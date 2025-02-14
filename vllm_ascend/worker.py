@@ -457,6 +457,8 @@ def init_worker_distributed_environment(
         backend: str = "hccl") -> None:
     """Initialize the distributed environment."""
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
+    # register communicator patch before init dist env
+    from vllm_ascend import patch  # noqa: F401
 
     init_distributed_environment(parallel_config.world_size, rank,
                                  distributed_init_method, local_rank, backend)
