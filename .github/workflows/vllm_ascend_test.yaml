@@ -48,7 +48,7 @@ jobs:
     runs-on: ascend-arm64  # actionlint-ignore: runner-label
 
     container:
-      image: quay.io/ascend/cann:8.0.rc3.beta1-910b-ubuntu22.04-py3.10
+      image: quay.io/ascend/cann:8.0.0.beta1-910b-ubuntu22.04-py3.10
       volumes:
         - /usr/local/dcmi:/usr/local/dcmi
         - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
@@ -63,9 +63,10 @@ jobs:
       env:
         HF_ENDPOINT: https://hf-mirror.com
     steps:
-      - name: Check npu driver
+      - name: Check npu and CANN info
         run: |
           npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
 
       - name: Config mirrors
         run: |
