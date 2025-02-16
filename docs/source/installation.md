@@ -39,9 +39,12 @@ pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs numpy==1.24.0 dec
 
 # Download and install the CANN package.
 wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.0.0/Ascend-cann-toolkit_8.0.0_linux-aarch64.run
-sh Ascend-cann-toolkit_8.0.0_linux-aarch64.run --full
+chmod +x ./Ascend-cann-toolkit_8.0.0_linux-aarch64.run
+./Ascend-cann-toolkit_8.0.0_linux-aarch64.run --full
+
 wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.0.0/Ascend-cann-kernels-910b_8.0.0_linux-aarch64.run
-sh Ascend-cann-kernels-910b_8.0.0_linux-aarch64.run --full
+chmod +x ./Ascend-cann-kernels-910b_8.0.0_linux-aarch64.run
+./Ascend-cann-kernels-910b_8.0.0_linux-aarch64.run --install
 ```
 
 Once it's done, you can read either **Set up using Python** or **Set up using Docker** section to install and use vllm-ascend.
