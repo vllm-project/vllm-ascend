@@ -10,7 +10,7 @@ vLLM Ascend Plugin
 </h3>
 
 <p align="center">
-| <a href="https://www.hiascend.com/en/"><b>关于昇腾</b></a> | <a href="https://slack.vllm.ai"><b>开发者 Slack (#sig-ascend)</b></a> |
+| <a href="https://www.hiascend.com/en/"><b>关于昇腾</b></a> | <a href="https://vllm-ascend.readthedocs.io/en/latest/"><b>官方文档</b></a> | <a href="https://slack.vllm.ai"><b>开发者 Slack (#sig-ascend)</b></a> |
 </p>
 
 <p align="center">
@@ -70,6 +70,15 @@ curl http://localhost:8000/v1/models
 ```
 
 **请参阅 [官方文档](https://vllm-ascend.readthedocs.io/en/latest/)以获取更多详细信息**
+
+## 分支
+
+vllm-ascend有主干分支和开发分支。
+
+- **main**: 主干分支，与vLLM的主干分支对应，并通过昇腾CI持续进行质量看护。
+- **vX.Y.Z-dev**: 开发分支，随vLLM部分新版本发布而创建，比如`v0.7.1-dev`是vllm-asend针对vLLM `v0.7.1`版本的开发分支。
+
+请参阅[版本策略](docs/source/developer_guide/versioning_policy.zh.md)了解更多详细信息。
 
 ## 贡献
 有关更多详细信息，请参阅 [CONTRIBUTING](docs/source/developer_guide/contributing.zh.md)，可以更详细的帮助您部署开发环境、构建和测试。
