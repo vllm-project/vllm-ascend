@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm-ascend/main/docs/logos/vllm-ascend-logo-text-dark.png">
-    <img alt="vllm-ascend" src="https://raw.githubusercontent.com/vllm-project/vllm-ascend/main/docs/logos/vllm-ascend-logo-text-light.png" width=55%>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm-ascend/main/docs/source/logos/vllm-ascend-logo-text-dark.png">
+    <img alt="vllm-ascend" src="https://raw.githubusercontent.com/vllm-project/vllm-ascend/main/docs/source/logos/vllm-ascend-logo-text-light.png" width=55%>
   </picture>
 </p>
 
@@ -39,7 +39,7 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个让vLLM在Ascend NPU无缝运行的�
   * PyTorch >= 2.4.0, torch-npu >= 2.4.0
   * vLLM (与vllm-ascend版本一致)
 
-在[此处](docs/installation.md)，您可以了解如何逐步准备环境。
+在[此处](docs/source/installation.md)，您可以了解如何逐步准备环境。
 
 ## 开始使用
 
@@ -69,10 +69,10 @@ vllm serve Qwen/Qwen2.5-0.5B-Instruct
 curl http://localhost:8000/v1/models
 ```
 
-**请参阅 [官方文档](./docs/index.md)以获取更多详细信息**
+**请参阅 [官方文档](https://vllm-ascend.readthedocs.io/en/latest/)以获取更多详细信息**
 
 ## 贡献
-有关更多详细信息，请参阅 [CONTRIBUTING](./CONTRIBUTING.md)，可以更详细的帮助您部署开发环境、构建和测试。
+有关更多详细信息，请参阅 [CONTRIBUTING](docs/source/developer_guide/contributing.zh.md)，可以更详细的帮助您部署开发环境、构建和测试。
 
 我们欢迎并重视任何形式的贡献与合作：
 - 您可以在[这里](https://github.com/vllm-project/vllm-ascend/issues/19)反馈您的使用体验。
