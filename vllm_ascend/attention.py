@@ -523,45 +523,55 @@ class AscendAttentionBackendImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
-        if kv_cache.numel() > 0:
-            key_cache, value_cache = kv_cache[0], kv_cache[1]
-            num_blocks, block_size, _ = key_cache.shape
-            key_cache = key_cache.view(num_blocks, block_size, self.num_kv_heads,
-                                    self.head_size)
-            value_cache = value_cache.view(num_blocks, block_size,
-                                        self.num_kv_heads, self.head_size)
-            slots = attn_metadata.slot_mapping
-            torch_npu.npu_reshapecache(key, value, key_cache, value_cache, slots)
-
         output = torch.empty(num_tokens,
                              self.num_heads,
                              self.head_size,
                              dtype=query.dtype,
                              device="npu")
 
-        if attn_metadata.num_prefills > 0:
+        if hasattr(layer,'quant_method') and isinstance(layer.quant_method, BaseKVCacheMethod):
+            isPrefill = True if attn_metadata.num_prefills > 0 else False
+            self.seq_lens_tensor_cpu = torch.from_numpy(np.array(attn_metadata.prefill_metadata.seq_lens).astype(np.int32)) if isPrefill \
+                else torch.from_numpy(np.array(attn_metadata.decode_metadata.seq_lens).astype(np.int32))
+            block_tables = attn_metadata.decode_metadata.block_tables if attn_metadata.decode_metadata else None
+            # Details of kv_cache arrangement in attention quantization
+            # are implemented by quant_method. 
+            layer.quant_method.apply(layer, query, key, value, kv_cache,
+                                    self.scale, self.seq_lens_tensor_cpu,
+                                    block_tables, isPrefill, attn_metadata, output) 
+        else:
+            if kv_cache.numel() > 0:
+                key_cache, value_cache = kv_cache[0], kv_cache[1]
+                num_blocks, block_size, _ = key_cache.shape
+                key_cache = key_cache.view(num_blocks, block_size, self.num_kv_heads,
+                                        self.head_size)
+                value_cache = value_cache.view(num_blocks, block_size,
+                                            self.num_kv_heads, self.head_size)
+                slots = attn_metadata.slot_mapping
+                torch_npu.npu_reshapecache(key, value, key_cache, value_cache, slots)
+            if attn_metadata.num_prefills > 0:
 
-            if (attn_metadata.block_tables is None
-                    or attn_metadata.block_tables.numel() == 0):
-                assert attn_metadata.attn_mask is not None
-                mask = attn_metadata.attn_mask
-                self.seq_lens_tensor_cpu = torch.from_numpy(np.array(attn_metadata.prefill_metadata.seq_lens).astype(np.int32))
-                torch_npu.npu_selfattention(query, key, value, mask,
-                                            self.seq_lens_tensor_cpu, self.scale,
-                                            self.num_heads, self.num_kv_heads,
-                                            output)
-            else:
-                # TODO: Will support prefix cache and chunked prefill soon.
-                raise RuntimeError(
-                    "Prefix cache and chunked prefill are currently not supported."
-                )
-        elif attn_metadata.decode_metadata:
-            assert kv_cache is not None
-            self.seq_lens_tensor_cpu = torch.from_numpy(np.array(attn_metadata.decode_metadata.seq_lens).astype(np.int32))
-            block_tables = attn_metadata.decode_metadata.block_tables
-            torch_npu.npu_pagedattention(query, key_cache, value_cache,
-                                         self.num_kv_heads, self.num_heads,
-                                         self.scale, block_tables,
-                                         self.seq_lens_tensor_cpu, output)
+                if (attn_metadata.block_tables is None
+                        or attn_metadata.block_tables.numel() == 0):
+                    assert attn_metadata.attn_mask is not None
+                    mask = attn_metadata.attn_mask
+                    self.seq_lens_tensor_cpu = torch.from_numpy(np.array(attn_metadata.prefill_metadata.seq_lens).astype(np.int32))
+                    torch_npu.npu_selfattention(query, key, value, mask,
+                                                self.seq_lens_tensor_cpu, self.scale,
+                                                self.num_heads, self.num_kv_heads,
+                                                output)
+                else:
+                    # TODO: Will support prefix cache and chunked prefill soon.
+                    raise RuntimeError(
+                        "Prefix cache and chunked prefill are currently not supported."
+                    )
+            elif attn_metadata.decode_metadata:
+                assert kv_cache is not None
+                self.seq_lens_tensor_cpu = torch.from_numpy(np.array(attn_metadata.decode_metadata.seq_lens).astype(np.int32))
+                block_tables = attn_metadata.decode_metadata.block_tables
+                torch_npu.npu_pagedattention(query, key_cache, value_cache,
+                                            self.num_kv_heads, self.num_heads,
+                                            self.scale, block_tables,
+                                            self.seq_lens_tensor_cpu, output)
 
         return output.view(num_tokens, self.hidden_size)

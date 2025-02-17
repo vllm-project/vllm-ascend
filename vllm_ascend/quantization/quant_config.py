@@ -251,21 +251,16 @@ class AscendQKVQuantAttentionMethod(BaseKVCacheMethod):
         query : torch.Tensor,
         key : torch.Tensor,
         value : torch.Tensor,
-        num_kv_heads:int,
-        head_size:int,
         kv_cache: List[torch.Tensor],
         scale : torch.Tensor,
         seq_lens_tensor_cpu:int,
         block_tables : torch.Tensor,
-        attn_mask : torch.Tensor,
         isPrefill: bool,
         attn_metadata,
         output
     ) -> torch.Tensor:
         return self.quant_method.apply(layer, query, key,
-                                       value, num_kv_heads,
-                                       head_size, kv_cache,
+                                       value, kv_cache,
                                        scale, seq_lens_tensor_cpu,
-                                       block_tables, attn_mask,
-                                       isPrefill, attn_metadata,
-                                       output)
+                                       block_tables, isPrefill,
+                                       attn_metadata, output)
