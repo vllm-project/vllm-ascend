@@ -1,8 +1,7 @@
 <p align="center">
   <picture>
-    <!-- TODO: Replace tmp link to logo url after vllm-projects/vllm-ascend ready -->
-    <source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/4a958093-58b5-4772-a942-638b51ced646">
-    <img alt="vllm-ascend" src="https://github.com/user-attachments/assets/838afe2f-9a1d-42df-9758-d79b31556de0" width=55%>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm-ascend/main/docs/source/logos/vllm-ascend-logo-text-dark.png">
+    <img alt="vllm-ascend" src="https://raw.githubusercontent.com/vllm-project/vllm-ascend/main/docs/source/logos/vllm-ascend-logo-text-light.png" width=55%>
   </picture>
 </p>
 
@@ -11,7 +10,7 @@ vLLM Ascend Plugin
 </h3>
 
 <p align="center">
-| <a href="https://www.hiascend.com/en/"><b>关于昇腾</b></a> | <a href="https://slack.vllm.ai"><b>开发者 Slack (#sig-ascend)</b></a> |
+| <a href="https://www.hiascend.com/en/"><b>关于昇腾</b></a> | <a href="https://vllm-ascend.readthedocs.io/en/latest/"><b>官方文档</b></a> | <a href="https://slack.vllm.ai"><b>开发者 Slack (#sig-ascend)</b></a> |
 </p>
 
 <p align="center">
@@ -31,21 +30,16 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个让vLLM在Ascend NPU无缝运行的�
 
 使用 vLLM 昇腾插件，可以让类Transformer、混合专家(MOE)、嵌入、多模态等流行的大语言模型在 Ascend NPU 上无缝运行。
 
-## 前提
-### 支持的设备
-- Atlas A2 训练系列 (Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 Box16, Atlas 300T A2)
-- Atlas 800I A2 推理系列 (Atlas 800I A2)
+## 准备
 
-### 依赖
-| 需求 | 支持的版本 | 推荐版本 | 注意                                     |
-|-------------|-------------------| ----------- |------------------------------------------|
-| vLLM        | main              | main |  vllm-ascend 依赖                 |
-| Python      | >= 3.9            | [3.10](https://www.python.org/downloads/) |  vllm 依赖                       |
-| CANN        | >= 8.0.RC2        | [8.0.RC3](https://www.hiascend.com/developer/download/community/result?module=cann&cann=8.0.0.beta1) |  vllm-ascend and torch-npu 依赖  |
-| torch-npu   | >= 2.4.0          | [2.5.1rc1](https://gitee.com/ascend/pytorch/releases/tag/v6.0.0.alpha001-pytorch2.5.1)    | vllm-ascend 依赖                |
-| torch       | >= 2.4.0          | [2.5.1](https://github.com/pytorch/pytorch/releases/tag/v2.5.1)      |  torch-npu and vllm 依赖 |
+- 硬件：Atlas 800I A2 Inference系列、Atlas A2 Training系列
+- 软件：
+  * Python >= 3.9
+  * CANN >= 8.0.RC2
+  * PyTorch >= 2.4.0, torch-npu >= 2.4.0
+  * vLLM (与vllm-ascend版本一致)
 
-在[此处](docs/environment.zh.md)了解更多如何配置您环境的信息。
+在[此处](docs/source/installation.md)，您可以了解如何逐步准备环境。
 
 ## 开始使用
 
@@ -75,77 +69,24 @@ vllm serve Qwen/Qwen2.5-0.5B-Instruct
 curl http://localhost:8000/v1/models
 ```
 
-请参阅 [vLLM 快速入门](https://docs.vllm.ai/en/latest/getting_started/quickstart.html)以获取更多详细信息。
+**请参阅 [官方文档](https://vllm-ascend.readthedocs.io/en/latest/)以获取更多详细信息**
 
-## 构建
+## 分支
 
-#### 从源码构建Python包
+vllm-ascend有主干分支和开发分支。
 
-```bash
-git clone https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-pip install -e .
-```
+- **main**: 主干分支，与vLLM的主干分支对应，并通过昇腾CI持续进行质量看护。
+- **vX.Y.Z-dev**: 开发分支，随vLLM部分新版本发布而创建，比如`v0.7.1-dev`是vllm-asend针对vLLM `v0.7.1`版本的开发分支。
 
-#### 构建容器镜像
-```bash
-git clone https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-docker build -t vllm-ascend-dev-image -f ./Dockerfile .
-```
-
-查看[构建和测试](./CONTRIBUTING.zh.md)以获取更多详细信息，其中包含逐步指南，帮助您设置开发环境、构建和测试。
-
-## 特性支持矩阵
-| Feature | Supported | Note |
-|---------|-----------|------|
-| Chunked Prefill | ✗ | Plan in 2025 Q1 |
-| Automatic Prefix Caching | ✅ | Imporve performance in 2025 Q1 |
-| LoRA | ✗ | Plan in 2025 Q1 |
-| Prompt adapter | ✅ ||
-| Speculative decoding | ✅ | Impore accuracy in 2025 Q1|
-| Pooling | ✗ | Plan in 2025 Q1 |
-| Enc-dec | ✗ | Plan in 2025 Q1 |
-| Multi Modality | ✅ (LLaVA/Qwen2-vl/Qwen2-audio/internVL)| Add more model support in 2025 Q1 |
-| LogProbs | ✅ ||
-| Prompt logProbs | ✅ ||
-| Async output | ✅ ||
-| Multi step scheduler | ✅ ||
-| Best of | ✅ ||
-| Beam search | ✅ ||
-| Guided Decoding | ✗ | Plan in 2025 Q1 |
-
-## 模型支持矩阵
-
-此处展示了部分受支持的模型。有关更多详细信息，请参阅 [supported_models](docs/supported_models.md)：
-| Model | Supported | Note |
-|---------|-----------|------|
-| Qwen 2.5 | ✅ ||
-| Mistral |  | Need test |
-| DeepSeek v2.5 | |Need test |
-| LLama3.1/3.2 | ✅ ||
-| Gemma-2 |  |Need test|
-| baichuan |  |Need test|
-| minicpm |  |Need test|
-| internlm | ✅ ||
-| ChatGLM | ✅ ||
-| InternVL 2.5 | ✅ ||
-| Qwen2-VL | ✅ ||
-| GLM-4v |  |Need test|
-| Molomo | ✅ ||
-| LLaVA 1.5 | ✅ ||
-| Mllama |  |Need test|
-| LLaVA-Next |  |Need test|
-| LLaVA-Next-Video |  |Need test|
-| Phi-3-Vison/Phi-3.5-Vison |  |Need test|
-| Ultravox |  |Need test|
-| Qwen2-Audio | ✅ ||
-
+请参阅[版本策略](docs/source/developer_guide/versioning_policy.zh.md)了解更多详细信息。
 
 ## 贡献
+有关更多详细信息，请参阅 [CONTRIBUTING](docs/source/developer_guide/contributing.zh.md)，可以更详细的帮助您部署开发环境、构建和测试。
+
 我们欢迎并重视任何形式的贡献与合作：
+- 您可以在[这里](https://github.com/vllm-project/vllm-ascend/issues/19)反馈您的使用体验。
 - 请通过[提交问题](https://github.com/vllm-project/vllm-ascend/issues)来告知我们您遇到的任何错误。
-- 请参阅 [CONTRIBUTING.zh.md](./CONTRIBUTING.zh.md) 中的贡献指南。
+
 ## 许可证
 
 Apache 许可证 2.0，如 [LICENSE](./LICENSE) 文件中所示。

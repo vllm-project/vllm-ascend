@@ -15,13 +15,15 @@
 # limitations under the License.
 #
 
-FROM quay.io/ascend/cann:8.0.rc3.beta1-910b-ubuntu22.04-py3.10
+FROM quay.io/ascend/cann:8.0.0.beta1-910b-ubuntu22.04-py3.10
 
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y && \
-    apt-get install -y python3-pip git vim
+    apt-get install -y python3-pip git vim && \
+    rm -rf /var/cache/apt/* && \
+    rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace
 
@@ -29,12 +31,17 @@ COPY . /workspace/vllm-ascend/
 
 RUN pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 
-# Install vLLM main
+# Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-RUN git clone --depth 1 $VLLM_REPO /workspace/vllm
-RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install /workspace/vllm/
+ARG VLLM_TAG=v0.7.1
+RUN git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /workspace/vllm
+# Add -f to fix https://github.com/vllm-project/vllm/pull/12874
+RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install /workspace/vllm/ -f https://download.pytorch.org/whl/torch/
 
 # Install vllm-ascend main
-RUN python3 -m pip install /workspace/vllm-ascend/
+RUN python3 -m pip install /workspace/vllm-ascend/ -f https://download.pytorch.org/whl/torch/
+
+# Install modelscope
+RUN python3 -m pip install modelscope
 
 CMD ["/bin/bash"]

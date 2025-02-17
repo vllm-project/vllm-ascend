@@ -527,7 +527,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                              self.num_heads,
                              self.head_size,
                              dtype=query.dtype,
-                             device="npu")
+                             device=query.device)
 
         if hasattr(layer,'quant_method') and isinstance(layer.quant_method, BaseKVCacheMethod):
             isPrefill = True if attn_metadata.num_prefills > 0 else False
