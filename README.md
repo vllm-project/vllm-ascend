@@ -68,7 +68,8 @@ Run the following command to start the vLLM server with the [Qwen/Qwen2.5-0.5B-I
 vllm serve Qwen/Qwen2.5-0.5B-Instruct
 curl http://localhost:8000/v1/models
 ```
-**Please refer to [official docs](https://vllm-ascend.readthedocs.io/en/latest/) for more details.**
+
+Please refer to [QuickStart](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/latest/installation.html) for more details.
 
 ## Contributing
 See [CONTRIBUTING](docs/source/developer_guide/contributing.md) for more details, which is a step-by-step guide to help you set up development environment, build and test.
