@@ -18,7 +18,7 @@ docker run \
 -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
 -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/models:/root/models \
+-v /root/.cache:/root/.cache \
 -p 8000:8000 \
 -it quay.io/ascend/vllm-ascend:latest bash
 ```
@@ -28,7 +28,7 @@ Setup environment variables:
 ```bash
 # Use Modelscope mirror to speed up model download
 export VLLM_USE_MODELSCOPE=True
-export MODELSCOPE_CACHE=/root/models/
+export MODELSCOPE_CACHE=/root/.cache/
 
 # To avoid NPU out of memory, set `max_split_size_mb` to any value lower than you need to allocate for Qwen2.5-7B-Instruct
 export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
@@ -79,10 +79,10 @@ docker run \
 -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
 -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/models:/root/models \
+-v /root/.cache:/root/.cache \
 -p 8000:8000 \
 -e VLLM_USE_MODELSCOPE=True \
--e MODELSCOPE_CACHE=/root/models/ \
+-e MODELSCOPE_CACHE=/root/.cache/ \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
 -it quay.io/ascend/vllm-ascend:latest \
 vllm serve Qwen/Qwen2.5-7B-Instruct --max_model_len 26240
@@ -136,7 +136,7 @@ docker run \
 -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
 -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/models:/root/models \
+-v /root/.cache:/root/.cache \
 -p 8000:8000 \
 -it quay.io/ascend/vllm-ascend:latest bash
 ```
@@ -146,7 +146,7 @@ Setup environment variables:
 ```bash
 # Use Modelscope mirror to speed up model download
 export VLLM_USE_MODELSCOPE=True
-export MODELSCOPE_CACHE=/root/models/
+export MODELSCOPE_CACHE=/root/.cache/
 
 # To avoid NPU out of memory, set `max_split_size_mb` to any value lower than you need to allocate for Qwen2.5-7B-Instruct
 export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
@@ -156,12 +156,6 @@ Run the following script to execute offline inference on multi-NPU:
 
 ```python
 from vllm import LLM, SamplingParams
-
-def clean_up():
-    destroy_model_parallel()
-    destroy_distributed_environment()
-    gc.collect()
-    torch.npu.empty_cache()
 
 prompts = [
     "Hello, my name is",
@@ -178,9 +172,6 @@ for output in outputs:
     prompt = output.prompt
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-
-del llm
-clean_up()
 ```
 
 If you run this script successfully, you can see the info shown below:
