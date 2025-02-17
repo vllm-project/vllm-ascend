@@ -537,7 +537,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                              self.num_heads,
                              self.head_size,
                              dtype=query.dtype,
-                             device="npu")
+                             device=query.device)
 
         if attn_metadata.num_prefills > 0:
 
