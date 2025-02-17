@@ -29,8 +29,8 @@ from vllm.model_executor.layers.quantization.base_config import (QuantizationCon
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            ChannelQuantScaleParameter,
                                            ModelWeightParameter)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    FUSED_LAYER_NAME_MAPPING)
+from vllm.model_executor.layers.quantization.utils.quant_utils import FUSED_LAYER_NAME_MAPPING
+from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.distributed import get_tensor_model_parallel_rank
 from .quantizer import AscendQuantizer
 

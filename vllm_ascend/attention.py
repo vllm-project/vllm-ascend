@@ -529,7 +529,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                              dtype=query.dtype,
                              device=query.device)
 
-        if hasattr(layer,'quant_method') and isinstance(layer.quant_method, BaseKVCacheMethod):
+        if hasattr(layer,'quant_method'):
             isPrefill = True if attn_metadata.num_prefills > 0 else False
             self.seq_lens_tensor_cpu = torch.from_numpy(np.array(attn_metadata.prefill_metadata.seq_lens).astype(np.int32)) if isPrefill \
                 else torch.from_numpy(np.array(attn_metadata.decode_metadata.seq_lens).astype(np.int32))
