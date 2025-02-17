@@ -253,15 +253,6 @@ run_serving_tests() {
   done
 }
 
-# upload_to_elastic() {
-#   # upload the benchmarking results to elascit
-
-#   # Use the determined command to annotate and upload artifacts
-#   $BUILDKITE_AGENT_COMMAND annotate --style "info" --context "$BUILDKITE_LABEL-benchmark-results" < "$RESULTS_FOLDER/benchmark_results.md"
-#   $BUILDKITE_AGENT_COMMAND artifact upload "$RESULTS_FOLDER/*"
-# }
-
-
 main() {
   check_npus
 
@@ -277,7 +268,6 @@ main() {
 
   # prepare for benchmarking
   cd benchmarks || exit 1
-  MODEL_PATH=$LLAMA8B_PATH
   QUICK_BENCHMARK_ROOT=../.elastic/nightly-benchmarks/
 
   declare -g RESULTS_FOLDER=results
