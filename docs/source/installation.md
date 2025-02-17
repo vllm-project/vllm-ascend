@@ -21,7 +21,7 @@ Before installing the package,  you need to make sure firmware/driver and CANN i
 
 ### Install firmwares and drivers
 
-To verify that the Ascend NPU firmware and driver were correctly installed, run `npu-smi` info
+To verify that the Ascend NPU firmware and driver were correctly installed, run `npu-smi info`.
 
 > Tips: Refer to [Ascend Environment Setup Guide](https://ascend.github.io/docs/sources/ascend/quick_install.html) for more details.
 
