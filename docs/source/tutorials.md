@@ -28,7 +28,6 @@ Setup environment variables:
 ```bash
 # Use Modelscope mirror to speed up model download
 export VLLM_USE_MODELSCOPE=True
-export MODELSCOPE_CACHE=/root/.cache/
 
 # To avoid NPU out of memory, set `max_split_size_mb` to any value lower than you need to allocate for Qwen2.5-7B-Instruct
 export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
@@ -82,7 +81,6 @@ docker run \
 -v /root/.cache:/root/.cache \
 -p 8000:8000 \
 -e VLLM_USE_MODELSCOPE=True \
--e MODELSCOPE_CACHE=/root/.cache/ \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
 -it quay.io/ascend/vllm-ascend:latest \
 vllm serve Qwen/Qwen2.5-7B-Instruct --max_model_len 26240
@@ -90,6 +88,14 @@ vllm serve Qwen/Qwen2.5-7B-Instruct --max_model_len 26240
 
 > [!NOTE]
 > Add `--max_model_len` option to avoid ValueError that the Qwen2.5-7B model's max seq len (32768) is larger than the maximum number of tokens that can be stored in KV cache (26240).
+
+If your service start successfully, you can see the info shown below:
+
+```bash
+INFO:     Started server process [6873]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+```
 
 Once your server is started, you can query the model with input prompts:
 
@@ -146,7 +152,6 @@ Setup environment variables:
 ```bash
 # Use Modelscope mirror to speed up model download
 export VLLM_USE_MODELSCOPE=True
-export MODELSCOPE_CACHE=/root/.cache/
 
 # To avoid NPU out of memory, set `max_split_size_mb` to any value lower than you need to allocate for Qwen2.5-7B-Instruct
 export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
@@ -155,7 +160,19 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 Run the following script to execute offline inference on multi-NPU:
 
 ```python
+import gc
+
+import torch
+
 from vllm import LLM, SamplingParams
+from vllm.distributed.parallel_state import (destroy_distributed_environment,
+                                             destroy_model_parallel)
+
+def clean_up():
+    destroy_model_parallel()
+    destroy_distributed_environment()
+    gc.collect()
+    torch.npu.empty_cache()
 
 prompts = [
     "Hello, my name is",
@@ -172,6 +189,9 @@ for output in outputs:
     prompt = output.prompt
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+del llm
+clean_up()
 ```
 
 If you run this script successfully, you can see the info shown below:
