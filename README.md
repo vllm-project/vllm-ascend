@@ -10,7 +10,7 @@ vLLM Ascend Plugin
 </h3>
 
 <p align="center">
-| <a href="https://www.hiascend.com/en/"><b>About Ascend</b></a> | <a href="https://slack.vllm.ai"><b>Developer Slack (#sig-ascend)</b></a> |
+| <a href="https://www.hiascend.com/en/"><b>About Ascend</b></a> | <a href="https://vllm-ascend.readthedocs.io/en/latest/"><b>Documentation</b></a> | <a href="https://slack.vllm.ai"><b>Developer Slack (#sig-ascend)</b></a> |
 </p>
 
 <p align="center">
@@ -76,6 +76,15 @@ See [CONTRIBUTING](docs/source/developer_guide/contributing.md) for more details
 We welcome and value any contributions and collaborations:
 - Please feel free comments [here](https://github.com/vllm-project/vllm-ascend/issues/19) about your usage of vLLM Ascend Plugin.
 - Please let us know if you encounter a bug by [filing an issue](https://github.com/vllm-project/vllm-ascend/issues).
+
+## Branch
+
+vllm-ascend has main branch and dev branch.
+
+- **main**: main branch，corresponds to the vLLM main branch, and is continuously monitored for quality through Ascend CI.
+- **vX.Y.Z-dev**: development branch, created with part of new releases of vLLM. For example, `v0.7.1-dev` is the dev branch for vLLM `v0.7.1` version.
+
+Please refer to [Versioning policy](docs/source/developer_guide/versioning_policy.md) for more details.
 
 ## License
 

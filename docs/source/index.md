@@ -50,4 +50,5 @@ features/supported_models
 :caption: Developer Guide
 :maxdepth: 1
 developer_guide/contributing
+developer_guide/versioning_policy
 :::
