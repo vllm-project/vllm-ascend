@@ -69,7 +69,7 @@ vllm serve Qwen/Qwen2.5-0.5B-Instruct
 curl http://localhost:8000/v1/models
 ```
 
-**请参阅 [官方文档](https://vllm-ascend.readthedocs.io/en/latest/)以获取更多详细信息**
+请查看[快速开始](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html)和[安装指南](https://vllm-ascend.readthedocs.io/en/latest/installation.html)了解更多.
 
 ## 分支
 
