@@ -35,6 +35,7 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
 :maxdepth: 1
 quick_start
 installation
+tutorials
 :::
 
 % What does vLLM Ascend Plugin support?
