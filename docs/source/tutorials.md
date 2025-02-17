@@ -28,7 +28,6 @@ Setup environment variables:
 ```bash
 # Use Modelscope mirror to speed up model download
 export VLLM_USE_MODELSCOPE=True
-export MODELSCOPE_CACHE=/root/.cache/modelscope
 
 # To avoid NPU out of memory, set `max_split_size_mb` to any value lower than you need to allocate for Qwen2.5-7B-Instruct
 export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
@@ -82,7 +81,6 @@ docker run \
 -v /root/.cache:/root/.cache \
 -p 8000:8000 \
 -e VLLM_USE_MODELSCOPE=True \
--e MODELSCOPE_CACHE=/root/.cache/modelscope \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
 -it quay.io/ascend/vllm-ascend:latest \
 vllm serve Qwen/Qwen2.5-7B-Instruct --max_model_len 26240
@@ -154,7 +152,6 @@ Setup environment variables:
 ```bash
 # Use Modelscope mirror to speed up model download
 export VLLM_USE_MODELSCOPE=True
-export MODELSCOPE_CACHE=/root/.cache/modelscope
 
 # To avoid NPU out of memory, set `max_split_size_mb` to any value lower than you need to allocate for Qwen2.5-7B-Instruct
 export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
