@@ -159,12 +159,15 @@ class AscendLinearMethod(LinearMethodBase):
         pertensor_names = self.quant_method.get_pertensor_param()
         for pertensor_name in pertensor_names:
             if pertensor_name in weights.keys():
+                param = BasevLLMParameter(
+                    data=weights[pertensor_name],
+                    weight_loader=weight_loader
+                )
+                # disable warning
+                param.ignore_warning = True
                 layer.register_parameter(
                     pertensor_name,
-                    BasevLLMParameter(
-                        data=weights[pertensor_name],
-                        weight_loader=weight_loader
-                    )
+                    param
                 )
             else:
                 raise ValueError(f"{pertensor_name} is nor registered. Please check your linear quant method implementation.")
