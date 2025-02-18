@@ -69,15 +69,17 @@ pip install --upgrade pip
 
 You can install vLLM and vllm-ascend plugin by using:
 
-```bash
-# Install vLLM main branch (About 5 mins)
-git clone --depth 1 https://github.com/vllm-project/vllm.git
+```{code-block} bash
+   :substitutions:
+
+# Install vLLM (About 5 mins)
+git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm.git
 cd vllm
 VLLM_TARGET_DEVICE=empty pip install .
 cd ..
 
 # Install vLLM Ascend Plugin:
-git clone --depth 1 https://github.com/vllm-project/vllm-ascend.git
+git clone --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 pip install -e .
 cd ..
