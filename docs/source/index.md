@@ -40,10 +40,11 @@ tutorials
 
 % What does vLLM Ascend Plugin support?
 :::{toctree}
-:caption: Features
+:caption: User Guide
 :maxdepth: 1
-features/suppoted_features
-features/supported_models
+user_guide/suppoted_features
+user_guide/supported_models
+user_guide/release_notes
 :::
 
 % How to contribute to the vLLM project
