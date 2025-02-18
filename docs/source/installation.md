@@ -11,7 +11,7 @@ This document describes how to install vllm-ascend manually.
 
     | Software     | Supported version | Note |
     | ------------ | ----------------- | ---- | 
-    | CANN         | >= 8.0.0.beta1    | Required for vllm-ascend and torch-npu |
+    | CANN         | >= 8.0.0          | Required for vllm-ascend and torch-npu |
     | torch-npu    | >= 2.5.1rc1       | Required for vllm-ascend |
     | torch        | >= 2.5.1          | Required for torch-npu and vllm |
 
@@ -46,7 +46,7 @@ The easiest way to prepare your software environment is using CANN image directl
 
 ```bash
 # Update DEVICE according to your device (/dev/davinci[0-7])
-DEVICE=/dev/davinci7
+export DEVICE=/dev/davinci7
 
 docker run --rm \
     --name vllm-ascend-env \
@@ -59,11 +59,14 @@ docker run --rm \
     -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -it quay.io/ascend/cann:8.0.0.beta1-910b-ubuntu22.04-py3.10 bash
+    -it quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10 bash
 ```
 
 You can also install CANN manually:
-> NOTE: This guide takes aarc64 as an example. If you run on x86, you need to replace `aarch64` with `x86_64` for the package name shown below.
+
+:::{note}
+This guide takes aarch64 as an example. If you run on x86, you need to replace `aarch64` with `x86_64` for the package name shown below.
+:::
 
 ```bash
 # Create a virtual environment
@@ -83,11 +86,11 @@ chmod +x ./Ascend-cann-kernels-910b_8.0.0_linux-aarch64.run
 ./Ascend-cann-kernels-910b_8.0.0_linux-aarch64.run --install
 
 wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.0.0/Ascend-cann-nnal_8.0.0_linux-aarch64.run
-chmod +x./Ascend-cann-nnal_8.0.0_linux-aarch64.run
+chmod +x. /Ascend-cann-nnal_8.0.0_linux-aarch64.run
 ./Ascend-cann-nnal_8.0.0_linux-aarch64.run --install
 
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
-source /usr/local/Ascend/nnal/set_env.sh
+source /usr/local/Ascend/nnal/atb/set_env.sh
 ```
 
 ::::
@@ -112,7 +115,30 @@ Once it's done, you can start to set up `vllm` and `vllm-ascend`.
 You can install `vllm` and `vllm-ascend` from **pre-built wheel**:
 
 ```bash
-pip install vllm vllm-ascend -f https://download.pytorch.org/whl/torch/
+# Install vllm from source, since `pip install vllm` doesn't work on CPU currently.
+# It'll be fixed in the next vllm release, e.g. v0.7.3.
+git clone --branch v0.7.1 https://github.com/vllm-project/vllm
+cd vllm
+VLLM_TARGET_DEVICE=empty pip install . -f https://download.pytorch.org/whl/torch/
+
+# Install vllm-ascend from pypi.
+pip install vllm-ascend -f https://download.pytorch.org/whl/torch/
+
+# Once the packages are installed, you need to install `torch-npu` manually,
+# because that vllm-ascend relies on an unreleased version of torch-npu.
+# This step will be removed in the next vllm-ascend release.
+# 
+# Here we take python 3.10 on aarch64 as an example. Feel free to install the correct version for your environment. See:
+#
+# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250218.4/pytorch_v2.5.1_py39.tar.gz
+# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250218.4/pytorch_v2.5.1_py310.tar.gz
+# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250218.4/pytorch_v2.5.1_py311.tar.gz
+#
+mkdir pta
+cd pta
+wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250218.4/pytorch_v2.5.1_py310.tar.gz
+tar -xvf pytorch_v2.5.1_py310.tar.gz
+pip install ./torch_npu-2.5.1.dev20250218-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 ```
 
 or build from **source code**:
@@ -136,7 +162,9 @@ pip install -e . -f https://download.pytorch.org/whl/torch/
 
 You can just pull the **prebuilt image** and run it with bash.
 
-```bash
+```{code-block} bash
+   :substitutions:
+
 # Update DEVICE according to your device (/dev/davinci[0-7])
 DEVICE=/dev/davinci7
 # Update the vllm-ascend image
@@ -185,7 +213,7 @@ prompts = [
 ]
 
 # Create a sampling params object.
-sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 # Create an LLM.
 llm = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
 
@@ -207,25 +235,23 @@ python example.py
 The output will be like:
 
 ```bash
-INFO 02-18 02:33:37 __init__.py:28] Available plugins for group vllm.platform_plugins:
-INFO 02-18 02:33:37 __init__.py:30] name=ascend, value=vllm_ascend:register
-INFO 02-18 02:33:37 __init__.py:32] all available plugins for group vllm.platform_plugins will be loaded.
-INFO 02-18 02:33:37 __init__.py:34] set environment variable VLLM_PLUGINS to control which plugins to load.
-INFO 02-18 02:33:37 __init__.py:42] plugin ascend loaded.
-INFO 02-18 02:33:37 __init__.py:174] Platform plugin ascend is activated
-INFO 02-18 02:33:50 config.py:526] This model supports multiple tasks: {'reward', 'embed', 'generate', 'score', 'classify'}. Defaulting to 'generate'.
-INFO 02-18 02:33:50 llm_engine.py:232] Initializing a V0 LLM engine (v0.7.1) with config: model='Qwen/Qwen2.5-0.5B-Instruct', speculative_config=None, tokenizer='./opt-125m', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.float16, max_seq_len=2048, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, kv_cache_dtype=auto,  device_config=npu, decoding_config=DecodingConfig(guided_decoding_backend='xgrammar'), observability_config=ObservabilityConfig(otlp_traces_endpoint=None, collect_model_forward_time=False, collect_model_execute_time=False), seed=0, served_model_name=./opt-125m, num_scheduler_steps=1, multi_step_stream_outputs=True, enable_prefix_caching=False, chunked_prefill_enabled=False, use_async_output_proc=True, disable_mm_preprocessor_cache=False, mm_processor_kwargs=None, pooler_config=None, compilation_config={"splitting_ops":[],"compile_sizes":[],"cudagraph_capture_sizes":[256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1],"max_capture_size":256}, use_cached_outputs=False,
-INFO 02-18 02:33:52 importing.py:14] Triton not installed or not compatible; certain GPU-related functions will not be available.
-Loading pt checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
-Loading pt checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  4.30it/s]
-Loading pt checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  4.29it/s]
-
-INFO 02-18 02:33:59 executor_base.py:108] # CPU blocks: 98559, # CPU blocks: 7281
-INFO 02-18 02:33:59 executor_base.py:113] Maximum concurrency for 2048 tokens per request: 769.99x
-INFO 02-18 02:33:59 llm_engine.py:429] init engine (profile, create kv cache, warmup model) took 1.52 seconds
-Processed prompts: 100%|██████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00,  4.92it/s, est. speed input: 31.99 toks/s, output: 78.73 toks/s]
-Prompt: 'Hello, my name is', Generated text: ' John, I am the daughter of Bill and Jocelyn, I am married'
-Prompt: 'The president of the United States is', Generated text: " States President. I don't like him.\nThis is my favorite comment so"
-Prompt: 'The capital of France is', Generated text: " Texas and everyone I've spoken to in the city knows the state's name,"
-Prompt: 'The future of AI is', Generated text: ' people trying to turn a good computer into a machine, not a computer being human'
+INFO 02-18 08:49:58 __init__.py:28] Available plugins for group vllm.platform_plugins:
+INFO 02-18 08:49:58 __init__.py:30] name=ascend, value=vllm_ascend:register
+INFO 02-18 08:49:58 __init__.py:32] all available plugins for group vllm.platform_plugins will be loaded.
+INFO 02-18 08:49:58 __init__.py:34] set environment variable VLLM_PLUGINS to control which plugins to load.
+INFO 02-18 08:49:58 __init__.py:42] plugin ascend loaded.
+INFO 02-18 08:49:58 __init__.py:174] Platform plugin ascend is activated
+INFO 02-18 08:50:12 config.py:526] This model supports multiple tasks: {'embed', 'classify', 'generate', 'score', 'reward'}. Defaulting to 'generate'.
+INFO 02-18 08:50:12 llm_engine.py:232] Initializing a V0 LLM engine (v0.7.1) with config: model='./Qwen2.5-0.5B-Instruct', speculative_config=None, tokenizer='./Qwen2.5-0.5B-Instruct', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=32768, download_dir=None, load_format=auto, tensor_parallel_size=1, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=False, kv_cache_dtype=auto,  device_config=npu, decoding_config=DecodingConfig(guided_decoding_backend='xgrammar'), observability_config=ObservabilityConfig(otlp_traces_endpoint=None, collect_model_forward_time=False, collect_model_execute_time=False), seed=0, served_model_name=./Qwen2.5-0.5B-Instruct, num_scheduler_steps=1, multi_step_stream_outputs=True, enable_prefix_caching=False, chunked_prefill_enabled=False, use_async_output_proc=True, disable_mm_preprocessor_cache=False, mm_processor_kwargs=None, pooler_config=None, compilation_config={"splitting_ops":[],"compile_sizes":[],"cudagraph_capture_sizes":[256,248,240,232,224,216,208,200,192,184,176,168,160,152,144,136,128,120,112,104,96,88,80,72,64,56,48,40,32,24,16,8,4,2,1],"max_capture_size":256}, use_cached_outputs=False,
+Loading safetensors checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  5.86it/s]
+Loading safetensors checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  5.85it/s]
+INFO 02-18 08:50:24 executor_base.py:108] # CPU blocks: 35064, # CPU blocks: 2730
+INFO 02-18 08:50:24 executor_base.py:113] Maximum concurrency for 32768 tokens per request: 136.97x
+INFO 02-18 08:50:25 llm_engine.py:429] init engine (profile, create kv cache, warmup model) took 3.87 seconds
+Processed prompts: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:00<00:00,  8.46it/s, est. speed input: 46.55 toks/s, output: 135.41 toks/s]
+Prompt: 'Hello, my name is', Generated text: " Shinji, a teenage boy from New York City. I'm a computer science"
+Prompt: 'The president of the United States is', Generated text: ' a very important person. When he or she is elected, many people think that'
+Prompt: 'The capital of France is', Generated text: ' Paris. The oldest part of the city is Saint-Germain-des-Pr'
+Prompt: 'The future of AI is', Generated text: ' not bright\n\nThere is no doubt that the evolution of AI will have a huge'
 ```

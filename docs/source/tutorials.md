@@ -20,7 +20,7 @@ docker run \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /root/.cache:/root/.cache \
 -p 8000:8000 \
--it quay.io/ascend/vllm-ascend:latest bash
+-it ghcr.io/vllm-project/vllm-ascend:v0.7.1.rc1 bash
 ```
 
 Setup environment variables:
@@ -33,8 +33,9 @@ export VLLM_USE_MODELSCOPE=True
 export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 ```
 
-> [!NOTE]
-> `max_split_size_mb` prevents the native allocator from splitting blocks larger than this size (in MB). This can reduce fragmentation and may allow some borderline workloads to complete without running out of memory. You can find more details [<u>here</u>](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha003/apiref/envref/envref_07_0061.html).
+:::{note}
+`max_split_size_mb` prevents the native allocator from splitting blocks larger than this size (in MB). This can reduce fragmentation and may allow some borderline workloads to complete without running out of memory. You can find more details [<u>here</u>](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha003/apiref/envref/envref_07_0061.html).
+:::
 
 Run the following script to execute offline inference on a single NPU:
 
@@ -82,12 +83,13 @@ docker run \
 -p 8000:8000 \
 -e VLLM_USE_MODELSCOPE=True \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
--it quay.io/ascend/vllm-ascend:latest \
+-it ghcr.io/vllm-project/vllm-ascend:v0.7.1.rc1 \
 vllm serve Qwen/Qwen2.5-7B-Instruct --max_model_len 26240
 ```
 
-> [!NOTE]
-> Add `--max_model_len` option to avoid ValueError that the Qwen2.5-7B model's max seq len (32768) is larger than the maximum number of tokens that can be stored in KV cache (26240).
+:::{note}
+Add `--max_model_len` option to avoid ValueError that the Qwen2.5-7B model's max seq len (32768) is larger than the maximum number of tokens that can be stored in KV cache (26240). This will differ with different NPU series base on the HBM size. Please modify the value according to a suitable value for your NPU series.
+:::
 
 If your service start successfully, you can see the info shown below:
 
@@ -144,7 +146,7 @@ docker run \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /root/.cache:/root/.cache \
 -p 8000:8000 \
--it quay.io/ascend/vllm-ascend:latest bash
+-it ghcr.io/vllm-project/vllm-ascend:v0.7.1.rc1 bash
 ```
 
 Setup environment variables:
