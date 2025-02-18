@@ -29,7 +29,7 @@ prompts = [
 # Create a sampling params object.
 sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 # Create an LLM.
-llm = LLM(model="facebook/opt-125m")
+llm = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
 
 # Generate texts from the prompts.
 outputs = llm.generate(prompts, sampling_params)
