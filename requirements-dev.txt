@@ -1,5 +1,2 @@
 -r requirements-lint.txt
-modelscope
-pytest >= 6.0
-pytest-asyncio
-
+-r requirements-test.txt
