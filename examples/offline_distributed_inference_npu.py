@@ -29,11 +29,10 @@ prompts = [
 # Create a sampling params object.
 sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 # Create an LLM.
-# TODO (cmq): ray is not supported currently, need some fixes
 llm = LLM(
-    model="facebook/opt-125m",
+    model="Qwen/Qwen2.5-0.5B-Instruct",
     tensor_parallel_size=2,
-    distributed_executor_backend="mp",
+    distributed_executor_backend="ray",
     trust_remote_code=True,
 )
 
