@@ -77,6 +77,7 @@ exclude_patterns = [
     '.DS_Store',
     '.venv',
     'README.md',
+    'user_guide/release.template.md',
     # TODO(yikun): Remove this after zh supported
     '**/*.zh.md'
 ]
