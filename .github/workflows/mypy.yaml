@@ -27,6 +27,7 @@ on:
       - '**/*.py'
       - '.github/workflows/mypy.yaml'
       - 'tools/mypy.sh'
+      - 'mypy.ini'
   pull_request:
     branches:
       - "main"
@@ -39,6 +40,7 @@ on:
      - '**/*.py'
      - '.github/workflows/mypy.yaml'
      - 'tools/mypy.sh'
+     - 'mypy.ini'
 
 jobs:
   mypy:

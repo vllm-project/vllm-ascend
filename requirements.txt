@@ -2,4 +2,5 @@ decorator
 pyyaml
 scipy
 setuptools
-torch_npu == 2.5.1rc1
+setuptools-scm
+torch-npu >= 2.5.1rc1

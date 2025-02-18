@@ -14,15 +14,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from typing import Optional
 
 import torch
 import torch.distributed as dist
-from vllm.distributed.device_communicators.base_communicator import \
-    CommunicatorBase
+from torch.distributed import ProcessGroup
+from vllm.distributed.device_communicators.base_device_communicator import \
+    DeviceCommunicatorBase
 
 
-class NPUCommunicator(CommunicatorBase):
+class NPUCommunicator(DeviceCommunicatorBase):
 
-    def all_reduce(self, x: torch.Tensor) -> torch.Tensor:
-        dist.all_reduce(x, group=self.group)
-        return x
+    def __init__(self,
+                 cpu_group: ProcessGroup,
+                 device: Optional[torch.device] = None,
+                 device_group: Optional[ProcessGroup] = None,
+                 unique_name: str = ""):
+        super().__init__(cpu_group, device, device_group, unique_name)
+        # init device according to local rank
+        local_rank = dist.get_rank(device_group)
+        self.device = torch.device(f"npu:{local_rank}")
