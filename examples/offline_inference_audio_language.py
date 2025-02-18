@@ -24,7 +24,6 @@ For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
 
-from transformers import AutoTokenizer
 from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.utils import FlexibleArgumentParser
@@ -39,28 +38,6 @@ question_per_audio_count = {
 # NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
 # lower-end GPUs.
 # Unless specified, these settings have been tested to work on a single L4.
-
-
-# Ultravox 0.3
-def run_ultravox(question: str, audio_count: int):
-    model_name = "fixie-ai/ultravox-v0_3"
-
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    messages = [{
-        'role': 'user',
-        'content': "<|audio|>\n" * audio_count + question
-    }]
-    prompt = tokenizer.apply_chat_template(messages,
-                                           tokenize=False,
-                                           add_generation_prompt=True)
-
-    llm = LLM(model=model_name,
-              max_model_len=4096,
-              max_num_seqs=5,
-              trust_remote_code=True,
-              limit_mm_per_prompt={"audio": audio_count})
-    stop_token_ids = None
-    return llm, prompt, stop_token_ids
 
 
 # Qwen2-Audio
@@ -85,11 +62,7 @@ def run_qwen2_audio(question: str, audio_count: int):
     return llm, prompt, stop_token_ids
 
 
-# TODO (cmq): test ultravox
-model_example_map = {
-    # "ultravox": run_ultravox,
-    "qwen2_audio": run_qwen2_audio
-}
+model_example_map = {"qwen2_audio": run_qwen2_audio}
 
 
 def main(args):
