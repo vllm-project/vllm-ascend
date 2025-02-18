@@ -2,6 +2,7 @@
 
 This document describes how to install vllm-ascend manually.
 
+
 ## Requirements
 
 - OS: Linux
@@ -15,11 +16,16 @@ This document describes how to install vllm-ascend manually.
     | torch-npu    | >= 2.5.1rc1       | Required for vllm-ascend |
     | torch        | >= 2.5.1          | Required for torch-npu and vllm |
 
+
+You have 2 way to install:
+- **Using pip**: first prepare env manually or via CANN image, then install `vllm-ascend` using pip.
+- **Using docker**: use the `vllm-ascend` pre-built docker image directly.
+
 ## Configure a new environment
 
-Before installing, you need to make sure firmware/driver and CANN is installed correctly.
+Before installing, you need to make sure firmware/driver and CANN is installed correctly, refer to [link](https://ascend.github.io/docs/sources/ascend/quick_install.html) for more details.
 
-### Install firmwares and drivers
+### Configure hardware environment
 
 To verify that the Ascend NPU firmware and driver were correctly installed, run:
 
@@ -27,18 +33,18 @@ To verify that the Ascend NPU firmware and driver were correctly installed, run:
 npu-smi info
 ```
 
-Refer to [Ascend Environment Setup Guide](https://ascend.github.io/docs/sources/ascend/quick_install.html) for more details.
 
-### Install CANN
+
+### Configure software environment
 
 :::::{tab-set}
 :sync-group: install
 
-::::{tab-item} Using pip
+::::{tab-item} Before using pip
 :selected:
 :sync: pip
 
-The easiest way to prepare your CANN environment is using container directly:
+The easiest way to prepare your software environment is using CANN image directly:
 
 ```bash
 # Update DEVICE according to your device (/dev/davinci[0-7])
@@ -77,9 +83,9 @@ sh Ascend-cann-kernels-910b_8.0.0_linux-aarch64.run --full
 
 ::::
 
-::::{tab-item} Using Docker
+::::{tab-item} Before using docker
 :sync: docker
-No more extra step if you are using `vllm-ascend` image.
+No more extra step if you are using `vllm-ascend` prebuilt docker image.
 ::::
 :::::
 
@@ -172,7 +178,7 @@ prompts = [
 # Create a sampling params object.
 sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 # Create an LLM.
-llm = LLM(model="facebook/opt-125m")
+llm = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
 
 # Generate texts from the prompts.
 outputs = llm.generate(prompts, sampling_params)
