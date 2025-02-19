@@ -47,6 +47,7 @@ jobs:
     - name: Print
       run: |
         echo "REPO_OWNER:""${REPO_OWNER}"
+        lscpu
 
     - name: Docker meta
       id: meta
@@ -104,3 +105,5 @@ jobs:
         push: ${{ github.event_name != 'pull_request' }}
         labels: ${{ steps.meta.outputs.labels }}
         tags: ${{ steps.meta.outputs.tags }}
+        build-args: |
+            PIP_INDEX_URL=https://pypi.org/simple
