@@ -20,7 +20,7 @@ docker run \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /root/.cache:/root/.cache \
 -p 8000:8000 \
--it ghcr.io/vllm-project/vllm-ascend:v0.7.1.rc1 bash
+-it quay.io/ascend/vllm-ascend:v0.7.1rc1 bash
 ```
 
 Setup environment variables:
@@ -83,7 +83,7 @@ docker run \
 -p 8000:8000 \
 -e VLLM_USE_MODELSCOPE=True \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
--it ghcr.io/vllm-project/vllm-ascend:v0.7.1.rc1 \
+-it quay.io/ascend/vllm-ascend:v0.7.1rc1 \
 vllm serve Qwen/Qwen2.5-7B-Instruct --max_model_len 26240
 ```
 
@@ -146,7 +146,7 @@ docker run \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /root/.cache:/root/.cache \
 -p 8000:8000 \
--it ghcr.io/vllm-project/vllm-ascend:v0.7.1.rc1 bash
+-it quay.io/ascend/vllm-ascend:v0.7.1rc1 bash
 ```
 
 Setup environment variables:
