@@ -46,7 +46,7 @@ jobs:
     runs-on: ascend-arm64  # actionlint-ignore: runner-label
 
     container:
-      image: quay.io/ascend/cann:8.0.rc3.beta1-910b-ubuntu22.04-py3.10
+      image: quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10
       volumes:
         - /usr/local/dcmi:/usr/local/dcmi
         - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
