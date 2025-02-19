@@ -119,10 +119,10 @@ You can install `vllm` and `vllm-ascend` from **pre-built wheel**:
 # It'll be fixed in the next vllm release, e.g. v0.7.3.
 git clone --branch v0.7.1 https://github.com/vllm-project/vllm
 cd vllm
-VLLM_TARGET_DEVICE=empty pip install . -f https://download.pytorch.org/whl/torch/
+VLLM_TARGET_DEVICE=empty pip install . --extra-index https://download.pytorch.org/whl/cpu/
 
 # Install vllm-ascend from pypi.
-pip install vllm-ascend -f https://download.pytorch.org/whl/torch/
+pip install vllm-ascend --extra-index https://download.pytorch.org/whl/cpu/
 
 # Once the packages are installed, you need to install `torch-npu` manually,
 # because that vllm-ascend relies on an unreleased version of torch-npu.
@@ -148,11 +148,11 @@ or build from **source code**:
 
 git clone  --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
 cd vllm
-VLLM_TARGET_DEVICE=empty pip install . -f https://download.pytorch.org/whl/torch/
+VLLM_TARGET_DEVICE=empty pip install . --extra-index https://download.pytorch.org/whl/cpu/
 
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
-pip install -e . -f https://download.pytorch.org/whl/torch/
+pip install -e . --extra-index https://download.pytorch.org/whl/cpu/
 ```
 
 ::::

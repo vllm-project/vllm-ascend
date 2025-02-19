@@ -68,7 +68,7 @@ myst_substitutions = {
     'vllm_ascend_version': 'main',
     # the newest release version of vllm, used in quick start or container image tag.
     # This value should be updated when cut down release.
-    'vllm_newest_release_version': "v0.7.1.rc1",
+    'vllm_newest_release_version': "v0.7.1rc1",
 }
 
 # Add any paths that contain templates here, relative to this directory.

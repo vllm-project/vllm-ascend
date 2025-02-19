@@ -12,7 +12,7 @@
    :substitutions:
 
 # You can change version a suitable one base on your requirement, e.g. main
-export IMAGE=ghcr.io/vllm-project/vllm-ascend:|vllm_newest_release_version|
+export IMAGE=quay.io/ascend:|vllm_newest_release_version|
 
 docker run \
 --name vllm-ascend \
