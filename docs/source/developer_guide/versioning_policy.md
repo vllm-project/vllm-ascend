@@ -43,7 +43,7 @@ Usually, each minor version of vLLM (such as 0.7) will correspond to a vllm-asce
 | Branch    | Status     | Note                                 |
 |-----------|------------|--------------------------------------|
 | main      | Maintained | CI commitment for vLLM main branch   |
-| 0.7.1-dev | Maintained | CI commitment for vLLM 0.7.1 version |
+| v0.7.1-dev | Maintained | CI commitment for vLLM 0.7.1 version |
 
 ## Release Compatibility Matrix
 
@@ -51,7 +51,7 @@ Following is the Release Compatibility Matrix for vLLM Ascend Plugin:
 
 | vllm-ascend  | vLLM         | Python | Stable CANN | PyTorch/torch_npu |
 |--------------|--------------| --- | --- | --- |
-| v0.7.x (TBD) | v0.7.x (TBD) | 3.9 - 3.12 | 8.0.0.beta1 |  2.5.1 / 2.5.1rc1 |
+| v0.7.1.rc1 | v0.7.1 | 3.9 - 3.12 | 8.0.0   |  2.5.1 / 2.5.1.dev20250218 |
 
 ## Release cadence
 
