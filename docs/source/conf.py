@@ -61,14 +61,17 @@ myst_enable_extensions = ["colon_fence", "substitution"]
 # Change this when cut down release
 myst_substitutions = {
     # the branch of vllm, used in vllm clone
-    # such as 'main', 'v0.7.1'
+    # - main branch: 'main'
+    # - vX.Y.Z branch: 'vX.Y.Z'
     'vllm_version': 'v0.7.1',
     # the branch of vllm-ascend, used in vllm-ascend clone and image tag
-    # such as 'main', 'v0.7.1-dev', 'v0.7.1rc1'
+    # - main branch: 'main'
+    # - vX.Y.Z branch: latest vllm-ascend release tag
     'vllm_ascend_version': 'v0.7.1rc1',
-    # the newest release version of vllm, used in quick start or container image tag.
+    # the newest release version of vllm-ascend and matched vLLM, used in pip install.
     # This value should be updated when cut down release.
-    'vllm_newest_release_version': "v0.7.1rc1",
+    'pip_vllm_ascend_version': "v0.7.1rc1",
+    'pip_vllm_version': "v0.7.1",
 }
 
 # Add any paths that contain templates here, relative to this directory.

@@ -114,15 +114,17 @@ Once it's done, you can start to set up `vllm` and `vllm-ascend`.
 
 You can install `vllm` and `vllm-ascend` from **pre-built wheel**:
 
-```bash
+```{code-block} bash
+   :substitutions:
+
 # Install vllm from source, since `pip install vllm` doesn't work on CPU currently.
 # It'll be fixed in the next vllm release, e.g. v0.7.3.
-git clone --branch v0.7.1 https://github.com/vllm-project/vllm
+git clone --branch |pip_vllm_version| https://github.com/vllm-project/vllm
 cd vllm
 VLLM_TARGET_DEVICE=empty pip install . --extra-index-url https://download.pytorch.org/whl/cpu/
 
 # Install vllm-ascend from pypi.
-pip install vllm-ascend --extra-index-url https://download.pytorch.org/whl/cpu/
+pip install vllm-ascend==|pip_vllm_ascend_version| --extra-index-url https://download.pytorch.org/whl/cpu/
 
 # Once the packages are installed, you need to install `torch-npu` manually,
 # because that vllm-ascend relies on an unreleased version of torch-npu.
@@ -146,7 +148,7 @@ or build from **source code**:
 ```{code-block} bash
    :substitutions:
 # Install vllm from source
-git clone  --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
+git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
 cd vllm
 VLLM_TARGET_DEVICE=empty pip install . --extra-index-url https://download.pytorch.org/whl/cpu/
 
@@ -184,7 +186,7 @@ You can just pull the **prebuilt image** and run it with bash.
 # Update DEVICE according to your device (/dev/davinci[0-7])
 DEVICE=/dev/davinci7
 # Update the vllm-ascend image
-IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+IMAGE=quay.io/ascend/vllm-ascend:|vllm_newest_release_version|
 docker pull $IMAGE
 docker run --rm \
     --name vllm-ascend-env \

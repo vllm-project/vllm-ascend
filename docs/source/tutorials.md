@@ -6,7 +6,8 @@
 
 Run docker container:
 
-```bash
+```{code-block} bash
+   :substitutions:
 docker run \
 --name vllm-ascend \
 --device /dev/davinci0 \
@@ -20,7 +21,7 @@ docker run \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /root/.cache:/root/.cache \
 -p 8000:8000 \
--it quay.io/ascend/vllm-ascend:v0.7.1rc1 bash
+-it quay.io/ascend/vllm-ascend:|vllm_ascend_version| bash
 ```
 
 Setup environment variables:
@@ -67,7 +68,9 @@ Prompt: 'The future of AI is', Generated text: ' following you. As the technolog
 
 Run docker container to start the vLLM server on a single NPU:
 
-```bash
+```{code-block} bash
+   :substitutions:
+
 docker run \
 --name vllm-ascend \
 --device /dev/davinci0 \
@@ -83,7 +86,7 @@ docker run \
 -p 8000:8000 \
 -e VLLM_USE_MODELSCOPE=True \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
--it quay.io/ascend/vllm-ascend:v0.7.1rc1 \
+-it quay.io/ascend/vllm-ascend:|vllm_ascend_version| \
 vllm serve Qwen/Qwen2.5-7B-Instruct --max_model_len 26240
 ```
 
@@ -131,7 +134,9 @@ INFO 02-13 08:34:35 logger.py:39] Received request cmpl-574f00e342904692a73fb6c1
 
 Run docker container:
 
-```bash
+```{code-block} bash
+   :substitutions:
+
 docker run \
 --name vllm-ascend \
 --device /dev/davinci0 \
@@ -146,7 +151,7 @@ docker run \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /root/.cache:/root/.cache \
 -p 8000:8000 \
--it quay.io/ascend/vllm-ascend:v0.7.1rc1 bash
+-it quay.io/ascend/vllm-ascend:|vllm_ascend_version| bash
 ```
 
 Setup environment variables:
