@@ -98,8 +98,9 @@ Only specific types of PRs will be reviewed. The PR title is prefixed appropriat
 - `[CI]` for build or continuous integration improvements.
 - `[Misc]` for PRs that do not fit the above categories. Please use this sparingly.
 
-> [!NOTE]
-> If the PR spans more than one category, please include all relevant prefixes.
+:::{note}
+If the PR spans more than one category, please include all relevant prefixes.
+:::
 
 ## Others
 
