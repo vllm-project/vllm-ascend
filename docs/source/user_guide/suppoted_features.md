@@ -3,7 +3,7 @@
 | Feature | Supported | Note |
 |---------|-----------|------|
 | Chunked Prefill | ✗ | Plan in 2025 Q1 |
-| Automatic Prefix Caching | ✗ | Plan in 2025 Q2 |
+| Automatic Prefix Caching | ✗ | Plan in 2025 Q1 |
 | LoRA | ✗ | Plan in 2025 Q1 |
 | Prompt adapter | ✗ | Plan in 2025 Q1 |
 | Speculative decoding | ✗ | Plan in 2025 Q1 |
