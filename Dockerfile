@@ -17,6 +17,8 @@
 
 FROM quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10
 
+ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
+
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
 
@@ -29,7 +31,7 @@ WORKDIR /workspace
 
 COPY . /workspace/vllm-ascend/
 
-RUN pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+RUN pip config set global.index-url ${PIP_INDEX_URL}
 
 # Install vLLM main
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
@@ -37,7 +39,7 @@ RUN git clone --depth 1 $VLLM_REPO /workspace/vllm
 RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install /workspace/vllm/
 
 # Install vllm-ascend main
-RUN python3 -m pip install /workspace/vllm-ascend/ -f https://download.pytorch.org/whl/torch/
+RUN python3 -m pip install /workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/
 
 # Install modelscope
 RUN python3 -m pip install modelscope
