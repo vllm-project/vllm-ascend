@@ -12,12 +12,12 @@
 | baichuan |  |Need test|
 | minicpm |  |Need test|
 | internlm | ✅ ||
-| ChatGLM | ✅ ||
+| ChatGLM |  |Need test|
 | InternVL 2.5 | ✅ ||
-| Qwen2-VL | ✅ ||
+| Qwen2-VL |  |Need test|
 | GLM-4v |  |Need test|
 | Molomo | ✅ ||
-| LLaVA 1.5 | ✅ ||
+| LLaVA 1.5 |  |Need test|
 | Mllama |  |Need test|
 | LLaVA-Next |  |Need test|
 | LLaVA-Next-Video |  |Need test|
