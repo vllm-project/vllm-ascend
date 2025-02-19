@@ -128,7 +128,7 @@ def fused_experts(hidden_states: torch.Tensor,
             bias=None,
             scales=routing_weights,
             expanded_src_to_dst_row=expanded_row_idx,
-            export_for_source_row=expert_idx
+            export_for_source_row=topk_ids
         )
     if len(ori_shape) == 3:
         hidden_states = hidden_states.view(ori_shape)   
