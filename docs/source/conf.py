@@ -53,10 +53,20 @@ extensions = [
     "sphinxarg.ext",
     "sphinx_design",
     "sphinx_togglebutton",
+    "sphinx_substitution_extensions",
 ]
-myst_enable_extensions = [
-    "colon_fence",
-]
+
+myst_enable_extensions = ["colon_fence", "substitution"]
+
+# Change this when cut down release
+myst_substitutions = {
+    # the branch of vllm, used in vllm clone
+    # such as 'main', 'v0.7.1'
+    'vllm_version': 'main',
+    # the branch of vllm-ascend, used in vllm-ascend clone and image tag
+    # such as 'main', 'v0.7.1-dev', 'v0.7.1rc1'
+    'vllm_ascend_version': 'main'
+}
 
 # Add any paths that contain templates here, relative to this directory.
 templates_path = ['_templates']
