@@ -65,10 +65,10 @@ myst_substitutions = {
     'vllm_version': 'v0.7.1',
     # the branch of vllm-ascend, used in vllm-ascend clone and image tag
     # such as 'main', 'v0.7.1-dev', 'v0.7.1rc1'
-    'vllm_ascend_version': 'v0.7.1.rc1',
+    'vllm_ascend_version': 'v0.7.1rc1',
     # the newest release version of vllm, used in quick start or container image tag.
     # This value should be updated when cut down release.
-    'vllm_newest_release_version': "v0.7.1.rc1",
+    'vllm_newest_release_version': "v0.7.1rc1",
 }
 
 # Add any paths that contain templates here, relative to this directory.
