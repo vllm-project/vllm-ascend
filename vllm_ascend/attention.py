@@ -538,6 +538,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         query = query.view(-1, self.num_heads, self.head_size)
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
+        # TODO: Remove this contiguous in the future.
+        value = value.contiguous()
 
         output = torch.empty(num_tokens,
                              self.num_heads,
