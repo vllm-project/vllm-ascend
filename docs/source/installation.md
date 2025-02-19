@@ -117,12 +117,14 @@ pip install vllm vllm-ascend -f https://download.pytorch.org/whl/torch/
 
 or build from **source code**:
 
-```bash
-git clone https://github.com/vllm-project/vllm
+```{code-block} bash
+   :substitutions:
+
+git clone  --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
 cd vllm
 VLLM_TARGET_DEVICE=empty pip install . -f https://download.pytorch.org/whl/torch/
 
-git clone https://github.com/vllm-project/vllm-ascend.git
+git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 pip install -e . -f https://download.pytorch.org/whl/torch/
 ```
@@ -138,7 +140,7 @@ You can just pull the **prebuilt image** and run it with bash.
 # Update DEVICE according to your device (/dev/davinci[0-7])
 DEVICE=/dev/davinci7
 # Update the vllm-ascend image
-IMAGE=quay.io/ascend/vllm-ascend:main
+IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker pull $IMAGE
 docker run --rm \
     --name vllm-ascend-env \
