@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-FROM quay.io/ascend/cann:8.0.0.beta1-910b-ubuntu22.04-py3.10
+FROM quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10
 
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
