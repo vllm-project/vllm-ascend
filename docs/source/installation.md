@@ -74,7 +74,7 @@ python -m venv vllm-ascend-env
 source vllm-ascend-env/bin/activate
 
 # Install required python packages.
-pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs numpy<2.0.0 decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
+pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs "numpy<2.0.0" decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
 
 # Download and install the CANN package.
 wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.0.0/Ascend-cann-toolkit_8.0.0_linux-aarch64.run
@@ -119,15 +119,15 @@ You can install `vllm` and `vllm-ascend` from **pre-built wheel**:
 # It'll be fixed in the next vllm release, e.g. v0.7.3.
 git clone --branch v0.7.1 https://github.com/vllm-project/vllm
 cd vllm
-VLLM_TARGET_DEVICE=empty pip install . -f https://download.pytorch.org/whl/torch/
+VLLM_TARGET_DEVICE=empty pip install . --extra-index-url https://download.pytorch.org/whl/cpu/
 
 # Install vllm-ascend from pypi.
-pip install vllm-ascend -f https://download.pytorch.org/whl/torch/
+pip install vllm-ascend --extra-index-url https://download.pytorch.org/whl/cpu/
 
 # Once the packages are installed, you need to install `torch-npu` manually,
 # because that vllm-ascend relies on an unreleased version of torch-npu.
 # This step will be removed in the next vllm-ascend release.
-# 
+#
 # Here we take python 3.10 on aarch64 as an example. Feel free to install the correct version for your environment. See:
 #
 # https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250218.4/pytorch_v2.5.1_py39.tar.gz
@@ -145,14 +145,30 @@ or build from **source code**:
 
 ```{code-block} bash
    :substitutions:
-
+# Install vllm from source
 git clone  --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
 cd vllm
-VLLM_TARGET_DEVICE=empty pip install . -f https://download.pytorch.org/whl/torch/
+VLLM_TARGET_DEVICE=empty pip install . --extra-index-url https://download.pytorch.org/whl/cpu/
 
+# Install vllm-ascend from source
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
-pip install -e . -f https://download.pytorch.org/whl/torch/
+pip install -e . --extra-index-url https://download.pytorch.org/whl/cpu/
+
+# You need to install `torch-npu` manually, because that vllm-ascend relies on an unreleased version of torch-npu.
+# This step will be removed in the next vllm-ascend release.
+#
+# Here we take python 3.10 on aarch64 as an example. Feel free to install the correct version for your environment. See:
+#
+# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250218.4/pytorch_v2.5.1_py39.tar.gz
+# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250218.4/pytorch_v2.5.1_py310.tar.gz
+# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250218.4/pytorch_v2.5.1_py311.tar.gz
+#
+mkdir pta
+cd pta
+wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250218.4/pytorch_v2.5.1_py310.tar.gz
+tar -xvf pytorch_v2.5.1_py310.tar.gz
+pip install ./torch_npu-2.5.1.dev20250218-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 ```
 
 ::::

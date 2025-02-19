@@ -62,10 +62,10 @@ myst_enable_extensions = ["colon_fence", "substitution"]
 myst_substitutions = {
     # the branch of vllm, used in vllm clone
     # such as 'main', 'v0.7.1'
-    'vllm_version': 'main',
+    'vllm_version': 'v0.7.1',
     # the branch of vllm-ascend, used in vllm-ascend clone and image tag
     # such as 'main', 'v0.7.1-dev', 'v0.7.1rc1'
-    'vllm_ascend_version': 'main',
+    'vllm_ascend_version': 'v0.7.1.rc1',
     # the newest release version of vllm, used in quick start or container image tag.
     # This value should be updated when cut down release.
     'vllm_newest_release_version': "v0.7.1.rc1",
