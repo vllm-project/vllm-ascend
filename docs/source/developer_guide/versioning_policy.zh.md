@@ -43,7 +43,7 @@ vllm-ascend有主干和开发两种分支。
 | 分支    | 状态     | 备注                                 |
 |-----------|------------|--------------------------------------|
 | main      | Maintained | 基于vLLM main分支CI看护   |
-| 0.7.1-dev | Maintained | 基于vLLM 0.7.1版本CI看护 |
+| v0.7.1-dev | Maintained | 基于vLLM 0.7.1版本CI看护 |
 
 ## 版本配套
 
@@ -51,7 +51,7 @@ vLLM Ascend Plugin (`vllm-ascend`) 的关键配套关系如下:
 
 | vllm-ascend  | vLLM    | Python | Stable CANN | PyTorch/torch_npu |
 |--------------|---------| --- | --- | --- |
-| v0.7.x (TBD) | v0.7.x (TBD) | 3.9 - 3.12 | 8.0.0.beta1 |  2.5.1 / 2.5.1rc1 |
+| v0.7.1rc1 | v0.7.1 | 3.9 - 3.12 | 8.0.0 |  2.5.1 / 2.5.1.dev20250218 |
 
 ## 发布节奏
 

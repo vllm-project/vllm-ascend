@@ -5,6 +5,8 @@
 | Qwen 2.5 | ✅ ||
 | Mistral |  | Need test |
 | DeepSeek v2.5 | |Need test |
+| DeepSeek v3 | ✅|||
+| DeepSeek Distill (Qwen/llama) |✅||
 | LLama3.1/3.2 | ✅ ||
 | Gemma-2 |  |Need test|
 | baichuan |  |Need test|
