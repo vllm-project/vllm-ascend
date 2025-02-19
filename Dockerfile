@@ -29,7 +29,7 @@ WORKDIR /workspace
 
 COPY . /workspace/vllm-ascend/
 
-RUN pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+# RUN pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
