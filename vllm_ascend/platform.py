@@ -83,8 +83,10 @@ class NPUPlatform(Platform):
         torch.npu.synchronize()
 
     @classmethod
-    def mem_get_info(cls) -> Tuple[int, int]:
-        return torch.npu.mem_get_info()
+    def mem_get_info(
+            cls,
+            device: Optional[torch.types.Device] = None) -> Tuple[int, int]:
+        return torch.npu.mem_get_info(device)
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
