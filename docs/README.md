@@ -1,5 +1,7 @@
 # vLLM Ascend Plugin documents
 
+Live doc: https://vllm-ascend.readthedocs.io
+
 ## Build the docs
 
 ```bash
