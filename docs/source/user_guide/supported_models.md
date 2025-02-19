@@ -24,3 +24,7 @@
 | Phi-3-Vison/Phi-3.5-Vison |  |Need test|
 | Ultravox |  |Need test|
 | Qwen2-Audio | ✅ ||
+| TeleChat2 | ✅ ||
+| Solar Pro | ✅ ||
+| Starcoder2 | ✅ ||
+| StableLM | ✅ ||
