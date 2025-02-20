@@ -24,6 +24,7 @@ on:
     paths:
       - '*.txt'
       - '**/*.py'
+      - 'pytest.ini'
       - '.github/workflows/vllm_ascend_test.yaml'
       - '!docs/**'
   pull_request:
@@ -32,6 +33,7 @@ on:
     paths:
       - '*.txt'
       - '**/*.py'
+      - 'pytest.ini'
       - '.github/workflows/vllm_ascend_test.yaml'
       - '!docs/**'
 
