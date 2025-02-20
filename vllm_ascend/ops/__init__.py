@@ -15,4 +15,5 @@
 # limitations under the License.
 #
 
+import vllm_ascend.ops.fused_moe  # noqa
 import vllm_ascend.ops.layernorm  # noqa
