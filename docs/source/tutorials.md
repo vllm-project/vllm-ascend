@@ -283,7 +283,7 @@ python -m vllm.entrypoints.openai.api_server  \
 Once your server is started, you can query the model with input prompts:
 
 ```shell
-curl -X POST http://127.0.0.1:8006/v1/completions  \
+curl -X POST http://127.0.0.1:{prot_num}/v1/completions  \
      -H "Content-Type: application/json" \
      -d '{
          "model": "Deepseek/DeepSeek-V2-Lite-Chat",
