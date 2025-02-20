@@ -252,7 +252,7 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 ray start --address='{head_node_ip}:{port_num}' --num-gpus=8 --node-ip-address={local_ip}
 ```
 
-Then start the vLLM server on head node:
+Start the vLLM server on head node:
 
 ```shell
 export VLLM_HOST_IP={head_node_ip}
