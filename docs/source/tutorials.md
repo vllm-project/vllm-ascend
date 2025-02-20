@@ -208,47 +208,46 @@ Prompt: 'The future of AI is', Generated text: ' following you. As the technolog
 Run docker container on each machine:
 
 ```shell
-docker run --name vllm-ascend -it -d --net=host --shm-size=500g \
-    --privileged=true \
-    -w /home \
-    --device=/dev/davinci_manager \
-    --device=/dev/hisi_hdc \
-    --device=/dev/devmm_svm \
-    --entrypoint=bash \
-    -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-    -v /usr/local/dcmi:/usr/local/dcmi \
-    -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-    -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -v /usr/local/sbin:/usr/local/sbin \
-    -v /home:/home \
-    -v /tmp:/tmp \
-    -v /usr/share/zoneinfo/Asia/Shanghai:/etc/localtime \
-    {image_name}
+docker run \
+--name vllm-ascend \
+--device /dev/davinci0 \
+--device /dev/davinci1 \
+--device /dev/davinci_manager \
+--device /dev/devmm_svm \
+--device /dev/hisi_hdc \
+-v /usr/local/dcmi:/usr/local/dcmi \
+-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+-v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+-v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+-v /etc/ascend_install.info:/etc/ascend_install.info \
+-v /root/.cache:/root/.cache \
+-p 8000:8000 \
+-it quay.io/ascend/vllm-ascend:v0.7.1rc1 bash
 ```
 
-Choise one machine as head node, the other are worker nodes,
-then start ray on each machine:
+Choose one machine as head node, the other are worker nodes, then start ray on each machine:
+(Can find nic_name by commend ```ip addr```)
 
 ```shell
 # Head node
-export HCCL_IF_IP={head_node_ip}
-export GLOO_SOCKET_IFNAME=enp189s0f0
-export TP_SOCKET_IFNAME=enp189s0f0
+export HCCL_IF_IP={local_ip}
+export GLOO_SOCKET_IFNAME={nic_name}
+export TP_SOCKET_IFNAME={nic_name}
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1 
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 ray start --head --num-gpus=8
 
 # Worker node
-export HCCL_IF_IP={worker_node_ip}
+export HCCL_IF_IP={local_ip}
 export ASCEND_PROCESS_LOG_PATH={plog_save_path}
-export GLOO_SOCKET_IFNAME=enp189s0f0
-export TP_SOCKET_IFNAME=enp189s0f0
+export GLOO_SOCKET_IFNAME={nic_name}
+export TP_SOCKET_IFNAME={nic_name}
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1 
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-ray start --address='{head_node_ip}:6379' --num-gpus=8 --node-ip-address={worker_node_ip}
+ray start --address='{head_node_ip}:{port_num}' --num-gpus=8 --node-ip-address={local_ip}
 ```
 
-Then start the vLLM server on a single NPU:
+Then start the vLLM server on head node:
 
 ```shell
 export VLLM_HOST_IP={head_node_ip}
@@ -267,13 +266,13 @@ python -m vllm.entrypoints.openai.api_server  \
        --model="Deepseek/DeepSeek-V2-Lite-Chat" \
        --trust-remote-code \
        --enforce-eager \
-       --max-model-len 4096 \
+       --max-model-len {max_model_len} \
        --distributed_executor_backend "ray" \
        --tensor-parallel-size 16 \
        --disable-log-requests \
        --disable-log-stats \
        --disable-frontend-multiprocessing \
-       --port 8006 \
+       --port {port_num} \
 ```
 
 Once your server is started, you can query the model with input prompts:
