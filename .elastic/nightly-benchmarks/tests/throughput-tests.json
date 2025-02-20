@@ -1,0 +1,14 @@
+[
+  {
+    "test_name": "throughput_llama8B_tp1",
+    "parameters": {
+      "model": "LLAMA_3_8B_PATH",
+      "tensor_parallel_size": 1,
+      "load_format": "dummy",
+      "dataset_path": "SHAREGPT_PATH",
+      "num_prompts": 200,
+      "backend": "vllm"
+    }
+  }
+]
+
