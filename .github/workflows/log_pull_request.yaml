@@ -12,7 +12,7 @@ on:
     branches:
       - "main"
     types:
-      - closed
+      - merged
     paths:
       - '**/*.py'
       - '.github/workflows/log_pull_request.yaml'
