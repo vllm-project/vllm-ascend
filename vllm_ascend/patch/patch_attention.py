@@ -1,6 +1,8 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
+# Adapted from vllm/vllm/attention/layer.py
+# Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,7 +17,9 @@
 # limitations under the License.
 #
 # This file is used to monkey patch vLLM Attention.__init__ function
-# so that we can use three params
+# and move the instantiation of num_heads, head_size, num_kv_heads
+# ahead of the initialization of attention quant methods, which is 
+# required by ascend attention quant method to initialize.
 # Remove this file when vllm support it.
 
 from typing import Any, Dict, List, Optional
@@ -23,7 +27,7 @@ from typing import Any, Dict, List, Optional
 import torch
 
 import vllm.envs as envs
-from vllm.attention import AttentionType
+from vllm.attention import Attention, AttentionType
 from vllm.attention.selector import backend_name_to_enum, get_attn_backend
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.model_executor.layers.quantization.base_config import (
@@ -152,3 +156,6 @@ def attention_init(
 
         self.k_range = torch.tensor(envs.K_SCALE_CONSTANT, dtype=torch.float32)
         self.v_range = torch.tensor(envs.V_SCALE_CONSTANT, dtype=torch.float32)
+
+
+Attention.__init__ = attention_init
