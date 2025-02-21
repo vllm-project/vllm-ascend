@@ -16,7 +16,7 @@
 #
 
 import os
-from typing import Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 
@@ -27,6 +27,11 @@ except ImportError:
 
 from vllm.config import VllmConfig
 from vllm.platforms import Platform, PlatformEnum
+
+if TYPE_CHECKING:
+    from vllm.utils import FlexibleArgumentParser
+else:
+    FlexibleArgumentParser = None
 
 os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
 
@@ -52,6 +57,15 @@ class NPUPlatform(Platform):
     simple_compile_backend: str = "npu"
     ray_device_key: str = "NPU"
     device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
+
+    supported_quantization: list[str] = ["ascend"]
+
+    @classmethod
+    def pre_register_and_update(cls,
+                                parser: Optional[FlexibleArgumentParser] = None
+                                ) -> None:
+        from vllm_ascend.quantization.quant_config import \
+            AscendQuantConfig  # noqa: F401
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0):
@@ -96,11 +110,14 @@ class NPUPlatform(Platform):
             parallel_config.worker_cls = "vllm_ascend.worker.NPUWorker"
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 128
+            # TODO: Set block_size to 128 will lead unexpected accuracy issue in mla case.  Please set block_size to 128 back once the problem is fixed.
+            cache_config.block_size = 16
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla):
+        if use_mla:
+            return "vllm_ascend.attention.AscendMLAAttentionBackend"
         return "vllm_ascend.attention.AscendAttentionBackend"
 
     @classmethod
