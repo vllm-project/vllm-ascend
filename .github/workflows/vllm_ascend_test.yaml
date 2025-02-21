@@ -20,7 +20,8 @@ name: 'e2e test'
 on:
   push:
     branches:
-      - "main"
+      - 'main'
+      - '*-dev'
     paths:
       - '*.txt'
       - '**/*.py'
@@ -28,7 +29,8 @@ on:
       - '!docs/**'
   pull_request:
     branches:
-      - "main"
+      - 'main'
+      - '*-dev'
     paths:
       - '*.txt'
       - '**/*.py'
@@ -99,6 +101,16 @@ jobs:
       - name: Install vllm-project/vllm-ascend
         run: |
           pip install -e .
+
+      - name: Install torch-npu
+        run: |
+          mkdir pta
+          cd pta
+          wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250218.4/pytorch_v2.5.1_py310.tar.gz
+          tar -xvf pytorch_v2.5.1_py310.tar.gz
+          pip install ./torch_npu-2.5.1.dev20250218-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+          cd ..
+          rm -rf pta
 
       - name: Run vllm-project/vllm-ascend test
         run: |
