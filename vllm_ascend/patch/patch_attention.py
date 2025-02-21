@@ -54,7 +54,7 @@ def attention_init(
         attn_type: str = AttentionType.DECODER,
         **extra_impl_args,
     ) -> None:
-        super().__init__()
+        super(Attention, self).__init__()
         if per_layer_sliding_window is not None:
             # per-layer sliding window
             sliding_window = per_layer_sliding_window
