@@ -65,7 +65,7 @@ def group_topk(hidden_states: torch.Tensor,
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
-    return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+    return topk_weights, topk_ids.to(torch.int32)
 
 
 def fused_experts(hidden_states: torch.Tensor, w1: torch.Tensor,
@@ -126,13 +126,12 @@ def fused_experts(hidden_states: torch.Tensor, w1: torch.Tensor,
     down_out_list = torch.cat(down_out_list, dim=0)
     # TODO: Reorder device memory 2 times here, replace the current
     # implementation here when suitable operators become available.
-    routing_weights = topk_weights.to(down_out_list.dtype)
     hidden_states = torch_npu.npu_moe_finalize_routing(
         down_out_list,
         skip1=None,
         skip2=None,
         bias=None,
-        scales=routing_weights,
+        scales=topk_weights,
         expanded_src_to_dst_row=expanded_row_idx,
         export_for_source_row=topk_ids)
     if len(ori_shape) == 3:
