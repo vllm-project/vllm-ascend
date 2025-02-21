@@ -103,9 +103,6 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        # Register ops when setup.
-        from vllm_ascend import ops  # noqa: F401
-
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm_ascend.worker.NPUWorker"
