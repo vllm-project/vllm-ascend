@@ -106,6 +106,10 @@ class NPUPlatform(Platform):
         if cache_config and cache_config.block_size is None:
             # TODO: Set block_size to 128 will lead unexpected accuracy issue in mla case.  Please set block_size to 128 back once the problem is fixed.
             cache_config.block_size = 16
+        if vllm_config.quant_config is not None and \
+            'fa_quant_type' in vllm_config.quant_config.quant_description.keys():
+            # Ascend attention quant uses int8 dtype.
+            cache_config.cache_dtype = 'int8'
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,

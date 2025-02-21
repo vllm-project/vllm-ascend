@@ -14,6 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+# This file is used to monkey patch int8 cache dtype in vllm to support ascend.
+# Remove this file when vllm support int8 cache dtype.
 
-from vllm_ascend.patch import patch_commnicator  # noqa
-from vllm_ascend.patch import patch_cache_dtype  # noqa
+import torch
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+
+STR_DTYPE_TO_TORCH_DTYPE['int8'] = torch.int8
