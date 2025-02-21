@@ -68,7 +68,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         is_driver_worker: bool = False,
         model_runner_cls: Optional[Type[ModelRunnerBase]] = None,
     ) -> None:
-
+        from vllm_ascend import ops
         WorkerBase.__init__(self, vllm_config=vllm_config)
         # Try to import mindie_turbo to accelerate vLLM inference.
         try_register_lib(
