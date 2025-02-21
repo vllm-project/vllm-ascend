@@ -106,8 +106,8 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             # using ascend attention quant.
             # TODO: Updates of cache_config should de added into
             # NPUPlatorm.check_and_update_config. However, this function fails to
-            # recognize quant_config when running multi-ranks by ray. Hence we have
-            # to move these codes to here.
+            # update STR_DTYPE_TO_TORCH_DTYPE which is used by vLLM 0.7.1 to convert 
+            # dtype string to torch.dtype. Hence we have to move these codes to here.
             from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
             cache_config.cache_dtype = 'int8'
             STR_DTYPE_TO_TORCH_DTYPE['int8'] = torch.int8
