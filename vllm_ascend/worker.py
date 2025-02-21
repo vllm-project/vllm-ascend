@@ -101,6 +101,17 @@ class NPUWorker(LocalOrDistributedWorkerBase):
                 not in ["medusa", "mlp_speculator", "eagle"]) \
                     else {"return_hidden_states": True}
 
+        if vllm_config.quant_config is not None and \
+            'fa_quant_type' in vllm_config.quant_config.quant_description.keys():
+            # using ascend attention quant.
+            # TODO: Updates of cache_config should de added into
+            # NPUPlatorm.check_and_update_config. However, this function fails to
+            # recognize quant_config when running multi-ranks by ray. Hence we have
+            # to move these codes to here.
+            from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+            cache_config.cache_dtype = 'int8'
+            STR_DTYPE_TO_TORCH_DTYPE['int8'] = torch.int8
+
         ModelRunnerClass: Type[ModelRunnerBase] = NPUModelRunner
         if model_config.runner_type == "pooling":
             ModelRunnerClass = PoolingModelRunner
