@@ -57,6 +57,7 @@ class NPUPlatform(Platform):
     simple_compile_backend: str = "npu"
     ray_device_key: str = "NPU"
     device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
+    dispatch_key: str = "PrivateUse1"
 
     supported_quantization: list[str] = ["ascend"]
 
