@@ -34,7 +34,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op
 
 
 def attention_init(
