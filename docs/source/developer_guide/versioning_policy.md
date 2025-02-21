@@ -40,10 +40,12 @@ Note that vllm-ascend will only be released for a certain vLLM release version r
 
 Usually, each minor version of vLLM (such as 0.7) will correspond to a vllm-ascend version branch and support its latest version (for example, we plan to support version 0.7.3) as following shown:
 
-| Branch    | Status     | Note                                 |
-|-----------|------------|--------------------------------------|
-| main      | Maintained | CI commitment for vLLM main branch   |
-| v0.7.1-dev | Maintained | CI commitment for vLLM 0.7.1 version |
+| Branch     | Status       | Note                                 |
+|------------|--------------|--------------------------------------|
+| main       | Maintained   | CI commitment for vLLM main branch   |
+| v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version |
+| v0.7.1-dev | Unmaintained | Replaced by v0.7.3-dev               |
+
 
 ## Release Compatibility Matrix
 
@@ -57,8 +59,7 @@ Following is the Release Compatibility Matrix for vLLM Ascend Plugin:
 
 ### Next final release (`v0.7.x`) window
 
-| Date | Event |
-|---------|-----------|
-| February 2025 | Release candidates (RC1), v0.7.1rc1 |
-| March 2025 | Release candidates (RC2), v0.7.1rc2 or v0.7.3rc1 |
+| Date       | Event                                                            |
+|------------|------------------------------------------------------------------|
+| March 2025 | Release candidates, v0.7.3rc1                                    |
 | March 2025 | Final release passes, match vLLM v0.7.x latest: v0.7.1 or v0.7.3 |
