@@ -22,7 +22,8 @@ on:
   # but only for the main branch
   push:
     branches:
-      - "main"
+      - 'main'
+      - '*-dev'
     paths:
       - "**/*.py"
       - requirements-lint.txt
@@ -30,7 +31,8 @@ on:
       - .github/workflows/ruff.yml
   pull_request:
     branches:
-      - "main"
+      - 'main'
+      - '*-dev'
 
 jobs:
   ruff:
