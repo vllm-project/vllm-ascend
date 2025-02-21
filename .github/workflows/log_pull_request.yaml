@@ -40,7 +40,7 @@ jobs:
 
     - name: Send to es
       run: |
-        curl -k -X PUT "${{ secrets.ES_OM_DOMAIN }}/vllm_pull_request_test/_doc/${{ env.COMMIT_ID }}" \
+        curl -k -X PUT "${{ secrets.ES_OM_DOMAIN }}/vllm_pull_request/_doc/${{ env.COMMIT_ID }}" \
         -H "Content-Type: application/json" \
         -H "Authorization: ${{ secrets.ES_OM_AUTHORIZATION }}" \
         -d "{\"commit_title\": \"${{ env.COMMIT_TITLE }}\", \"need_test\": true, \"create_at\": \"${{ env.CURRENT_TIME }}\"}"
