@@ -1,4 +1,4 @@
-# Contributing to vLLM Ascend plugin
+# Contributing
 
 ## Building and testing
 It's recommended to set up a local development environment to build and test
@@ -45,7 +45,7 @@ git commit -sm "your commit info"
 
 ### Testing
 
-Although vllm-ascend CI provide integration test on [Ascend](.github/workflows/vllm_ascend_test.yaml), you can run it
+Although vllm-ascend CI provide integration test on [Ascend](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test.yaml), you can run it
 locally. The simplest way to run these integration tests locally is through a container:
 
 ```bash
@@ -98,8 +98,9 @@ Only specific types of PRs will be reviewed. The PR title is prefixed appropriat
 - `[CI]` for build or continuous integration improvements.
 - `[Misc]` for PRs that do not fit the above categories. Please use this sparingly.
 
-> [!NOTE]
-> If the PR spans more than one category, please include all relevant prefixes.
+:::{note}
+If the PR spans more than one category, please include all relevant prefixes.
+:::
 
 ## Others
 

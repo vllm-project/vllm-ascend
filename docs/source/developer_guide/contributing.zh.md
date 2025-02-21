@@ -1,4 +1,4 @@
-# 为 vLLM 昇腾插件贡献
+# 贡献指南
 
 ## 构建与测试
 我们推荐您在提交PR之前在本地开发环境进行构建和测试。
@@ -41,7 +41,7 @@ git commit -sm "your commit info"
 ```
 
 ### 测试
-虽然 vllm-ascend CI 提供了对 [Ascend](.github/workflows/vllm_ascend_test.yaml) 的集成测试，但您也可以在本地运行它。在本地运行这些集成测试的最简单方法是通过容器：
+虽然 vllm-ascend CI 提供了对 [Ascend](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test.yaml) 的集成测试，但您也可以在本地运行它。在本地运行这些集成测试的最简单方法是通过容器：
 
 ```bash
 # 基于昇腾NPU环境

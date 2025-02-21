@@ -1,0 +1,9 @@
+sphinx
+sphinx-argparse
+sphinx-book-theme
+sphinx-copybutton
+sphinx-design
+sphinx-togglebutton
+myst-parser
+msgspec
+sphinx-substitution-extensions
