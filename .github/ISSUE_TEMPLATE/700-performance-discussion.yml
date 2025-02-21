@@ -1,5 +1,5 @@
-name: ⚡ Discussion on the performance of vllm
-description: Submit a proposal/discussion about the performance of vllm
+name: ⚡ Discussion on the performance of vllm-ascend
+description: Submit a proposal/discussion about the performance of vllm-ascend
 title: "[Performance]: "
 labels: ["performance"]
 
@@ -7,12 +7,12 @@ body:
 - type: markdown
   attributes:
     value: >
-      #### Before submitting an issue, please make sure the issue hasn't been already addressed by searching through [the existing and past issues](https://github.com/vllm-project/vllm/issues?q=is%3Aissue+sort%3Acreated-desc+).
+      #### Before submitting an issue, please make sure the issue hasn't been already addressed by searching through [the existing and past issues](https://github.com/vllm-project/vllm-ascend/issues?q=is%3Aissue+sort%3Acreated-desc+).
 - type: textarea
   attributes:
     label: Proposal to improve performance
     description: >
-      How do you plan to improve vllm's performance?
+      How do you plan to improve vllm-ascend's performance?
   validations:
     required: false
 - type: textarea
