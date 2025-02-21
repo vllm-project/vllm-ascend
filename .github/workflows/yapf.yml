@@ -22,13 +22,15 @@ on:
   # but only for the main branch
   push:
     branches:
-      - "main"
+      - 'main'
+      - '*-dev'
     paths:
       - "**/*.py"
       - .github/workflows/yapf.yml
   pull_request:
     branches:
-      - "main"
+      - 'main'
+      - '*-dev'
     paths:
       - "**/*.py"
       - .github/workflows/yapf.yml
