@@ -1,0 +1,46 @@
+name: 'log pull request merged info'
+
+on:
+  push:
+    branches:
+      - "main"
+    paths:
+      - '**/*.py'
+      - '.github/workflows/log_pull_request.yaml'
+      - '!docs/**'
+  pull_request:
+    branches:
+      - "main"
+    types:
+      - closed
+    paths:
+      - '**/*.py'
+      - '.github/workflows/log_pull_request.yaml'
+      - '!docs/**'
+
+jobs:
+  benchmarks:
+    runs-on: vLLM Ascend test (self-host)
+
+    steps:
+    - name: Checkout the repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1 
+
+    - name: Get commit information
+      run: |
+        COMMIT_ID=$(git log -n 1 --format=%H)
+        COMMIT_TITLE=$(git log -n 1 --format=%s)
+        CURRENT_TIME=$(date --iso-8601=seconds)
+
+        echo "COMMIT_ID=$COMMIT_ID" >> $GITHUB_ENV
+        echo "COMMIT_TITLE=$COMMIT_TITLE" >> $GITHUB_ENV
+        echo "CURRENT_TIME=$CURRENT_TIME" >> $GITHUB_ENV
+
+    - name: Send to es
+      run: |
+        curl -k -X PUT "${{ secrets.ES_OM_DOMAIN }}/vllm_pull_request_test/_doc/${{ env.COMMIT_ID }}" \
+        -H "Content-Type: application/json" \
+        -H "Authorization: ${{ secrets.ES_OM_AUTHORIZATION }}" \
+        -d "{\"commit_title\": \"${{ env.COMMIT_TITLE }}\", \"need_test\": true, \"create_at\": \"${{ env.CURRENT_TIME }}\"}"
