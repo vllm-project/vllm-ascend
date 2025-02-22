@@ -15,5 +15,4 @@
 # limitations under the License.
 #
 
-from vllm_ascend.patch import patch_cache_dtype  # noqa
-from vllm_ascend.patch import patch_attention  # noqa
+from vllm_ascend.patch import patch_attention, patch_cache_dtype  # noqa
