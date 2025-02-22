@@ -18,7 +18,8 @@
 from typing import Optional, Tuple
 
 import torch
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding , DeepseekScalingRotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding import (
+    DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 
 
 def rope_forward_oot(
@@ -51,6 +52,7 @@ def rope_forward_oot(
         )
     return query, key
 
+
 def rope_deepseek_forward_oot(
     self,
     positions: torch.Tensor,
@@ -69,9 +71,9 @@ def rope_deepseek_forward_oot(
             "Batched rotary embedding is currently not supported on NPU.")
     else:
         # TODO: Remove the contiguous in the future.
-        ori_query_shape,ori_key_shape = query.shape,key.shape
-        query = query.contiguous().view(query.shape[0],-1)
-        key = key.contiguous().view(query.shape[0],-1)
+        ori_query_shape, ori_key_shape = query.shape, key.shape
+        query = query.contiguous().view(query.shape[0], -1)
+        key = key.contiguous().view(query.shape[0], -1)
         torch_npu.npu_rope(
             positions,
             query,
@@ -84,6 +86,7 @@ def rope_deepseek_forward_oot(
         key = key.view(ori_key_shape)
 
     return query, key
+
 
 RotaryEmbedding.forward_oot = rope_forward_oot
 DeepseekScalingRotaryEmbedding.forward = rope_deepseek_forward_oot
