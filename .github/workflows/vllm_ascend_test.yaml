@@ -118,4 +118,4 @@ jobs:
 
       - name: Run vllm-project/vllm test
         run: |
-          pytest -sv
+          pytest -sv -c pytest.ini
