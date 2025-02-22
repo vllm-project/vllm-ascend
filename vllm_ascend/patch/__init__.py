@@ -17,4 +17,3 @@
 
 from vllm_ascend.patch import patch_commnicator  # noqa
 from vllm_ascend.patch import patch_cache_dtype  # noqa
-from vllm_ascend.patch import patch_attention  # noqa
