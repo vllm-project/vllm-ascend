@@ -236,6 +236,7 @@ class AscendMetadata(AttentionMetadata):
     # and block tables
     cross_slot_mapping: Optional[torch.Tensor] = None
     cross_block_tables: Optional[torch.Tensor] = None
+    input_positions: Optional[torch.Tensor] = None
 
     @property
     def prefill_metadata(self) -> Optional["AscendMetadata"]:

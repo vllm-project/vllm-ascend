@@ -18,7 +18,7 @@
 from typing import Optional, Tuple
 
 import torch
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding ,DeepseekScalingRotaryEmbedding
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding , DeepseekScalingRotaryEmbedding
 
 
 def rope_forward_oot(
