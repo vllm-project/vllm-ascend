@@ -82,21 +82,15 @@ jobs:
         run: |
           apt-get update -y
           apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Install dependencies
         run: |
           pip install -r requirements-dev.txt
 
-      - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v4
-        with:
-          repository: vllm-project/vllm
-          path: ./vllm-empty
-
-      - name: Install vllm-project/vllm from source
-        working-directory: ./vllm-empty
+      - name: Install vllm-project/vllm from pypi
         run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+          pip install vllm==0.7.3
 
       - name: Install vllm-project/vllm-ascend
         run: |
