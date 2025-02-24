@@ -35,8 +35,8 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
 - Hardware: Atlas 800I A2 Inference series, Atlas A2 Training series
 - Software:
   * Python >= 3.9
-  * CANN >= 8.0.RC2
-  * PyTorch >= 2.4.0, torch-npu >= 2.4.0
+  * CANN >= 8.0.0
+  * PyTorch >= 2.5.1, torch-npu >= 2.5.1.dev20250218
   * vLLM (the same version as vllm-ascend)
 
 Find more about how to setup your environment step by step in [here](docs/source/installation.md).
@@ -83,13 +83,14 @@ We welcome and value any contributions and collaborations:
 vllm-ascend has main branch and dev branch.
 
 - **main**: main branch，corresponds to the vLLM main branch, and is continuously monitored for quality through Ascend CI.
-- **vX.Y.Z-dev**: development branch, created with part of new releases of vLLM. For example, `v0.7.1-dev` is the dev branch for vLLM `v0.7.1` version.
+- **vX.Y.Z-dev**: development branch, created with part of new releases of vLLM. For example, `v0.7.3-dev` is the dev branch for vLLM `v0.7.3` version.
 
 Below is maintained branches:
 
 | Branch     | Status       | Note                                 |
 |------------|--------------|--------------------------------------|
 | main       | Maintained   | CI commitment for vLLM main branch   |
+| v0.7.1-dev | UnMaintained | Only doc fixed is allowed |
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version |
 
 Please refer to [Versioning policy](docs/source/developer_guide/versioning_policy.md) for more details.
