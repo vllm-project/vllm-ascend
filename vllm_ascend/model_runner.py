@@ -463,30 +463,16 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
         if any(inter_data.mrope_input_positions is not None
                for inter_data in self.inter_data_list):
             mrope_input_positions = [[] for _ in range(3)]
-            # calculate max position length for padding
-            input_position_lens = [
-                len(inter_data.input_positions[0])
-                for inter_data in self.inter_data_list
-            ]
-            max_pos_len = max(input_position_lens)
 
             for idx in range(3):
                 for inter_data in self.inter_data_list:
                     msections = inter_data.mrope_input_positions
                     if msections is None:
                         for _seq_input_positions in inter_data.input_positions:
-                            # zero pad
-                            _seq_input_positions.extend(
-                                [0] *
-                                (max_pos_len - len(_seq_input_positions)))
                             mrope_input_positions[idx].extend(
                                 _seq_input_positions)
                     else:
                         for _seq_mrope_input_positions in msections:
-                            # zero pad
-                            _seq_mrope_input_positions[idx].extend(
-                                [0] * (max_pos_len -
-                                       len(_seq_mrope_input_positions[idx])))
                             mrope_input_positions[idx].extend(
                                 _seq_mrope_input_positions[idx])
             input_positions = None
