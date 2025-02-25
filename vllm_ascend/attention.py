@@ -594,10 +594,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         np.array(
                             attn_metadata.prefill_metadata.seq_lens).astype(
                                 np.int32))
-                    torch_npu._npu_flash_attention(query=query, key=key, value=value,
-                                                   mask=mask, seq_len=self.seq_lens_tensor_cpu,
-                                                   scale_value=self.scale, num_heads=self.num_heads,
-                                                   num_kv_heads=self.num_kv_heads, out=output)
+                    torch_npu._npu_flash_attention(
+                        query=query,
+                        key=key,
+                        value=value,
+                        mask=mask,
+                        seq_len=self.seq_lens_tensor_cpu,
+                        scale_value=self.scale,
+                        num_heads=self.num_heads,
+                        num_kv_heads=self.num_kv_heads,
+                        out=output)
                 else:
                     # TODO: Will support prefix cache and chunked prefill soon.
                     raise RuntimeError(
@@ -609,10 +615,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     np.array(attn_metadata.decode_metadata.seq_lens).astype(
                         np.int32))
                 block_tables = attn_metadata.decode_metadata.block_tables
-                torch_npu._npu_paged_attention(query=query, key_cache=key_cache, value_cache=value_cache,
-                                               num_kv_heads=self.num_kv_heads, num_heads=self.num_heads,
-                                               scale_value=self.scale, block_table=block_tables,
-                                               context_lens=self.seq_lens_tensor_cpu, out=output)
+                torch_npu._npu_paged_attention(
+                    query=query,
+                    key_cache=key_cache,
+                    value_cache=value_cache,
+                    num_kv_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale_value=self.scale,
+                    block_table=block_tables,
+                    context_lens=self.seq_lens_tensor_cpu,
+                    out=output)
 
         return output.view(num_tokens, self.hidden_size)
 
