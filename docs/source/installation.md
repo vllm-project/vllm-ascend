@@ -12,7 +12,7 @@ This document describes how to install vllm-ascend manually.
     | Software     | Supported version | Note |
     | ------------ | ----------------- | ---- | 
     | CANN         | >= 8.0.0          | Required for vllm-ascend and torch-npu |
-    | torch-npu    | >= 2.5.1rc1       | Required for vllm-ascend |
+    | torch-npu    | >= 2.5.1.dev20250218       | Required for vllm-ascend |
     | torch        | >= 2.5.1          | Required for torch-npu and vllm |
 
 You have 2 way to install:
@@ -81,6 +81,8 @@ wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.0.0/Ascen
 chmod +x ./Ascend-cann-toolkit_8.0.0_linux-aarch64.run
 ./Ascend-cann-toolkit_8.0.0_linux-aarch64.run --full
 
+source /usr/local/Ascend/ascend-toolkit/set_env.sh
+
 wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.0.0/Ascend-cann-kernels-910b_8.0.0_linux-aarch64.run
 chmod +x ./Ascend-cann-kernels-910b_8.0.0_linux-aarch64.run
 ./Ascend-cann-kernels-910b_8.0.0_linux-aarch64.run --install
@@ -89,7 +91,6 @@ wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.0.0/Ascen
 chmod +x. /Ascend-cann-nnal_8.0.0_linux-aarch64.run
 ./Ascend-cann-nnal_8.0.0_linux-aarch64.run --install
 
-source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
 ```
 
