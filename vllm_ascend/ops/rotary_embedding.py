@@ -42,7 +42,7 @@ def rope_forward_oot(
         # TODO: Remove the contiguous in the future.
         query = query.contiguous()
         key = key.contiguous()
-        torch_npu.npu_rope(
+        torch_npu._npu_rotary_embedding(
             positions,
             query,
             key,
