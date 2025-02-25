@@ -1,0 +1,11 @@
+---
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '**/*.md'
+
+ci/build:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/actions/*.yml'
+          - '.github/workflows/*.yml'
