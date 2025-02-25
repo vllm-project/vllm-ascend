@@ -83,7 +83,7 @@ vllm-ascend有主干分支和开发分支。
 | 分支         | 状态         | 备注                  |
 |------------|------------|---------------------|
 | main       | Maintained | 基于vLLM main分支CI看护   |
-| v0.7.1-dev | UnMaintained | 只允许文档修复 |
+| v0.7.1-dev | Unmaintained | 只允许文档修复 |
 | v0.7.3-dev | Maintained | 基于vLLM v0.7.3版本CI看护 |
 
 请参阅[版本策略](docs/source/developer_guide/versioning_policy.zh.md)了解更多详细信息。
