@@ -65,7 +65,7 @@ jobs:
             type=pep440,pattern={{raw}}
 
     - name: Free up disk space
-      uses: openmerlin/dockerfile/.github/actions/clean-up
+      uses: openmerlin/dockerfile/.github/actions/clean-up@main
 
     - name: Build - Set up QEMU
       uses: docker/setup-qemu-action@v2
