@@ -14,10 +14,4 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
-
-def register():
-    """Register the NPU platform."""
-    # To ensure that the module is correctly replaced, add it at the beginning
-    import vllm_ascend.patch_module  # noqa: F401
-    return "vllm_ascend.platform.NPUPlatform"
+import vllm_ascend.patch.patch_minicpm  # noqa

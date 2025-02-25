@@ -14,10 +14,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import sys
+import types
 
-
-def register():
-    """Register the NPU platform."""
-    # To ensure that the module is correctly replaced, add it at the beginning
-    import vllm_ascend.patch_module  # noqa: F401
-    return "vllm_ascend.platform.NPUPlatform"
+# prevent errors caused by triton not supported
+sys.modules[
+    'vllm.model_executor.layers.fused_moe.fused_moe'] = types.ModuleType(
+        'fused_moe_module')
