@@ -32,7 +32,7 @@ sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 llm = LLM(
     model="Qwen/Qwen2.5-0.5B-Instruct",
     tensor_parallel_size=2,
-    distributed_executor_backend="mp",
+    distributed_executor_backend="ray",
     trust_remote_code=True,
 )
 
