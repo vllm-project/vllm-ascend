@@ -19,7 +19,7 @@ check_npus() {
 ensure_sharegpt_downloaded() {
   local FILE=$SHAREGPT_PATH
   if [ ! -f "$FILE" ]; then
-    wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/$FILE
+    wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/"$FILE"
   else
     echo "$FILE already exists."
   fi
@@ -39,7 +39,8 @@ json2args() {
   # input: { "model": "meta-llama/Llama-2-7b-chat-hf", "tensor_parallel_size": 1 }
   # output: --model meta-llama/Llama-2-7b-chat-hf --tensor-parallel-size 1
   local json_string=$1
-  local args=$(
+  local args
+  args=$(
     echo "$json_string" | jq -r '
       to_entries |
       map(

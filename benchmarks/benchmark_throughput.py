@@ -14,10 +14,9 @@ from PIL import Image
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
-
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
-from vllm.entrypoints.openai.api_server import (
-    build_async_engine_client_from_engine_args)
+from vllm.entrypoints.openai.api_server import \
+    build_async_engine_client_from_engine_args
 from vllm.inputs import TextPrompt
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
