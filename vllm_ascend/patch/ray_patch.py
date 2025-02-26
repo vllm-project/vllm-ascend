@@ -3,6 +3,7 @@ import vllm
 from vllm.executor.ray_utils import RayWorkerWrapper
 
 if RayWorkerWrapper is not None:
+
     class NPURayWorkerWrapper(RayWorkerWrapper):
         """Importing torch_npu in other Ray processes through an empty class and 
         a monkey patch.
@@ -15,7 +16,7 @@ if RayWorkerWrapper is not None:
         Worker process.
         See https://github.com/vllm-project/vllm-ascend/pull/92.
         """
-    pass
 
+    pass
 
     vllm.executor.ray_utils.RayWorkerWrapper = NPURayWorkerWrapper
