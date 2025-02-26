@@ -93,6 +93,8 @@ jobs:
         platforms: linux/amd64,linux/arm64
         cache-from: type=gha
         cache-to: type=gha,mode=max
+        context: .
+        file: ./Dockerfile.CI
         # only trigger when tag, branch/main push
         push: ${{ github.event_name != 'pull_request' }}
         labels: ${{ steps.meta.outputs.labels }}

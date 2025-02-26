@@ -63,15 +63,14 @@ myst_substitutions = {
     # the branch of vllm, used in vllm clone
     # - main branch: 'main'
     # - vX.Y.Z branch: 'vX.Y.Z'
-    'vllm_version': 'main',
+    'vllm_version': 'v0.7.3rc1',
     # the branch of vllm-ascend, used in vllm-ascend clone and image tag
     # - main branch: 'main'
     # - vX.Y.Z branch: latest vllm-ascend release tag
-    'vllm_ascend_version': 'main',
+    'vllm_ascend_version': 'v0.7.3rc1',
     # the newest release version of vllm-ascend and matched vLLM, used in pip install.
     # This value should be updated when cut down release.
-    'pip_vllm_ascend_version': "v0.7.3rc1",
-    'pip_vllm_version': "v0.7.3",
+    'pip_vllm_ascend_version': "0.7.3rc1",
 }
 
 # Add any paths that contain templates here, relative to this directory.
