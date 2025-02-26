@@ -237,7 +237,10 @@ docker run \
 ```
 
 Choose one machine as head node, the other are worker nodes, then start ray on each machine:
-:::{note} Check out your `nic_name` by command `ip addr`  :::
+
+:::{note}
+Check out your `nic_name` by command `ip addr`.
+:::
 
 ```shell
 # Head node

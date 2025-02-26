@@ -1116,8 +1116,8 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
-            model_forward_start = torch.cuda.Event(enable_timing=True)
-            model_forward_end = torch.cuda.Event(enable_timing=True)
+            model_forward_start = torch_npu.npu.Event(enable_timing=True)
+            model_forward_end = torch_npu.npu.Event(enable_timing=True)
             model_forward_start.record()
 
         if not bypass_model_exec:
