@@ -284,10 +284,9 @@ def sample_hf_requests(
     random_seed: int,
     fixed_output_len: Optional[int] = None,
 ) -> List[Tuple[str, str, int, Optional[Dict[str, Collection[str]]]]]:
-
     # Special case for vision_arena dataset
     if dataset_path == 'lmarena-ai/vision-arena-bench-v0.1' \
-        and dataset_subset is None:
+            and dataset_subset is None:
         assert dataset_split == "train"
         dataset = load_dataset(dataset_path,
                                name=dataset_subset,
@@ -303,8 +302,8 @@ def sample_hf_requests(
                            streaming=True)
     assert "conversations" in dataset.features, (
         "HF Dataset must have 'conversations' column.")
-    filter_func = lambda x: len(x["conversations"]) >= 2
-    filtered_dataset = dataset.shuffle(seed=random_seed).filter(filter_func)
+    filtered_dataset = dataset.shuffle(seed=random_seed).filter(
+        lambda x: len(x["conversations"]) >= 2, )
     sampled_requests: List[Tuple[str, int, int, Dict[str,
                                                      Collection[str]]]] = []
     for data in filtered_dataset:
@@ -323,7 +322,7 @@ def sample_hf_requests(
             # Prune too short sequences.
             continue
         if fixed_output_len is None and \
-            (prompt_len > 1024 or prompt_len + output_len > 2048):
+                (prompt_len > 1024 or prompt_len + output_len > 2048):
             # Prune too long sequences.
             continue
 
@@ -342,7 +341,7 @@ def sample_hf_requests(
             }
         elif "image" in data and isinstance(data["image"], str):
             if (data["image"].startswith("http://") or \
-                data["image"].startswith("file://")):
+                    data["image"].startswith("file://")):
                 image_url = data["image"]
             else:
                 image_url = f"file://{data['image']}"
@@ -962,8 +961,8 @@ def main(args: argparse.Namespace):
                     )
 
         # Traffic
-        result_json["request_rate"] = (args.request_rate if args.request_rate
-                                       < float("inf") else "inf")
+        result_json["request_rate"] = (
+            args.request_rate if args.request_rate < float("inf") else "inf")
         result_json["burstiness"] = args.burstiness
         result_json["max_concurrency"] = args.max_concurrency
 
@@ -974,7 +973,7 @@ def main(args: argparse.Namespace):
         base_model_id = model_id.split("/")[-1]
         max_concurrency_str = (f"-concurrency{args.max_concurrency}"
                                if args.max_concurrency is not None else "")
-        file_name = f"{backend}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  #noqa
+        file_name = f"{backend}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
         if args.result_filename:
             file_name = args.result_filename
         if args.result_dir:

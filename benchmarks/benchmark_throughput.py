@@ -8,12 +8,10 @@ import time
 from functools import cache
 from typing import Dict, List, Optional, Tuple
 
-import torch
 import uvloop
 from PIL import Image
 from tqdm import tqdm
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          PreTrainedTokenizerBase)
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.openai.api_server import \
     build_async_engine_client_from_engine_args
@@ -89,7 +87,6 @@ def get_random_lora_request(
 
 def sample_requests(tokenizer: PreTrainedTokenizerBase,
                     args: argparse.Namespace) -> List[SampleRequest]:
-
     dataset_path: str = args.dataset_path
     num_requests: int = args.num_prompts
     fixed_output_len: Optional[int] = args.output_len
@@ -214,6 +211,7 @@ def run_vllm(
             ))
         end = time.perf_counter()
     return end - start
+
 
 async def run_vllm_async(
     requests: List[SampleRequest],
