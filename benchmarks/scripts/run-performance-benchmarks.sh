@@ -2,6 +2,7 @@
 
 
 check_npus() {
+  # shellcheck disable=SC2155
   declare -g npu_count=$(npu-smi info -l | grep "Total Count" | awk -F ':' '{print $2}' | tr -d ' ')
   
   if [[ -z "$npu_count" || "$npu_count" -eq 0 ]]; then
@@ -76,8 +77,7 @@ kill_npu_processes() {
   ps -aux
   lsof -t -i:8000 | xargs -r kill -9
   pgrep python3 | xargs -r kill -9
-
-  npu_id=$(get_cur_npu_id)
+  
   sleep 4
   rm -rf ~/.config/vllm
 
@@ -269,6 +269,7 @@ main() {
   (which lsof) || (apt-get update && apt-get install -y lsof)
 
   # get the current IP address, required by benchmark_serving.py
+  # shellcheck disable=SC2155
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
   # turn of the reporting of the status of each request, to clean up the terminal output
   export VLLM_LOG_LEVEL="WARNING"
