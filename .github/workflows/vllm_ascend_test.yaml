@@ -119,5 +119,7 @@ jobs:
           pytest -sv tests
 
       - name: Run vllm-project/vllm test
+        env:
+          HF_TOKEN: {{ secrets.HF_TOKEN }}
         run: |
           pytest -sv
