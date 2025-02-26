@@ -342,7 +342,7 @@ Benchmark vllm-ascend's performance under various workload, for **developers** t
 ### Quick Use
 #### Prerequisites
 - Please make sure that you have vllm and vllm-ascned installed and npu environment，cause these scripts are specially prepared for npu devices
-- To speed up the script， you can cache the models and datasets locally in advance and change the path in the json file in the [benchmarks](../benchmarks/scripts/tests/) folder
+- To speed up the script， you can cache the models and datasets locally in advance and change the path in the json file in the benchmarks/scripts/tests folder
 
 #### Run benchmarks
 these scripts can automatically conduct performance testing of serving, through and latency, run the following command:
