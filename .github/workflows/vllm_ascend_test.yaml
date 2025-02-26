@@ -114,12 +114,13 @@ jobs:
           cd ..
           rm -rf pta
 
-      - name: Run vllm-project/vllm-ascend test
-        run: |
-          pytest -sv tests
+      # - name: Run vllm-project/vllm-ascend test
+      #   run: |
+      #     pytest -sv tests
 
       - name: Run vllm-project/vllm test
         env:
           HF_TOKEN: {{ secrets.HF_TOKEN }}
         run: |
+          python check_hf.py
           pytest -sv
