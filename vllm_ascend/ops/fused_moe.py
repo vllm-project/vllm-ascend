@@ -65,7 +65,7 @@ def group_topk(hidden_states: torch.Tensor,
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
-    return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+    return topk_weights, topk_ids.to(torch.int32)
 
 
 def fused_experts(hidden_states: torch.Tensor, w1: torch.Tensor,
@@ -126,13 +126,12 @@ def fused_experts(hidden_states: torch.Tensor, w1: torch.Tensor,
     down_out_list = torch.cat(down_out_list, dim=0)
     # TODO: Reorder device memory 2 times here, replace the current
     # implementation here when suitable operators become available.
-    routing_weights = topk_weights.to(down_out_list.dtype)
     hidden_states = torch_npu.npu_moe_finalize_routing(
         down_out_list,
         skip1=None,
         skip2=None,
         bias=None,
-        scales=routing_weights,
+        scales=topk_weights,
         expanded_src_to_dst_row=expanded_row_idx,
         export_for_source_row=topk_ids)
     if len(ori_shape) == 3:
@@ -140,37 +139,62 @@ def fused_experts(hidden_states: torch.Tensor, w1: torch.Tensor,
     return hidden_states
 
 
-def forward_oot(
-        self,
-        layer: torch.nn.Module,
-        x: torch.Tensor,
-        use_grouped_topk: bool,
-        top_k: int,
-        router_logits: torch.Tensor,
-        renormalize: bool,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        custom_routing_function: Optional[Callable] = None,
-        scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None
+def fused_moe(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_expert_group: Optional[int] = None,
+    topk_group: Optional[int] = None,
+    scoring_func:Optional[str] = None,
+    e_score_correction_bias: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
 
     topk_weights, topk_ids = group_topk(
-        hidden_states=x,
-        gating_output=router_logits,
-        topk=top_k,
+        hidden_states=hidden_states,
+        gating_output=gating_output,
+        topk=topk,
         renormalize=renormalize,
         num_expert_group=num_expert_group,
         topk_group=topk_group,
         scoring_func=scoring_func,
         e_score_correction_bias=e_score_correction_bias)
-
-    return fused_experts(hidden_states=x,
-                         w1=layer.w13_weight,
-                         w2=layer.w2_weight,
+    
+    return fused_experts(hidden_states=hidden_states,
+                         w1=w1,
+                         w2=w2,
                          topk_weights=topk_weights,
                          topk_ids=topk_ids,
-                         top_k=top_k)
+                         top_k=topk)
 
 
-UnquantizedFusedMoEMethod.forward_oot = forward_oot
+def fused_moe_forward_oot(
+    self,
+    layer: torch.nn.Module,
+    x: torch.Tensor,
+    use_grouped_topk: bool,
+    top_k: int,
+    router_logits: torch.Tensor,
+    renormalize: bool,
+    topk_group: Optional[int] = None,
+    num_expert_group: Optional[int] = None,
+    custom_routing_function: Optional[Callable] = None,
+    scoring_func: str = "softmax",
+    e_score_correction_bias: Optional[torch.Tensor] = None
+) -> torch.Tensor:
+
+    return fused_moe(hidden_states=x,
+                     w1=layer.w13_weight,
+                     w2=layer.w2_weight,
+                     gating_output=router_logits,
+                     topk=top_k,
+                     renormalize=renormalize,
+                     num_expert_group=num_expert_group,
+                     topk_group=topk_group,
+                     scoring_func=scoring_func,
+                     e_score_correction_bias=e_score_correction_bias)
+
+    
+UnquantizedFusedMoEMethod.forward_oot = fused_moe_forward_oot
