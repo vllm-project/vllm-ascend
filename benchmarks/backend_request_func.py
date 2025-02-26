@@ -157,6 +157,7 @@ def get_model(pretrained_model_name_or_path: str) -> str:
         return model_path
     return pretrained_model_name_or_path
 
+
 def get_tokenizer(
     pretrained_model_name_or_path: str,
     tokenizer_mode: str = "auto",
@@ -187,6 +188,7 @@ def get_tokenizer(
             trust_remote_code=trust_remote_code,
             **kwargs,
         )
+
 
 ASYNC_REQUEST_FUNCS = {
     "vllm": async_request_openai_completions,
