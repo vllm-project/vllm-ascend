@@ -122,5 +122,5 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          python check_hf.py
+          huggingface-cli login --token ${{ secrets.HF_TOKEN }}
           pytest -sv
