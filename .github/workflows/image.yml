@@ -77,7 +77,7 @@ jobs:
         image: tonistiigi/binfmt:qemu-v7.0.0-28
 
     - name: Build - Set up Docker Buildx
-      uses: docker/setup-buildx-action@v2
+      uses: docker/setup-buildx-action@v3
 
     - name: Publish - Login to Quay Container Registry
       if: ${{ github.event_name == 'push' && github.repository_owner == 'vllm-project' }}
