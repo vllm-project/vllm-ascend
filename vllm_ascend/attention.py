@@ -789,12 +789,16 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                 self.seq_lens_tensor_cpu = torch.from_numpy(
                     np.array(attn_metadata.prefill_metadata.seq_lens).astype(
                         np.int32))
-                torch_npu._npu_flash_attention(query=query, key=key, value=value,
-                                               mask=mask,
-                                               seq_len=self.seq_lens_tensor_cpu,
-                                               scale_value=self.scale,
-                                               num_heads=self.num_heads, num_kv_heads=self.num_heads,
-                                               out=attn_output)
+                torch_npu._npu_flash_attention(
+                    query=query,
+                    key=key,
+                    value=value,
+                    mask=mask,
+                    seq_len=self.seq_lens_tensor_cpu,
+                    scale_value=self.scale,
+                    num_heads=self.num_heads,
+                    num_kv_heads=self.num_heads,
+                    out=attn_output)
             else:
                 # TODO: Will support prefix cache and chunked prefill soon.
                 raise RuntimeError(
@@ -811,12 +815,16 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                 np.array(attn_metadata.decode_metadata.seq_lens).astype(
                     np.int32))
             block_tables = attn_metadata.decode_metadata.block_tables
-            torch_npu._npu_paged_attention_mla(query=query, key_cache=key_cache,
-                                               num_kv_heads=self.num_kv_heads, num_heads=self.num_heads,
-                                               scale_value=self.scale, block_table=block_tables,
-                                               context_lens=self.seq_lens_tensor_cpu,
-                                               mla_vheadsize=self.kv_lora_rank,
-                                               out=attn_output) 
+            torch_npu._npu_paged_attention_mla(
+                query=query,
+                key_cache=key_cache,
+                num_kv_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale_value=self.scale,
+                block_table=block_tables,
+                context_lens=self.seq_lens_tensor_cpu,
+                mla_vheadsize=self.kv_lora_rank,
+                out=attn_output)
             attn_output_t = torch.transpose(attn_output, 0, 1)
             attn_output_t = torch.bmm(attn_output_t, self.w_vc)
             attn_output = torch.transpose(attn_output_t, 0, 1)

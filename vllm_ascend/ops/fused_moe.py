@@ -50,7 +50,9 @@ def group_topk(hidden_states: torch.Tensor,
 
     topk_group = 0 if topk_group is None else topk_group
     num_expert_group = 0 if num_expert_group is None else num_expert_group
-    torch_npu._npu_group_topk(self=scores, k=topk_group, group_num=num_expert_group)
+    torch_npu._npu_group_topk(self=scores,
+                              k=topk_group,
+                              group_num=num_expert_group)
     if e_score_correction_bias is not None:
         topk_ids = torch.topk(scores, k=topk, dim=-1, sorted=False)[1]
         # Use original unbiased scores for the routing weights
