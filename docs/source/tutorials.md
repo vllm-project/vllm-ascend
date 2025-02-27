@@ -248,6 +248,7 @@ export HCCL_IF_IP={local_ip}
 export GLOO_SOCKET_IFNAME={nic_name}
 export TP_SOCKET_IFNAME={nic_name}
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 ray start --head --num-gpus=8
 
 # Worker node
