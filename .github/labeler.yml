@@ -1,0 +1,38 @@
+---
+documentation:
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'docs/**'
+          - '**/*.md'
+
+ci/build:
+  - changed-files:
+      - any-glob-to-any-file:
+          - '.github/actions/*.yml'
+          - '.github/workflows/*.yml'
+
+'module:tests':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'tests/**'
+
+'module:tools':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'tools/**'
+
+'module:ops':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'vllm_ascend/ops/**'
+
+'module:quantization':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'vllm_ascend/quantization/**'
+
+'module:core':
+  - changed-files:
+      - any-glob-to-any-file:
+          - 'vllm_ascend/*.py'
+
