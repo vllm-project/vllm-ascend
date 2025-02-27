@@ -1,0 +1,53 @@
+#
+# Adapted from vllm-project/vllm/blob/main/requirements-test.in
+# Copyright 2023 The vLLM team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+# testing
+pytest>=6.0
+tensorizer>=2.9.0
+pytest-forked
+pytest-asyncio
+pytest-rerunfailures
+pytest-shard
+
+# testing utils
+modelscope
+awscli
+# decord # required for video tests : pip._internal.exceptions.DistributionNotFound: No matching distribution found for decord
+einops # required for MPT, qwen-vl and Mamba
+httpx
+librosa # required for audio tests
+vector_quantize_pytorch # required for minicpmo_26 test
+vocos # required for minicpmo_26 test
+peft
+pqdm
+ray
+sentence-transformers # required for embedding tests
+soundfile # required for audio tests
+jiwer # required for audio tests
+timm # required for internvl test
+torch==2.5.1
+torchaudio==2.5.1
+transformers_stream_generator # required for qwen-vl test
+matplotlib # required for qwen-vl test
+mistral_common[opencv] >= 1.5.0 # required for pixtral test
+datamodel_code_generator # required for minicpm3 test
+lm-eval[api]==0.4.4 # required for model evaluation test
+transformers==4.48.2
+
+genai_perf==0.0.8
+
+numpy < 2.0.0
