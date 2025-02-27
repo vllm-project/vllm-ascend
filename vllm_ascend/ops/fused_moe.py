@@ -48,6 +48,8 @@ def group_topk(hidden_states: torch.Tensor,
         original_scores = scores
         scores = scores + e_score_correction_bias.unsqueeze(0)
 
+    topk_group = 0 if topk_group is None else topk_group
+    num_expert_group = 0 if num_expert_group is None else num_expert_group
     torch_npu.npu_group_topk(input=scores,
                              out=scores,
                              group_num=num_expert_group,
