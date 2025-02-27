@@ -17,6 +17,6 @@ if RayWorkerWrapper is not None:
         See https://github.com/vllm-project/vllm-ascend/pull/92.
         """
 
-    pass
+        pass
 
     vllm.executor.ray_utils.RayWorkerWrapper = NPURayWorkerWrapper
