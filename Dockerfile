@@ -36,7 +36,10 @@ RUN pip config set global.index-url ${PIP_INDEX_URL}
 # Install vllm and vllm-ascend
 RUN python3 -m pip install /workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/
 
+# Install torch-npu
+RUN bash /workspace/vllm-ascend/pta_install.sh
+
 # Install modelscope
-RUN python3 -m pip install modelscope
+RUN python3 -m pip install modelscope ray
 
 CMD ["/bin/bash"]
