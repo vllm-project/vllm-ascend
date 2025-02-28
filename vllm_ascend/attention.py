@@ -713,30 +713,20 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                                                       self.qk_head_dim)
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
                                dim=-1)
-        if attn_metadata.num_prefills > 0:
-            assert attn_metadata.prefill_metadata is not None
-            assert attn_metadata.prefill_metadata.seq_lens is not None
-            np_positions = np.concatenate([
-                np.arange(i) for i in attn_metadata.prefill_metadata.seq_lens
-            ])
-            positions = torch.tensor(np_positions,
-                                     device=hidden_states_or_q_c.device)
-        else:
-            assert attn_metadata.decode_metadata is not None
-            np_positions = np.array(attn_metadata.decode_metadata.seq_lens) - 1
-            positions = torch.tensor(np_positions,
-                                     device=hidden_states_or_q_c.device)
+
         k_pe = k_pe.view(num_tokens, self.num_kv_heads, -1)
 
         if self.rotary_emb.__class__.__name__ == 'RotaryEmbedding':
             ori_q_pe_shape, ori_k_pe_shape = q_pe.shape, k_pe.shape
             q_pe = q_pe.reshape(num_tokens, -1)
             k_pe = k_pe.reshape(num_tokens, -1)
-            q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+            q_pe, k_pe = self.rotary_emb(attn_metadata.input_positions, q_pe,
+                                         k_pe)
             q_pe = q_pe.view(ori_q_pe_shape)
             k_pe = k_pe.view(ori_k_pe_shape)
         else:
-            q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
+            q_pe, k_pe = self.rotary_emb(attn_metadata.input_positions, q_pe,
+                                         k_pe)
 
         if self.w_kc is None or self.w_vc is None:
             kv_b_proj_weight = self.kv_b_proj.weight.reshape(
@@ -757,16 +747,14 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
             k_cache = torch.cat(
                 [kv_c_normed.view(num_tokens, self.num_kv_heads, -1), k_pe],
                 dim=2)
-            k_pe = k_pe.repeat(1, self.num_heads, 1)
+            k_pe = k_pe.expand(-1, self.num_heads, -1)
             key = torch.cat([k_nope.view(num_tokens, kv_heads_num, -1), k_pe],
                             dim=2)
         else:
             kv_heads_num = self.num_kv_heads
-            q_nope_t = torch_npu.npu_transpose(q_nope, (1, 0, 2),
-                                               require_contiguous=True)
+            q_nope_t = torch.transpose(q_nope, 0, 1)
             q_nope_out = torch.bmm(q_nope_t, self.w_kc)
-            q_nope = torch_npu.npu_transpose(q_nope_out, (1, 0, 2),
-                                             require_contiguous=True)
+            q_nope = torch.transpose(q_nope_out, 0, 1)
             k_cache = torch.cat(
                 [kv_c_normed.view(num_tokens, self.num_kv_heads, -1), k_pe],
                 dim=2)
@@ -782,13 +770,9 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                 num_blocks, block_size, self.num_kv_heads,
                 self.qk_rope_head_dim + self.kv_lora_rank)
             slots = attn_metadata.slot_mapping
-            torch_npu.npu_reshapecache(key=k_cache,
-                                       value=None,
-                                       keyCache=key_cache,
-                                       valueCache=None,
-                                       slotMapping=slots,
-                                       compressType=0,
-                                       kvCacheCfg=1)
+            torch_npu._npu_reshape_and_cache_siso(key=k_cache,
+                                                  key_cache=key_cache,
+                                                  slot_indices=slots)
 
         if attn_metadata.num_prefills > 0:
             attn_output = torch.empty(num_tokens,
@@ -805,32 +789,16 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                 self.seq_lens_tensor_cpu = torch.from_numpy(
                     np.array(attn_metadata.prefill_metadata.seq_lens).astype(
                         np.int32))
-                torch_npu.npu_selfattention(query=query,
-                                            key=key,
-                                            value=value,
-                                            kvcacheCfg=0,
-                                            mask=mask,
-                                            maskType=1,
-                                            isTriuMask=0,
-                                            seqLen=self.seq_lens_tensor_cpu,
-                                            scale=self.scale,
-                                            qScale=1,
-                                            scaleType=0,
-                                            headNum=self.num_heads,
-                                            kvHeadNum=self.num_heads,
-                                            mlaVHeadSize=0,
-                                            calcType=3,
-                                            kernelType=0,
-                                            clampType=0,
-                                            quantType=0,
-                                            cacheType=0,
-                                            windowSize=0,
-                                            clampMin=0,
-                                            clampMax=0,
-                                            batchRunStatusEnable=False,
-                                            inputLayout=0,
-                                            outDataType=0,
-                                            out=attn_output)
+                torch_npu._npu_flash_attention(
+                    query=query,
+                    key=key,
+                    value=value,
+                    mask=mask,
+                    seq_len=self.seq_lens_tensor_cpu,
+                    scale_value=self.scale,
+                    num_heads=self.num_heads,
+                    num_kv_heads=self.num_heads,
+                    out=attn_output)
             else:
                 # TODO: Will support prefix cache and chunked prefill soon.
                 raise RuntimeError(
@@ -847,31 +815,20 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                 np.array(attn_metadata.decode_metadata.seq_lens).astype(
                     np.int32))
             block_tables = attn_metadata.decode_metadata.block_tables
-            torch_npu.npu_pagedattention(query=query,
-                                         keyCache=key_cache,
-                                         valueCache=None,
-                                         contextLens=self.seq_lens_tensor_cpu,
-                                         maskType=0,
-                                         kvHeadNum=self.num_kv_heads,
-                                         headNum=self.num_heads,
-                                         mlaVHeadSize=self.kv_lora_rank,
-                                         qkScale=self.scale,
-                                         blockTables=block_tables,
-                                         batchRunStatusEnable=False,
-                                         hasQuantOffset=False,
-                                         compressType=0,
-                                         calcType=0,
-                                         scaleType=0,
-                                         quantType=0,
-                                         inputLayout=0,
-                                         outDataType=-1,
-                                         attnOut=attn_output)
-            attn_output_t = torch_npu.npu_transpose(attn_output, (1, 0, 2),
-                                                    require_contiguous=True)
+            torch_npu._npu_paged_attention_mla(
+                query=query,
+                key_cache=key_cache,
+                num_kv_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale_value=self.scale,
+                block_table=block_tables,
+                context_lens=self.seq_lens_tensor_cpu,
+                mla_vheadsize=self.kv_lora_rank,
+                out=attn_output)
+            attn_output_t = torch.transpose(attn_output, 0, 1)
             attn_output_t = torch.bmm(attn_output_t, self.w_vc)
-            attn_output = torch_npu.npu_transpose(attn_output_t, (1, 0, 2),
-                                                  require_contiguous=True)
+            attn_output = torch.transpose(attn_output_t, 0, 1)
 
-        output, _ = self.o_proj(attn_output.view(num_tokens, -1))
+        output, _ = self.o_proj(attn_output.reshape(num_tokens, -1))
 
         return output

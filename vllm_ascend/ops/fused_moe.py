@@ -48,10 +48,11 @@ def group_topk(hidden_states: torch.Tensor,
         original_scores = scores
         scores = scores + e_score_correction_bias.unsqueeze(0)
 
-    torch_npu.npu_group_topk(input=scores,
-                             out=scores,
-                             group_num=num_expert_group,
-                             k=topk_group)
+    topk_group = 0 if topk_group is None else topk_group
+    num_expert_group = 0 if num_expert_group is None else num_expert_group
+    torch_npu._npu_group_topk(self=scores,
+                              k=topk_group,
+                              group_num=num_expert_group)
     if e_score_correction_bias is not None:
         topk_ids = torch.topk(scores, k=topk, dim=-1, sorted=False)[1]
         # Use original unbiased scores for the routing weights
@@ -65,7 +66,7 @@ def group_topk(hidden_states: torch.Tensor,
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
-    return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
+    return topk_weights, topk_ids.to(torch.int32)
 
 
 def fused_experts(hidden_states: torch.Tensor, w1: torch.Tensor,
@@ -126,13 +127,12 @@ def fused_experts(hidden_states: torch.Tensor, w1: torch.Tensor,
     down_out_list = torch.cat(down_out_list, dim=0)
     # TODO: Reorder device memory 2 times here, replace the current
     # implementation here when suitable operators become available.
-    routing_weights = topk_weights.to(down_out_list.dtype)
     hidden_states = torch_npu.npu_moe_finalize_routing(
         down_out_list,
         skip1=None,
         skip2=None,
         bias=None,
-        scales=routing_weights,
+        scales=topk_weights,
         expanded_src_to_dst_row=expanded_row_idx,
         export_for_source_row=topk_ids)
     if len(ori_shape) == 3:

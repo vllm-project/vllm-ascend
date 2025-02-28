@@ -22,7 +22,6 @@ from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 import torch.distributed
-import torch_npu
 from torch import nn
 from vllm import envs
 from vllm.config import ParallelConfig, VllmConfig
@@ -125,6 +124,8 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
+            # lazy import so that torch_npu is not required for normal use.
+            import torch_npu
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)
