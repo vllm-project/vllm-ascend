@@ -566,13 +566,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 value_cache = value_cache.view(num_blocks, block_size,
                                             self.num_kv_heads, self.head_size)
                 slots = attn_metadata.slot_mapping
-                torch_npu.npu_reshapecache(key=key,
-                                           value=value,
-                                           keyCache=key_cache,
-                                           valueCache=value_cache,
-                                           slotMapping=slots,
-                                           compressType=0,
-                                           kvCacheCfg=0)
+                torch_npu._npu_reshape_and_cache(key=key,
+                                                 value=value,
+                                                 key_cache=key_cache,
+                                                 value_cache=value_cache,
+                                                 slot_indices=slots)
 
             if attn_metadata.num_prefills > 0:
 
@@ -581,16 +579,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     assert attn_metadata.attn_mask is not None
                     mask = attn_metadata.attn_mask
                     self.seq_lens_tensor_cpu = torch.from_numpy(np.array(attn_metadata.prefill_metadata.seq_lens).astype(np.int32))
-                    torch_npu.npu_selfattention(query=query, key=key, value=value,
-                                                mask=mask,  maskType=1, isTriuMask=0,
-                                                seqLen=self.seq_lens_tensor_cpu,
-                                                scale=self.scale, qScale=1,
-                                                headNum=self.num_heads, kvHeadNum=self.num_kv_heads, mlaVHeadSize=0,
-                                                calcType=3, kernelType=0, clampType=0,
-                                                scaleType=0, quantType=0, cacheType=0,
-                                                batchRunStatusEnable=False, kvcacheCfg=0,
-                                                clampMin=0, clampMax=0, inputLayout=0,
-                                                windowSize=0, outDataType=0, out=output)  
+                    torch_npu._npu_flash_attention(
+                        query=query,
+                        key=key,
+                        value=value,
+                        mask=mask,
+                        seq_len=self.seq_lens_tensor_cpu,
+                        scale_value=self.scale,
+                        num_heads=self.num_heads,
+                        num_kv_heads=self.num_kv_heads,
+                        out=output)  
                 else:
                     # TODO: Will support prefix cache and chunked prefill soon.
                     raise RuntimeError(
@@ -600,13 +598,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 assert kv_cache is not None
                 self.seq_lens_tensor_cpu = torch.from_numpy(np.array(attn_metadata.decode_metadata.seq_lens).astype(np.int32))
                 block_tables = attn_metadata.decode_metadata.block_tables
-                torch_npu.npu_pagedattention(query=query, keyCache=key_cache, valueCache=value_cache,
-                                             contextLens=self.seq_lens_tensor_cpu, maskType=0,
-                                             kvHeadNum=self.num_kv_heads, headNum=self.num_heads, mlaVHeadSize=0,
-                                             qkScale=self.scale, scaleType=0, blockTables=block_tables,
-                                             batchRunStatusEnable=False, hasQuantOffset=False,
-                                             calcType=3, quantType=0, compressType=0,
-                                             inputLayout=0, outDataType=0, attnOut=output) 
+                torch_npu._npu_paged_attention(
+                    query=query,
+                    key_cache=key_cache,
+                    value_cache=value_cache,
+                    num_kv_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale_value=self.scale,
+                    block_table=block_tables,
+                    context_lens=self.seq_lens_tensor_cpu,
+                    out=output)
 
         return output.view(num_tokens, self.hidden_size)
 
@@ -743,13 +744,9 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
             key_cache = key_cache.view(num_blocks, block_size, self.num_kv_heads,
                                        self.qk_rope_head_dim+self.kv_lora_rank)
             slots = attn_metadata.slot_mapping
-            torch_npu.npu_reshapecache(key=k_cache,
-                                       value=None,
-                                       keyCache=key_cache,
-                                       valueCache=None,
-                                       slotMapping=slots,
-                                       compressType=0,
-                                       kvCacheCfg=1)
+            torch_npu._npu_reshape_and_cache_siso(key=k_cache,
+                                                  key_cache=key_cache,
+                                                  slot_indices=slots)
 
         if attn_metadata.num_prefills > 0:
             attn_output = torch.empty(num_tokens,
@@ -762,16 +759,16 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                 assert attn_metadata.attn_mask is not None
                 mask = attn_metadata.attn_mask
                 self.seq_lens_tensor_cpu = torch.from_numpy(np.array(attn_metadata.prefill_metadata.seq_lens).astype(np.int32))
-                torch_npu.npu_selfattention(query=query, key=key, value=value, kvcacheCfg=0,
-                                            mask=mask, maskType=1, isTriuMask=0,
-                                            seqLen=self.seq_lens_tensor_cpu,
-                                            scale=self.scale, qScale=1, scaleType=0,
-                                            headNum=self.num_heads, kvHeadNum=self.num_heads, mlaVHeadSize=0,
-                                            calcType=3, kernelType=0, clampType=0,
-                                            quantType=0, cacheType=0, windowSize=0,
-                                            clampMin=0, clampMax=0,
-                                            batchRunStatusEnable=False, inputLayout=0,
-                                            outDataType=0, out=attn_output)
+                torch_npu._npu_flash_attention(
+                    query=query,
+                    key=key,
+                    value=value,
+                    mask=mask,
+                    seq_len=self.seq_lens_tensor_cpu,
+                    scale_value=self.scale,
+                    num_heads=self.num_heads,
+                    num_kv_heads=self.num_heads,
+                    out=attn_output)
             else:
                 # TODO: Will support prefix cache and chunked prefill soon.
                 raise RuntimeError(
@@ -786,15 +783,16 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                                       device="npu")
             self.seq_lens_tensor_cpu = torch.from_numpy(np.array(attn_metadata.decode_metadata.seq_lens).astype(np.int32))
             block_tables = attn_metadata.decode_metadata.block_tables
-            torch_npu.npu_pagedattention(query=query, keyCache=key_cache, valueCache=None,
-                                         contextLens=self.seq_lens_tensor_cpu,
-                                         maskType=0,
-                                         kvHeadNum=self.num_kv_heads, headNum=self.num_heads,
-                                         mlaVHeadSize=self.kv_lora_rank,
-                                         qkScale=self.scale, blockTables=block_tables,
-                                         batchRunStatusEnable=False, hasQuantOffset=False,
-                                         compressType=0, calcType=0, scaleType=0, quantType=0,
-                                         inputLayout=0, outDataType=-1, attnOut=attn_output) 
+            torch_npu._npu_paged_attention_mla(
+                query=query,
+                key_cache=key_cache,
+                num_kv_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale_value=self.scale,
+                block_table=block_tables,
+                context_lens=self.seq_lens_tensor_cpu,
+                mla_vheadsize=self.kv_lora_rank,
+                out=attn_output)
             attn_output_t = torch_npu.npu_transpose(attn_output, (1, 0, 2), require_contiguous=True)
             attn_output_t = torch.bmm(attn_output_t, self.w_vc)
             attn_output = torch_npu.npu_transpose(attn_output_t, (1, 0, 2), require_contiguous=True)
