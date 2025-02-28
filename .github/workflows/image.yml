@@ -71,7 +71,7 @@ jobs:
         docker-images: false
 
     - name: Build - Set up QEMU
-      uses: docker/setup-qemu-action@v2
+      uses: docker/setup-qemu-action@v3
       # TODO(yikun): remove this after https://github.com/docker/setup-qemu-action/issues/198 resolved
       with:
         image: tonistiigi/binfmt:qemu-v7.0.0-28
