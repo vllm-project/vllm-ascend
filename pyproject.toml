@@ -6,6 +6,5 @@ requires = [
     "decorator",
     "pyyaml",
     "scipy",
-    "vllm==0.7.3",
 ]
 build-backend = "setuptools.build_meta"
