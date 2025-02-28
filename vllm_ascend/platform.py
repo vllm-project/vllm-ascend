@@ -17,6 +17,7 @@
 
 import os
 from typing import TYPE_CHECKING, Optional, Tuple
+import vllm.envs as envs
 
 import torch
 
@@ -108,8 +109,13 @@ class NPUPlatform(Platform):
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
+            if vllm_config.scheduler_config.is_multi_step:
+                parallel_config.worker_cls = "vllm_ascend.multi_step_worker.MultiStepWorker"
+            else:
+                parallel_config.worker_cls = "vllm_ascend.worker.NPUWorker"
+
         cache_config = vllm_config.cache_config
+        vllm_config.scheduler_config.chunked_prefill_enabled = False
         if cache_config and cache_config.block_size is None:
             # TODO: Set block_size to 128 will lead unexpected accuracy issue in mla case.  Please set block_size to 128 back once the problem is fixed.
             cache_config.block_size = 16
