@@ -41,7 +41,7 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install /workspace/vllm/
 # Install vllm-ascend main
 RUN python3 -m pip install /workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/
 
-# Install modelscope
-RUN python3 -m pip install modelscope
+# Install modelscope (for fast download) and ray/net-tools (for multinode)
+RUN python3 -m pip install modelscope ray net-tools
 
 CMD ["/bin/bash"]
