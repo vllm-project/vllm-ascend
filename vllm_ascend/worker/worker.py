@@ -266,6 +266,12 @@ class NPUWorker(LocalOrDistributedWorkerBase):
                         self.parallel_config, self.device_config)
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
+        import torch_npu
+        for ve in range(self.parallel_config.pipeline_parallel_size):
+            num_layers = len(self.cache_engine[ve].gpu_cache)
+            for i in range(num_layers):
+                torch_npu.npu_format_cast(self.cache_engine[ve].gpu_cache[i],
+                                          2)
         self.gpu_cache = [
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)

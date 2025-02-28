@@ -246,11 +246,11 @@ class AscendQKVQuantAttentionMethod(BaseKVCacheMethod):
             self.quant_method.process_weights_after_loading(layer)
 
     def apply(self, layer: torch.nn.Module, query: torch.Tensor,
-              key: torch.Tensor, value: torch.Tensor,
-              kv_cache: List[torch.Tensor], scale: torch.Tensor,
+              key: torch.Tensor, value: torch.Tensor, key_cache: torch.Tensor,
+              value_cache: torch.Tensor, scale: torch.Tensor,
               seq_lens_tensor_cpu: int, block_tables: torch.Tensor,
               isPrefill: bool, attn_metadata, output) -> torch.Tensor:
-        return self.quant_method.apply(layer, query, key, value, kv_cache,
-                                       scale, seq_lens_tensor_cpu,
+        return self.quant_method.apply(layer, query, key, value, key_cache,
+                                       value_cache, scale, seq_lens_tensor_cpu,
                                        block_tables, isPrefill, attn_metadata,
                                        output)
