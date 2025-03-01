@@ -353,7 +353,7 @@ extern "C" __global__ __aicore__ void rope_custom_quant_##NEOX##_##TYPE(      \
     const int loop_num,                                 \
     const int core_num) {                               \
         AscendC::TPipe pipe;                            \
-        KernelRopeQuant<TYPE, NEOX, true> op{};                    \
+        KernelRope<TYPE, NEOX> op{};                    \
         op.Init(                                        \
             positions,                                  \
             query_dst,                                  \

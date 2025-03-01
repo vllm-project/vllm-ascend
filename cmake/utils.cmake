@@ -48,7 +48,7 @@ macro (append_cmake_prefix_path PKG EXPR)
 endmacro()
 
 
-#
+# This cmake function is adapted from vllm /Users/ganyi/workspace/vllm-ascend/cmake/utils.cmake
 # Define a target named `GPU_MOD_NAME` for a single extension. The
 # arguments are:
 #
