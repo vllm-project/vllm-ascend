@@ -69,6 +69,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
     ) -> None:
         # Register ops when worker init.
         from vllm_ascend import ops  # noqa: F401
+        from vllm_ascend.model_executor.models import qwen2_vl
 
         WorkerBase.__init__(self, vllm_config=vllm_config)
         # Try to import mindie_turbo to accelerate vLLM inference.
