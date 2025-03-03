@@ -17,7 +17,6 @@
 
 import os
 from typing import TYPE_CHECKING, Optional, Tuple
-import vllm.envs as envs
 
 import torch
 

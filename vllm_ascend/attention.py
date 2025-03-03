@@ -198,6 +198,17 @@ class AscendMetadata(AttentionMetadata):
 
     # FIXME: It is for flash attn.
     # Maximum sequence length among prefill batch. 0 if there are decoding
+    # Avoid mypy error
+    # Total number of prefill requests.
+    num_prefills: int
+    # Number of prefill tokens.
+    num_prefill_tokens: int
+    # (num_tokens,). The indices of the token slots that input tokens will be
+    # stored into. E.g., if `slot_mapping` is [35, 2, 17] and the block size
+    # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
+    # in block 0, and 1st slot in block 1, respectively.
+    slot_mapping: torch.Tensor
+
     # requests only.
     max_prefill_seq_len: int
     # Maximum sequence length among decode batch. 0 if there are prefill
@@ -218,15 +229,12 @@ class AscendMetadata(AttentionMetadata):
     # the computed tokens + new tokens None if it is a decoding.
     seq_lens: Optional[List[int]] = None
 
-    # seq_lens stored as a tensor.
-    seq_lens_tensor: Optional[torch.Tensor] = None
-
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int] = None
 
     # Max number of query tokens among request in the batch.
     max_decode_query_len: Optional[int] = None
-    
+
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
@@ -235,7 +243,6 @@ class AscendMetadata(AttentionMetadata):
     # the batch, used to index into sequence. E.g., if the sequence length is
     # [4, 6], it is [0, 4, 10].
     seq_start_loc: Optional[torch.Tensor] = None
-
 
     # Self-attention prefill/decode metadata cache
     _cached_prefill_metadata: Optional["AscendMetadata"] = None
@@ -254,11 +261,6 @@ class AscendMetadata(AttentionMetadata):
     num_encoder_tokens: Optional[int] = None
 
     attn_mask: Optional[torch.Tensor] = None
-
-    # Cross-attention memory-mapping data structures: slot mapping
-    # and block tables
-    cross_slot_mapping: Optional[torch.Tensor] = None
-    cross_block_tables: Optional[torch.Tensor] = None
 
     # Cross-attention memory-mapping data structures: slot mapping
     # and block tables
@@ -338,7 +340,7 @@ class AscendMetadata(AttentionMetadata):
         slot_mapping = (None if self.slot_mapping is None else
                         self.slot_mapping[self.num_prefill_tokens:])
         seq_lens = (None if self.seq_lens is None else
-                               self.seq_lens[self.num_prefills:])
+                    self.seq_lens[self.num_prefills:])
         seq_lens_tensor = (None if self.seq_lens_tensor is None else
                            self.seq_lens_tensor[self.num_prefills:])
         block_tables = (None if self.block_tables is None else
@@ -439,12 +441,12 @@ class AscendMetadata(AttentionMetadata):
         for i in range(num_queries):
             self.seq_lens[i] += 1
         self.max_decode_seq_len = max(self.seq_lens)
-        
-        
+
         # TODO optimize these codes using ascendc just like flash attention backend using cuda
-        
+
         # update input_tokens
-        model_input.input_tokens[:num_queries] = sampled_token_ids[:num_queries].squeeze(-1)
+        sampled_token_ids_list = sampled_token_ids[:num_queries].squeeze(-1) # type: ignore
+        model_input.input_tokens[:num_queries] = sampled_token_ids_list # type: ignore
 
         # get seq_lens and input_positions
         seq_lens = self.seq_lens_tensor[:num_queries]
@@ -453,13 +455,14 @@ class AscendMetadata(AttentionMetadata):
 
         # update seq_lens and input_positions
         self.seq_lens_tensor[:num_queries] = next_seq_lens
-        model_input.input_positions[:num_queries] = next_input_pos
+        model_input.input_positions[:num_queries] = next_input_pos # type: ignore
 
         # 计算 block index 和 offset
         block_idx = next_input_pos // block_size
         block_offset = next_input_pos % block_size
-        
-        current_block_table = self.block_tables.gather(1, block_idx.unsqueeze(-1)).squeeze(-1)
+
+        current_block_table = self.block_tables.gather(
+            1, block_idx.unsqueeze(-1)).squeeze(-1)
         slot_num = current_block_table * block_size + block_offset
 
         # update slot_mapping
