@@ -41,12 +41,12 @@ from vllm.utils import bind_kv_cache
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner_base import ModelRunnerBase
-from vllm.worker.pooling_model_runner import PoolingModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
-from vllm_ascend.model_runner import NPUModelRunner
 from vllm_ascend.utils import try_register_lib
+from vllm_ascend.worker.model_runner import NPUModelRunner
+from vllm_ascend.worker.pooling_model_runner import NPUPoolingModelRunner
 
 logger = init_logger(__name__)
 
@@ -98,10 +98,9 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             or (speculative_config.draft_model_config.hf_config.model_type
                 not in ["medusa", "mlp_speculator", "eagle"]) \
                     else {"return_hidden_states": True}
-
         ModelRunnerClass: Type[ModelRunnerBase] = NPUModelRunner
         if model_config.runner_type == "pooling":
-            ModelRunnerClass = PoolingModelRunner
+            ModelRunnerClass = NPUPoolingModelRunner
         elif self.model_config.is_encoder_decoder:
             ModelRunnerClass = EncoderDecoderModelRunner
         self.model_runner: ModelRunnerBase = ModelRunnerClass(
