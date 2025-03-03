@@ -58,6 +58,7 @@ class NPUPlatform(Platform):
     ray_device_key: str = "NPU"
     device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
     dispatch_key: str = "PrivateUse1"
+    communicate_backend: str = "hccl"
 
     supported_quantization: list[str] = ["ascend"]
 
@@ -128,3 +129,19 @@ class NPUPlatform(Platform):
     @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm_ascend.communicator.NPUCommunicator"
+
+    @classmethod
+    def set_device(cls, device: torch.device) -> None:
+        """
+        Usage of this function is discouraged in favor of device. In most cases
+        it’s better to use `vllm.current_platform.device_control_env_var` 
+        environmental variable.
+        """
+        return torch.npu.set_device(device)
+
+    @classmethod
+    def device_count(cls) -> int:
+        """
+        Return the number of devices available.
+        """
+        return torch.npu.device_count()
