@@ -1,10 +1,32 @@
-from vllm.worker.multi_step_model_runner import *
-from vllm_ascend.model_runner import NPUModelRunnerBase,ModelInputForNPUWithSamplingMetadata
+import dataclasses
+import functools
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+import torch
 from torch import nn
+from vllm.distributed import get_pp_group
+from vllm.logger import init_logger
+from vllm.model_executor.layers.sampler import (PromptLogprobs, SampleLogprobs,
+                                                SamplerOutput,
+                                                SamplingMetadata, get_logprobs,
+                                                get_pythonized_sample_results)
+from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
+                           Logprob, SequenceGroupMetadata, SequenceOutput)
+from vllm.utils import current_stream
+from vllm.worker.multi_step_model_runner import (ModelOutput,
+                                                 PythonizationCache,
+                                                 StatefulModelInput)
+
+from vllm_ascend.model_runner import (ModelInputForNPUWithSamplingMetadata,
+                                      NPUModelRunnerBase)
+
+logger = init_logger(__name__)
+
 
 class MultiStepModelNPURunner(NPUModelRunnerBase[StatefulModelInput]):
-        # mypy: enable-error-code=type-var
-        
+    # mypy: enable-error-code=type-var
+
     def __init__(self, base_model_runner: NPUModelRunnerBase, *args, **kwargs):
 
         super().__init__(*args, **kwargs)
@@ -26,10 +48,10 @@ class MultiStepModelNPURunner(NPUModelRunnerBase[StatefulModelInput]):
         # for this.
         self.pythonization_cache = PythonizationCache() \
             if self.parallel_config.pipeline_parallel_size == 1 else None
-    
+
     def get_model(self) -> nn.Module:
         return self.model
-    
+
     @functools.cached_property
     def _copy_stream(self):
         # used to copy tensors from GPU to CPU asynchronously

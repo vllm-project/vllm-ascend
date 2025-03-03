@@ -39,7 +39,8 @@ from vllm.attention.backends.utils import (CommonAttentionState,
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 if TYPE_CHECKING:
-    from vllm_ascend.model_runner import ModelInputForNPUBuilder,ModelInputForNPUWithSamplingMetadata
+    from vllm_ascend.model_runner import (ModelInputForNPUBuilder,
+                                          ModelInputForNPUWithSamplingMetadata)
 
 
 def generate_attn_mask(max_seq_len: int, dtype=torch.float16):
@@ -223,7 +224,7 @@ class AscendMetadata(AttentionMetadata):
 
     # Max number of query tokens among request in the batch.
     max_decode_query_len: Optional[int] = None
-    
+
     # (batch_size + 1,). The cumulative subquery lengths of the sequences in
     # the batch, used to index into subquery. E.g., if the subquery length
     # is [4, 6], it is [0, 4, 10].
@@ -232,7 +233,6 @@ class AscendMetadata(AttentionMetadata):
     # the batch, used to index into sequence. E.g., if the sequence length is
     # [4, 6], it is [0, 4, 10].
     seq_start_loc: Optional[torch.Tensor] = None
-
 
     # Self-attention prefill/decode metadata cache
     _cached_prefill_metadata: Optional["AscendMetadata"] = None
@@ -251,11 +251,6 @@ class AscendMetadata(AttentionMetadata):
     num_encoder_tokens: Optional[int] = None
 
     attn_mask: Optional[torch.Tensor] = None
-
-    # Cross-attention memory-mapping data structures: slot mapping
-    # and block tables
-    cross_slot_mapping: Optional[torch.Tensor] = None
-    cross_block_tables: Optional[torch.Tensor] = None
 
     # Cross-attention memory-mapping data structures: slot mapping
     # and block tables
@@ -332,7 +327,7 @@ class AscendMetadata(AttentionMetadata):
         slot_mapping = (None if self.slot_mapping is None else
                         self.slot_mapping[self.num_prefill_tokens:])
         seq_lens = (None if self.seq_lens is None else
-                               self.seq_lens[self.num_prefills:])
+                    self.seq_lens[self.num_prefills:])
         seq_lens_tensor = (None if self.seq_lens_tensor is None else
                            self.seq_lens_tensor[self.num_prefills:])
         block_tables = (None if self.block_tables is None else
@@ -432,12 +427,12 @@ class AscendMetadata(AttentionMetadata):
         for i in range(num_queries):
             self.seq_lens[i] += 1
         self.max_decode_seq_len = max(self.seq_lens)
-        
-        
+
         # TODO optimize these codes using ascendc just like flash attention backend using cuda
-        
+
         # update input_tokens
-        model_input.input_tokens[:num_queries] = sampled_token_ids[:num_queries].squeeze(-1)
+        sampled_token_ids_list = sampled_token_ids[:num_queries].squeeze(-1)
+        model_input.input_tokens[:num_queries] = sampled_token_ids_list
 
         # get seq_lens and input_positions
         seq_lens = self.seq_lens_tensor[:num_queries]
@@ -451,8 +446,9 @@ class AscendMetadata(AttentionMetadata):
         # 计算 block index 和 offset
         block_idx = next_input_pos // block_size
         block_offset = next_input_pos % block_size
-        
-        current_block_table = self.block_tables.gather(1, block_idx.unsqueeze(-1)).squeeze(-1)
+
+        current_block_table = self.block_tables.gather(
+            1, block_idx.unsqueeze(-1)).squeeze(-1)
         slot_num = current_block_table * block_size + block_offset
 
         # update slot_mapping
