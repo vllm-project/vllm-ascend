@@ -308,7 +308,10 @@ def get_npu_info(run_lambda):
 def get_cann_info(run_lambda):
     out = run_and_read_all(run_lambda, 'lscpu | grep Architecture:')
     cpu_arch = str(out).split()[-1]
-    return run_and_read_all(run_lambda, 'cat /usr/local/Ascend/ascend-toolkit/latest/{}-linux/ascend_toolkit_install.info'.format(cpu_arch))
+    return run_and_read_all(
+        run_lambda,
+        'cat /usr/local/Ascend/ascend-toolkit/latest/{}-linux/ascend_toolkit_install.info'
+        .format(cpu_arch))
 
 
 def get_env_vars():
