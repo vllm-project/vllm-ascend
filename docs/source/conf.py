@@ -70,8 +70,8 @@ myst_substitutions = {
     'vllm_ascend_version': 'main',
     # the newest release version of vllm-ascend and matched vLLM, used in pip install.
     # This value should be updated when cut down release.
-    'pip_vllm_ascend_version': "v0.7.1rc1",
-    'pip_vllm_version': "v0.7.1",
+    'pip_vllm_ascend_version': "0.7.3rc1",
+    'pip_vllm_version': "0.7.3",
 }
 
 # Add any paths that contain templates here, relative to this directory.

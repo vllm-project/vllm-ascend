@@ -237,7 +237,10 @@ docker run \
 ```
 
 Choose one machine as head node, the other are worker nodes, then start ray on each machine:
-:::{note} Check out your `nic_name` by command `ip addr`  :::
+
+:::{note}
+Check out your `nic_name` by command `ip addr`.
+:::
 
 ```shell
 # Head node
@@ -245,6 +248,7 @@ export HCCL_IF_IP={local_ip}
 export GLOO_SOCKET_IFNAME={nic_name}
 export TP_SOCKET_IFNAME={nic_name}
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 ray start --head --num-gpus=8
 
 # Worker node

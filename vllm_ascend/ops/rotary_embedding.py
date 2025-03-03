@@ -42,7 +42,7 @@ def rope_forward_oot(
         # TODO: Remove the contiguous in the future.
         query = query.contiguous()
         key = key.contiguous()
-        torch_npu.npu_rope(
+        torch_npu._npu_rotary_embedding(
             positions,
             query,
             key,
@@ -74,7 +74,7 @@ def rope_deepseek_forward_oot(
         ori_query_shape, ori_key_shape = query.shape, key.shape
         query = query.contiguous().view(query.shape[0], -1)
         key = key.contiguous().view(query.shape[0], -1)
-        torch_npu.npu_rope(
+        torch_npu._npu_rotary_embedding(
             positions,
             query,
             key,

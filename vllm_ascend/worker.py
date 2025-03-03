@@ -22,7 +22,6 @@ from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 import torch.distributed
-import torch_npu
 from torch import nn
 from vllm import envs
 from vllm.config import ParallelConfig, VllmConfig
@@ -84,9 +83,6 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         self.distributed_init_method = distributed_init_method
         self.is_driver_worker = is_driver_worker
 
-        if is_driver_worker:
-            assert rank % self.parallel_config.tensor_parallel_size == 0, \
-                   "Driver worker should be rank 0 of tensor parallel group."
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
@@ -127,6 +123,8 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
+            # lazy import so that torch_npu is not required for normal use.
+            import torch_npu
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)
