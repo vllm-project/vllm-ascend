@@ -72,7 +72,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         from vllm_ascend import patch  # noqa: F401
 
         # TODO: Remove this line after fixing the hard-coding issue in VLLM later.
-        from torch_npu.contrib import transfer_to_npu
+        from torch_npu.contrib import transfer_to_npu # noqa: F401
 
         WorkerBase.__init__(self, vllm_config=vllm_config)
         # Try to import mindie_turbo to accelerate vLLM inference.
