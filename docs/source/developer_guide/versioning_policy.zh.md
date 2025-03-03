@@ -46,6 +46,21 @@ vllm-ascend有主干和开发两种分支。
 | v0.7.3-dev | Maintained   | 基于vLLM v0.7.3版本CI看护 |
 | v0.7.1-dev | Unmaintained | 被v0.7.3-dev分支代替     |
 
+## 文档分支管理策略
+
+为了减少维护成本，**所有分支文档内容应当保持一致，版本的差异可以通过[docs/source/conf.py](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/conf.py)中的变量控制**，这不是一件简单的事情，但这是我们应该努力遵循的原则。
+
+| 版本 | 定位 | 代码分支 |
+|-----|-----|---------|
+| latest | 最新开发分支文档 | `vX.Y.Z-dev` （首个版本发布后为`main`） |
+| version | 历史发布版本的文档 | `vX.Y.Z[rcN]`等git tag |
+| stable（尚未发布） | 最新正式版分支文档 | 首个版本发布后为`vX.Y.Z-dev` |
+
+如上所示：
+- `latest`文档：最新发布版维护分支的文档，匹配当前维护分支`vX.Y.Z-dev`的文档（当首个正式版发布后，会更换为`main`分支），持续更新，保证最新发布版的文档持续可用。
+- `version`文档：发布版本的文档，对应版本为vX.Y.Z[rcN]（例如`v0.7.3`, `v0.7.3rc1`），版本发布后不会再更新。
+- `stable`文档（尚未发布）：正式版文档，**文档允许在release后实时更新**，通常是`vX.Y.Z-dev`。有稳定文档后，在非稳定版的文档顶部，应该提示: `您正在查看最新的开发者预览版文档。单击此处查看最新稳定版本的文档。`。
+
 ## 版本配套
 
 vLLM Ascend Plugin (`vllm-ascend`) 的关键配套关系如下:
