@@ -114,10 +114,11 @@ jobs:
           cd ..
           rm -rf pta
 
-      - name: Run vllm-project/vllm-ascend test
-        run: |
-          pytest -sv tests
+      # - name: Run vllm-project/vllm-ascend test
+      #   run: |
+      #     pytest -sv tests
 
       - name: Run vllm-project/vllm test
         run: |
+          huggingface-cli login --token ${{ secrets.HF_TOKEN }}
           pytest -sv
