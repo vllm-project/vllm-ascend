@@ -131,15 +131,6 @@ class NPUPlatform(Platform):
         return "vllm_ascend.communicator.NPUCommunicator"
 
     @classmethod
-    def set_device(cls, device: torch.device) -> None:
-        """
-        Usage of this function is discouraged in favor of device. In most cases
-        it’s better to use `vllm.current_platform.device_control_env_var` 
-        environmental variable.
-        """
-        return torch.npu.set_device(device)
-
-    @classmethod
     def device_count(cls) -> int:
         """
         Return the number of devices available.
