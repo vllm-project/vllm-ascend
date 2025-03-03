@@ -113,21 +113,37 @@ Once it's done, you can start to set up `vllm` and `vllm-ascend`.
 :selected:
 :sync: pip
 
-You can install `vllm` and `vllm-ascend` from **pre-built wheel**:
+You can install `vllm` and `vllm-ascend` from **pre-built wheel** (**Unreleased yet**, please build from source code):
 
 ```{code-block} bash
    :substitutions:
 
-# Install vllm from source, since `pip install vllm` doesn't work on CPU currently.
-# It'll be fixed in the next vllm release, e.g. v0.7.3.
-git clone --branch |pip_vllm_version| https://github.com/vllm-project/vllm
+# Install vllm-project/vllm from pypi
+pip install vllm==|pip_vllm_version|
 
+# Install vllm-project/vllm-ascend from pypi.
+pip install vllm-ascend==|pip_vllm_ascend_version| --extra-index https://download.pytorch.org/whl/cpu/
+```
+
+or build from **source code**:
+
+```{code-block} bash
+   :substitutions:
+
+# Install vLLM
+git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
 cd vllm
 VLLM_TARGET_DEVICE=empty pip install . --extra-index https://download.pytorch.org/whl/cpu/
 
-# Install vllm-ascend from pypi.
-pip install vllm-ascend==|pip_vllm_ascend_version| --extra-index https://download.pytorch.org/whl/cpu/
+# Install vLLM Ascend
+git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
+cd vllm-ascend
+pip install -e . --extra-index https://download.pytorch.org/whl/cpu/
+```
 
+Current version depends on a unreleased `torch-npu`, you need to install manually:
+
+```
 # Once the packages are installed, you need to install `torch-npu` manually,
 # because that vllm-ascend relies on an unreleased version of torch-npu.
 # This step will be removed in the next vllm-ascend release.
@@ -140,25 +156,10 @@ pip install vllm-ascend==|pip_vllm_ascend_version| --extra-index https://downloa
 #
 mkdir pta
 cd pta
-wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250218.4/pytorch_v2.5.1_py310.tar.gz
+wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250226.4/pytorch_v2.5.1_py310.tar.gz
 tar -xvf pytorch_v2.5.1_py310.tar.gz
 pip install ./torch_npu-2.5.1.dev20250226-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 ```
-
-or build from **source code**:
-
-```{code-block} bash
-   :substitutions:
-
-git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
-cd vllm
-VLLM_TARGET_DEVICE=empty pip install . --extra-index https://download.pytorch.org/whl/cpu/
-
-git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-pip install -e . --extra-index https://download.pytorch.org/whl/cpu/
-```
-
 ::::
 
 ::::{tab-item} Using docker
