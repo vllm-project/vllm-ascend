@@ -1,6 +1,6 @@
 #
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
+# Adapted from https://github.com/vllm-project/vllm/blob/main/collect_env.py
+# Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -47,16 +47,13 @@ SystemEnv = namedtuple(
         'pip_version',  # 'pip' or 'pip3'
         'pip_packages',
         'conda_packages',
-        'hip_compiled_version',
-        'hip_runtime_version',
-        'miopen_runtime_version',
         'is_xnnpack_available',
         'cpu_info',
-        'rocm_version',  # vllm specific field
-        'neuron_sdk_version',  # vllm specific field
         'vllm_version',  # vllm specific field
         'vllm_build_flags',  # vllm specific field
         'env_vars',
+        'npu_info',  # ascend specific field
+        'cann_info',  # ascend specific field
     ])
 
 DEFAULT_CONDA_PATTERNS = {
@@ -67,7 +64,6 @@ DEFAULT_CONDA_PATTERNS = {
     "magma",
     "triton",
     "optree",
-    "nccl",
     "transformers",
     "zmq",
     "pynvml",
@@ -81,7 +77,6 @@ DEFAULT_PIP_PATTERNS = {
     "triton",
     "optree",
     "onnx",
-    "nccl",
     "transformers",
     "zmq",
     "pynvml",
@@ -158,12 +153,6 @@ def get_clang_version(run_lambda):
 def get_cmake_version(run_lambda):
     return run_and_parse_first_match(run_lambda, 'cmake --version',
                                      r'cmake (.*)')
-
-
-def get_rocm_version(run_lambda):
-    """Returns the ROCm version if available, otherwise 'N/A'."""
-    return run_and_parse_first_match(run_lambda, 'hipcc --version',
-                                     r'HIP version: (\S+)')
 
 
 def get_vllm_version():
@@ -295,15 +284,6 @@ def get_pip_packages(run_lambda, patterns=None):
     return pip_version, out
 
 
-def get_neuron_sdk_version(run_lambda):
-    # Adapted from your install script
-    try:
-        result = run_lambda(["neuron-ls"])
-        return result if result[0] == 0 else 'N/A'
-    except Exception:
-        return 'N/A'
-
-
 def summarize_vllm_build_flags():
     # This could be a static method if the flags are constant, or dynamic if you need to check environment variables, etc.
     return 'ROCm: {}; Neuron: {}'.format(
@@ -321,11 +301,20 @@ def is_xnnpack_available():
         return "N/A"
 
 
+def get_npu_info(run_lambda):
+    return run_and_read_all(run_lambda, 'npu-smi info')
+
+
+def get_cann_info(run_lambda):
+    out = run_and_read_all(run_lambda, 'lscpu | grep Architecture:')
+    cpu_arch = str(out).split()[-1]
+    return run_and_read_all(run_lambda, 'cat /usr/local/Ascend/ascend-toolkit/latest/{}-linux/ascend_toolkit_install.info'.format(cpu_arch))
+
+
 def get_env_vars():
     env_vars = ''
     secret_terms = ('secret', 'token', 'api', 'access', 'password')
-    report_prefix = ("TORCH", "NCCL", "PYTORCH", "CUBLAS", "CUDNN", "OMP_",
-                     "MKL_")
+    report_prefix = ("TORCH", "PYTORCH", "ASCEND_")
     for k, v in os.environ.items():
         if any(term in k.lower() for term in secret_terms):
             continue
@@ -344,28 +333,13 @@ def get_env_info():
     if TORCH_AVAILABLE:
         version_str = torch.__version__
         debug_mode_str = str(torch.version.debug)
-        if not hasattr(torch.version, 'hip') or torch.version.hip is None:
-            hip_compiled_version = hip_runtime_version = miopen_runtime_version = 'N/A'
-        else:  # HIP version
-
-            def get_version_or_na(cfg, prefix):
-                _lst = [s.rsplit(None, 1)[-1] for s in cfg if prefix in s]
-                return _lst[0] if _lst else 'N/A'
-
-            cfg = torch._C._show_config().split('\n')
-            hip_runtime_version = get_version_or_na(cfg, 'HIP Runtime')
-            miopen_runtime_version = get_version_or_na(cfg, 'MIOpen')
-            hip_compiled_version = torch.version.hip
     else:
         version_str = debug_mode_str = 'N/A'
-        hip_compiled_version = hip_runtime_version = miopen_runtime_version = 'N/A'
 
     sys_version = sys.version.replace("\n", " ")
 
     conda_packages = get_conda_packages(run_lambda)
 
-    rocm_version = get_rocm_version(run_lambda)
-    neuron_sdk_version = get_neuron_sdk_version(run_lambda)
     vllm_version = get_vllm_version()
     vllm_build_flags = summarize_vllm_build_flags()
 
@@ -376,9 +350,6 @@ def get_env_info():
             sys_version,
             sys.maxsize.bit_length() + 1),
         python_platform=get_python_platform(),
-        hip_compiled_version=hip_compiled_version,
-        hip_runtime_version=hip_runtime_version,
-        miopen_runtime_version=miopen_runtime_version,
         pip_version=pip_version,
         pip_packages=pip_list_output,
         conda_packages=conda_packages,
@@ -389,18 +360,17 @@ def get_env_info():
         cmake_version=get_cmake_version(run_lambda),
         is_xnnpack_available=is_xnnpack_available(),
         cpu_info=get_cpu_info(run_lambda),
-        rocm_version=rocm_version,
-        neuron_sdk_version=neuron_sdk_version,
         vllm_version=vllm_version,
         vllm_build_flags=vllm_build_flags,
         env_vars=get_env_vars(),
+        npu_info=get_npu_info(run_lambda),
+        cann_info=get_cann_info(run_lambda),
     )
 
 
 env_info_fmt = """
 PyTorch version: {torch_version}
 Is debug build: {is_debug_build}
-ROCM used to build PyTorch: {hip_compiled_version}
 
 OS: {os}
 GCC version: {gcc_version}
@@ -410,8 +380,6 @@ Libc version: {libc_version}
 
 Python version: {python_version}
 Python platform: {python_platform}
-HIP runtime version: {hip_runtime_version}
-MIOpen runtime version: {miopen_runtime_version}
 Is XNNPACK available: {is_xnnpack_available}
 
 CPU:
@@ -428,13 +396,16 @@ Versions of relevant libraries:
 env_info_fmt += "\n"
 
 env_info_fmt += """
-ROCM Version: {rocm_version}
-Neuron SDK Version: {neuron_sdk_version}
 vLLM Version: {vllm_version}
 vLLM Build Flags:
 {vllm_build_flags}
 
 {env_vars}
+NPU:
+{npu_info}
+
+CANN:
+{cann_info}
 """.strip()
 
 
@@ -494,6 +465,8 @@ def pretty_str(envinfo):
         mutable_dict['conda_packages'] = prepend(
             mutable_dict['conda_packages'], '[conda] ')
     mutable_dict['cpu_info'] = envinfo.cpu_info
+    mutable_dict['npu_info'] = envinfo.npu_info
+    mutable_dict['cann_info'] = envinfo.cann_info
     return env_info_fmt.format(**mutable_dict)
 
 
