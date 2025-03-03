@@ -108,7 +108,11 @@ class NPUPlatform(Platform):
 
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm_ascend.worker.NPUWorker"
+            if vllm_config.speculative_config:
+                parallel_config.worker_cls = "vllm.spec_decode.spec_decode_worker.create_spec_worker"
+                parallel_config.sd_worker_cls = "vllm_ascend.worker.NPUWorker"
+            else:
+                parallel_config.worker_cls = "vllm_ascend.worker.NPUWorker"
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             # TODO: Set block_size to 128 will lead unexpected accuracy issue in mla case.  Please set block_size to 128 back once the problem is fixed.
