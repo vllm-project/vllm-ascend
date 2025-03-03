@@ -6,6 +6,7 @@ requires = [
     "decorator",
     "pyyaml",
     "scipy",
+    "einops",
     "torch-npu >= 2.5.1rc1"
 ]
 build-backend = "setuptools.build_meta"
