@@ -23,7 +23,7 @@ ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y && \
-    apt-get install -y python3-pip git vim net-tools && \
+    apt-get install -y python3-pip git vim wget net-tools && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
