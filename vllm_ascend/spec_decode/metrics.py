@@ -33,14 +33,15 @@ from vllm.utils import is_pin_memory_available
 Timer = Callable[[], float]
 
 
-def __npu_async_metrics_collector_init__(self,
-                spec_decode_sampler: SpecDecodeBaseSampler,
-                timer: Optional[Timer] = None,
-                collect_interval_s: float = 5.0):
+def __npu_async_metrics_collector_init__(
+        self,
+        spec_decode_sampler: SpecDecodeBaseSampler,
+        timer: Optional[Timer] = None,
+        collect_interval_s: float = 5.0):
     self.spec_decode_sampler = spec_decode_sampler
     self._timer = time.time if timer is None else timer
 
-    self._rank: Optional[int] = None
+    self._rank: Optional[int] = None  # noqa
 
     # We don't have a device set yet.
     self._copy_stream: Optional[torch.cuda.Stream] = None
@@ -50,10 +51,14 @@ def __npu_async_metrics_collector_init__(self,
     pin_memory = is_pin_memory_available()
     rank = torch_npu.npu.current_device()
     torch_npu.npu.set_device(f"npu:{rank}")
-    self._aggregate_num_accepted_tokens = torch.tensor(
-        0, dtype=torch.long, device="cpu", pin_memory=pin_memory)
-    self._aggregate_num_emitted_tokens = torch.tensor(
-        0, dtype=torch.long, device="cpu", pin_memory=pin_memory)
+    self._aggregate_num_accepted_tokens = torch.tensor(0, 
+                                                       dtype=torch.long, 
+                                                       device="cpu", 
+                                                       pin_memory=pin_memory)
+    self._aggregate_num_emitted_tokens = torch.tensor(0, 
+                                                      dtype=torch.long, 
+                                                      device="cpu", 
+                                                      pin_memory=pin_memory)
     self._aggregate_num_draft_tokens = 0
 
     self._rejsample_metrics_collect_interval_s = collect_interval_s
@@ -66,8 +71,8 @@ def init_gpu_tensors(self, rank: int) -> None:
 
 
 def init_tensors(self,
-                    rank: int,
-                    device_type: Union[torch.device, str] = 'npu') -> None:
+                 rank: int,
+                 device_type: Union[torch.device, str] = 'npu') -> None:
     self._rank = rank
     if isinstance(device_type, torch.device):
         device_type = device_type.type
@@ -91,6 +96,7 @@ def maybe_collect_rejsample_metrics(
 
     return None
 
+
 def _copy_rejsample_metrics_async(self) -> torch.cuda.Event:
     """Copy rejection/typical-acceptance sampling metrics
     (number of accepted tokens, etc) to CPU asynchronously.
@@ -102,8 +108,7 @@ def _copy_rejsample_metrics_async(self) -> torch.cuda.Event:
 
     with torch_npu.npu.stream(self._copy_stream):
         self._aggregate_num_accepted_tokens.copy_(
-            self.spec_decode_sampler.num_accepted_tokens,
-            non_blocking=True)
+            self.spec_decode_sampler.num_accepted_tokens, non_blocking=True)
         self._aggregate_num_emitted_tokens.copy_(
             self.spec_decode_sampler.num_emitted_tokens, non_blocking=True)
         # Number of draft tokens is calculated on CPU, so no copy is

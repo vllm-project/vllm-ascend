@@ -806,11 +806,10 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                 )
         elif attn_metadata.decode_metadata:
             assert kv_cache is not None
-            attn_output = torch.randn([num_tokens,
-                                      self.num_heads,
-                                      self.kv_lora_rank],
-                                      dtype=query.dtype,
-                                      device="npu")
+            attn_output = torch.randn(
+                [num_tokens, self.num_heads, self.kv_lora_rank],
+                dtype=query.dtype,
+                device="npu")
             self.seq_lens_tensor_cpu = torch.from_numpy(
                 np.array(attn_metadata.decode_metadata.seq_lens).astype(
                     np.int32))

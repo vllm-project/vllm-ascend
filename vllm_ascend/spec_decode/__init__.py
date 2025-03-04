@@ -15,4 +15,4 @@
 # limitations under the License.
 #
 
-import vllm_ascend.spec_decode.metrics
+import vllm_ascend.spec_decode.metrics  # noqa

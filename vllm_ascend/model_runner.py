@@ -1117,7 +1117,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
         model_kwargs = {}
         if previous_hidden_states is not None:
             model_kwargs["previous_hidden_states"] = previous_hidden_states
-        
+
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_start = torch_npu.npu.Event(enable_timing=True)

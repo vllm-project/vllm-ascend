@@ -48,4 +48,5 @@ def _multinomial(
 
     return probs.div_(q).argmax(dim=1).view(-1, num_samples)
 
+
 rejection_sampler._multinomial = _multinomial
