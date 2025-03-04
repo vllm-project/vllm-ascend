@@ -3,4 +3,4 @@ pyyaml
 scipy
 setuptools
 setuptools-scm
-vllm==0.7.3
+

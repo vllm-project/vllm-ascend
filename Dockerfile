@@ -23,7 +23,7 @@ ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update -y && \
-    apt-get install -y python3-pip git vim gcc g++ cmake libnuma-dev kmod && \
+    apt-get install -y python3-pip git vim wget net-tools && \
     rm -rf /var/cache/apt/* && \
     rm -rf /var/lib/apt/lists/*
 
@@ -33,13 +33,19 @@ COPY . /workspace/vllm-ascend/
 
 RUN pip config set global.index-url ${PIP_INDEX_URL}
 
-# Install vllm and vllm-ascend
+# Install vLLM
+ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
+ARG VLLM_TAG=v0.7.3
+RUN git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /workspace/vllm
+RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install /workspace/vllm/
+
+# Install vllm-ascend
 RUN python3 -m pip install /workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/
 
 # Install torch-npu
 RUN bash /workspace/vllm-ascend/pta_install.sh
 
-# Install modelscope
+# Install modelscope (for fast download) and ray (for multinode)
 RUN python3 -m pip install modelscope ray
 
 CMD ["/bin/bash"]
