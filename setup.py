@@ -20,6 +20,7 @@
 import os
 from typing import List, Dict
 import importlib.util
+from shutil import which
 
 from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
@@ -104,9 +105,10 @@ class cmake_build_ext(build_ext):
         # match.
         cmake_args += ['-DVLLM_PYTHON_EXECUTABLE={}'.format(sys.executable)]
 
-        # Pass the python path to cmake so it can reuse the build dependencies
-        # on subsequent calls to python.
-        cmake_args += ['-DVLLM_PYTHON_PATH={}'.format(":".join(sys.path))]
+        # enable ccache if ccache is availiable for compile speedup
+        if which("ccache") is not None:
+                cmake_args += ['-DCMAKE_C_COMPILER_LAUNCHER=ccache',
+                            '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache']
 
         # Override the base directory for FetchContent downloads to $ROOT/.deps
         # This allows sharing dependencies between profiles,
@@ -120,13 +122,18 @@ class cmake_build_ext(build_ext):
         # Setup parallelism and build tool
         #
 
+
+        build_tool = []
+        # TODO(ganyi): ninja support for ascend c auto codegen. now we can only use make build
+        # if which('ninja') is not None:
+        #     build_tool += ['-G', 'Ninja']
+        # Default build tool to whatever cmake picks.
+
         subprocess.check_call(
             ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
             cwd=self.build_temp)
 
 
-        # Default build tool to whatever cmake picks.
-        build_tool = []
         subprocess.check_call(
             ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
             cwd=self.build_temp)
