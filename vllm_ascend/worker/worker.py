@@ -33,7 +33,6 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
@@ -41,12 +40,13 @@ from vllm.utils import bind_kv_cache
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner_base import ModelRunnerBase
-from vllm.worker.pooling_model_runner import PoolingModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
-from vllm_ascend.model_runner import NPUModelRunner
+from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import try_register_lib
+from vllm_ascend.worker.model_runner import NPUModelRunner
+from vllm_ascend.worker.pooling_model_runner import NPUPoolingModelRunner
 
 logger = init_logger(__name__)
 
@@ -65,8 +65,10 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         rank: int,
         distributed_init_method: str,
         is_driver_worker: bool = False,
-        model_runner_cls: Optional[Type[ModelRunnerBase]] = None,
     ) -> None:
+        # TODO: Remove this line after fixing the hard-coding issue in VLLM later.
+        from torch_npu.contrib import transfer_to_npu  # noqa: F401
+
         # Register ops and patch when worker init.
         from vllm_ascend import ops  # noqa: F401
         from vllm_ascend import patch  # noqa: F401
@@ -102,7 +104,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
 
         ModelRunnerClass: Type[ModelRunnerBase] = NPUModelRunner
         if model_config.runner_type == "pooling":
-            ModelRunnerClass = PoolingModelRunner
+            ModelRunnerClass = NPUPoolingModelRunner
         elif self.model_config.is_encoder_decoder:
             ModelRunnerClass = EncoderDecoderModelRunner
         self.model_runner: ModelRunnerBase = ModelRunnerClass(
@@ -111,8 +113,6 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             is_driver_worker=is_driver_worker,
             **speculative_args,
         )
-        if model_runner_cls is not None:
-            self.model_runner = model_runner_cls(self.model_runner)
 
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
@@ -156,6 +156,26 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         else:
             self.profiler = None
 
+    def init_device(self) -> None:
+        if self.device_config.device.type == "npu":
+            self.device = torch.device(f"npu:{self.local_rank}")
+            NPUPlatform.set_device(self.device)
+            NPUPlatform.empty_cache()
+            self.init_npu_memory = NPUPlatform.mem_get_info()[0]
+        else:
+            raise RuntimeError(
+                f"Not support device type: {self.device_config.device}")
+        # Initialize the distributed environment.
+        self._init_worker_distributed_environment(self.parallel_config,
+                                                  self.rank,
+                                                  self.distributed_init_method,
+                                                  self.local_rank)
+        # Set random seed.
+        set_random_seed(self.model_config.seed)
+
+    def load_model(self):
+        self.model_runner.load_model()
+
     def start_profile(self):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
@@ -165,28 +185,6 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         self.profiler.stop()
-
-    def init_device(self) -> None:
-        if self.device_config.device.type == "npu":
-            # # This env var set by Ray causes exceptions with graph building.
-            # os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
-            self.device = torch.device(f"npu:{self.local_rank}")
-            current_platform.set_device(self.device)
-
-            current_platform.empty_cache()
-            self.init_npu_memory = current_platform.mem_get_info()[0]
-        else:
-            raise RuntimeError(
-                f"Not support device type: {self.device_config.device}")
-        # Initialize the distributed environment.
-        init_worker_distributed_environment(self.parallel_config, self.rank,
-                                            self.distributed_init_method,
-                                            self.local_rank)
-        # Set random seed.
-        set_random_seed(self.model_config.seed)
-
-    def load_model(self):
-        self.model_runner.load_model()
 
     def save_sharded_state(
         self,
@@ -207,7 +205,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         self.model_runner.save_tensorized_model(
             tensorizer_config=tensorizer_config, )
 
-    @current_platform.inference_mode()
+    @NPUPlatform.inference_mode()
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Profiles the peak memory usage of the model to determine how many
         KV blocks may be allocated without OOMs.
@@ -220,7 +218,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
-        current_platform.empty_cache()
+        NPUPlatform.empty_cache()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -228,7 +226,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
-        free_npu_memory, total_npu_memory = current_platform.mem_get_info()
+        free_npu_memory, total_npu_memory = NPUPlatform.mem_get_info()
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
         peak_memory = self.init_npu_memory - free_npu_memory
@@ -249,7 +247,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         gc.collect()
         # TODO: don`t need impl this func after empty_cache in
         # Worker.determine_num_available_blocks() unified`
-        current_platform.empty_cache()
+        NPUPlatform.empty_cache()
         return num_npu_blocks, num_cpu_blocks
 
     def initialize_cache(self, num_gpu_blocks: int,
@@ -449,21 +447,21 @@ class NPUWorker(LocalOrDistributedWorkerBase):
                                                 self.model_config,
                                                 self.parallel_config)
 
-
-def init_worker_distributed_environment(
-        parallel_config: ParallelConfig,
-        rank: int,
-        distributed_init_method: Optional[str] = None,
-        local_rank: int = -1,
-        backend: str = "hccl") -> None:
-    """Initialize the distributed environment."""
-    set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
-
-    init_distributed_environment(parallel_config.world_size, rank,
-                                 distributed_init_method, local_rank, backend)
-
-    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
-                                      parallel_config.pipeline_parallel_size)
+    def _init_worker_distributed_environment(
+            self,
+            parallel_config: ParallelConfig,
+            rank: int,
+            distributed_init_method: Optional[str] = None,
+            local_rank: int = -1,
+            backend: str = "hccl") -> None:
+        """Initialize the distributed environment."""
+        set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
+        init_distributed_environment(parallel_config.world_size, rank,
+                                     distributed_init_method, local_rank,
+                                     backend)
+        ensure_model_parallel_initialized(
+            parallel_config.tensor_parallel_size,
+            parallel_config.pipeline_parallel_size)
 
 
 def raise_if_cache_size_invalid(num_gpu_blocks, block_size, is_attention_free,
