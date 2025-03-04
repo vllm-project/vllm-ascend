@@ -46,6 +46,20 @@ Usually, each minor version of vLLM (such as 0.7) will correspond to a vllm-asce
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version |
 | v0.7.1-dev | Unmaintained | Replaced by v0.7.3-dev               |
 
+## Document Branch Policy
+To reduce maintenance costs, **all branch documentation content should remain consistent, and version differences can be controlled via variables in [docs/source/conf.py](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/conf.py)**. While this is not a simple task, it is a principle we should strive to follow.
+
+| Version | Purpose | Code Branch |
+|-----|-----|---------|
+| latest | Doc for the latest dev branch | vX.Y.Z-dev (Will be `main` after the first final release) |
+| version | Doc for historical released versions | Git tags, like vX.Y.Z[rcN] |
+| stable（not yet released） | Doc for latest final release branch | Will be `vX.Y.Z-dev` after the first official release |
+
+As shown above:
+
+- `latest` documentation: Matches the current maintenance branch `vX.Y.Z-dev` (Will be `main` after the first final release). Continuously updated to ensure usability for the latest release.
+- `version` documentation: Corresponds to specific released versions (e.g., `v0.7.3`, `v0.7.3rc1`). No further updates after release.
+- `stable` documentation (**not yet released**): Official release documentation. Updates are allowed in real-time after release, typically based on vX.Y.Z-dev. Once stable documentation is available, non-stable versions should display a header warning: `You are viewing the latest developer preview docs. Click here to view docs for the latest stable release.`.
 
 ## Release Compatibility Matrix
 

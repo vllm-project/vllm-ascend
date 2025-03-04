@@ -47,7 +47,6 @@ from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs, MultiModalPlaceholderMap,
                              MultiModalRegistry)
-from vllm.platforms import current_platform
 from vllm.prompt_adapter.layers import PromptAdapterMapping
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -808,6 +807,9 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
               SamplingMetadataCache() \
                 if self.parallel_config.pipeline_parallel_size == 1 else None
 
+    def get_model(self) -> nn.Module:
+        return self.model
+
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:
@@ -1261,86 +1263,3 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
 
         return self.vllm_config.kv_transfer_config.is_kv_producer and (
             not is_profile_run) and is_prefill_run
-
-    @current_platform.inference_mode()
-    def profile_run(self) -> None:
-        # Enable top-k sampling to reflect the accurate memory usage.
-        sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
-        max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
-        max_num_seqs = self.scheduler_config.max_num_seqs
-
-        # Profile memory usage with max_num_sequences sequences and the total
-        # number of tokens equal to max_num_batched_tokens.
-        seqs: List[SequenceGroupMetadata] = []
-        # Additional GPU memory may be needed for multi-modal encoding, which
-        # needs to be accounted for when calculating the GPU blocks for
-        # vLLM blocker manager.
-        # To exercise the worst scenario for GPU memory consumption,
-        # the number of seqs (batch_size) is chosen to maximize the number
-        # of images processed.
-
-        max_mm_tokens = self.mm_registry.get_max_multimodal_tokens(
-            self.model_config)
-        if max_mm_tokens > 0:
-            max_num_seqs_orig = max_num_seqs
-            max_num_seqs = min(max_num_seqs,
-                               max_num_batched_tokens // max_mm_tokens)
-            if max_num_seqs < 1:
-                expr = (f"min({max_num_seqs_orig}, "
-                        f"{max_num_batched_tokens} // {max_mm_tokens})")
-                logger.warning(
-                    "Computed max_num_seqs (%s) to be less than 1. "
-                    "Setting it to the minimum value of 1.", expr)
-                max_num_seqs = 1
-
-        batch_size = 0
-        for group_id in range(max_num_seqs):
-            seq_len = (max_num_batched_tokens // max_num_seqs +
-                       (group_id < max_num_batched_tokens % max_num_seqs))
-            batch_size += seq_len
-
-            dummy_data = self.input_registry \
-                .dummy_data_for_profiling(self.model_config,
-                                          seq_len,
-                                          self.mm_registry)
-
-            seq = SequenceGroupMetadata(
-                request_id=str(group_id),
-                is_prompt=True,
-                seq_data={group_id: dummy_data.seq_data},
-                sampling_params=sampling_params,
-                block_tables=None,
-                lora_request=None,
-                multi_modal_data=dummy_data.multi_modal_data,
-                multi_modal_placeholders=dummy_data.multi_modal_placeholders,
-            )
-            seqs.append(seq)
-
-        # Run the model with the dummy inputs.
-        num_layers = self.model_config.get_num_layers(self.parallel_config)
-        # use an empty tensor instead of `None`` to force Dynamo to pass
-        # it by reference, rather by specializing on the value ``None``.
-        # the `dtype` argument does not matter, and we use `float32` as
-        # a placeholder (it has wide hardware support).
-        # it is important to create tensors inside the loop, rather than
-        # multiplying the list, to avoid Dynamo from treating them as
-        # tensor aliasing.
-        kv_caches = [
-            torch.tensor([], dtype=torch.float32, device=self.device)
-            for _ in range(num_layers)
-        ]
-        finished_requests_ids = [seq.request_id for seq in seqs]
-        model_input = self.prepare_model_input(
-            seqs, finished_requests_ids=finished_requests_ids)
-        intermediate_tensors = None
-        if not get_pp_group().is_first_rank:
-            intermediate_tensors = self.model.make_empty_intermediate_tensors(
-                batch_size=batch_size,
-                dtype=self.model_config.dtype,
-                device=self.device)
-        self.execute_model(model_input, kv_caches, intermediate_tensors)
-        current_platform.synchronize()
-        return
-
-    def get_model(self) -> nn.Module:
-        return self.model
