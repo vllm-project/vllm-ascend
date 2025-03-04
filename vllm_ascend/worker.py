@@ -95,7 +95,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         model_config = self.model_config
 
         if speculative_config:
-            from vllm_ascend import spec_decode # noqa: F401
+            from vllm_ascend import spec_decode  # noqa: F401
 
         speculative_args = {} if speculative_config is None \
             or (speculative_config.draft_model_config.hf_config.model_type ==

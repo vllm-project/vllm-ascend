@@ -51,13 +51,13 @@ def __npu_async_metrics_collector_init__(
     pin_memory = is_pin_memory_available()
     rank = torch_npu.npu.current_device()
     torch_npu.npu.set_device(f"npu:{rank}")
-    self._aggregate_num_accepted_tokens = torch.tensor(0, 
-                                                       dtype=torch.long, 
-                                                       device="cpu", 
+    self._aggregate_num_accepted_tokens = torch.tensor(0,
+                                                       dtype=torch.long,
+                                                       device="cpu",
                                                        pin_memory=pin_memory)
-    self._aggregate_num_emitted_tokens = torch.tensor(0, 
-                                                      dtype=torch.long, 
-                                                      device="cpu", 
+    self._aggregate_num_emitted_tokens = torch.tensor(0,
+                                                      dtype=torch.long,
+                                                      device="cpu",
                                                       pin_memory=pin_memory)
     self._aggregate_num_draft_tokens = 0
 
@@ -97,7 +97,7 @@ def maybe_collect_rejsample_metrics(
     return None
 
 
-def _copy_rejsample_metrics_async(self) -> torch.cuda.Event:
+def _copy_rejsample_metrics_async(self) -> torch_npu.npu.Event:
     """Copy rejection/typical-acceptance sampling metrics
     (number of accepted tokens, etc) to CPU asynchronously.
 
