@@ -16,6 +16,6 @@
 | Multi step scheduler | ✗ | Plan in 2025 Q1 |
 | Best of | ✅ ||
 | Beam search | ✅ ||
-| Guided Decoding | ✗ | Plan in 2025 Q1 |
+| Guided Decoding | ✅ ||
 | Tensor Parallel | ✅ | Only "mp" supported now |
 | Pipeline Parallel | ✅ | Only "mp" supported now |
