@@ -223,23 +223,7 @@ class AscendQKVQuantAttentionMethod(BaseKVCacheMethod):
         self.quant_method = self.quantizer.build_attention_method()
 
     def create_weights(self, layer: torch.nn.Module) -> None:
-        # ascend attention quantization might include some extra weights
-        # and must be loaded by dummy modules
-        extra_module_names = self.quant_method.get_extra_module_names()
-        for name in extra_module_names:
-            setattr(layer, name, torch.nn.Module())
-
-        # During model initialization, the default dtype is set as the model
-        # weight and activation dtype.
-        dtype = torch.get_default_dtype()
-        weights = self.quant_method.create_weights(dtype, layer.num_heads,
-                                                   layer.num_kv_heads)
-
-        for name, weight in weights.items():
-            module_name, weight_name = name.split('.')
-            module = getattr(layer, module_name)
-            module.register_parameter(
-                weight_name, torch.nn.Parameter(weight, requires_grad=False))
+        self.quant_method.create_weights(layer)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
