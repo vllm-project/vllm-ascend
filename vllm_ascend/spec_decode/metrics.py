@@ -118,7 +118,7 @@ def _copy_rejsample_metrics_async(self) -> torch.cuda.Event:
 
 
 AsyncMetricsCollector.__init__ = __npu_async_metrics_collector_init__
-AsyncMetricsCollector.init_gpu_memory = init_gpu_memory
+AsyncMetricsCollector.init_gpu_tensors = init_gpu_tensors
 AsyncMetricsCollector.init_tensors = init_tensors
 AsyncMetricsCollector.maybe_collect_rejsample_metrics = maybe_collect_rejsample_metrics
 AsyncMetricsCollector._copy_rejsample_metrics_async = _copy_rejsample_metrics_async

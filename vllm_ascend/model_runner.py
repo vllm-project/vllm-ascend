@@ -1115,7 +1115,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
 
         previous_hidden_states = kwargs.get("previous_hidden_states")
         model_kwargs = {}
-        if prefill_hidden_states is not None:
+        if previous_hidden_states is not None:
             model_kwargs["previous_hidden_states"] = previous_hidden_states
         
         if (self.observability_config is not None
