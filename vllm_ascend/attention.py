@@ -813,6 +813,8 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                 )
         elif attn_metadata.decode_metadata:
             assert kv_cache is not None
+            # if torch.empty is used here, the preemptive scheduling case of
+            # test_mtp_correctness.py will fail to run.
             attn_output = torch.randn(
                 [num_tokens, self.num_heads, self.kv_lora_rank],
                 dtype=query.dtype,

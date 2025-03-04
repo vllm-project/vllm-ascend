@@ -41,6 +41,8 @@ def __npu_async_metrics_collector_init__(
     self._in_flight_copy = None
 
     pin_memory = is_pin_memory_available()
+    # The set_device here can be removed in the next version and fixed it
+    # by an environment variable.
     rank = torch_npu.npu.current_device()
     torch_npu.npu.set_device(f"npu:{rank}")
     self._aggregate_num_accepted_tokens = torch.tensor(0,
@@ -93,7 +95,7 @@ def _copy_rejsample_metrics_async(self) -> torch_npu.npu.Event:
     """Copy rejection/typical-acceptance sampling metrics
     (number of accepted tokens, etc) to CPU asynchronously.
 
-    Returns a CUDA event recording when the copy is complete.
+    Returns a Ascend NPU event recording when the copy is complete.
     """
     assert self._copy_stream is not None
     self._copy_stream.wait_stream(torch_npu.npu.current_stream())
