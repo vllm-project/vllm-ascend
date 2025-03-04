@@ -65,6 +65,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         rank: int,
         distributed_init_method: str,
         is_driver_worker: bool = False,
+        model_runner_cls: Optional[Type[ModelRunnerBase]] = None
     ) -> None:
         # TODO: Remove this line after fixing the hard-coding issue in VLLM later.
         from torch_npu.contrib import transfer_to_npu  # noqa: F401
@@ -113,6 +114,8 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             is_driver_worker=is_driver_worker,
             **speculative_args,
         )
+        if model_runner_cls is not None:
+            self.model_runner = model_runner_cls(self.model_runner)
 
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
