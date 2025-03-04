@@ -67,6 +67,9 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         is_driver_worker: bool = False,
         model_runner_cls: Optional[Type[ModelRunnerBase]] = None,
     ) -> None:
+        # TODO: Remove this line after fixing the hard-coding issue in VLLM later.
+        from torch_npu.contrib import transfer_to_npu  # noqa: F401
+
         # Register ops and patch when worker init.
         from vllm_ascend import ops  # noqa: F401
         from vllm_ascend import patch  # noqa: F401
