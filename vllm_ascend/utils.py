@@ -22,7 +22,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-def try_register_lib(lib_name: str, lib_info: str = ""):
+def try_register_lib(lib_name: str, lib_info: str = "") -> bool:
     import importlib
     import importlib.util
     try:
@@ -31,5 +31,6 @@ def try_register_lib(lib_name: str, lib_info: str = ""):
             importlib.import_module(lib_name)
             if lib_info:
                 logger.info(lib_info)
+        return True
     except Exception:
-        pass
+        return False

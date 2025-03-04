@@ -72,10 +72,13 @@ class NPUWorker(LocalOrDistributedWorkerBase):
 
         WorkerBase.__init__(self, vllm_config=vllm_config)
         # Try to import mindie_turbo to accelerate vLLM inference.
-        try_register_lib(
+        enable_mindie_turbo = try_register_lib(
             "mindie_turbo",
             "MindIE Turbo is installed. vLLM inference will be accelerated with MindIE Turbo."
         )
+        if enable_mindie_turbo:
+            from mindie_turbo import VLLMTurbo
+            vllm_turbo = VLLMTurbo(vllm_config)
         # distribute related config
         self.parallel_config.rank = rank
         self.local_rank = local_rank
