@@ -59,13 +59,13 @@ class NPUWorker(LocalOrDistributedWorkerBase):
     """
 
     def __init__(
-        self,
-        vllm_config: VllmConfig,
-        local_rank: int,
-        rank: int,
-        distributed_init_method: str,
-        is_driver_worker: bool = False,
-        model_runner_cls: Optional[Type[ModelRunnerBase]] = None
+            self,
+            vllm_config: VllmConfig,
+            local_rank: int,
+            rank: int,
+            distributed_init_method: str,
+            is_driver_worker: bool = False,
+            model_runner_cls: Optional[Type[ModelRunnerBase]] = None
     ) -> None:
         # TODO: Remove this line after fixing the hard-coding issue in VLLM later.
         from torch_npu.contrib import transfer_to_npu  # noqa: F401
