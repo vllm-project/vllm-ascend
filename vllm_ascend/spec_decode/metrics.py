@@ -36,13 +36,9 @@ def __npu_async_metrics_collector_init__(
         collect_interval_s: float = 5.0):
     self.spec_decode_sampler = spec_decode_sampler
     self._timer = time.time if timer is None else timer
-
-    self._rank: Optional[int] = None  # noqa
-
-    # We don't have a device set yet.
-    self._copy_stream: Optional[torch.cuda.Stream] = None
-
-    self._in_flight_copy: Optional[torch.cuda.Event] = None
+    self._rank = None
+    self._copy_stream = None
+    self._in_flight_copy = None
 
     pin_memory = is_pin_memory_available()
     rank = torch_npu.npu.current_device()
