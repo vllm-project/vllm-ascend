@@ -1263,6 +1263,3 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
 
         return self.vllm_config.kv_transfer_config.is_kv_producer and (
             not is_profile_run) and is_prefill_run
-
-    def get_model(self) -> nn.Module:
-        return self.model
