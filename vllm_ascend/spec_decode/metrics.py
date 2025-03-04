@@ -19,15 +19,10 @@ import time
 from typing import Callable, Optional, Union
 
 import torch
-
-try:
-    import torch_npu
-except ImportError:
-    print("Failed to import torch_npu")
-
-from vllm.spec_decode.metrics import AsyncMetricsCollector, SpecDecodeWorkerMetrics
+import torch_npu
 from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeBaseSampler)
+from vllm.spec_decode.metrics import AsyncMetricsCollector, SpecDecodeWorkerMetrics
 from vllm.utils import is_pin_memory_available
 
 Timer = Callable[[], float]
