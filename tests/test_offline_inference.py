@@ -30,6 +30,7 @@ import vllm_ascend  # noqa: F401
 
 MODELS = [
     "Qwen/Qwen2.5-0.5B-Instruct",
+    "deepseek-ai/DeepSeek-V2-Lite"
 ]
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 
