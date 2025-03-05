@@ -41,7 +41,11 @@ logger = init_logger(__name__)
 
 @register_quantization_config("ascend")
 class AscendQuantConfig(QuantizationConfig):
-    """Config class for Ascend"""
+    """Config class for Ascend
+    
+    This class is a general class that parse quantization configs
+    that are supported on ascend hardware.
+    """
 
     def __init__(self, quant_config: Dict[str, Any]):
         self.quant_description = quant_config
@@ -87,7 +91,7 @@ class AscendQuantConfig(QuantizationConfig):
             return AscendLinearMethod(self)
         if isinstance(layer, Attention) and \
             'fa_quant_type' in self.quant_description.keys():
-            return AscendQKVQuantAttentionMethod(self)
+            return AscendKVCacheMethod(self)
         return None
 
     def is_layer_skipped_ascend(
@@ -126,6 +130,9 @@ class AscendQuantConfig(QuantizationConfig):
 
 class AscendLinearMethod(LinearMethodBase):
     """Linear method for Ascend quantization.
+
+    This class calls AscendQuantizer to search a specific quantization
+    implementations supported on ascend hardware for linear methods.
 
     Args:
         quant_config: The Ascend quantization config.
@@ -203,8 +210,11 @@ class AscendLinearMethod(LinearMethodBase):
         return self.quant_method.apply(layer, x, bias)
 
 
-class AscendQKVQuantAttentionMethod(BaseKVCacheMethod):
-    """Linear method for Ascend quantization.
+class AscendKVCacheMethod(BaseKVCacheMethod):
+    """KVCache method for Ascend quantization.
+
+    This class calls AscendQuantizer to search a specific quantization
+    implementations supported on ascend hardware for kvcache methods.
 
     Args:
         quant_config: The Ascend quantization config.
@@ -216,6 +226,9 @@ class AscendQKVQuantAttentionMethod(BaseKVCacheMethod):
         self.quant_method = self.quantizer.build_attention_method()
 
     def create_weights(self, layer: torch.nn.Module) -> None:
+        # Different from linear method, there are no weight processing/slicing
+        # steps for attention in vllm. So the whole process of create weights
+        # is hidden into the specific quant method.
         self.quant_method.create_weights(layer)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
