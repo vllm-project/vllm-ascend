@@ -59,11 +59,6 @@ def __npu_async_metrics_collector_init__(
     self._last_metrics_collect_time = self._timer()
 
 
-def init_gpu_tensors(self, rank: int) -> None:
-    self._rank = rank
-    self._copy_stream = torch_npu.npu.Stream()
-
-
 def init_tensors(self,
                  rank: int,
                  device_type: Union[torch.device, str] = 'npu') -> None:
@@ -91,33 +86,6 @@ def maybe_collect_rejsample_metrics(
     return None
 
 
-def _copy_rejsample_metrics_async(self) -> torch_npu.npu.Event:
-    """Copy rejection/typical-acceptance sampling metrics
-    (number of accepted tokens, etc) to CPU asynchronously.
-
-    Returns a Ascend NPU event recording when the copy is complete.
-    """
-    assert self._copy_stream is not None
-    self._copy_stream.wait_stream(torch_npu.npu.current_stream())
-
-    with torch_npu.npu.stream(self._copy_stream):
-        self._aggregate_num_accepted_tokens.copy_(
-            self.spec_decode_sampler.num_accepted_tokens, non_blocking=True)
-        self._aggregate_num_emitted_tokens.copy_(
-            self.spec_decode_sampler.num_emitted_tokens, non_blocking=True)
-        # Number of draft tokens is calculated on CPU, so no copy is
-        # required.
-        self._aggregate_num_draft_tokens = (
-            self.spec_decode_sampler.num_draft_tokens)
-
-    aggregate_metrics_ready = torch_npu.npu.Event()
-    aggregate_metrics_ready.record(self._copy_stream)
-
-    return aggregate_metrics_ready
-
-
 AsyncMetricsCollector.__init__ = __npu_async_metrics_collector_init__
-AsyncMetricsCollector.init_gpu_tensors = init_gpu_tensors
 AsyncMetricsCollector.init_tensors = init_tensors
 AsyncMetricsCollector.maybe_collect_rejsample_metrics = maybe_collect_rejsample_metrics
-AsyncMetricsCollector._copy_rejsample_metrics_async = _copy_rejsample_metrics_async
