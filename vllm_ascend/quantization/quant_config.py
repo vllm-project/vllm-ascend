@@ -30,9 +30,9 @@ from vllm.model_executor.layers.quantization import \
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.parameter import (PerTensorScaleParameter,
-                                           ChannelQuantScaleParameter,
-                                           ModelWeightParameter)
+from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
+                                           ModelWeightParameter,
+                                           PerTensorScaleParameter)
 
 from .quantizer import AscendQuantizer
 
@@ -88,10 +88,10 @@ class AscendQuantConfig(QuantizationConfig):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
                 return UnquantizedLinearMethod()
-            return AscendLinearMethod(self)
+            return AscendLinearMethod(self, prefix)
         if isinstance(layer, Attention) and \
             'fa_quant_type' in self.quant_description.keys():
-            return AscendKVCacheMethod(self)
+            return AscendKVCacheMethod(self, prefix)
         return None
 
     def is_layer_skipped_ascend(
@@ -156,21 +156,16 @@ class AscendLinearMethod(LinearMethodBase):
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
 
-        weight_dict = self.quant_method.get_weight(
-            input_size_per_partition,
-            output_size_per_partition,
-            params_dtype
-        )
+        weight_dict = self.quant_method.get_weight(input_size_per_partition,
+                                                   output_size_per_partition,
+                                                   params_dtype)
         for weight_name, weight_param in weight_dict.items():
             layer.register_parameter(
                 weight_name,
-                ModelWeightParameter(
-                    data=weight_param,
-                    input_dim=1,
-                    output_dim=0,
-                    weight_loader=weight_loader
-                )
-            )
+                ModelWeightParameter(data=weight_param,
+                                     input_dim=1,
+                                     output_dim=0,
+                                     weight_loader=weight_loader))
 
         pertensor_dict = self.quant_method.get_pertensor_param(params_dtype)
         for pertensor_name, pertensor_param in pertensor_dict.items():
@@ -181,18 +176,13 @@ class AscendLinearMethod(LinearMethodBase):
             layer.register_parameter(pertensor_name, param)
 
         perchannel_dict = self.quant_method.get_perchannel_param(
-            output_size_per_partition,
-            params_dtype
-        )
+            output_size_per_partition, params_dtype)
         for perchannel_name, perchannel_param in perchannel_dict.items():
             layer.register_parameter(
                 perchannel_name,
-                ChannelQuantScaleParameter(
-                    data=perchannel_param,
-                    output_dim=0,
-                    weight_loader=weight_loader
-                )
-            )
+                ChannelQuantScaleParameter(data=perchannel_param,
+                                           output_dim=0,
+                                           weight_loader=weight_loader))
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
@@ -236,11 +226,11 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
             self.quant_method.process_weights_after_loading(layer)
 
     def apply(self, layer: torch.nn.Module, query: torch.Tensor,
-              key: torch.Tensor, value: torch.Tensor, key_cache: torch.Tensor,
-              value_cache: torch.Tensor, scale: torch.Tensor,
+              key: torch.Tensor, value: torch.Tensor,
+              kv_cache: List[torch.Tensor], scale: torch.Tensor,
               seq_lens_tensor_cpu: int, block_tables: torch.Tensor,
               isPrefill: bool, attn_metadata, output) -> torch.Tensor:
-        return self.quant_method.apply(layer, query, key, value, key_cache,
-                                       value_cache, scale, seq_lens_tensor_cpu,
+        return self.quant_method.apply(layer, query, key, value, kv_cache,
+                                       scale, seq_lens_tensor_cpu,
                                        block_tables, isPrefill, attn_metadata,
                                        output)
