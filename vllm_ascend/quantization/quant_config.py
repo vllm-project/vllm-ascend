@@ -138,9 +138,9 @@ class AscendLinearMethod(LinearMethodBase):
         quant_config: The Ascend quantization config.
     """
 
-    def __init__(self, quant_config: AscendQuantConfig) -> None:
+    def __init__(self, quant_config: AscendQuantConfig, prefix: str) -> None:
         self.quantizer = AscendQuantizer.get_quantizer(
-            quant_config.quant_description)
+            quant_config.quant_description, prefix)
         self.quant_method = self.quantizer.build_linear_method()
 
     def create_weights(
@@ -220,9 +220,9 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
         quant_config: The Ascend quantization config.
     """
 
-    def __init__(self, quant_config: AscendQuantConfig) -> None:
+    def __init__(self, quant_config: AscendQuantConfig, prefix: str) -> None:
         self.quantizer = AscendQuantizer.get_quantizer(
-            quant_config.quant_description)
+            quant_config.quant_description, prefix)
         self.quant_method = self.quantizer.build_attention_method()
 
     def create_weights(self, layer: torch.nn.Module) -> None:
