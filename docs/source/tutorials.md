@@ -313,3 +313,53 @@ Logs of the vllm server:
 INFO:     127.0.0.1:59384 - "POST /v1/completions HTTP/1.1" 200 OK
 INFO 02-19 17:37:35 metrics.py:453] Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 1.9 tokens/s, Running: 0 reqs, Swapped: 0 reqs, Pending: 0 reqs, GPU KV cache usage: 0.0%, CPU KV cache usage: 0.0%.
 ```
+
+## Performance Benchmark
+### Introduction
+Benchmark vllm-ascend's performance under various workload, for **developers** to gain clarity on whether their PR improves/degrades vllm-ascned's performance
+### Overview
+**Benchmarking Coverage**: latency, throughput and fix-qps serving on Atlas800I A2 (see [quick_start](./quick_start.md) to learn more supported devices list), with different models(coming soon).
+- Latency tests
+    - Input length: 32 tokens.
+    - Output length: 128 tokens.
+    - Batch size: fixed (8).
+    - Models: llama-3.1 8B.
+    - Evaluation metrics: end-to-end latency (mean, median, p99).
+
+- Throughput tests
+    - Input length: randomly sample 200 prompts from ShareGPT dataset (with fixed random seed).
+    - Output length: the corresponding output length of these 200 prompts.
+    - Batch size: dynamically determined by vllm to achieve maximum throughput.
+    - Models: llama-3.1 8B .
+    - Evaluation metrics: throughput.
+- Serving tests
+    - Input length: randomly sample 200 prompts from ShareGPT dataset (with fixed random seed).
+    - Output length: the corresponding output length of these 200 prompts.
+    - Batch size: dynamically determined by vllm and the arrival pattern of the requests.
+    - **Average QPS (query per second)**: 1, 4, 16 and inf. QPS = inf means all requests come at once. For other QPS values, the arrival time of each query is determined using a random Poisson process (with fixed random seed).
+    - Models: llama-3.1 8B.
+    - Evaluation metrics: throughput, TTFT (time to the first token, with mean, median and p99), ITL (inter-token latency, with mean, median and p99).
+
+**Benchmarking Duration**: about 800senond for single model.
+
+
+### Quick Use
+#### Prerequisites
+- Please make sure that you have vllm and vllm-ascned installed and npu environment，cause these scripts are specially prepared for npu devices
+- To speed up the script， you can cache the models and datasets locally in advance and change the path in the json file in the benchmarks/scripts/tests folder
+
+#### Run benchmarks
+these scripts can automatically conduct performance testing of serving, through and latency, run the following command:
+```
+cd benchmarks
+bash scripts/run-performance-benchmarks.sh
+```
+once  the script is finished, you can view the result files in the benchmarks/results folder. and the results may looks like below:
+```
+|-- latency_llama8B_tp1.json
+|-- serving_llama8B_tp1_sharegpt_qps_1.json
+|-- serving_llama8B_tp1_sharegpt_qps_16.json
+|-- serving_llama8B_tp1_sharegpt_qps_4.json
+|-- serving_llama8B_tp1_sharegpt_qps_inf.json
+|-- throughput_llama8B_tp1.json
+```
