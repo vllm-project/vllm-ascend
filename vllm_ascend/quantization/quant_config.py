@@ -30,7 +30,7 @@ from vllm.model_executor.layers.quantization import \
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.parameter import (BasevLLMParameter,
+from vllm.model_executor.parameter import (PerTensorScaleParameter,
                                            ChannelQuantScaleParameter,
                                            ModelWeightParameter)
 
@@ -146,57 +146,50 @@ class AscendLinearMethod(LinearMethodBase):
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> None:
-        del output_size
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
 
-        weights = self.quant_method.create_weights(input_size_per_partition,
-                                                   output_size_per_partition,
-                                                   params_dtype)
-
-        weight_name = self.quant_method.get_weight()
-        if weight_name in weights.keys():
+        weight_dict = self.quant_method.get_weight(
+            input_size_per_partition,
+            output_size_per_partition,
+            params_dtype
+        )
+        for weight_name, weight_param in weight_dict.items():
             layer.register_parameter(
                 weight_name,
-                ModelWeightParameter(data=weights[weight_name].transpose(0, 1),
-                                     input_dim=1,
-                                     output_dim=0,
-                                     weight_loader=weight_loader))
-        else:
-            raise ValueError(
-                f"{weight_name} is nor registered. Please check your linear quant method implementation."
+                ModelWeightParameter(
+                    data=weight_param,
+                    input_dim=1,
+                    output_dim=0,
+                    weight_loader=weight_loader
+                )
             )
 
-        pertensor_names = self.quant_method.get_pertensor_param()
-        for pertensor_name in pertensor_names:
-            if pertensor_name in weights.keys():
-                param = BasevLLMParameter(data=weights[pertensor_name],
-                                          weight_loader=weight_loader)
-                # disable warning
-                param.ignore_warning = True
-                layer.register_parameter(pertensor_name, param)
-            else:
-                raise ValueError(
-                    f"{pertensor_name} is nor registered. Please check your linear quant method implementation."
-                )
+        pertensor_dict = self.quant_method.get_pertensor_param(params_dtype)
+        for pertensor_name, pertensor_param in pertensor_dict.items():
+            param = PerTensorScaleParameter(data=pertensor_param,
+                                            weight_loader=weight_loader)
+            # disable warning
+            param.ignore_warning = True
+            layer.register_parameter(pertensor_name, param)
 
-        perchannel_names = self.quant_method.get_perchannel_param()
-        for perchannel_name in perchannel_names:
-            if perchannel_name in weights.keys():
-                layer.register_parameter(
-                    perchannel_name,
-                    ChannelQuantScaleParameter(data=weights[perchannel_name],
-                                               output_dim=0,
-                                               weight_loader=weight_loader))
-            else:
-                raise ValueError(
-                    f"{perchannel_name} is nor registered. Please check your linear quant method implementation."
+        perchannel_dict = self.quant_method.get_perchannel_param(
+            output_size_per_partition,
+            params_dtype
+        )
+        for perchannel_name, perchannel_param in perchannel_dict.items():
+            layer.register_parameter(
+                perchannel_name,
+                ChannelQuantScaleParameter(
+                    data=perchannel_param,
+                    output_dim=0,
+                    weight_loader=weight_loader
                 )
+            )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        if hasattr(self.quant_method,
-                   'transpose_weight') and self.quant_method.transpose_weight:
-            layer.weight.data = layer.weight.data.transpose(1, 0)
+        if hasattr(self.quant_method, "process_weights_after_loading"):
+            self.quant_method.process_weights_after_loading(layer)
 
     def apply(
         self,
