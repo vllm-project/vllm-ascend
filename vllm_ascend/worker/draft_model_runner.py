@@ -26,6 +26,7 @@ from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.worker.model_runner_base import (ModelRunnerBase,
                                            ModelRunnerInputBase,
                                            ModelRunnerWrapperBase)
+
 from vllm_ascend.attention import AscendMetadata as FlashAttentionMetadata
 
 logger = init_logger(__name__)
