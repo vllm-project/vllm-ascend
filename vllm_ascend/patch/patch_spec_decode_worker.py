@@ -66,7 +66,7 @@ def create_worker(
             "device_type"] = scorer_worker.device_config.device.type
         proposer_worker = NGramWorker(**draft_worker_kwargs)
         proposer_worker.set_ngram_window_size(ngram_prompt_lookup_min,
-                                                ngram_prompt_lookup_max)
+                                              ngram_prompt_lookup_max)
     else:
         draft_tp = draft_parallel_config.tensor_parallel_size
         target_tp = scorer_worker.parallel_config.tensor_parallel_size
@@ -117,27 +117,23 @@ def create_worker(
         " SpecDecodeWorker with sampler=%s", type(spec_decode_sampler))
 
     if not disable_mqa_scorer:
-        if scorer_worker.model_runner.attn_backend.get_name(
-        ) != "FLASH_ATTN":
+        if scorer_worker.model_runner.attn_backend.get_name() != "FLASH_ATTN":
             disable_mqa_scorer = True
-            logger.info(
-                "[Speculative Decoding] Disabling MQA scorer as the "
-                "MQA is only available with flash attn backend.")
+            logger.info("[Speculative Decoding] Disabling MQA scorer as the "
+                        "MQA is only available with flash attn backend.")
 
         if draft_model_config and \
             draft_model_config.max_model_len < \
                 scorer_worker.model_config.max_model_len:
             disable_mqa_scorer = True
-            logger.info(
-                "[Speculative Decoding] Disabling MQA scorer as the "
-                "draft model max_model_len is smaller than the target "
-                "model max_model_len.")
+            logger.info("[Speculative Decoding] Disabling MQA scorer as the "
+                        "draft model max_model_len is smaller than the target "
+                        "model max_model_len.")
 
         if not scorer_worker.model_runner.model_config.enforce_eager:
             disable_mqa_scorer = True
-            logger.info(
-                "[Speculative Decoding] Disabling MQA scorer as the "
-                "target model is not running in eager mode.")
+            logger.info("[Speculative Decoding] Disabling MQA scorer as the "
+                        "target model is not running in eager mode.")
 
     return SpecDecodeWorker(
         proposer_worker,

@@ -18,7 +18,6 @@
 from typing import List, Optional
 
 import torch
-
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -27,7 +26,6 @@ from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.worker.model_runner_base import (ModelRunnerBase,
                                            ModelRunnerInputBase,
                                            ModelRunnerWrapperBase)
-
 from vllm_ascend.attention import AscendMetadata as FlashAttentionMetadata
 
 logger = init_logger(__name__)
