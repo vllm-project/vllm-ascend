@@ -163,9 +163,12 @@ def forward_oot(
         renormalize: bool,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
+        global_num_experts: Optional[int] = None,
+        expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        activation: str = "silu",
 ) -> torch.Tensor:
 
     topk_weights, topk_ids = group_topk(
