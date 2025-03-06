@@ -25,7 +25,7 @@ class AscendQuantizer:
     """An interface to different quantization implementations for ascend hardwares."""
 
     @classmethod
-    def get_quantizer(cls, quant_config: Dict[str, Any]):
+    def get_quantizer(cls, quant_config: Dict[str, Any], prefix: str):
         # TODO: Need a param to choose quantization algorithms.
         quantization_algorithm = ''
 
@@ -39,7 +39,7 @@ class AscendQuantizer:
             raise NotImplementedError(
                 "There is no available ascend quantizer.")
 
-        return MindIETurboQuantizer.get_quantizer(quant_config)
+        return MindIETurboQuantizer.get_quantizer(quant_config, prefix)
 
     def build_linear_method(self):
         raise NotImplementedError
