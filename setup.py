@@ -102,5 +102,5 @@ setup(
     entry_points={
         'vllm.platform_plugins': ["ascend = vllm_ascend:register"],
         'vllm.general_plugins':
-        ["register_ascend_model = vllm_ascend:register_model"]
+        ["ascend_enhanced_model = vllm_ascend:register_model"]
     })
