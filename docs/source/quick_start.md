@@ -11,12 +11,13 @@
 ```{code-block} bash
    :substitutions:
 
-# You can change version a suitable one base on your requirement, e.g. main
+# Update DEVICE according to your device (/dev/davinci[0-7])
+export DEVICE=/dev/davinci0
+# Update the vllm-ascend image
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-
-docker run \
+docker run --rm \
 --name vllm-ascend \
---device /dev/davinci0 \
+--device $DEVICE \
 --device /dev/davinci_manager \
 --device /dev/devmm_svm \
 --device /dev/hisi_hdc \
