@@ -156,7 +156,7 @@ class CustomQwen2VisionTransformer(Qwen2VisionTransformer):
 @MULTIMODAL_REGISTRY.register_processor(Qwen2VLMultiModalProcessor,
                                         info=Qwen2VLProcessingInfo,
                                         dummy_inputs=Qwen2VLDummyInputsBuilder)
-class customQwen2VLForConditionalGeneration(Qwen2VLForConditionalGeneration):
+class CustomQwen2VLForConditionalGeneration(Qwen2VLForConditionalGeneration):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config)
