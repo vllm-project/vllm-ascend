@@ -21,3 +21,8 @@ def register():
     # To ensure that the module is correctly replaced, add it at the beginning
     import vllm_ascend.patch_module  # noqa: F401
     return "vllm_ascend.platform.NPUPlatform"
+
+
+def register_model():
+    from .models import register_model
+    register_model()
