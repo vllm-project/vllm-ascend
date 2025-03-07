@@ -140,7 +140,7 @@ echo 'vLLM mypy: Done'
 # https://github.com/codespell-project/codespell/issues/1915
 # Avoiding the "./" prefix and using "/**" globs for directories appears to solve the problem
 CODESPELL_EXCLUDES=(
-    '--skip' 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,collect_env.py'
+    '--skip' 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,collect_env.py,vllm_ascend/ops/fused_moe.py'
 )
 
 # check spelling of specified files

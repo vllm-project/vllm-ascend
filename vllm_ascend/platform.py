@@ -25,7 +25,9 @@ try:
 except ImportError:
     print("Failed to import torch_npu.")
 
-from vllm.config import VllmConfig
+import vllm.envs as envs
+from vllm.config import CompilationLevel, VllmConfig
+from vllm.logger import init_logger
 from vllm.platforms import Platform, PlatformEnum
 
 if TYPE_CHECKING:
@@ -35,18 +37,19 @@ else:
 
 os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
 
+logger = init_logger(__name__)
 
-def _device_id_to_physical_device_id(device_id: int) -> int:
-    if "ASCEND_RT_VISIBLE_DEVICES" in os.environ:
-        device_ids = os.environ["ASCEND_RT_VISIBLE_DEVICES"].split(",")
-        if device_ids == [""]:
-            raise RuntimeError("ASCEND_RT_VISIBLE_DEVICES is set to empty"
-                               "string, which means Ascend NPU support is"
-                               "disabled.")
-        physical_device_id = device_ids[device_id]
-        return int(physical_device_id)
-    else:
-        return device_id
+# def _device_id_to_physical_device_id(device_id: int) -> int:
+#     if "ASCEND_RT_VISIBLE_DEVICES" in os.environ:
+#         device_ids = os.environ["ASCEND_RT_VISIBLE_DEVICES"].split(",")
+#         if device_ids == [""]:
+#             raise RuntimeError("ASCEND_RT_VISIBLE_DEVICES is set to empty"
+#                                "string, which means Ascend NPU support is"
+#                                "disabled.")
+#         physical_device_id = device_ids[device_id]
+#         return int(physical_device_id)
+#     else:
+#         return device_id
 
 
 class NPUPlatform(Platform):
@@ -74,8 +77,9 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
-        physical_device_id = _device_id_to_physical_device_id(device_id)
-        return torch.npu.get_device_name(physical_device_id)
+        # physical_device_id = _device_id_to_physical_device_id(device_id)
+        # return torch.npu.get_device_name(physical_device_id)
+        return torch.npu.get_device_name(device_id)
 
     @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
@@ -103,20 +107,42 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.level != CompilationLevel.NO_COMPILATION:
+            logger.info("[NPU] Forcing NO_COMPILATION compilation level")
+            compilation_config.level = CompilationLevel.NO_COMPILATION
+
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
-            if vllm_config.scheduler_config.is_multi_step:
-                parallel_config.worker_cls = "vllm_ascend.worker.multi_step_worker.MultiStepWorker"
+            if envs.VLLM_USE_V1:
+                parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
             else:
-                parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
+                if vllm_config.scheduler_config.is_multi_step:
+                    parallel_config.worker_cls = "vllm_ascend.worker.multi_step_worker.MultiStepWorker"
+                else:
+                    parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
+
 
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 128
 
+        if envs.VLLM_USE_V1 and cache_config.enable_prefix_caching:
+            logger.warning("[V1][NPU] Disable prefix caching")
+            cache_config.enable_prefix_caching = False
+
+        if envs.VLLM_USE_V1 and cache_config.enable_prefix_caching:
+            logger.warning("[V1][NPU] Disable prefix caching")
+            cache_config.enable_prefix_caching = False
+
+        assert not vllm_config.speculative_config, (
+            "Speculative decoding is not yet supported for NPU backend")
+
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla):
+        if use_v1:
+            return "vllm_ascend.v1.npu_attention.AscendAttentionBackend"
         if use_mla:
             return "vllm_ascend.attention.AscendMLAAttentionBackend"
         return "vllm_ascend.attention.AscendAttentionBackend"
@@ -131,3 +157,7 @@ class NPUPlatform(Platform):
     @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm_ascend.communicator.NPUCommunicator"
+
+    @classmethod
+    def is_pin_memory_available(cls):
+        return True
