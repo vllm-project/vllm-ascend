@@ -99,4 +99,8 @@ setup(
     python_requires=">=3.9",
     install_requires=get_requirements(),
     extras_require={},
-    entry_points={'vllm.platform_plugins': ["ascend = vllm_ascend:register"]})
+    entry_points={
+        'vllm.platform_plugins': ["ascend = vllm_ascend:register"],
+        'vllm.general_plugins':
+        ["ascend_enhanced_model = vllm_ascend:register_model"]
+    })
