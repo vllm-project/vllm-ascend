@@ -233,7 +233,7 @@ docker run \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /root/.cache:/root/.cache \
 -p 8000:8000 \
--it quay.io/ascend/vllm-ascend:v0.7.1rc1 bash
+-it quay.io/ascend/vllm-ascend:|vllm_ascend_version| bash
 ```
 
 Choose one machine as head node, the other are worker nodes, then start ray on each machine:
