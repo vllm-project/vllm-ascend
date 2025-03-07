@@ -181,6 +181,29 @@ def fused_experts_with_ep(
     return final_hidden_states
 
 
+def native_grouped_topk(
+    topk_weights: torch.Tensor,
+    num_expert_group: int,
+    topk_group: int,
+):
+    topk_group = 0 if topk_group is None else topk_group
+    num_expert_group = 0 if num_expert_group is None else num_expert_group
+
+    num_token = topk_weights.shape[0]
+    grouped_weights = topk_weights.view(num_token, num_expert_group, -1).max(dim=-1).values
+    topk_group_indices = torch.topk(grouped_weights.to(torch.float32), k=topk_group, dim=-1, sorted=False)[1]
+    topk_group_mask = torch.zeros_like(grouped_weights)
+    topk_group_mask.scatter_(1, topk_group_indices, 1)
+    topk_weight_mask = (
+        topk_group_mask.unsqueeze(-1)
+        .expand(num_token, num_expert_group, topk_weights.shape[-1] // num_expert_group)
+        .reshape(num_token, -1)
+    )
+    topk_weights = topk_weights.masked_fill(~topk_weight_mask.bool(), 0.0)
+
+    return topk_weights
+
+
 def forward_oot(
     self,
     layer: torch.nn.Module,
@@ -196,6 +219,7 @@ def forward_oot(
     custom_routing_function: Optional[Callable] = None,
     scoring_func: str = "softmax",
     e_score_correction_bias: Optional[torch.Tensor] = None,
+    **kwargs,
 ):
     if custom_routing_function is not None:
         raise NotImplementedError("Custom routing function is not supported now")
@@ -223,7 +247,9 @@ def forward_oot(
             original_weights = topk_weights
             topk_weights = topk_weights + e_score_correction_bias.unsqueeze(0)
 
-        torch_npu._npu_group_topk(topk_weights, group_num=num_expert_group, k=topk_group)
+        # TODO: Change to npu_group_topk when the latest CANN and NNAL is available
+        # >>> torch_npu._npu_group_topk(topk_weights, group_num=num_expert_group, k=topk_group)
+        topk_weights = native_grouped_topk(topk_weights, num_expert_group, topk_group)
 
         if e_score_correction_bias is not None:
             topk_ids = torch.topk(topk_weights, k=top_k, dim=-1, sorted=False)[1]
