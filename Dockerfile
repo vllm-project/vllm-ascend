@@ -46,6 +46,7 @@ RUN python3 -m pip install /workspace/vllm-ascend/ --extra-index https://downloa
 RUN bash /workspace/vllm-ascend/pta_install.sh
 
 # Install modelscope (for fast download) and ray (for multinode)
-RUN python3 -m pip install modelscope ray
+# TODO(yikun): Remove "<1.23.0" after v0.7.4 which resloved by https://github.com/vllm-project/vllm/pull/13807
+RUN python3 -m pip install "modelscope<1.23.0" ray
 
 CMD ["/bin/bash"]
