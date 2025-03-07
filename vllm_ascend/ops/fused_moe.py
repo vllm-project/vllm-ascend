@@ -109,6 +109,7 @@ def fused_experts_with_ep(
     expert_map: torch.Tensor = None,
 ) -> torch.Tensor:
     orig_shape = hidden_states.shape
+    # NOTE: Set min_tokens=max_tokens to ensure constant num_tokens
     num_tokens = hidden_states.shape[:-1].numel()
     num_experts = w1.shape[0]
     dtype = hidden_states.dtype
@@ -126,17 +127,21 @@ def fused_experts_with_ep(
 
     # Filter valid token-expert pairs
     mask = local_experts_flat != -1
-    selected_weights = weights_flat[mask]
-    selected_token_indices = token_indices[mask]
-    selected_local_experts = local_experts_flat[mask]
+    filtered_weights = torch.where(mask, weights_flat, torch.zeros_like(weights_flat))
+    filtered_experts = torch.where(mask, local_experts_flat, torch.full_like(local_experts_flat, num_experts))
 
     # Sort by local expert IDs
-    sort_indices = torch.argsort(selected_local_experts)
-    sorted_token_indices = selected_token_indices[sort_indices]
-    sorted_weights = selected_weights[sort_indices]
+    sort_indices = torch.argsort(filtered_experts)
+    sorted_token_indices = token_indices[sort_indices]
+    sorted_weights = filtered_weights[sort_indices]
 
     # Compute token counts with minlength of num_experts
-    token_counts = torch.bincount(selected_local_experts, minlength=num_experts)
+    # This is equivalent to but faster than:
+    # >>> token_counts = torch.bincount(filtered_experts, minlength=num_experts)[:-1]
+    token_counts = torch.zeros(num_experts + 1, device=device, dtype=torch.int64)
+    ones = torch.ones_like(filtered_experts, dtype=torch.int64)
+    token_counts.scatter_add_(0, filtered_experts.to(torch.int64), ones)
+    token_counts = token_counts[:num_experts]
     end_indices = torch.cumsum(token_counts, dim=0, dtype=torch.int64)
 
     # Rearrange hidden_states
@@ -218,7 +223,7 @@ def forward_oot(
             original_weights = topk_weights
             topk_weights = topk_weights + e_score_correction_bias.unsqueeze(0)
 
-        torch_npu.npu_group_topk(input=topk_weights, out=topk_weights, group_num=num_expert_group, k=topk_group)
+        torch_npu._npu_group_topk(topk_weights, group_num=num_expert_group, k=topk_group)
 
         if e_score_correction_bias is not None:
             topk_ids = torch.topk(topk_weights, k=top_k, dim=-1, sorted=False)[1]
@@ -229,7 +234,9 @@ def forward_oot(
     else:
         topk_weights, topk_ids = topk_weights.topk(top_k, dim=-1)
         topk_weights = topk_weights.to(x.dtype)
-        topk_ids = topk_ids.to(torch.int32)
+
+    # Required by npu_moe_init_routing
+    topk_ids = topk_ids.to(torch.int32)
 
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
