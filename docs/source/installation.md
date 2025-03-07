@@ -150,15 +150,15 @@ Current version depends on a unreleased `torch-npu`, you need to install manuall
 # 
 # Here we take python 3.10 on aarch64 as an example. Feel free to install the correct version for your environment. See:
 #
-# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250226.4/pytorch_v2.5.1_py39.tar.gz
-# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250226.4/pytorch_v2.5.1_py310.tar.gz
-# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250226.4/pytorch_v2.5.1_py311.tar.gz
+# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250307.3/pytorch_v2.5.1_py39.tar.gz
+# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250307.3/pytorch_v2.5.1_py310.tar.gz
+# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250307.3/pytorch_v2.5.1_py311.tar.gz
 #
 mkdir pta
 cd pta
-wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250226.4/pytorch_v2.5.1_py310.tar.gz
+wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250307.3/pytorch_v2.5.1_py310.tar.gz
 tar -xvf pytorch_v2.5.1_py310.tar.gz
-pip install ./torch_npu-2.5.1.dev20250226-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+pip install ./torch_npu-2.5.1.dev20250307-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 ```
 ::::
 
