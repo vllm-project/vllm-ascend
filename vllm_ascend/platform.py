@@ -131,3 +131,7 @@ class NPUPlatform(Platform):
     @classmethod
     def get_device_communicator_cls(cls) -> str:
         return "vllm_ascend.communicator.NPUCommunicator"
+
+    @classmethod
+    def get_stream_cls(cls) -> str:
+        return "torch_npu.npu.Stream"
