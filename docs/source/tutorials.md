@@ -212,7 +212,9 @@ Prompt: 'The future of AI is', Generated text: ' following you. As the technolog
 
 Run docker container on each machine:
 
-```shell
+```{code-block} bash
+   :substitutions:
+
 docker run \
 --name vllm-ascend \
 --device /dev/davinci0 \
