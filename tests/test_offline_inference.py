@@ -52,8 +52,11 @@ def test_models(
     # 5042 tokens for gemma2
     # gemma2 has alternating sliding window size of 4096
     # we need a prompt with more than 4096 tokens to test the sliding window
-    prompt = "The following numbers of the sequence " + ", ".join(
-        str(i) for i in range(1024)) + " are:"
+
+    # prompt = "The following numbers of the sequence " + ", ".join(
+    #     str(i) for i in range(1024)) + " are:"
+
+    prompt = "Translate this from Chinese to English:\nChinese: 你喜欢机器翻译吗？\nEnglish:"
     example_prompts = [prompt]
 
     with VllmRunner(model,
@@ -61,4 +64,5 @@ def test_models(
                     dtype=dtype,
                     enforce_eager=False,
                     gpu_memory_utilization=0.7) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
+        result = vllm_model.generate_greedy(example_prompts, max_tokens)
+        print(f"Generated text: {result}")
