@@ -29,7 +29,9 @@ from conftest import VllmRunner
 import vllm_ascend  # noqa: F401
 
 MODELS = [
-    "Qwen/Qwen2.5-0.5B-Instruct",
+    # "Qwen/Qwen2.5-0.5B-Instruct",
+    "ModelSpace/GemmaX2-28-2B-v0.1",
+
 ]
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
