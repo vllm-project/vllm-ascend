@@ -127,9 +127,9 @@ jobs:
         run: |
           mkdir pta
           cd pta
-          wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250307.3/pytorch_v2.5.1_py310.tar.gz
+          wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250308.3/pytorch_v2.5.1_py310.tar.gz
           tar -xvf pytorch_v2.5.1_py310.tar.gz
-          pip install ./torch_npu-2.5.1.dev20250307-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+          pip install ./torch_npu-2.5.1.dev20250308-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
           cd ..
           rm -rf pta
 
