@@ -41,11 +41,11 @@ TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half", "float16"])
-@pytest.mark.parametrize("max_tokens", [5])
+@pytest.mark.parametrize("max_tokens", [128])
 def test_models(
-    model: str,
-    dtype: str,
-    max_tokens: int,
+        model: str,
+        dtype: str,
+        max_tokens: int,
 ) -> None:
     os.environ["VLLM_ATTENTION_BACKEND"] = "ASCEND"
 
@@ -74,10 +74,30 @@ def test_models(
             "The only thing we have to fear is fear itself."
         ]
 
-        for text in english_sentences:
+        for idx, text in enumerate(english_sentences):
             prompt = f"Translate this from English to Chinese:\nEnglish: {text} \nChinese:"
             example_prompts = [prompt]
             t0 = time.time()
             result = vllm_model.generate_greedy(example_prompts, max_tokens)
             t1 = time.time()
-            print(f"Generated text: {result}", f"time elapsed: {t1 - t0:.2f}s")
+            print(f"{idx}, src:{text}, tgt:{result}", f"elapsed: {t1 - t0:.2f}s")
+
+        chinese_sentences = [
+            "众里寻他千百度，蓦然回首，那人却在灯火阑珊处。",
+            "在天愿作比翼鸟，在地愿为连理枝。",
+            "落败孤岛孤败落。",
+            "我有梦，梦中我乘风破浪，穿越无尽的海洋，只为寻找那片属于我的自由天地。",
+            "他不是商人，而是农民。",
+            "你根本不知道他们在干嘛。",
+            "这个和尚虽然活着，但跟死了差不多。",
+            "在仙境中，忽必烈下了一道关于宏伟快乐之殿的法令。",
+            "谁也不知道，在更低的频率上，是我在代表你说话吗？",
+            "我祖父快90岁了，什么事都需要别人来做。"
+        ]
+        for idx, text in enumerate(chinese_sentences):
+            prompt = f"Translate this from Chinese to English:\nChinese: {text} \nEnglish:"
+            example_prompts = [prompt]
+            t0 = time.time()
+            result = vllm_model.generate_greedy(example_prompts, max_tokens)
+            t1 = time.time()
+            print(f"{idx}, src:{text}, tgt:{result}", f"elapsed: {t1 - t0:.2f}s")
