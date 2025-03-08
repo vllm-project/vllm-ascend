@@ -65,7 +65,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
                  distributed_init_method: str,
                  is_driver_worker: bool = False):
         # Register ops when worker init.
-        from vllm_ascend import ops  # noqa: F401
+        from vllm_ascend import ops, patch  # noqa: F401
 
         WorkerBase.__init__(self, vllm_config=vllm_config)
         # Try to import mindie_turbo to accelerate vLLM inference.
