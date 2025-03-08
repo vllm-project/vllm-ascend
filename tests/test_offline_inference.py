@@ -56,13 +56,28 @@ def test_models(
     # prompt = "The following numbers of the sequence " + ", ".join(
     #     str(i) for i in range(1024)) + " are:"
 
-    prompt = "Translate this from Chinese to English:\nChinese: 你喜欢机器翻译吗？\nEnglish:"
-    example_prompts = [prompt]
-
     with VllmRunner(model,
                     max_model_len=8192,
                     dtype=dtype,
                     enforce_eager=False,
                     gpu_memory_utilization=0.7) as vllm_model:
-        result = vllm_model.generate_greedy(example_prompts, max_tokens)
-        print(f"Generated text: {result}")
+        english_sentences = [
+            "The road to hell is paved with good intentions.",
+            "The exception proves the rule.",
+            "To be or not to be, that is the question.",
+            "The pen is mightier than the sword.",
+            "All happy families are alike; each unhappy family is unhappy in its own way.",
+            "The greatest trick the devil ever pulled was convincing the world he didn't exist.",
+            "The more you sweat in training, the less you bleed in battle.",
+            "The only way to get the best of an argument is to avoid it.",
+            "The journey of a thousand miles begins with a single step.",
+            "The only thing we have to fear is fear itself."
+        ]
+        import time
+        for text in english_sentences:
+            prompt = f"Translate this from Chinese to English:\nChinese: {text} \nEnglish:"
+            example_prompts = [prompt]
+            t0 = time.time()
+            result = vllm_model.generate_greedy(example_prompts, max_tokens)
+            t1 = time.time()
+            print(f"Generated text: {result}", f"time elapsed: {t1 - t0:.2f} s")
