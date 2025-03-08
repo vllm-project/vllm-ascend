@@ -21,7 +21,7 @@
 Run `pytest tests/test_offline_inference.py`.
 """
 import os
-
+import time
 import pytest
 import vllm  # noqa: F401
 from conftest import VllmRunner
@@ -73,11 +73,11 @@ def test_models(
             "The journey of a thousand miles begins with a single step.",
             "The only thing we have to fear is fear itself."
         ]
-        import time
+
         for text in english_sentences:
             prompt = f"Translate this from Chinese to English:\nChinese: {text} \nEnglish:"
             example_prompts = [prompt]
             t0 = time.time()
             result = vllm_model.generate_greedy(example_prompts, max_tokens)
             t1 = time.time()
-            print(f"Generated text: {result}", f"time elapsed: {t1 - t0:.2f} s")
+            print(f"Generated text: {result}", f"time elapsed: {t1 - t0:.2f}s")
