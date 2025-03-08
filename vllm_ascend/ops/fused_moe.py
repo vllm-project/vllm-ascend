@@ -1,6 +1,7 @@
-#
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
+# Adapted from vllm/tests/kernels/test_moe.py
+# Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,13 +14,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
 
 from typing import Callable, Optional
 
 import torch
 import torch_npu
-from vllm.model_executor.layers.fused_moe.layer import UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe.layer import \
+    UnquantizedFusedMoEMethod
 
 
 def fused_experts(
@@ -36,7 +37,9 @@ def fused_experts(
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w1.is_contiguous(), "Expert weights1 must be contiguous"
     assert w2.is_contiguous(), "Expert weights2 must be contiguous"
-    assert hidden_states.dtype in [torch.float32, torch.float16, torch.bfloat16]
+    assert hidden_states.dtype in [
+        torch.float32, torch.float16, torch.bfloat16
+    ]
     ori_shape = hidden_states.shape
     if len(ori_shape) == 3:
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
@@ -45,17 +48,19 @@ def fused_experts(
     E, N, _ = w1.shape
 
     row_idx_len = num_tokens * top_k
-    row_idx = (
-        torch.arange(0, row_idx_len, dtype=torch.int32, device=topk_weights.device)
-        .view(top_k, -1)
-        .permute(1, 0)
-        .contiguous()
-    )
+    row_idx = (torch.arange(0,
+                            row_idx_len,
+                            dtype=torch.int32,
+                            device=topk_weights.device).view(
+                                top_k, -1).permute(1, 0).contiguous())
     expanded_x, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
-        hidden_states, row_idx=row_idx, expert_idx=topk_ids, active_num=num_tokens
-    )
+        hidden_states,
+        row_idx=row_idx,
+        expert_idx=topk_ids,
+        active_num=num_tokens)
 
-    expert_tokens = torch_npu.npu_moe_compute_expert_tokens(expanded_expert_idx, E)
+    expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
+        expanded_expert_idx, E)
     expert_tokens = expert_tokens.to(torch.int64)
 
     w1 = w1.transpose(1, 2)
@@ -116,9 +121,9 @@ def fused_experts_with_ep(
     device = hidden_states.device
 
     # Generate token indices and flatten
-    token_indices = (
-        torch.arange(num_tokens, device=device, dtype=torch.int64).unsqueeze(1).expand(-1, top_k).reshape(-1)
-    )
+    token_indices = (torch.arange(num_tokens, device=device,
+                                  dtype=torch.int64).unsqueeze(1).expand(
+                                      -1, top_k).reshape(-1))
 
     # Flatten token-to-expert mappings and map to local experts
     weights_flat = topk_weights.view(-1)
@@ -127,8 +132,11 @@ def fused_experts_with_ep(
 
     # Filter valid token-expert pairs
     mask = local_experts_flat != -1
-    filtered_weights = torch.where(mask, weights_flat, torch.zeros_like(weights_flat))
-    filtered_experts = torch.where(mask, local_experts_flat, torch.full_like(local_experts_flat, num_experts))
+    filtered_weights = torch.where(mask, weights_flat,
+                                   torch.zeros_like(weights_flat))
+    filtered_experts = torch.where(
+        mask, local_experts_flat,
+        torch.full_like(local_experts_flat, num_experts))
 
     # Sort by local expert IDs
     sort_indices = torch.argsort(filtered_experts)
@@ -138,7 +146,9 @@ def fused_experts_with_ep(
     # Compute token counts with minlength of num_experts
     # This is equivalent to but faster than:
     # >>> token_counts = torch.bincount(filtered_experts, minlength=num_experts)[:-1]
-    token_counts = torch.zeros(num_experts + 1, device=device, dtype=torch.int64)
+    token_counts = torch.zeros(num_experts + 1,
+                               device=device,
+                               dtype=torch.int64)
     ones = torch.ones_like(filtered_experts, dtype=torch.int64)
     token_counts.scatter_add_(0, filtered_experts.to(torch.int64), ones)
     token_counts = token_counts[:num_experts]
@@ -175,7 +185,9 @@ def fused_experts_with_ep(
 
     weighted_down_out = down_out_list * sorted_weights.unsqueeze(1)
 
-    final_hidden_states = torch.zeros(*orig_shape, device=hidden_states.device, dtype=dtype)
+    final_hidden_states = torch.zeros(*orig_shape,
+                                      device=hidden_states.device,
+                                      dtype=dtype)
     final_hidden_states.index_add_(0, sorted_token_indices, weighted_down_out)
 
     return final_hidden_states
@@ -183,22 +195,24 @@ def fused_experts_with_ep(
 
 def native_grouped_topk(
     topk_weights: torch.Tensor,
-    num_expert_group: int,
-    topk_group: int,
+    num_expert_group: Optional[int],
+    topk_group: Optional[int],
 ):
     topk_group = 0 if topk_group is None else topk_group
     num_expert_group = 0 if num_expert_group is None else num_expert_group
 
     num_token = topk_weights.shape[0]
-    grouped_weights = topk_weights.view(num_token, num_expert_group, -1).max(dim=-1).values
-    topk_group_indices = torch.topk(grouped_weights.to(torch.float32), k=topk_group, dim=-1, sorted=False)[1]
+    grouped_weights = topk_weights.view(num_token, num_expert_group,
+                                        -1).max(dim=-1).values
+    topk_group_indices = torch.topk(grouped_weights.to(torch.float32),
+                                    k=topk_group,
+                                    dim=-1,
+                                    sorted=False)[1]
     topk_group_mask = torch.zeros_like(grouped_weights)
     topk_group_mask.scatter_(1, topk_group_indices, 1)
-    topk_weight_mask = (
-        topk_group_mask.unsqueeze(-1)
-        .expand(num_token, num_expert_group, topk_weights.shape[-1] // num_expert_group)
-        .reshape(num_token, -1)
-    )
+    topk_weight_mask = (topk_group_mask.unsqueeze(-1).expand(
+        num_token, num_expert_group,
+        topk_weights.shape[-1] // num_expert_group).reshape(num_token, -1))
     topk_weights = topk_weights.masked_fill(~topk_weight_mask.bool(), 0.0)
 
     return topk_weights
@@ -222,7 +236,8 @@ def forward_oot(
     **kwargs,
 ):
     if custom_routing_function is not None:
-        raise NotImplementedError("Custom routing function is not supported now")
+        raise NotImplementedError(
+            "Custom routing function is not supported now")
 
     assert x.shape[0] == router_logits.shape[0], "Number of tokens mismatch"
 
@@ -249,14 +264,19 @@ def forward_oot(
 
         # TODO: Change to npu_group_topk when the latest CANN and NNAL is available
         # >>> torch_npu._npu_group_topk(topk_weights, group_num=num_expert_group, k=topk_group)
-        topk_weights = native_grouped_topk(topk_weights, num_expert_group, topk_group)
+        topk_weights = native_grouped_topk(topk_weights, num_expert_group,
+                                           topk_group)
 
         if e_score_correction_bias is not None:
-            topk_ids = torch.topk(topk_weights, k=top_k, dim=-1, sorted=False)[1]
+            topk_ids = torch.topk(topk_weights, k=top_k, dim=-1,
+                                  sorted=False)[1]
             # Use original unbiased scores for the routing weights
             topk_weights = original_weights.gather(1, topk_ids)
         else:
-            topk_weights, topk_ids = torch.topk(topk_weights, k=top_k, dim=-1, sorted=False)
+            topk_weights, topk_ids = torch.topk(topk_weights,
+                                                k=top_k,
+                                                dim=-1,
+                                                sorted=False)
     else:
         topk_weights, topk_ids = topk_weights.topk(top_k, dim=-1)
         topk_weights = topk_weights.to(x.dtype)
