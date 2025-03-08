@@ -35,7 +35,7 @@ class AscendQuantizer:
         try:
             module = importlib.import_module("mindie_turbo")
             MindIETurboQuantizer = module.MindIETurboQuantizer
-        except Exception:
+        except ImportError:
             raise NotImplementedError(
                 "There is no available ascend quantizer.")
 
