@@ -17,7 +17,7 @@ source ./.venv/bin/activate
 # 克隆并安装vllm
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
-pip install -r requirements-build.txt
+pip install -r requirements/build.txt
 VLLM_TARGET_DEVICE="empty" pip install .
 cd ..
 
