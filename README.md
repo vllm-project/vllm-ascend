@@ -52,7 +52,7 @@ Installation from source code:
 # https://docs.vllm.ai/en/latest/getting_started/installation/cpu/index.html#build-wheel-from-source
 git clone --depth 1 https://github.com/vllm-project/vllm.git
 cd vllm
-pip install -r requirements-build.txt
+pip install -r requirements/build.txt
 VLLM_TARGET_DEVICE=empty pip install .
 
 # Install vllm-ascend main branch
