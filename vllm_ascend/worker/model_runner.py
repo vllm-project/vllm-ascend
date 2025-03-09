@@ -484,9 +484,11 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
             ]
 
         seq_lens = []
+        context_lens = []
         max_decode_seq_len = 0
         for inter_data in self.inter_data_list:
             seq_lens.extend(inter_data.seq_lens)
+            context_lens.extend(inter_data.context_lens)
             if not inter_data.is_prompt:
                 max_decode_seq_len = max(max_decode_seq_len,
                                          max(inter_data.seq_lens))
@@ -513,7 +515,7 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
                 device=self.runner.device)
 
         # Attention metadata.
-        attn_metadata = self.attn_metadata_builder.build(seq_lens, query_lens)
+        attn_metadata = self.attn_metadata_builder.build(seq_lens, context_lens, query_lens)
 
         # Multi-modal data.
         multi_modal_kwargs_list = [
