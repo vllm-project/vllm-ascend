@@ -18,8 +18,10 @@
 #
 
 from vllm.logger import init_logger
+import os
 
 logger = init_logger(__name__)
+VLLM_ENABLE_GRAPH_MODE = os.environ.get('VLLM_ENABLE_GRAPH_MODE', '0')
 
 
 def try_register_lib(lib_name: str, lib_info: str = ""):

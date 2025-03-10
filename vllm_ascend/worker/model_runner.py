@@ -30,7 +30,7 @@ import torch.nn as nn
 import torch_npu
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.utils import CommonAttentionState
-from vllm.config import VllmConfig
+from vllm.config import CompilationLevel, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import get_kv_transfer_group, get_pp_group
 from vllm.forward_context import set_forward_context
@@ -52,7 +52,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import (DeviceMemoryProfiler, PyObjectCache, flatten_2d_lists,
-                        is_pin_memory_available)
+                        is_pin_memory_available, supports_dynamo)
+import vllm.envs as envs
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -62,6 +63,8 @@ from vllm.worker.model_runner_base import (
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
+
+from vllm_ascend.utils import VLLM_ENABLE_GRAPH_MODE
 
 logger = init_logger(__name__)
 
@@ -520,6 +523,14 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
         ]
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
+        # TODO:(hrz) 如果想追求极致性能走静态图，在dynamic true场景可标记输入Tensor静态
+        # if self.runner.vllm_config.compilation_config.level ==\
+        #    CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+        #    torch._dynamo.mark_static(input_tokens_tensor)
+        #    torch._dynamo.mark_static(input_positions_tensor)
+        #    torch._dynamo.mark_static(attn_metadata.block_tables)
+        #    torch._dynamo.mark_static(attn_metadata.slot_mapping)
+
         return self.model_input_cls(
             input_tokens=input_tokens_tensor,
             input_positions=input_positions_tensor,
@@ -819,6 +830,24 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
 
+        # adapter torch compile with npu_backend
+        if self.vllm_config.compilation_config.level ==\
+            CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+            import torchair
+            from torchair import patch_for_hcom
+            # 通信算子成图
+            patch_for_hcom()
+            # 设置npu的config，如果不设置config，可以使用默认的，那可以设置npu_backend="npu"
+            config = torchair.CompilerConfig()
+            config.experimental_config.frozen_parameter = True
+            config.experimental_config.tiling_schedule_optimize = True
+            npu_backend = torchair.get_npu_backend(compiler_config=config)
+            self.compile_model = torch.compile(
+                self.model,
+                dynamic=True,
+                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                backend=npu_backend)
+
     def save_sharded_state(
         self,
         path: str,
@@ -1087,7 +1116,11 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
         # TODO(andoorve): We can remove this once all
         # virtual engines share the same kv cache.
         virtual_engine = model_input.virtual_engine
-        model_executable = self.model
+        prefill_meta = model_input.attn_metadata.prefill_metadata
+        if prefill_meta is None and self.vllm_config.compilation_config.level > 0:
+            model_executable = self.compile_model
+        else:
+            model_executable = self.model
 
         # Receive KV cache in distributed KV cache transfer setting
         # In disagg prefill setting, it will also recv hidden states and bypass
