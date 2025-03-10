@@ -11,12 +11,13 @@
 ```{code-block} bash
    :substitutions:
 
-# You can change version a suitable one base on your requirement, e.g. main
+# Update DEVICE according to your device (/dev/davinci[0-7])
+export DEVICE=/dev/davinci0
+# Update the vllm-ascend image
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-
-docker run \
+docker run --rm \
 --name vllm-ascend \
---device /dev/davinci0 \
+--device $DEVICE \
 --device /dev/davinci_manager \
 --device /dev/devmm_svm \
 --device /dev/hisi_hdc \
@@ -32,16 +33,18 @@ docker run \
 
 ## Usage
 
-There are two ways to start vLLM on Ascend NPU:
-
-### Offline Batched Inference with vLLM
-
-With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing).
+You can use Modelscope mirror to speed up download:
 
 ```bash
-# Use Modelscope mirror to speed up download
 export VLLM_USE_MODELSCOPE=true
 ```
+
+There are two ways to start vLLM on Ascend NPU:
+
+:::::{tab-set}
+::::{tab-item} Offline Batched Inference
+
+With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing).
 
 Try to run below Python script directly or use `python3` shell to generate texts:
 
@@ -64,15 +67,15 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-### OpenAI Completions API with vLLM
+::::
+
+::::{tab-item} OpenAI Completions API
 
 vLLM can also be deployed as a server that implements the OpenAI API protocol. Run
 the following command to start the vLLM server with the
 [Qwen/Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) model:
 
 ```bash
-# Use Modelscope mirror to speed up download
-export VLLM_USE_MODELSCOPE=true
 # Deploy vLLM server (The first run will take about 3-5 mins (10 MB/s) to download models)
 vllm serve Qwen/Qwen2.5-0.5B-Instruct &
 ```
@@ -124,3 +127,5 @@ INFO:     Application shutdown complete.
 ```
 
 Finally, you can exit container by using `ctrl-D`.
+::::
+:::::
