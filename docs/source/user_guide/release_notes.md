@@ -1,5 +1,27 @@
 # Release note
 
+## 0.7.3rc1
+
+🎉 Hello, World! This is the first release candidate of v0.7.3 for vllm-ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io) to start the journey.
+
+### Highlights
+- DeepSeek V3/R1 works well now. [#242](https://github.com/vllm-project/vllm-ascend/pull/242)
+- speculative decoding feature is supported. [#252](https://github.com/vllm-project/vllm-ascend/pull/252)
+- Multi step scheduler feature is supported. [#222](https://github.com/vllm-project/vllm-ascend/pull/222)
+
+### Core
+- The performance of Qwen2-VL is improved. [#241](https://github.com/vllm-project/vllm-ascend/pull/241)
+- Fixed the issue of garbled code in model output. [#277](https://github.com/vllm-project/vllm-ascend/pull/277)
+- MiniCPM is now supported [#164](https://github.com/vllm-project/vllm-ascend/pull/164)
+
+### Other
+- Support MTP(Multi-Token Prediction) for DeepSeek V3/R1 [#236](https://github.com/vllm-project/vllm-ascend/pull/236)
+- Added initial support for pooling models [#229](https://github.com/vllm-project/vllm-ascend/pull/229)
+
+### Known issues
+- The accuracy of pooling models is not correct. It'll be fixed in the next release.
+
+
 ## v0.7.1rc1
 
 🎉 Hello, World!
@@ -8,7 +30,7 @@ We are excited to announce the first release candidate of v0.7.1 for vllm-ascend
 
 vLLM Ascend Plugin (vllm-ascend) is a community maintained hardware plugin for running vLLM on the Ascend NPU. With this release, users can now enjoy the latest features and improvements of vLLM on the Ascend NPU.
 
-Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/v0.7.1rc1) to start the journey. Note that this is a release candidate, and there may be some bugs or issues. We appreciate your feedback and suggestions [here](https://github.com/vllm-project/vllm-ascend/issues/19)
+Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/v0.7.1-dev) to start the journey. Note that this is a release candidate, and there may be some bugs or issues. We appreciate your feedback and suggestions [here](https://github.com/vllm-project/vllm-ascend/issues/19)
 
 ### Highlights
 
