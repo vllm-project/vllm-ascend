@@ -63,6 +63,7 @@ jobs:
     - name: Checkout vllm-project/vllm repo
       uses: actions/checkout@v4
       with:
+        ref: v0.7.3
         repository: vllm-project/vllm
         path: vllm-empty
 
