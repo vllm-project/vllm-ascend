@@ -1,10 +1,10 @@
 # formatting
 yapf==0.32.0
 toml==0.10.2
-tomli==2.0.2
+tomli==2.2.1
 ruff==0.6.5
 codespell==2.3.0
-isort==5.13.2
+isort==6.0.0
 clang-format==18.1.5
 sphinx-lint==1.0.0
 
