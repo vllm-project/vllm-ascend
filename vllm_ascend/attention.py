@@ -214,6 +214,12 @@ class AscendMetadata(AttentionMetadata):
     # seq_lens stored as a tensor.
     seq_lens_tensor: Optional[torch.Tensor] = None
 
+    # The query lengths of the input sequences
+    query_lens: Optional[List[int]] = None
+    
+    # The computed tokens
+    context_lens: Optional[List[int]] = None
+
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int] = None
 
@@ -234,6 +240,10 @@ class AscendMetadata(AttentionMetadata):
     num_encoder_tokens: Optional[int] = None
 
     attn_mask: Optional[torch.Tensor] = None
+
+    compress_mask: Optional[torch.Tensor] = None
+
+    chunk_mask: Optional[torch.Tensor] = None
 
     # Cross-attention memory-mapping data structures: slot mapping
     # and block tables
@@ -258,6 +268,10 @@ class AscendMetadata(AttentionMetadata):
                         self.slot_mapping[:self.num_prefill_tokens])
         seq_lens = (None if self.seq_lens is None else
                     self.seq_lens[:self.num_prefills])
+        query_lens = (None if self.query_lens is None else
+                    self.query_lens[:self.num_prefills])
+        context_lens = (None if self.context_lens is None else
+                    self.context_lens[:self.num_prefills])
         block_tables = (None if self.block_tables is None else
                         self.block_tables[:self.num_prefills])
 
@@ -272,6 +286,8 @@ class AscendMetadata(AttentionMetadata):
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
+            query_lens=query_lens,
+            context_lens=context_lens,
             max_query_len=self.max_query_len,
             max_prefill_seq_len=self.max_prefill_seq_len,
             max_decode_seq_len=0,
@@ -302,6 +318,10 @@ class AscendMetadata(AttentionMetadata):
                         self.slot_mapping[self.num_prefill_tokens:])
         seq_lens = (None if self.seq_lens is None else
                     self.seq_lens[self.num_prefills:])
+        query_lens = (None if self.query_lens is None else
+                    self.query_lens[self.num_prefills:])
+        context_lens = (None if self.context_lens is None else
+                    self.context_lens[self.num_prefills:])
         block_tables = (None if self.block_tables is None else
                         self.block_tables[self.num_prefills:])
         seq_lens_tensor = (None if self.seq_lens_tensor is None else
@@ -314,6 +334,8 @@ class AscendMetadata(AttentionMetadata):
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
+            query_lens=query_lens,
+            context_lens=context_lens,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
             block_tables=block_tables,
@@ -340,6 +362,8 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
         self.block_size = input_builder.block_size
 
         self.attn_mask = None
+        self.compress_mask = None
+        self.chunk_mask = None
         if AscendMetadataBuilder._attn_mask_builder is None:
             AscendMetadataBuilder._attn_mask_builder = AttentionMaskBuilder.initialize_from_len(
                 128, self.input_builder.runner.model_config.dtype)
@@ -415,6 +439,7 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
     def build(
         self,
         seq_lens: List[int],
+        context_lens: List[int],
         query_lens: List[int],
     ):
         """Build attention metadata with on-device tensors.
@@ -428,18 +453,7 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
                                 self.input_builder.chunked_prefill_enabled)
 
         device = self.runner.device
-
-        max_query_len = max(query_lens)
-        max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
-        max_decode_seq_len = max(self.curr_seq_lens, default=0)
-
-        if self.num_prefills > 0:
-            self.attn_mask = AscendMetadataBuilder._attn_mask_builder.get_attn_mask(  # type: ignore
-                max_prefill_seq_len,
-                self.input_builder.runner.model_config.dtype,
-                self.input_builder.runner.device)
-        else:
-            self.attn_mask = None
+        dtype = self.runner.model_config.dtype
 
         block_tables = make_tensor_with_pad(
             self.block_tables,
@@ -447,6 +461,44 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
             dtype=torch.int32,
             device=device,
         )
+
+        max_query_len = max(query_lens)
+        max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
+        max_decode_seq_len = max(self.curr_seq_lens, default=0)
+        max_seq_len = max(max_prefill_seq_len, max_decode_seq_len)
+
+        if self.num_prefills > 0:
+            if self.num_decode_tokens == 0:
+                if block_tables is None or block_tables.numel() == 0:
+                    # normal mask without prefix cache
+                    self.attn_mask = AscendMetadataBuilder._attn_mask_builder.get_attn_mask(  # type: ignore
+                        max_prefill_seq_len,
+                        dtype,
+                        device)
+                else:
+                    # compress mask for prefix cache
+                    self.compress_mask = AscendMetadataBuilder._attn_mask_builder.get_attn_mask(
+                        128,
+                        dtype,
+                        device)
+            else:
+                # chunk_mask for paged attention
+                num_tokens = sum(query_lens)
+                chunk_mask = np.zeros([num_tokens, max_seq_len], dtype=np.float16)
+                curr_index = 0
+                for i, seq_len in enumerate(seq_lens):
+                    query_len = query_lens[i]
+                    context_len = context_lens[i]
+                    mask = np.triu(np.ones((query_len, query_len), dtype=np.float16), 1)
+                    mask *= -10000
+                    chunk_mask[curr_index:curr_index+query_len, context_len:seq_len] = mask
+                    curr_index += query_len
+                self.chunk_mask = torch.from_numpy(chunk_mask).to(dtype).to(device)
+        else:
+            self.attn_mask = None
+            self.compress_mask = None
+            self.chunk_mask = None
+
         assert max_query_len > 0, "query_lens: {}".format(query_lens)
 
         assert device is not None
@@ -472,11 +524,15 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
             num_decode_tokens=self.num_decode_tokens,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
+            query_lens=query_lens,
+            context_lens=context_lens,
             max_query_len=max_query_len,
             max_prefill_seq_len=max_prefill_seq_len,
             max_decode_seq_len=max_decode_seq_len,
             block_tables=block_tables,
             attn_mask=self.attn_mask,
+            compress_mask=self.compress_mask,
+            chunk_mask=self.chunk_mask
         )
 
 
@@ -512,6 +568,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.seq_len_cpu_tensor = None
+        self.query_len_cpu_tensor = None
         self.key_cache = None
         self.value_cache = None
 
@@ -589,8 +646,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                                  value_cache=self.value_cache,
                                                  slot_indices=slots)
 
-            if attn_metadata.num_prefills > 0:
-
+            # Prefill only
+            if attn_metadata.num_decode_tokens == 0:
+                # Prefix cache disabled  and  chunk prefill disabled  or  no prefix cache hit
                 if (attn_metadata.block_tables is None
                         or attn_metadata.block_tables.numel() == 0):
                     assert attn_metadata.attn_mask is not None
@@ -611,12 +669,32 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         num_kv_heads=self.num_kv_heads,
                         out=output)
                 else:
-                    # TODO: Will support prefix cache and chunked prefill soon.
-                    raise RuntimeError(
-                        "Prefix cache and chunked prefill are currently not supported."
-                    )
-            elif attn_metadata.decode_metadata:
-                assert self.key_cache is not None
+                    self.seq_lens_tensor_cpu = torch.from_numpy(
+                        np.array(
+                            attn_metadata.prefill_metadata.seq_lens).astype(
+                                np.int32))
+                    self.query_lens_tensor_cpu = torch.from_numpy(
+                        np.array(
+                            attn_metadata.prefill_metadata.query_lens).astype(
+                                np.int32))
+                    block_tables = attn_metadata.prefill_metadata.block_tables
+                    assert attn_metadata.compress_mask is not None
+                    compress_mask = attn_metadata.compress_mask
+                    torch_npu._npu_flash_attention_qlens(
+                        query=query,
+                        key_cache=self.key_cache,
+                        value_cache=self.value_cache,
+                        block_table=block_tables,
+                        mask=compress_mask,
+                        seq_len=self.query_lens_tensor_cpu,
+                        context_lens=self.seq_lens_tensor_cpu,
+                        num_kv_heads=self.num_kv_heads,
+                        num_heads=self.num_heads,
+                        scale_value=self.scale,
+                        out=output)
+            # Decode only
+            elif attn_metadata.num_prefills == 0:
+                assert kv_cache is not None
                 self.seq_lens_tensor_cpu = torch.from_numpy(
                     np.array(attn_metadata.decode_metadata.seq_lens).astype(
                         np.int32))
@@ -630,6 +708,31 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     scale_value=self.scale,
                     block_table=block_tables,
                     context_lens=self.seq_lens_tensor_cpu,
+                    out=output)
+            # Splitfuse
+            else:
+                self.seq_lens_tensor_cpu = torch.from_numpy(
+                    np.array(
+                        attn_metadata.seq_lens).astype(
+                            np.int32))
+                self.query_lens_tensor_cpu = torch.from_numpy(
+                    np.array(
+                        attn_metadata.query_lens).astype(
+                            np.int32))
+                block_tables = attn_metadata.block_tables
+                assert attn_metadata.chunk_mask is not None
+                chunk_mask = attn_metadata.chunk_mask
+                torch_npu._npu_paged_attention_splitfuse(
+                    query=query,
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
+                    block_table=block_tables,
+                    context_lens=self.seq_lens_tensor_cpu,
+                    mask=chunk_mask,
+                    seq_len=self.query_lens_tensor_cpu,
+                    num_kv_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale_value=self.scale,
                     out=output)
 
         return output.view(num_tokens, self.hidden_size)
