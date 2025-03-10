@@ -86,7 +86,7 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40)
 llm = LLM(model="Qwen/QwQ-32B",
           tensor_parallel_size=4,
-          distributed_executor_backend="tp",
+          distributed_executor_backend="mp",
           max_model_len=4096)
 
 outputs = llm.generate(prompts, sampling_params)
