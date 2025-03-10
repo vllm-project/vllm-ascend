@@ -56,6 +56,7 @@ jobs:
       - name: vLLM Ascend test (dispatch)
         id: dispatch-device
         run: |
+          rm -f /tmp/dispatch.lock
           # Try to acquire lock to dispatch devices
           lockfile /tmp/dispatch.lock
 
