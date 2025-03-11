@@ -40,7 +40,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.worker_base import WorkerBase
 
-from vllm_ascend.v1.npu_model_runner import NPUModelRunner
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -120,8 +120,6 @@ class NPUWorker(WorkerBase):
 
     def init_device(self):
         if self.device_config.device.type == "npu":
-            # # This env var set by Ray causes exceptions with graph building.
-            # os.environ.pop("NCCL_ASYNC_ERROR_HANDLING", None)
             self.device = torch.device(f"npu:{self.local_rank}")
             current_platform.set_device(self.device)
 

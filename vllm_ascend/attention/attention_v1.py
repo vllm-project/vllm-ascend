@@ -19,11 +19,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
-
-try:
-    import torch_npu  # noqa: F401
-except ImportError:
-    print("Failed to import torch_npu.")
+import torch_npu
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
@@ -196,27 +192,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         value = value.contiguous()
 
         if hasattr(layer, 'quant_method'):
-            # The code below are invalid now, it will be fixed in the future
             # TODO: Add attr (num_prefills, prefill_metadata, decode_metadata) to AscendMetadata
-
-            # isPrefill = True if attn_metadata.num_prefills > 0 else False
-            # if isPrefill:
-            #     assert attn_metadata.prefill_metadata is not None
-            #     self.seq_lens_tensor_cpu = torch.from_numpy(
-            #         np.array(attn_metadata.prefill_metadata.seq_lens).astype(
-            #             np.int32))
-            # else:
-            #     assert attn_metadata.decode_metadata is not None
-            #     self.seq_lens_tensor_cpu = torch.from_numpy(
-            #         np.array(attn_metadata.decode_metadata.seq_lens).astype(
-            #             np.int32))
-            # block_tables = attn_metadata.decode_metadata.block_tables if attn_metadata.decode_metadata else None
-            # # Details of kv_cache arrangement in attention quantization
-            # # are implemented by quant_method.
-            # layer.quant_method.apply(layer, query, key, value, kv_cache,
-            #                          self.scale, self.seq_lens_tensor_cpu,
-            #                          block_tables, isPrefill, attn_metadata,
-            #                          output)
             pass
         else:
             if kv_cache.numel() > 0:

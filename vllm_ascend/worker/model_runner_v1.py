@@ -18,12 +18,13 @@
 #
 
 import gc
+import numpy as np
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
-import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
+
 from vllm.attention.backends.abstract import AttentionType
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
@@ -46,9 +47,8 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
-from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
-from vllm_ascend.v1.npu_attention import AscendAttentionBackend, AscendMetadata
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendMetadata
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler_output import SchedulerOutput
@@ -56,7 +56,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class NPUModelRunner(LoRAModelRunnerMixin):
+class NPUModelRunner:
 
     def __init__(
         self,
@@ -145,18 +145,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             vocab_size=model_config.get_vocab_size(),
         )
 
-        self.use_cuda_graph = (self.vllm_config.compilation_config.level
-                               == CompilationLevel.PIECEWISE
-                               and not self.model_config.enforce_eager)
-        # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
-        # The convention is different.
-        # self.cudagraph_batch_sizes sorts in ascending order.
-        # The batch sizes in the config are in descending order.
-        self.cudagraph_batch_sizes = list(
-            reversed(
-                self.vllm_config.compilation_config.cudagraph_capture_sizes))
-
-        # Persistent buffers for CUDA graphs.
         self.input_ids = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int32,
                                      device=self.device)
@@ -532,7 +520,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # Rewind the generator state as if the token was not sampled.
                 generator = self.input_batch.generators.get(i)
                 if generator is not None:
-                    # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
 
         # NOTE: GPU -> CPU Sync happens here.

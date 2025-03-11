@@ -39,18 +39,6 @@ os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
 
 logger = init_logger(__name__)
 
-# def _device_id_to_physical_device_id(device_id: int) -> int:
-#     if "ASCEND_RT_VISIBLE_DEVICES" in os.environ:
-#         device_ids = os.environ["ASCEND_RT_VISIBLE_DEVICES"].split(",")
-#         if device_ids == [""]:
-#             raise RuntimeError("ASCEND_RT_VISIBLE_DEVICES is set to empty"
-#                                "string, which means Ascend NPU support is"
-#                                "disabled.")
-#         physical_device_id = device_ids[device_id]
-#         return int(physical_device_id)
-#     else:
-#         return device_id
-
 
 class NPUPlatform(Platform):
 
@@ -77,8 +65,6 @@ class NPUPlatform(Platform):
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
-        # physical_device_id = _device_id_to_physical_device_id(device_id)
-        # return torch.npu.get_device_name(physical_device_id)
         return torch.npu.get_device_name(device_id)
 
     @classmethod
@@ -109,7 +95,9 @@ class NPUPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         compilation_config = vllm_config.compilation_config
         if compilation_config.level != CompilationLevel.NO_COMPILATION:
-            logger.info("[NPU] Forcing NO_COMPILATION compilation level")
+            logger.warning(
+                "Compilation level %s is not supported on NPU now, forcing compilation level to NO_COMPILATION",
+                compilation_config.level)
             compilation_config.level = CompilationLevel.NO_COMPILATION
 
         parallel_config = vllm_config.parallel_config
@@ -135,17 +123,14 @@ class NPUPlatform(Platform):
             logger.warning("[V1][NPU] Disable prefix caching")
             cache_config.enable_prefix_caching = False
 
-        assert not vllm_config.speculative_config, (
-            "Speculative decoding is not yet supported for NPU backend")
-
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla):
         if use_v1:
-            return "vllm_ascend.v1.npu_attention.AscendAttentionBackend"
+            return "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
         if use_mla:
-            return "vllm_ascend.attention.AscendMLAAttentionBackend"
-        return "vllm_ascend.attention.AscendAttentionBackend"
+            return "vllm_ascend.attention.attention.AscendMLAAttentionBackend"
+        return "vllm_ascend.attention.attention.AscendAttentionBackend"
 
     @classmethod
     def get_current_memory_usage(cls,
