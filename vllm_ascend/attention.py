@@ -577,10 +577,19 @@ class AscendAttentionBackendImpl(AttentionImpl):
             block_tables = attn_metadata.decode_metadata.block_tables if attn_metadata.decode_metadata else None
             # Details of kv_cache arrangement in attention quantization
             # are implemented by quant_method.
-            layer.quant_method.apply(layer, query, key, value, self.key_cache,
-                                     self.value_cache, self.scale,
-                                     self.seq_lens_tensor_cpu, block_tables,
-                                     isPrefill, attn_metadata, output)
+            layer.quant_method.apply(
+                layer,
+                query,
+                key,
+                value,
+                self.key_cache,
+                self.value_cache,
+                self.scale,
+                block_tables,
+                isPrefill,
+                attn_metadata,
+                output,
+                seq_lens_tensor_cpu=self.seq_lens_tensor_cpu)
         else:
             if self.key_cache is not None:
                 torch_npu._npu_reshape_and_cache(key=key,

@@ -227,14 +227,29 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
 
-    def apply(self, layer: torch.nn.Module, query: torch.Tensor,
-              key: torch.Tensor, value: torch.Tensor,
-              k_cache: List[torch.Tensor], v_cache: List[torch.Tensor],
-              scale: torch.Tensor, seq_lens_tensor_cpu: int,
-              block_tables: torch.Tensor, isPrefill: bool, attn_metadata,
-              output) -> torch.Tensor:
-        return self.quant_method.apply(layer, query, key, value, k_cache,
-                                       v_cache, scale, seq_lens_tensor_cpu,
-                                       block_tables, isPrefill,
+    def apply(self,
+              layer: torch.nn.Module,
+              query: torch.Tensor,
+              key: torch.Tensor,
+              value: torch.Tensor,
+              k_cache: List[torch.Tensor],
+              v_cache: List[torch.Tensor],
+              scale: torch.Tensor,
+              block_tables: torch.Tensor,
+              isPrefill: bool,
+              attn_metadata,
+              output,
+              seq_lens_tensor_cpu: Optional[int] = None) -> torch.Tensor:
+        return self.quant_method.apply(layer,
+                                       query,
+                                       key,
+                                       value,
+                                       k_cache,
+                                       v_cache,
+                                       scale,
+                                       block_tables,
+                                       isPrefill,
                                        attn_metadata.attn_mask,
-                                       attn_metadata.slot_mapping, output)
+                                       attn_metadata.slot_mapping,
+                                       output,
+                                       seq_lens_tensor_cpu=seq_lens_tensor_cpu)
