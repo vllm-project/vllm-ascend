@@ -49,6 +49,7 @@ logger = init_logger(__name__)
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 
+
 def _read_prompts(filename: str) -> List[str]:
     with open(filename) as f:
         prompts = f.readlines()
@@ -61,6 +62,7 @@ def example_prompts() -> List[str]:
     for filename in _TEST_PROMPTS:
         prompts += _read_prompts(filename)
     return prompts
+
 
 class VllmRunner:
 

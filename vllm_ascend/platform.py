@@ -111,7 +111,6 @@ class NPUPlatform(Platform):
                 parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
 
         cache_config = vllm_config.cache_config
-        vllm_config.scheduler_config.chunked_prefill_enabled = False
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 128
 
