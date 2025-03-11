@@ -16,7 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
+import torch
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -33,3 +33,23 @@ def try_register_lib(lib_name: str, lib_info: str = ""):
                 logger.info(lib_info)
     except Exception:
         pass
+
+
+_current_stream = None
+
+
+def current_stream() -> torch.npu.Stream:
+    """
+    replace `torch.npu.current_stream()` with `vllm.utils.current_stream()`.
+    it turns out that `torch.npu.current_stream()` is quite expensive,
+    as it will construct a new stream object at each call.
+    here we patch `torch.npu.set_stream` to keep track of the current stream
+    directly, so that we can avoid calling `torch.npu.current_stream()`.
+
+    """
+    global _current_stream
+    if _current_stream is None:
+        # when this function is called before any stream is set,
+        # we return the default stream.
+        _current_stream = torch.npu.current_stream()
+    return _current_stream
