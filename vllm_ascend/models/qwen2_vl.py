@@ -49,11 +49,11 @@ class CustomQwen2VisionAttention(Qwen2VisionAttention):
         prefix: str = "",
     ) -> None:
         super().__init__(
-        embed_dim,
-        num_heads,
-        projection_size,
-        quant_config,
-        prefix,
+            embed_dim,
+            num_heads,
+            projection_size,
+            quant_config,
+            prefix,
         )
         self.cu_seqlens = None
 
@@ -63,7 +63,7 @@ class CustomQwen2VisionAttention(Qwen2VisionAttention):
         cu_seqlens: torch.Tensor,
         rotary_pos_emb: torch.Tensor,
     ) -> torch.Tensor:
-        
+
         self.cu_seqlens = cu_seqlens
 
         # [s, b, c] --> [s, b, 3 * head * head_dim]
