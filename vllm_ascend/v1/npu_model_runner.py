@@ -18,27 +18,26 @@
 #
 
 import gc
-from typing import (TYPE_CHECKING, Dict, List, Optional, Union)
+from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
+import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
-import numpy as np
+from vllm.attention.backends.abstract import AttentionType
+from vllm.attention.layer import Attention
+from vllm.config import CompilationLevel, VllmConfig
+from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
-from vllm.sequence import IntermediateTensors
-from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.layer import Attention
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingType
+from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LayerBlockType, cdiv, is_pin_memory_available)
-from vllm.distributed.parallel_state import get_pp_group
-from vllm.platforms import current_platform
-
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -46,11 +45,10 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID
 from vllm.v1.utils import bind_kv_cache
-from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
-from vllm_ascend.v1.npu_attention import AscendMetadata
-from vllm_ascend.v1.npu_attention import AscendAttentionBackend
+from vllm_ascend.v1.npu_attention import AscendAttentionBackend, AscendMetadata
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler_output import SchedulerOutput
@@ -822,7 +820,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_kv_heads=attn_module.num_kv_heads,
                     head_size=attn_module.head_size,
                     dtype=attn_module.dtype,
-                )
+                    use_mla=False)
             elif attn_module.attn_type in (AttentionType.ENCODER,
                                            AttentionType.ENCODER_ONLY):
                 # encoder-only attention does not need KV cache.

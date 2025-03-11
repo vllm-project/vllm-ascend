@@ -140,7 +140,11 @@ echo 'vLLM mypy: Done'
 # https://github.com/codespell-project/codespell/issues/1915
 # Avoiding the "./" prefix and using "/**" globs for directories appears to solve the problem
 CODESPELL_EXCLUDES=(
-    '--skip' 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,collect_env.py,vllm_ascend/ops/fused_moe.py'
+    '--skip' 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**'
+)
+
+CODESPELL_IGNORE_WORDS=(
+    '-L' 'CANN,NNAL,ASCEND,Ascend'
 )
 
 # check spelling of specified files
@@ -163,7 +167,7 @@ spell_check_changed() {
     MERGEBASE="$(git merge-base origin/main HEAD)"
     if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
         git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
-            codespell "${CODESPELL_EXCLUDES[@]}"
+            codespell "${CODESPELL_EXCLUDES[@]}" "${CODESPELL_IGNORE_WORDS[@]}"
     fi
 }
 

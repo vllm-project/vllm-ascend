@@ -21,8 +21,8 @@ import gc
 from typing import Dict, List, Optional
 
 import torch
-import torch_npu
 import torch.distributed
+import torch_npu
 from torch import nn
 from vllm import envs
 from vllm.config import ParallelConfig, VllmConfig
@@ -32,8 +32,7 @@ from vllm.distributed import (ensure_model_parallel_initialized,
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
-from vllm.utils import bind_kv_cache, STR_DTYPE_TO_TORCH_DTYPE
-
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
