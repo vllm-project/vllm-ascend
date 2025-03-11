@@ -115,8 +115,7 @@ class NPUPlatform(Platform):
                 parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
-            # TODO: Set block_size to 128 will lead unexpected accuracy issue in mla case.  Please set block_size to 128 back once the problem is fixed.
-            cache_config.block_size = 16
+            cache_config.block_size = 128
         if vllm_config.quant_config is not None and \
             'fa_quant_type' in vllm_config.quant_config.quant_description.keys():
             # Ascend attention quant uses int8 dtype.
