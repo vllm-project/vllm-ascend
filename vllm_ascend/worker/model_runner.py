@@ -1061,6 +1061,11 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                 # TODO (cmq): enable this after supported in vllm
                 # pad_for_invariant_seq_len=True,
             )
+            # Get hash value of request id list to perform sampling param cache in sampler.
+            request_ids = model_input.request_ids_to_seq_ids.keys(  # type: ignore
+            )  # type: ignore
+            request_ids_hash = hash("".join(request_ids))
+            sampling_metadata.request_ids_hash = request_ids_hash  # type: ignore
         else:
             sampling_metadata = None
         is_prompt = (seq_group_metadata_list[0].is_prompt
