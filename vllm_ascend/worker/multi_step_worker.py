@@ -3,14 +3,15 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 import torch
-
 from vllm.distributed import broadcast_tensor_dict, get_pp_group
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
 from vllm.worker.model_runner_base import BroadcastableModelInput
 from vllm.worker.multi_step_model_runner import StatefulModelInput
-from vllm_ascend.worker import NPUWorker, WorkerInput
-from vllm_ascend.multi_step_runner import MultiStepModelNPURunner
+
+from vllm_ascend.worker.multi_step_runner import MultiStepModelNPURunner
+from vllm_ascend.worker.worker import NPUWorker, WorkerInput
+
 
 @dataclass
 class MultiStepState:

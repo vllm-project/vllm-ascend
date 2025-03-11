@@ -1,15 +1,34 @@
-from vllm.worker.multi_step_model_runner import *
-from vllm_ascend.model_runner import NPUModelRunnerBase,ModelInputForNPUWithSamplingMetadata
+import dataclasses
+import functools
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+
+import torch
 from torch import nn
+from vllm.distributed import get_pp_group
+from vllm.logger import init_logger
+from vllm.model_executor.layers.sampler import (PromptLogprobs, SampleLogprobs,
+                                                SamplerOutput,
+                                                SamplingMetadata, get_logprobs,
+                                                get_pythonized_sample_results)
+from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
+                           Logprob, SequenceGroupMetadata, SequenceOutput)
+from vllm.worker.multi_step_model_runner import (ModelOutput,
+                                                 PythonizationCache,
+                                                 StatefulModelInput)
+
+from vllm_ascend.worker.model_runner import (
+    ModelInputForNPUWithSamplingMetadata, NPUModelRunnerBase)
+
+logger = init_logger(__name__)
+
 
 class MultiStepModelNPURunner(NPUModelRunnerBase[StatefulModelInput]):
-        # mypy: enable-error-code=type-var
-        
-    def __init__(self, base_model_runner: NPUModelRunnerBase, *args, **kwargs):
+    # mypy: enable-error-code=type-var
 
+    def __init__(self, base_model_runner: NPUModelRunnerBase, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        print("using npu multistep runner")
-        # No need to check npu attention backend support.
 
         # uses the base model runner to execute the model and wraps it with
         # multi-step logic
@@ -26,18 +45,18 @@ class MultiStepModelNPURunner(NPUModelRunnerBase[StatefulModelInput]):
         # for this.
         self.pythonization_cache = PythonizationCache() \
             if self.parallel_config.pipeline_parallel_size == 1 else None
-    
+
     def get_model(self) -> nn.Module:
         return self.model
-    
+
     @functools.cached_property
     def _copy_stream(self):
-        # used to copy tensors from GPU to CPU asynchronously
-        return torch.cuda.Stream()
+        # used to copy tensors from NPU to CPU asynchronously
+        return torch.npu.Stream()
 
     def make_model_input_from_broadcasted_tensor_dict(
             self, tensor_dict: Dict[str, Any]) -> StatefulModelInput:
-        model_input = (StatefulModelInput.from_broadcasted_tensor_dict(
+        model_input = (NPUStatefulModelInput.from_broadcasted_tensor_dict(
             tensor_dict,
             attn_backend=self.attn_backend,
         ))
@@ -62,11 +81,13 @@ class MultiStepModelNPURunner(NPUModelRunnerBase[StatefulModelInput]):
         num_seqs = len(frozen_model_input.seq_lens)
         num_single_step_prefills = frozen_model_input.attn_metadata.num_prefills
 
-        model_input = StatefulModelInput(
+        model_input = NPUStatefulModelInput(
             frozen_model_input=frozen_model_input,
             num_seqs=num_seqs,
             num_queries=num_queries,
-            num_single_step_prefills=num_single_step_prefills)
+            num_single_step_prefills=num_single_step_prefills,
+            step_cuda_events=[torch.npu.Event(blocking=True)] * 2,
+        )
 
         return model_input
 
@@ -82,7 +103,7 @@ class MultiStepModelNPURunner(NPUModelRunnerBase[StatefulModelInput]):
                 model_output.maybe_pythonize(model_input, self._copy_stream,
                                              self.pinned_sampled_token_ids)
                 if model_output.pythonized:
-                    ctx = output_proc_callback.keywords["ctx"]
+                    ctx = output_proc_callback.keywords["ctx"]  # type: ignore
                     ctx.append_output(
                         outputs=[model_output.sampler_output],
                         seq_group_metadata_list=ctx.seq_group_metadata_list,
@@ -117,7 +138,7 @@ class MultiStepModelNPURunner(NPUModelRunnerBase[StatefulModelInput]):
             if has_async_callback:
                 assert output_proc_callback is not None
 
-                # Invoke callback before pythonize (to overlap with GPU)
+                # Invoke callback before pythonize (to overlap with NPU)
                 output_proc_callback()
 
                 # Pythonize
@@ -126,7 +147,7 @@ class MultiStepModelNPURunner(NPUModelRunnerBase[StatefulModelInput]):
                                      self.pinned_sampled_token_ids)
 
                     # For non last step, add to callback queue to chain
-                    # callbacks=>pythonize pairs (for GPU overlap)
+                    # callbacks=>pythonize pairs (for NPU overlap)
                     if not is_last_step:
                         ctx = output_proc_callback.keywords[  # type: ignore
                             "ctx"]  # type: ignore
@@ -188,12 +209,12 @@ class MultiStepModelNPURunner(NPUModelRunnerBase[StatefulModelInput]):
         #   - if it's the first step, we need to reset the sampling tensors
         #   - if it's not the first step, we need to advance the step using the
         #   appended sampler output from last iteration
-        #   - also maybe pythonize if CPU is ahead of GPU
+        #   - also maybe pythonize if CPU is ahead of NPU
 
         stream = current_stream()
         if not model_input.is_first_multi_step:
             # Explicitly block on the previous step's forward to make sure we
-            # don't clobber any GPU tensors still in use.
+            # don't clobber any NPU tensors still in use.
             # This is not needed for flashattn backend, but for other attn
             # backends such as flashinfer that performs extra CPU operations on
             # input metadata we may need to synchronize any CPU operations that
@@ -243,7 +264,7 @@ class MultiStepModelNPURunner(NPUModelRunnerBase[StatefulModelInput]):
 
             # event for the pythonization so that we only pythonize if the
             # tensors are ready. May be able to be combined with the step event
-            output_ready_event = torch.cuda.Event()
+            output_ready_event = torch.npu.Event()
             output_ready_event.record(stream)
             if self.parallel_config.pipeline_parallel_size > 1:
                 output[0].sampled_token_ids_cpu = output[
@@ -253,7 +274,7 @@ class MultiStepModelNPURunner(NPUModelRunnerBase[StatefulModelInput]):
                             output[0].sampled_token_ids, False,
                             output[0].logprobs, self.pythonization_cache))
 
-            # These GPU tensors are not required by multi-step;
+            # These NPU tensors are not required by multi-step;
             # erase them to ensure they are not pythonized or
             # transferred to CPU
             output[0].sampled_token_ids = None
@@ -380,8 +401,8 @@ def deferred_pythonize_logprobs(
 ) -> DeferredLogprobsReturnType:
     """Perform deferred logprob Pythonization.
 
-    1. Pythonize GPU-side sampler result tensors into CPU-side sampler result.
-    2. Pythonize GPU-side logprobs tensor into CPU-side logprobs lists,
+    1. Pythonize NPU-side sampler result tensors into CPU-side sampler result.
+    2. Pythonize NPU-side logprobs tensor into CPU-side logprobs lists,
        utilizing  the Pythonized sampler result computed in step 1.
     
     These deferred computations are not required for single-step scheduling
@@ -399,7 +420,7 @@ def deferred_pythonize_logprobs(
     sampler_result = get_pythonized_sample_results(
         output.deferred_sample_results_args)
 
-    # - Erase the GPU-side deferred sample_result
+    # - Erase the NPU-side deferred sample_result
     #   computation args to ensure it is never
     #   pythonized or transferred to CPU
     output.deferred_sample_results_args = None
@@ -435,9 +456,9 @@ def _pythonize_sampler_output(
       output: sampler output
       pinned_sampled_token_token_buffer: CPU-side pinned memory
                                          (receives copy of
-                                         GPU-side token buffer.)
-      sampled_token_ids: GPU-side token buffer
-      logprobs_tensor: GPU-side tensor containing 
+                                         NPU-side token buffer.)
+      sampled_token_ids: NPU-side token buffer
+      logprobs_tensor: NPU-side tensor containing 
                        logprobs computed during sampling
     """
 
@@ -480,7 +501,7 @@ def _pythonize_sampler_output(
         or any([sg.sampling_params.logprobs is not None for sg in seq_groups]))
 
     if prompt_logprobs_are_requested_for_prefill:
-        # CPU GPU sync, after gathering *only* sampled tokens (since
+        # CPU NPU sync, after gathering *only* sampled tokens (since
         # requesting prompt logprobs leads `sampled_token_ids` to
         # include prompt token ids in addition to sampled token ids.)
         sample_idx_tensor = torch.tensor(
@@ -488,7 +509,7 @@ def _pythonize_sampler_output(
         pinned_buffer = pinned_buffer.copy_(
             sampled_token_ids[sample_idx_tensor, :], non_blocking=False)
     else:
-        # CPU GPU sync
+        # CPU NPU sync
         pinned_buffer = pinned_buffer.copy_(sampled_token_ids,
                                             non_blocking=False)
 

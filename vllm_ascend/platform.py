@@ -17,9 +17,9 @@
 
 import os
 from typing import TYPE_CHECKING, Optional, Tuple
-import vllm.envs as envs
 
 import torch
+import vllm.envs as envs
 
 try:
     import torch_npu  # noqa: F401

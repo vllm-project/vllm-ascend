@@ -16,7 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
+import torch
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -33,3 +33,4 @@ def try_register_lib(lib_name: str, lib_info: str = ""):
                 logger.info(lib_info)
     except Exception:
         pass
+
