@@ -105,7 +105,11 @@ class NPUPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
+            if vllm_config.scheduler_config.is_multi_step:
+                parallel_config.worker_cls = "vllm_ascend.worker.multi_step_worker.MultiStepWorker"
+            else:
+                parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
+
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             # TODO: Set block_size to 128 will lead unexpected accuracy issue in mla case.  Please set block_size to 128 back once the problem is fixed.
