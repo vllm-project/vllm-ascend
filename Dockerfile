@@ -38,6 +38,8 @@ ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_TAG=main
 RUN git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /workspace/vllm
 RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install /workspace/vllm/
+# In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
+RUN pip uninstall -y triton
 
 # Install vllm-ascend
 RUN python3 -m pip install /workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/
@@ -46,7 +48,6 @@ RUN python3 -m pip install /workspace/vllm-ascend/ --extra-index https://downloa
 RUN bash /workspace/vllm-ascend/pta_install.sh
 
 # Install modelscope (for fast download) and ray (for multinode)
-# TODO(yikun): Remove "<1.23.0" after v0.7.4 which resloved by https://github.com/vllm-project/vllm/pull/13807
-RUN python3 -m pip install "modelscope<1.23.0" ray
+RUN python3 -m pip install modelscope ray
 
 CMD ["/bin/bash"]
