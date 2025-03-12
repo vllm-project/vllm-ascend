@@ -12,7 +12,7 @@ This document describes how to install vllm-ascend manually.
     | Software     | Supported version | Note |
     | ------------ | ----------------- | ---- | 
     | CANN         | >= 8.0.0          | Required for vllm-ascend and torch-npu |
-    | torch-npu    | >= 2.5.1.dev20250226       | Required for vllm-ascend |
+    | torch-npu    | >= 2.5.1.dev20250308       | Required for vllm-ascend |
     | torch        | >= 2.5.1          | Required for torch-npu and vllm |
 
 You have 2 way to install:
@@ -44,10 +44,12 @@ Refer to [Ascend Environment Setup Guide](https://ascend.github.io/docs/sources/
 
 The easiest way to prepare your software environment is using CANN image directly:
 
-```bash
+```{code-block} bash
+   :substitutions:
 # Update DEVICE according to your device (/dev/davinci[0-7])
 export DEVICE=/dev/davinci7
-
+# Update the vllm-ascend image
+export IMAGE=quay.io/ascend/cann:|cann_image_tag|
 docker run --rm \
     --name vllm-ascend-env \
     --device $DEVICE \
@@ -59,14 +61,16 @@ docker run --rm \
     -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
-    -it quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10 bash
+    -it $IMAGE bash
 ```
 
+:::{dropdown} Click here to see "Install CANN manally"
+:animate: fade-in-slide-down
 You can also install CANN manually:
 
-:::{note}
+```{note}
 This guide takes aarch64 as an example. If you run on x86, you need to replace `aarch64` with `x86_64` for the package name shown below.
-:::
+```
 
 ```bash
 # Create a virtual environment
@@ -93,6 +97,8 @@ chmod +x. /Ascend-cann-nnal_8.0.0_linux-aarch64.run
 
 source /usr/local/Ascend/nnal/atb/set_env.sh
 ```
+
+:::
 
 ::::
 
@@ -125,6 +131,7 @@ pip install vllm==|pip_vllm_version|
 pip install vllm-ascend==|pip_vllm_ascend_version| --extra-index https://download.pytorch.org/whl/cpu/
 ```
 
+:::{dropdown} Click here to see "Build from source code"
 or build from **source code**:
 
 ```{code-block} bash
@@ -140,6 +147,7 @@ git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-proj
 cd vllm-ascend
 pip install -e . --extra-index https://download.pytorch.org/whl/cpu/
 ```
+:::
 
 Current version depends on a unreleased `torch-npu`, you need to install manually:
 
@@ -150,15 +158,15 @@ Current version depends on a unreleased `torch-npu`, you need to install manuall
 # 
 # Here we take python 3.10 on aarch64 as an example. Feel free to install the correct version for your environment. See:
 #
-# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250226.4/pytorch_v2.5.1_py39.tar.gz
-# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250226.4/pytorch_v2.5.1_py310.tar.gz
-# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250226.4/pytorch_v2.5.1_py311.tar.gz
+# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250308.3/pytorch_v2.5.1_py39.tar.gz
+# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250308.3/pytorch_v2.5.1_py310.tar.gz
+# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250308.3/pytorch_v2.5.1_py311.tar.gz
 #
 mkdir pta
 cd pta
-wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250226.4/pytorch_v2.5.1_py310.tar.gz
+wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250308.3/pytorch_v2.5.1_py310.tar.gz
 tar -xvf pytorch_v2.5.1_py310.tar.gz
-pip install ./torch_npu-2.5.1.dev20250226-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+pip install ./torch_npu-2.5.1.dev20250308-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 ```
 ::::
 
@@ -167,14 +175,23 @@ pip install ./torch_npu-2.5.1.dev20250226-cp310-cp310-manylinux_2_17_aarch64.man
 
 You can just pull the **prebuilt image** and run it with bash.
 
+:::{dropdown} Click here to see "Build from Dockerfile"
+or build IMAGE from **source code**:
+
+```bash
+git clone https://github.com/vllm-project/vllm-ascend.git
+cd vllm-ascend
+docker build -t vllm-ascend-dev-image:latest -f ./Dockerfile .
+```
+:::
+
 ```{code-block} bash
    :substitutions:
 
 # Update DEVICE according to your device (/dev/davinci[0-7])
-DEVICE=/dev/davinci7
+export DEVICE=/dev/davinci7
 # Update the vllm-ascend image
-IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker pull $IMAGE
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
     --name vllm-ascend-env \
     --device $DEVICE \
@@ -187,14 +204,6 @@ docker run --rm \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
     -it $IMAGE bash
-```
-
-or build IMAGE from **source code**:
-
-```bash
-git clone https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-docker build -t vllm-ascend-dev-image:latest -f ./Dockerfile .
 ```
 
 ::::

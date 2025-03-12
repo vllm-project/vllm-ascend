@@ -90,6 +90,7 @@ class ModelInputForNPU(ModelRunnerInputBase):
     async_callback: Optional[Callable] = None
     seq_group_metadata_list: Optional[List[SequenceGroupMetadata]] = None
     scheduler_outputs: Optional[SchedulerOutputs] = None
+    previous_hidden_states: Optional[torch.Tensor] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -808,6 +809,9 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
               SamplingMetadataCache() \
                 if self.parallel_config.pipeline_parallel_size == 1 else None
 
+    def get_model(self) -> nn.Module:
+        return self.model
+
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:
@@ -1059,6 +1063,11 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                 # TODO (cmq): enable this after supported in vllm
                 # pad_for_invariant_seq_len=True,
             )
+            # Get hash value of request id list to perform sampling param cache in sampler.
+            request_ids = model_input.request_ids_to_seq_ids.keys(  # type: ignore
+            )  # type: ignore
+            request_ids_hash = hash("".join(request_ids))
+            sampling_metadata.request_ids_hash = request_ids_hash  # type: ignore
         else:
             sampling_metadata = None
         is_prompt = (seq_group_metadata_list[0].is_prompt
@@ -1075,6 +1084,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        **kwargs,
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
@@ -1111,6 +1121,11 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_inner_state else {}
 
+        previous_hidden_states = kwargs.get("previous_hidden_states")
+        model_kwargs = {}
+        if previous_hidden_states is not None:
+            model_kwargs["previous_hidden_states"] = previous_hidden_states
+
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
             model_forward_start = torch_npu.npu.Event(enable_timing=True)
@@ -1130,7 +1145,9 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                     intermediate_tensors=intermediate_tensors,
                     **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                                  device=self.device),
-                    **seqlen_agnostic_kwargs)
+                    **seqlen_agnostic_kwargs,
+                    **model_kwargs,
+                )
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
@@ -1343,6 +1360,3 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
         self.execute_model(model_input, kv_caches, intermediate_tensors)
         current_platform.synchronize()
         return
-
-    def get_model(self) -> nn.Module:
-        return self.model
