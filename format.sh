@@ -149,7 +149,7 @@ CODESPELL_IGNORE_WORDS=(
 
 # check spelling of specified files
 spell_check() {
-    codespell "$@" "${CODESPELL_IGNORE_WORDS[@]}" "${CODESPELL_IGNORE_WORDS[@]}"
+    codespell "$@" "${CODESPELL_IGNORE_WORDS[@]}"
 }
 
 spell_check_all() {
