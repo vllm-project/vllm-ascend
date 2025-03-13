@@ -2,25 +2,27 @@
 
 | Model | Supported | Note |
 |---------|-----------|------|
-| Qwen 2.5 | ✅ ||
+| DeepSeek v3 | ✅|||
+| DeepSeek R1 | ✅|||
+| DeepSeek Distill (Qwen/LLama) |✅||
+| Qwen2-VL | ✅ ||
+| Qwen2-Audio | ✅ ||
+| Qwen2.5 | ✅ ||
+| Qwen2.5-VL | ✅ ||
+| MiniCPM |✅| |
+| LLama3.1/3.2 | ✅ ||
 | Mistral |  | Need test |
 | DeepSeek v2.5 | |Need test |
-| DeepSeek v3 | ✅|||
-| DeepSeek Distill (Qwen/llama) |✅||
-| LLama3.1/3.2 | ✅ ||
 | Gemma-2 |  |Need test|
-| baichuan |  |Need test|
-| minicpm |  |Need test|
-| internlm | ✅ ||
-| ChatGLM | ✅ ||
-| InternVL 2.5 | ✅ ||
-| Qwen2-VL | ✅ ||
+| Baichuan |  |Need test|
+| Internlm | ✅ ||
+| ChatGLM | ❌ | Plan in Q2|
+| InternVL2.5 | ✅ ||
 | GLM-4v |  |Need test|
 | Molomo | ✅ ||
-| LLaVA 1.5 | ✅ ||
+| LLaVA1.5 | | Need test|
 | Mllama |  |Need test|
 | LLaVA-Next |  |Need test|
 | LLaVA-Next-Video |  |Need test|
 | Phi-3-Vison/Phi-3.5-Vison |  |Need test|
 | Ultravox |  |Need test|
-| Qwen2-Audio | ✅ ||
