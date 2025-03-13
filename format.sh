@@ -144,16 +144,16 @@ CODESPELL_EXCLUDES=(
 )
 
 CODESPELL_IGNORE_WORDS=(
-    '-L' 'CANN,NNAL,ASCEND,Ascend'
+    '-L' 'CANN,NNAL,ASCEND'
 )
 
 # check spelling of specified files
 spell_check() {
-    codespell "$@"
+    codespell "$@" "${CODESPELL_IGNORE_WORDS[@]}"
 }
 
-spell_check_all(){
-  codespell --toml pyproject.toml "${CODESPELL_EXCLUDES[@]}"
+spell_check_all() {
+  codespell --toml pyproject.toml "${CODESPELL_EXCLUDES[@]}" "${CODESPELL_IGNORE_WORDS[@]}"
 }
 
 # Spelling check of files that differ from main branch.

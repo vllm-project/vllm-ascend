@@ -1,7 +1,7 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
-# Adapted from vllm-project/vllm/vllm/worker/worker.py
+# Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py
 # Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -23,7 +23,6 @@ from typing import Dict, List, Optional
 import torch
 import torch.distributed
 import torch_npu
-from torch import nn
 from vllm import envs
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
@@ -33,28 +32,23 @@ from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.core.scheduler import SchedulerOutput
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.utils import bind_kv_cache
-from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.gpu_worker import Worker
 
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 logger = init_logger(__name__)
 
 
-class NPUWorker(WorkerBase):
+class NPUWorker(Worker):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        local_rank: int,
-        rank: int,
-        distributed_init_method: str,
-        is_driver_worker: bool = False,
-    ):
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 local_rank: int,
+                 rank: int,
+                 distributed_init_method: str,
+                 is_driver_worker: bool = False):
         # Register ops when worker init.
         from vllm_ascend import ops  # noqa: F401
 
@@ -63,6 +57,7 @@ class NPUWorker(WorkerBase):
                          rank=rank,
                          distributed_init_method=distributed_init_method,
                          is_driver_worker=is_driver_worker)
+
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -191,63 +186,37 @@ class NPUWorker(WorkerBase):
         )
         return int(npu_kv_cache_bytes)
 
-    def execute_model(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> Optional[ModelRunnerOutput]:
-        output = self.model_runner.execute_model(scheduler_output)
-        return output if self.rank == 0 else None
-
     def load_model(self) -> None:
         self.model_runner.load_model()
 
     def compile_or_warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
-            self.model_runner.capture_model()
-
+            logger.warning("Graph capture is not supported on NPU.")
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
-    def get_model(self) -> nn.Module:
-        return self.model_runner.get_model()
-
-    def get_kv_cache_spec(self) -> KVCacheSpec:
-        return self.model_runner.get_kv_cache_spec()
-
-    def initialize_cache(self, kv_cache_configs: List[KVCacheConfig]) -> None:
-        """Allocate GPU KV cache with the specified kv_cache_config."""
-        kv_cache_config = kv_cache_configs[self.rank]
-        self.model_runner.initialize_kv_cache(kv_cache_config)
-
-    def check_health(self) -> None:
-        # worker will always be healthy as long as it's running.
-        return
-
-    def profile(self, is_start: bool = True):
-        if self.profiler is None:
-            raise RuntimeError("Profiler is not enabled.")
-        if is_start:
-            self.profiler.start()
-        else:
-            self.profiler.stop()
-
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
         self.model_runner.initialize_kv_cache(kv_cache_config)
+
+    # TODO:SSS
+    # def initialize_cache(self, kv_cache_configs: List[KVCacheConfig]) -> None:
+    #     """Allocate NPU KV cache with the specified kv_cache_config."""
+    #     kv_cache_config = kv_cache_configs[self.rank]
+    #     self.model_runner.initialize_kv_cache(kv_cache_config)
 
 
 def init_worker_distributed_environment(
         parallel_config: ParallelConfig,
         rank: int,
         distributed_init_method: Optional[str] = None,
-        local_rank: int = -1,
-        backend: str = "hccl") -> None:
+        local_rank: int = -1) -> None:
     """Initialize the distributed environment."""
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_distributed_environment(parallel_config.world_size, rank,
-                                 distributed_init_method, local_rank, backend)
+                                 distributed_init_method, local_rank, "hccl")
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)

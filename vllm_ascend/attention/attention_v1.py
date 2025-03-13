@@ -20,7 +20,6 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 import torch_npu
-
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
@@ -100,7 +99,7 @@ class AscendMetadata:
     # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor = None
-    # TODO Indicates whether there are only prefill requests.
+    # TODO: Indicates whether there are only prefill requests.
     # FlashAttention can be used when there are only prefill requests.
     # FlashAttention has better performance than PageAtttention,
     # but it does not support decode requests.

@@ -1,9 +1,10 @@
 import os
-import torch
-import torch_npu
 
+import torch
+import torch_npu  # noqa: F401
 
 device_id = 0
+
 
 def _device_id_to_physical_device_id(device_id: int) -> int:
     if "ASCEND_RT_VISIBLE_DEVICES" in os.environ:
@@ -16,7 +17,7 @@ def _device_id_to_physical_device_id(device_id: int) -> int:
         return int(physical_device_id)
     else:
         return device_id
-    
+
 
 physical_device_id = _device_id_to_physical_device_id(device_id)
 print("physical_device_id: " + str(physical_device_id))

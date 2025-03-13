@@ -1,7 +1,7 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
-# Adapted from vllm-project/vllm/vllm/worker/model_runner.py
+# Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 # Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,16 +18,12 @@
 #
 
 import gc
-import numpy as np
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
+import numpy as np
 import torch
 import torch.distributed
-import torch.nn as nn
-
-from vllm.attention.backends.abstract import AttentionType
-from vllm.attention.layer import Attention
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
@@ -41,14 +37,16 @@ from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LayerBlockType, cdiv, is_pin_memory_available)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.engine.mm_input_cache import MMInputCacheClient
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID
+from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID, RejectionSampler
+from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackend, AscendMetadata
+from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
+                                                AscendMetadata)
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler_output import SchedulerOutput
@@ -56,13 +54,10 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class NPUModelRunner:
+class NPUModelRunner(GPUModelRunner):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        device: torch.device,
-    ):
+    def __init__(self, vllm_config: VllmConfig, device: torch.device):
+
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -78,9 +73,11 @@ class NPUModelRunner:
         cache_config = self.cache_config
         scheduler_config = self.scheduler_config
         parallel_config = self.parallel_config
+
         self.device = device
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
+
         if cache_config.cache_dtype == "auto":
             self.kv_cache_dtype = self.dtype
         else:
@@ -130,8 +127,23 @@ class NPUModelRunner:
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
 
-        # disable speculative decoding.
+        # Set up speculative decoding.
         self.use_spec_decode = False
+        if self.speculative_config:
+            self.use_spec_decode = True
+            self.rejection_sampler = RejectionSampler()
+            # TODO: find a better way to check if we are using ngram.
+            assert self.speculative_config.ngram_prompt_lookup_min, \
+                    "Currently, only ngram spec decode is supported in V1."
+            if get_pp_group().is_last_rank:
+                self.drafter = NgramProposer()
+                # Trigger Numba JIT compilation for N-gram proposer.
+                # This usually takes less than 1 second.
+                self.drafter.propose(
+                    np.zeros(1024, dtype=np.int32),
+                    self.speculative_config.ngram_prompt_lookup_min,
+                    self.speculative_config.num_speculative_tokens,
+                )
 
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}
@@ -331,7 +343,6 @@ class NPUModelRunner:
             self.input_batch.block_table.append_row(req_data.new_block_ids,
                                                     req_index)
             # Add new_token_ids to token_ids_cpu.
-            # 把新请求内容放到token_ids_cpu中存储
             start_token_index = num_computed_tokens
             end_token_index = num_computed_tokens + len(req_data.new_token_ids)
             self.input_batch.token_ids_cpu[
@@ -372,9 +383,6 @@ class NPUModelRunner:
 
         if batch_changed:
             self.input_batch.refresh_sampling_metadata()
-
-    def get_model(self) -> nn.Module:
-        return self.model
 
     @staticmethod
     def make_attention_mask(kv_dtype, kv_device, max_seq_len, seq_lens,
@@ -475,7 +483,7 @@ class NPUModelRunner:
                            0,
                            torch.from_numpy(token_indices),
                            out=self.input_ids_cpu[:total_num_scheduled_tokens])
-        # Copy the tensors to the GPU.
+        # Copy the tensors to the NPU.
         self.input_ids[:total_num_scheduled_tokens].copy_(
             self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
         input_ids = self.input_ids[:total_num_scheduled_tokens]
@@ -491,7 +499,7 @@ class NPUModelRunner:
 
         return hidden_states[cu_num_tokens - 1]
 
-    @current_platform.inference_mode()
+    @torch.inference_mode()
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
@@ -522,7 +530,7 @@ class NPUModelRunner:
                 if generator is not None:
                     generator.set_offset(generator.get_offset() - 4)
 
-        # NOTE: GPU -> CPU Sync happens here.
+        # NOTE: NPU -> CPU Sync happens here.
         # Move as many CPU operations as possible before this sync point.
         logprobs_tensors = sampler_output.logprobs_tensors
         logprobs_lists = logprobs_tensors.tolists() \
@@ -650,9 +658,12 @@ class NPUModelRunner:
         # Cache the dummy encoder outputs.
         self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
-    @current_platform.inference_mode()
-    def _dummy_run(self, num_tokens: int,
-                   dummy_kv_caches: List[torch.Tensor]) -> torch.Tensor:
+    @torch.inference_mode()
+    def _dummy_run(
+        self,
+        num_tokens: int,
+    ) -> torch.Tensor:
+        model = self.model
         if self.is_multimodal_model:
             input_ids = None
             inputs_embeds = self.inputs_embeds[:num_tokens]
@@ -663,6 +674,7 @@ class NPUModelRunner:
         if self.uses_mrope:
             positions = self.mrope_positions[:, :num_tokens]
         else:
+            # TODO:SSS diff from GPU ?
             positions = self.input_positions_cpu[:num_tokens]
 
         if get_pp_group().is_first_rank:
@@ -679,10 +691,12 @@ class NPUModelRunner:
                 for k, v in self.intermediate_tensors.items()
             })
 
-        with set_forward_context(None, self.vllm_config):
-            hidden_states = self.model(
+        with set_forward_context(None,
+                                 self.vllm_config):  # TODO:SSS diff from GPU ?
+            hidden_states = model(
                 input_ids=input_ids,
-                positions=positions.to(self.device),
+                positions=positions.to(
+                    self.device),  # TODO:SSS diff from GPU ?
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds)
         return hidden_states
@@ -698,7 +712,6 @@ class NPUModelRunner:
         min_tokens_per_req = num_tokens // num_reqs
 
         num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
-        # 将未能被整除的多余token全部放到最后一个请求中
         num_scheduled_tokens_list[-1] += num_tokens % num_reqs
         assert sum(num_scheduled_tokens_list) == num_tokens
         assert len(num_scheduled_tokens_list) == num_reqs
@@ -707,8 +720,8 @@ class NPUModelRunner:
                                         dtype=np.int32)
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
 
-        # TODO: 支持lora之后，需要调用maybe_profile_with_lora()函数，将lora的内存占用也考虑进来
         # assert self.lora_manager is not None, "LoRA is not enabled"
+        # TODO: call maybe_profile_with_lora()
 
         dummy_kv_caches = [
             torch.tensor((), dtype=torch.float32, device=self.device)
@@ -716,7 +729,7 @@ class NPUModelRunner:
         ]
 
         # Trigger compilation for general shape.
-        hidden_states = self._dummy_run(self.max_num_tokens, dummy_kv_caches)
+        hidden_states = self._dummy_run(self.max_num_tokens)
 
         if get_pp_group().is_last_rank:
             hidden_states = hidden_states[logit_indices]
@@ -729,27 +742,17 @@ class NPUModelRunner:
         self.encoder_cache.clear()
         gc.collect()
 
-    def generate_draft_token_ids(
-        self,
-        sampled_token_ids: List[List[int]],
-    ) -> List[List[int]]:
-        raise ValueError("npu is not supported in spec decode")
-
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
+
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
             if self.lora_config:
-                raise ValueError("npu is not supported lora model.")
+                raise ValueError("LoRA model is not supported on NPU now.")
 
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
-
-    def capture_model(self) -> None:
-        logger.warning(
-            "npu not support graph capture. current compilation level : CompilationLevel.NO_COMPILATION"
-        )
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -784,38 +787,3 @@ class NPUModelRunner:
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
-
-    def get_kv_cache_spec(self) -> KVCacheSpec:
-        """
-        Generates the KVCacheSpec by parsing the kv cache format from each
-        Attention module in the static forward context.
-        Returns:
-            KVCacheSpec: A dictionary mapping layer names to their KV cache
-            format. Layers that do not need KV cache are not included.
-        """
-
-        forward_ctx = self.vllm_config.compilation_config.static_forward_context
-        block_size = self.vllm_config.cache_config.block_size
-        kv_cache_spec: KVCacheSpec = {}
-        for layer_name, attn_module in forward_ctx.items():
-            # TODO: Support other attention modules, e.g., sliding window,
-            # cross-attention, MLA.
-            assert isinstance(attn_module, Attention)
-            if attn_module.attn_type == AttentionType.DECODER:
-                kv_cache_spec[layer_name] = FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=attn_module.num_kv_heads,
-                    head_size=attn_module.head_size,
-                    dtype=attn_module.dtype,
-                    use_mla=False)
-            elif attn_module.attn_type in (AttentionType.ENCODER,
-                                           AttentionType.ENCODER_ONLY):
-                # encoder-only attention does not need KV cache.
-                continue
-            elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
-                raise NotImplementedError
-            else:
-                raise ValueError(
-                    f"Unknown attention type: {attn_module.attn_type}")
-
-        return kv_cache_spec
