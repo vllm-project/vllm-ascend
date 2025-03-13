@@ -55,6 +55,10 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 ray start --address='{head_node_ip}:{port_num}' --num-gpus=8 --node-ip-address={local_ip}
 ```
 
+:::{note}
+If you're running DeepSeek V3/R1, please remove `quantization_config` section in `config.json` file since it's not supported by vllm-ascend currentlly.
+:::
+
 Start the vLLM server on head node:
 
 ```shell
