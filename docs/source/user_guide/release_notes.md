@@ -1,5 +1,33 @@
 # Release note
 
+## v0.7.3rc1
+
+🎉 Hello, World! This is the first release candidate of v0.7.3 for vllm-ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/v0.7.3-dev) to start the journey.
+- Quickstart with container: https://vllm-ascend.readthedocs.io/en/v0.7.3-dev/quick_start.html
+- Installation: https://vllm-ascend.readthedocs.io/en/v0.7.3-dev/installation.html
+
+### Highlights
+- DeepSeek V3/R1 works well now. Read the [official guide](https://vllm-ascend.readthedocs.io/en/v0.7.3-dev/tutorials/multi_node.html) to start! [#242](https://github.com/vllm-project/vllm-ascend/pull/242)
+- Speculative decoding feature is supported. [#252](https://github.com/vllm-project/vllm-ascend/pull/252)
+- Multi step scheduler feature is supported. [#300](https://github.com/vllm-project/vllm-ascend/pull/300)
+
+### Core
+- Bump torch_npu version to dev20250308.3 to improve `_exponential` accuracy
+- Added initial support for pooling models. Bert based model, such as `BAAI/bge-base-en-v1.5` and `BAAI/bge-reranker-v2-m3` works now. [#229](https://github.com/vllm-project/vllm-ascend/pull/229)
+
+### Model
+- The performance of Qwen2-VL is improved. [#241](https://github.com/vllm-project/vllm-ascend/pull/241)
+- MiniCPM is now supported [#164](https://github.com/vllm-project/vllm-ascend/pull/164)
+
+### Other
+- Support MTP(Multi-Token Prediction) for DeepSeek V3/R1 [#236](https://github.com/vllm-project/vllm-ascend/pull/236)
+- [Docs] Added more model tutorials, include DeepSeek, QwQ, Qwen and Qwen 2.5VL. See the [official doc](https://vllm-ascend.readthedocs.io/en/v0.7.3-dev/tutorials/index.html) for detail
+- Pin modelscope<1.23.0 on vLLM v0.7.3 to resolve: https://github.com/vllm-project/vllm/pull/13807
+
+### Known issues
+- In [some cases](https://github.com/vllm-project/vllm-ascend/issues/324), expecially when the input/output is very long, the accuracy of output may be incorrect. We are working on it. It'll be fixed in the next release.
+- Improved and reduced the garbled code in model output. But if you still hit the issue, try to change the gerneration config value, such as `temperature`, and try again. There is also a knonwn issue shown below. Any [feedback](https://github.com/vllm-project/vllm-ascend/issues/267) is welcome. [#277](https://github.com/vllm-project/vllm-ascend/pull/277)
+
 ## v0.7.1rc1
 
 🎉 Hello, World!
@@ -8,7 +36,7 @@ We are excited to announce the first release candidate of v0.7.1 for vllm-ascend
 
 vLLM Ascend Plugin (vllm-ascend) is a community maintained hardware plugin for running vLLM on the Ascend NPU. With this release, users can now enjoy the latest features and improvements of vLLM on the Ascend NPU.
 
-Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/v0.7.1rc1) to start the journey. Note that this is a release candidate, and there may be some bugs or issues. We appreciate your feedback and suggestions [here](https://github.com/vllm-project/vllm-ascend/issues/19)
+Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/v0.7.1-dev) to start the journey. Note that this is a release candidate, and there may be some bugs or issues. We appreciate your feedback and suggestions [here](https://github.com/vllm-project/vllm-ascend/issues/19)
 
 ### Highlights
 
