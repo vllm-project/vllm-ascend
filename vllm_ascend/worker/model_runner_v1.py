@@ -674,7 +674,6 @@ class NPUModelRunner(GPUModelRunner):
         if self.uses_mrope:
             positions = self.mrope_positions[:, :num_tokens]
         else:
-            # TODO:SSS diff from GPU ?
             positions = self.input_positions_cpu[:num_tokens]
 
         if get_pp_group().is_first_rank:
@@ -691,14 +690,11 @@ class NPUModelRunner(GPUModelRunner):
                 for k, v in self.intermediate_tensors.items()
             })
 
-        with set_forward_context(None,
-                                 self.vllm_config):  # TODO:SSS diff from GPU ?
-            hidden_states = model(
-                input_ids=input_ids,
-                positions=positions.to(
-                    self.device),  # TODO:SSS diff from GPU ?
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds)
+        with set_forward_context(None, self.vllm_config):
+            hidden_states = model(input_ids=input_ids,
+                                  positions=positions.to(self.device),
+                                  intermediate_tensors=intermediate_tensors,
+                                  inputs_embeds=inputs_embeds)
         return hidden_states
 
     def profile_run(self) -> None:

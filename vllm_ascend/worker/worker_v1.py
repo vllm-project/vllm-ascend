@@ -200,12 +200,6 @@ class NPUWorker(Worker):
         """Allocate NPU KV cache with the specified kv_cache_config."""
         self.model_runner.initialize_kv_cache(kv_cache_config)
 
-    # TODO:SSS
-    # def initialize_cache(self, kv_cache_configs: List[KVCacheConfig]) -> None:
-    #     """Allocate NPU KV cache with the specified kv_cache_config."""
-    #     kv_cache_config = kv_cache_configs[self.rank]
-    #     self.model_runner.initialize_kv_cache(kv_cache_config)
-
 
 def init_worker_distributed_environment(
         parallel_config: ParallelConfig,
