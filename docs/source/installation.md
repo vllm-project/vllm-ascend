@@ -92,7 +92,7 @@ chmod +x ./Ascend-cann-kernels-910b_8.0.0_linux-aarch64.run
 ./Ascend-cann-kernels-910b_8.0.0_linux-aarch64.run --install
 
 wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.0.0/Ascend-cann-nnal_8.0.0_linux-aarch64.run
-chmod +x. /Ascend-cann-nnal_8.0.0_linux-aarch64.run
+chmod +x ./Ascend-cann-nnal_8.0.0_linux-aarch64.run
 ./Ascend-cann-nnal_8.0.0_linux-aarch64.run --install
 
 source /usr/local/Ascend/nnal/atb/set_env.sh
