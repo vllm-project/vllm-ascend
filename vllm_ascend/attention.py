@@ -758,10 +758,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         attn_type = self.attn_type
 
         self.output = torch.empty(num_tokens,
-                             self.num_heads,
-                             self.head_size,
-                             dtype=query.dtype,
-                             device=query.device)
+                                  self.num_heads,
+                                  self.head_size,
+                                  dtype=query.dtype,
+                                  device=query.device)
 
         if kv_cache.numel() > 0:
             if self.key_cache is None:
