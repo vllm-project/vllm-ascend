@@ -25,8 +25,8 @@
 - Pin modelscope<1.23.0 on vLLM v0.7.3 to resolve: https://github.com/vllm-project/vllm/pull/13807
 
 ### Known issues
-- In [some cases](https://github.com/vllm-project/vllm-ascend/issues/324), expecially when the input/output is very long, the accuracy of output may be incorrect. We are working on it. It'll be fixed in the next release.
-- Improved and reduced the garbled code in model output. But if you still hit the issue, try to change the gerneration config value, such as `temperature`, and try again. There is also a knonwn issue shown below. Any [feedback](https://github.com/vllm-project/vllm-ascend/issues/267) is welcome. [#277](https://github.com/vllm-project/vllm-ascend/pull/277)
+- In [some cases](https://github.com/vllm-project/vllm-ascend/issues/321), expecially when the input/output is very long, the accuracy of output may be incorrect. You may see many `!` in the output, We are working on it. It'll be fixed in the next release.
+- Improved and reduced the garbled code in model output. But if you still hit the issue, try to change the gerneration config value, such as `temperature` and try again. Any [feedback](https://github.com/vllm-project/vllm-ascend/issues/267) is welcome. [#277](https://github.com/vllm-project/vllm-ascend/pull/277)
 
 ## v0.7.1rc1
 
