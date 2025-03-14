@@ -101,6 +101,8 @@ class AttentionMaskBuilder:
 
 class AscendAttentionBackend(AttentionBackend):
 
+    accept_output_buffer: bool = True
+
     @staticmethod
     def get_name() -> str:
         return "ASCEND"
@@ -726,8 +728,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AscendMetadata,
+        output: torch.Tensor,
         attn_type: str = AttentionType.DECODER,
-        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with Ascend attention.
         Args:
@@ -754,12 +756,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # TODO: Remove this contiguous in the future.
         value = value.contiguous()
         attn_type = self.attn_type
-
-        output = torch.empty(num_tokens,
-                             self.num_heads,
-                             self.head_size,
-                             dtype=query.dtype,
-                             device=query.device)
 
         if kv_cache.numel() > 0:
             if self.key_cache is None:
