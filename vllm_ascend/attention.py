@@ -718,7 +718,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.key_cache = None
         self.value_cache = None
         # TODO: FIXME revert me when torch-npu sync issue is solved
-        self.output = None
+        self.output: torch.Tensor = None
 
     def forward(
         self,
