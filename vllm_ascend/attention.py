@@ -715,8 +715,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.seq_len_cpu_tensor = None
         self.query_len_cpu_tensor = None
-        self.key_cache = None
-        self.value_cache = None
+        # self.key_cache = None
+        # self.value_cache = None
         # TODO: FIXME revert me when torch-npu sync issue is solved
         self.output: torch.Tensor = None
 
@@ -764,8 +764,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                   device=query.device)
 
         if kv_cache.numel() > 0:
-            if self.key_cache is None:
-                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            # if key_cache is None:
+            key_cache, value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
 
         if hasattr(layer, 'quant_method'):
@@ -788,8 +788,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 query,
                 key,
                 value,
-                self.key_cache,
-                self.value_cache,
+                key_cache,
+                value_cache,
                 self.scale,
                 block_tables,
                 isPrefill,
@@ -797,11 +797,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.output,
                 seq_lens_tensor_cpu=self.seq_lens_tensor_cpu)
         else:
-            if self.key_cache is not None:
+            if kv_cache.numel() > 0:
                 torch_npu._npu_reshape_and_cache(key=key,
                                                  value=value,
-                                                 key_cache=self.key_cache,
-                                                 value_cache=self.value_cache,
+                                                 key_cache=key_cache,
+                                                 value_cache=value_cache,
                                                  slot_indices=slots)
 
             if attn_metadata.num_prefills > 0:
@@ -868,8 +868,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     compress_mask = attn_metadata.compress_mask
                     torch_npu._npu_flash_attention_qlens(
                         query=query,
-                        key_cache=self.key_cache,
-                        value_cache=self.value_cache,
+                        key_cache=key_cache,
+                        value_cache=value_cache,
                         block_table=block_tables,
                         mask=compress_mask,
                         seq_len=self.query_lens_tensor_cpu,
@@ -890,8 +890,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     chunk_mask = attn_metadata.chunk_mask
                     torch_npu._npu_paged_attention_splitfuse(
                         query=query,
-                        key_cache=self.key_cache,
-                        value_cache=self.value_cache,
+                        key_cache=key_cache,
+                        value_cache=value_cache,
                         block_table=block_tables,
                         context_lens=self.seq_lens_tensor_cpu,
                         mask=chunk_mask,
@@ -910,8 +910,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 block_tables = attn_metadata.decode_metadata.block_tables
                 torch_npu._npu_paged_attention(
                     query=query,
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
+                    key_cache=key_cache,
+                    value_cache=value_cache,
                     num_kv_heads=self.num_kv_heads,
                     num_heads=self.num_heads,
                     scale_value=self.scale,
