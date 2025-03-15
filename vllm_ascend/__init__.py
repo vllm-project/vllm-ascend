@@ -15,6 +15,10 @@
 # limitations under the License.
 #
 
+from . import forward_context #noqa
+from . import engine #noqa
+from . import config #noqa
+from .distributed import utils #noqa
 
 def register():
     """Register the NPU platform."""
@@ -25,7 +29,3 @@ def register_model():
     from .models import register_model
     register_model()
 
-from . import forward_context
-from . import engine
-from . import config
-from .distributed import utils
