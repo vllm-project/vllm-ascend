@@ -1,3 +1,4 @@
+
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
@@ -19,6 +20,7 @@
 
 import gc
 import os
+from multiprocessing import Process
 
 
 def main(dp_size, dp_rank, dp_master_ip, dp_master_port, tp_size):
@@ -32,10 +34,11 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, tp_size):
 
     import torch
     import torch_npu  # noqa
-    import vllm_ascend  # noqa
     from vllm import LLM, SamplingParams
     from vllm.distributed.parallel_state import (
         destroy_distributed_environment, destroy_model_parallel)
+
+    import vllm_ascend  # noqa
 
 
     prompts = [
@@ -84,7 +87,6 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, tp_size):
 
 
 if __name__ == "__main__":
-    from multiprocessing import Process
     dp_master_ip = "127.0.0.1"
     dp_master_port = 29500
     procs = []
