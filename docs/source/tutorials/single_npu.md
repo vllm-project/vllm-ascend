@@ -1,4 +1,4 @@
-# Single NPU (Qwen 7B)
+# Single NPU (Qwen2.5 7B)
 
 ## Run vllm-ascend on Single NPU
 
@@ -29,10 +29,10 @@ docker run --rm \
 Setup environment variables:
 
 ```bash
-# Use Modelscope mirror to speed up model download
+# Load model from ModelScope to speed up download
 export VLLM_USE_MODELSCOPE=True
 
-# To avoid NPU out of memory, set `max_split_size_mb` to any value lower than you need to allocate for Qwen2.5-7B-Instruct
+# Set `max_split_size_mb` to reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 ```
 
