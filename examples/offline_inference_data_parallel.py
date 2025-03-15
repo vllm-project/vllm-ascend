@@ -31,11 +31,9 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, tp_size):
 
     import torch
     import torch_npu #noqa
-    import vllm_ascend
+    import vllm_ascend #noqa
     from vllm import LLM, SamplingParams
-    from vllm.utils import get_open_port
     from vllm.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
-    import vllm_ascend
 
     prompts = [
         "Hello, my name is",
