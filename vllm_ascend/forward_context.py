@@ -32,7 +32,10 @@ logger = init_logger(__name__)
 
 last_logging_time: float = 0
 forward_start_time: float = 0
+<<<<<<< HEAD
 batchsize_logging_interval: float = envs.VLLM_LOG_BATCHSIZE_INTERVAL
+=======
+>>>>>>> origin/main
 batchsize_forward_time: defaultdict = defaultdict(list)
 
 if TYPE_CHECKING:
