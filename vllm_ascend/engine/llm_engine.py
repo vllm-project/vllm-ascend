@@ -16,11 +16,10 @@
 # limitations under the License.
 
 def apply_custom_engine_patch():
-    from vllm.engine import llm_engine as vllm_llm_engine
     from vllm.engine.llm_engine import LLMEngine
     from vllm.config import ParallelConfig  
-    from vllm.engine.arg_utils import EngineArgs  
-    from vllm.config import VllmConfig as vllm_config
+    from vllm.engine.arg_utils import EngineArgs  # noqa
+    from vllm.config import VllmConfig as vllm_config  # noqa
 
     original_init = LLMEngine.__init__
 
