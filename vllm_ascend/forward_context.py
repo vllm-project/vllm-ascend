@@ -24,9 +24,13 @@ import vllm.envs as envs
 from vllm import forward_context
 from vllm.config import VllmConfig
 from vllm.forward_context import DPMetadata, ForwardContext
+from vllm.logger import init_logger
+from collections import defaultdict
+logger = init_logger(__name__)
+batchsize_forward_time: defaultdict = defaultdict(list)
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
+    from vllm.attention.backends.abstract import AttentionMetadata #noqa
 track_batchsize: bool = envs.VLLM_LOG_BATCHSIZE_INTERVAL >= 0
 
 _forward_context: Optional[ForwardContext] = None
