@@ -15,13 +15,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import torch
 from torch.distributed import ProcessGroup, is_hccl_available
 from torch.distributed.distributed_c10d import (Backend, PrefixStore,
                                                 _get_default_timeout,
                                                 is_nccl_available)
 from torch.distributed.rendezvous import rendezvous
 from vllm.distributed import utils
-import torch
+
 
 def stateless_init_torch_distributed_process_group(
         host: str, port: int, rank: int, world_size: int,
@@ -114,7 +115,7 @@ def stateless_init_torch_distributed_process_group(
             pg_options,
         )
         assert is_hccl_available()
-        import torch_npu #noqa
+        import torch_npu  # noqa
         from torch_npu._C._distributed_c10d import ProcessGroupHCCL
         backend_options = ProcessGroupHCCL.Options()
         backend_options._timeout = timeout
