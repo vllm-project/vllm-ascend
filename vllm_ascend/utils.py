@@ -54,4 +54,3 @@ def current_stream() -> torch.npu.Stream:
         # we return the default stream.
         _current_stream = torch.npu.current_stream()
     return _current_stream
-
