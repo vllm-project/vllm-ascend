@@ -29,6 +29,7 @@ from vllm.forward_context import DPMetadata, ForwardContext
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
 last_logging_time: float = 0
 forward_start_time: float = 0
 batchsize_forward_time: defaultdict = defaultdict(list)
