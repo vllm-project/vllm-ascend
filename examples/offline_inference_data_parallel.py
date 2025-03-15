@@ -1,4 +1,3 @@
-
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
@@ -29,8 +28,7 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, tp_size):
     os.environ["VLLM_DP_MASTER_IP"] = dp_master_ip
     os.environ["VLLM_DP_MASTER_PORT"] = str(dp_master_port)
     os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(
-        str(i) for i in range(dp_rank * tp_size, (dp_rank + 1) *
-                              tp_size))
+        str(i) for i in range(dp_rank * tp_size, (dp_rank + 1) * tp_size))
 
     import torch
     import torch_npu  # noqa
@@ -40,14 +38,12 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, tp_size):
 
     import vllm_ascend  # noqa
 
-
     prompts = [
         "Hello, my name is",
         "The president of the United States is",
         "The capital of France is",
         "The future of AI is",
-    ]*4
-
+    ] * 4
 
     promts_per_rank = len(prompts) // dp_size
     start = dp_rank * promts_per_rank
@@ -57,11 +53,10 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, tp_size):
         prompts = ["Placeholder"]
     print(f"DP rank {dp_rank} needs to process {len(prompts)} prompts")
 
-
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
-                                     max_tokens= 4,
-                                     min_tokens = 4)
+                                     max_tokens=4,
+                                     min_tokens=4)
 
     # Create an LLM.
     llm = LLM(model="/home/foundation_model/q00832892/DeepSeek-V2-Lite-Chat/",
