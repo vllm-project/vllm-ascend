@@ -33,16 +33,13 @@ def stateless_init_dp_group(self) -> "ProcessGroup":
 
     return dp_group
 
-def has_unfinished_dp(dp_group: "ProcessGroup",
-                      has_unfinished: bool) -> bool:
 
-    tensor = torch.tensor([has_unfinished],
-                          dtype=torch.int32,
-                          device="npu")
+def has_unfinished_dp(dp_group: "ProcessGroup", has_unfinished: bool) -> bool:
+
+    tensor = torch.tensor([has_unfinished], dtype=torch.int32, device="npu")
     torch.distributed.all_reduce(tensor, op=ReduceOp.MAX, group=dp_group)
     aggregated_has_unfinished = bool(tensor.item())
     return aggregated_has_unfinished
-
 
 
 ParallelConfig.stateless_init_dp_group = stateless_init_dp_group
