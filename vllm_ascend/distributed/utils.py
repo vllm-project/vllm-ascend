@@ -33,6 +33,7 @@ def stateless_init_torch_distributed_process_group(
     some operations such as `allreduce`, because it does not depend on the
     global rank. However, some operations such as `broadcast` cannot be used
     because it depends on the global rank.
+
     This function is useful when we are not sure about the total number of
     processes in the process group. For example, we may have process
     1, 2, ..., 8 who want to communicate, and process 9 might be the same
