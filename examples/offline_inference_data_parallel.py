@@ -17,8 +17,9 @@
 # limitations under the License.
 #
 
-import os
 import gc
+import os
+
 
 def main(dp_size, dp_rank, dp_master_ip, dp_master_port, tp_size):
     os.environ["VLLM_DP_RANK"] = str(dp_rank)
@@ -30,10 +31,12 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, tp_size):
                               tp_size))
 
     import torch
-    import torch_npu #noqa
-    import vllm_ascend #noqa
+    import torch_npu  # noqa
+    import vllm_ascend  # noqa
     from vllm import LLM, SamplingParams
-    from vllm.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
+    from vllm.distributed.parallel_state import (
+        destroy_distributed_environment, destroy_model_parallel)
+
 
     prompts = [
         "Hello, my name is",
