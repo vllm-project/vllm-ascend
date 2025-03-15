@@ -30,7 +30,7 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, tp_size):
                               tp_size))
 
     import torch
-    import torch_npu #noqa
+    import torch_npu # noqa: F401
     import vllm_ascend
     from vllm import LLM, SamplingParams
     from vllm.utils import get_open_port
