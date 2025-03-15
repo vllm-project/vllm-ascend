@@ -33,9 +33,11 @@ batchsize_forward_time: defaultdict = defaultdict(list)
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata  # noqa
+
 track_batchsize: bool = envs.VLLM_LOG_BATCHSIZE_INTERVAL >= 0
 
 _forward_context: Optional[ForwardContext] = None
+
 
 def get_forward_context() -> ForwardContext:
     """Get the current forward context."""
@@ -43,6 +45,7 @@ def get_forward_context() -> ForwardContext:
         "Forward context is not set. "
         "Please use `set_forward_context` to set the forward context.")
     return _forward_context
+
 
 @contextmanager
 def set_forward_context(attn_metadata: Any,
@@ -125,6 +128,7 @@ def set_forward_context(attn_metadata: Any,
                                  "(batchsize, count, median_time(ms)): %s"),
                                 forward_stats)
         _forward_context = prev_context
+
 
 forward_context.set_forward_context = set_forward_context
 forward_context.get_forward_context = get_forward_context
