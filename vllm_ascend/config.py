@@ -16,13 +16,13 @@
 # limitations under the License.
 
 import torch
-from vllm.config import ParallelConfig
 from torch.distributed import ProcessGroup, ReduceOp
+from vllm.config import ParallelConfig
 
 
 def stateless_init_dp_group(self) -> "ProcessGroup":
-    from vllm.distributed.utils import (
-        stateless_init_torch_distributed_process_group)
+    from vllm.distributed.utils import \
+        stateless_init_torch_distributed_process_group
 
     dp_group = stateless_init_torch_distributed_process_group(
         self.data_parallel_master_ip,
