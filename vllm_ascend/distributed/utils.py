@@ -108,12 +108,6 @@ def stateless_init_torch_distributed_process_group(
         pg._register_backend(device, backend_type, backend_class)
 
     elif backend == "hccl":
-        pg: ProcessGroup = ProcessGroup(
-            prefix_store,
-            group_rank,
-            group_size,
-            pg_options,
-        )
         assert is_hccl_available()
         import torch_npu  # noqa
         from torch_npu._C._distributed_c10d import ProcessGroupHCCL
@@ -125,7 +119,6 @@ def stateless_init_torch_distributed_process_group(
         backend_class._set_sequence_number_for_group()
         backend_type = ProcessGroup.BackendType.CUSTOM
         pg._register_backend(device, backend_type, backend_class)
-
 
     return pg
 
