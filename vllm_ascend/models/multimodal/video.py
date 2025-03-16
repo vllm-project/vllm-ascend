@@ -20,7 +20,6 @@
 # Copyright (c) Huawei Technologies Co., Ltd. 2024-2025. All rights reserved.
 
 from __future__ import annotations
-
 import tempfile
 
 import torch
