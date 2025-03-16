@@ -21,11 +21,12 @@
 
 from __future__ import annotations
 
+import tempfile
+
 import torch
+import numpy.typing as npt
 from torchvision.io import read_video
 from vllm.multimodal.video import VideoMediaIO
-import tempfile
-import numpy.typing as npt
 
 NUM_FRAMES = 32
 
