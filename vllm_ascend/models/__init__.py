@@ -1,4 +1,5 @@
 from vllm import ModelRegistry
+import vllm_ascend.models.multimodal  # noqa: F401
 
 
 def register_model():

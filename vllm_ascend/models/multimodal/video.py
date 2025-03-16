@@ -25,9 +25,9 @@ from __future__ import annotations
 import torch
 import torch_npu
 from torchvision.io import read_video
-import torchvision_npu
 from vllm.multimodal.video import VideoMediaIO
 import tempfile
+import numpy.typing as npt
 
 NUM_FRAMES = 32
 

@@ -1,0 +1,1 @@
+import vllm_ascend.models.multimodal.video  # noqa: F401
