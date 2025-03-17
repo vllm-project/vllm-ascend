@@ -47,9 +47,30 @@ defaults:
     shell: bash -el {0}
 
 jobs:
+  dispatch:
+    name: vLLM Ascend test (dispatch)
+    runs-on: ascend-ci-arm64
+    outputs:
+      number: ${{ steps.dispatch-device.outputs.number }}
+    steps:
+      - name: vLLM Ascend test (dispatch)
+        id: dispatch-device
+        run: |
+          # Try to acquire lock to dispatch devices
+          lockfile /tmp/dispatch.lock
+
+          # Print npu info
+          npu-list /dev/null 2>&1
+
+          # Select first available device (Skip reserved davinci1 and davinci0)
+          NUMBER=$(npu-list /dev/null 2>&1 | grep None | grep -v davinci1 | grep -v davinci0 | head -1 | cut -b 15)
+          echo "Dispatch to /dev/davinci$NUMBER"
+          echo "number=$NUMBER" >> $GITHUB_OUTPUT
+
   test:
+    needs: [dispatch]
     name: vLLM Ascend test (self-host)
-    runs-on: ascend-arm64  # actionlint-ignore: runner-label
+    runs-on: ascend-ci-arm64  # actionlint-ignore: runner-label
 
     container:
       image: quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10
@@ -58,9 +79,11 @@ jobs:
         - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
         - /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/
         # Use self-host cache speed up pip and model download
-        - /home/action/actions-runner/_work/cache:/github/home/.cache/
+        - /home/action/cache:/github/home/.cache/
+        # for dispatch lock
+        - /tmp/:/tmp/
       options: >-
-        --device /dev/davinci6
+        --device /dev/davinci${{ needs.dispatch.outputs.number }}
         --device /dev/davinci_manager
         --device /dev/devmm_svm
         --device /dev/hisi_hdc
@@ -71,6 +94,8 @@ jobs:
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          # unlock
+          rm -rf /tmp/dispatch.lock
 
       - name: Config mirrors
         run: |
@@ -108,9 +133,9 @@ jobs:
         run: |
           mkdir pta
           cd pta
-          wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250226.4/pytorch_v2.5.1_py310.tar.gz
+          wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250308.3/pytorch_v2.5.1_py310.tar.gz
           tar -xvf pytorch_v2.5.1_py310.tar.gz
-          pip install ./torch_npu-2.5.1.dev20250226-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+          pip install ./torch_npu-2.5.1.dev20250308-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
           cd ..
           rm -rf pta
 
@@ -119,7 +144,5 @@ jobs:
           pytest -sv tests
 
       - name: Run vllm-project/vllm test
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           pytest -sv

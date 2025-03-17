@@ -36,7 +36,7 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个让vLLM在Ascend NPU无缝运行的�
 - 软件：
   * Python >= 3.9
   * CANN >= 8.0.RC2
-  * PyTorch >= 2.5.1, torch-npu >= 2.5.1.dev20250218
+  * PyTorch >= 2.5.1, torch-npu >= 2.5.1.dev20250308
   * vLLM (与vllm-ascend版本一致)
 
 在[此处](docs/source/installation.md)，您可以了解如何逐步准备环境。
@@ -52,7 +52,7 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个让vLLM在Ascend NPU无缝运行的�
 # https://docs.vllm.ai/en/latest/getting_started/installation/cpu/index.html#build-wheel-from-source
 git clone --depth 1 https://github.com/vllm-project/vllm.git
 cd vllm
-pip install -r requirements-build.txt
+pip install -r requirements/build.txt
 VLLM_TARGET_DEVICE=empty pip install .
 
 # 安装vllm-ascend main 分支

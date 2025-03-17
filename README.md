@@ -36,7 +36,7 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
 - Software:
   * Python >= 3.9
   * CANN >= 8.0.0
-  * PyTorch >= 2.5.1, torch-npu >= 2.5.1.dev20250218
+  * PyTorch >= 2.5.1, torch-npu >= 2.5.1.dev20250308
   * vLLM (the same version as vllm-ascend)
 
 Find more about how to setup your environment step by step in [here](docs/source/installation.md).
@@ -52,7 +52,7 @@ Installation from source code:
 # https://docs.vllm.ai/en/latest/getting_started/installation/cpu/index.html#build-wheel-from-source
 git clone --depth 1 https://github.com/vllm-project/vllm.git
 cd vllm
-pip install -r requirements-build.txt
+pip install -r requirements/build.txt
 VLLM_TARGET_DEVICE=empty pip install .
 
 # Install vllm-ascend main branch

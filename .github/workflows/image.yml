@@ -71,13 +71,13 @@ jobs:
         docker-images: false
 
     - name: Build - Set up QEMU
-      uses: docker/setup-qemu-action@v2
+      uses: docker/setup-qemu-action@v3
       # TODO(yikun): remove this after https://github.com/docker/setup-qemu-action/issues/198 resolved
       with:
         image: tonistiigi/binfmt:qemu-v7.0.0-28
 
     - name: Build - Set up Docker Buildx
-      uses: docker/setup-buildx-action@v2
+      uses: docker/setup-buildx-action@v3
 
     - name: Publish - Login to Quay Container Registry
       if: ${{ github.event_name == 'push' && github.repository_owner == 'vllm-project' }}
