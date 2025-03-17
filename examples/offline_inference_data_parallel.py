@@ -59,7 +59,7 @@ def main(dp_size, dp_rank, dp_master_ip, dp_master_port, tp_size):
                                      min_tokens=4)
 
     # Create an LLM.
-    llm = LLM(model="/home/foundation_model/q00832892/DeepSeek-V2-Lite-Chat/",
+    llm = LLM(model="deepseek-ai/DeepSeek-V2-Lite-Chat",
               tensor_parallel_size=tp_size,
               enable_expert_parallel=True,
               enforce_eager=True,

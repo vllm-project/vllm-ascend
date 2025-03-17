@@ -15,14 +15,14 @@
 # limitations under the License.
 #
 
-from . import config  # noqa
-from . import engine  # noqa
-from . import forward_context  # noqa
-from .distributed import utils  # noqa
 
 
 def register():
     """Register the NPU platform."""
+    from . import config  # noqa
+    from . import engine  # noqa
+    from . import forward_context  # noqa
+    from .distributed import utils  # noqa
     return "vllm_ascend.platform.NPUPlatform"
 
 
