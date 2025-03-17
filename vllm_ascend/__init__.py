@@ -16,7 +16,6 @@
 #
 
 
-
 def register():
     """Register the NPU platform."""
     from . import config  # noqa
