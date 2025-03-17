@@ -18,13 +18,13 @@
 
 def register():
     """Register the NPU platform."""
-    from . import config  # noqa
-    from . import engine  # noqa
-    from . import forward_context  # noqa
-    from .distributed import utils  # noqa
     return "vllm_ascend.platform.NPUPlatform"
 
 
 def register_model():
+    from . import config  # noqa
+    from . import forward_context  # noqa
+    from .distributed import utils  # noqa
+    from .engine import llm_engine  # noqa
     from .models import register_model
     register_model()
