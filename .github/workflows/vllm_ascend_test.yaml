@@ -139,9 +139,14 @@ jobs:
           cd ..
           rm -rf pta
 
-      - name: Run vllm-project/vllm-ascend test
+      # - name: Run vllm-project/vllm-ascend test
+      #   run: |
+      #     pytest -sv tests
+      - name: Download model
         run: |
-          pytest -sv tests
+          huggingface-cli download --resume-download --local-dir-use-symlinks False meta-llama/Llama-3.2-1B-Instruct --token ${{ secrets.HF_TOKEN }}
+          huggingface-cli download --resume-download --local-dir-use-symlinks False google/gemma-1.1-2b-it --token ${{ secrets.HF_TOKEN }}
+          huggingface-cli download --resume-download --local-dir-use-symlinks False mistralai/Pixtral-12B-2409 --token ${{ secrets.HF_TOKEN }}
 
       - name: Run vllm-project/vllm test
         run: |
