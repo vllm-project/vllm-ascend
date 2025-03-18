@@ -120,7 +120,7 @@ class MultiStepModelNPURunner(NPUModelRunnerBase[StatefulModelInputForNPU]):
             if self.parallel_config.pipeline_parallel_size == 1 else None
 
     def get_model(self) -> nn.Module:
-        return self.model
+        return self._base_model_runner.get_model()
 
     @functools.cached_property
     def _copy_stream(self):
