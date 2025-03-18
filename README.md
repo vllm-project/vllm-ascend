@@ -44,7 +44,7 @@ Find more about how to setup your environment step by step in [here](docs/source
 ## Getting Started
 
 > [!NOTE]
-> Currently, we are actively collaborating with the vLLM community to support the Ascend backend plugin, once supported you can use one line command `pip install vllm vllm-ascend` to compelete installation.
+> Currently, we are actively collaborating with the vLLM community to support the Ascend backend plugin, once supported you can use one line command `pip install vllm vllm-ascend` to complete installation.
 
 Installation from source code:
 ```bash

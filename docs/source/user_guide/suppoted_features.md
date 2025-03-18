@@ -9,7 +9,7 @@
 |    Speculative decoding  |     ✅    |             |                   | Basic functions available |   Need fully test  |
 |        Pooling           |     ✅    |             |                   | Basic functions available(Bert) | Need fully test and add more models support|
 |        Enc-dec           |     ❌    |             |                   |          NA               | Plan in 2025.06.30|
-|      Multi Modality      |     ✅    |             |         ✅        | Basic functions available(LLaVA/Qwen2-vl/Qwen2-audio/internVL)| Improve perforamance, and add more models support |
+|      Multi Modality      |     ✅    |             |         ✅        | Basic functions available(LLaVA/Qwen2-vl/Qwen2-audio/internVL)| Improve performance, and add more models support |
 |        LogProbs          |     ✅    |             |                   | Basic functions available |   Need fully test  |
 |     Prompt logProbs      |     ✅    |             |                   | Basic functions available |   Need fully test  |
 |       Async output       |     ✅    |             |                   | Basic functions available |   Need fully test  |

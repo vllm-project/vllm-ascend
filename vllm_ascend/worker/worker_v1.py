@@ -22,6 +22,7 @@ from typing import Dict, List, Optional
 
 import torch
 import torch.distributed
+import torch.nn as nn
 import torch_npu
 from vllm import envs
 from vllm.config import ParallelConfig, VllmConfig
@@ -32,16 +33,19 @@ from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
+from vllm.v1.core.scheduler import SchedulerOutput
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheSpec)
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
-from vllm.v1.worker.gpu_worker import Worker
+from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 logger = init_logger(__name__)
 
 
-class NPUWorker(Worker):
+class NPUWorker(WorkerBase):
 
     def __init__(self,
                  vllm_config: VllmConfig,
@@ -186,6 +190,13 @@ class NPUWorker(Worker):
         )
         return int(npu_kv_cache_bytes)
 
+    def execute_model(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> Optional[ModelRunnerOutput]:
+        output = self.model_runner.execute_model(scheduler_output)
+        return output if self.rank == 0 else None
+
     def load_model(self) -> None:
         self.model_runner.load_model()
 
@@ -196,9 +207,28 @@ class NPUWorker(Worker):
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
+    def get_model(self) -> nn.Module:
+        return self.model_runner.get_model()
+
+    def get_kv_cache_spec(self) -> KVCacheSpec:
+        return self.model_runner.get_kv_cache_spec()
+
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
         self.model_runner.initialize_kv_cache(kv_cache_config)
+
+    def initialize_cache(self, kv_cache_configs: List[KVCacheConfig]) -> None:
+        """Allocate GPU KV cache with the specified kv_cache_config."""
+        kv_cache_config = kv_cache_configs[self.rank]
+        self.model_runner.initialize_kv_cache(kv_cache_config)
+
+    def profile(self, is_start: bool = True):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        if is_start:
+            self.profiler.start()
+        else:
+            self.profiler.stop()
 
 
 def init_worker_distributed_environment(

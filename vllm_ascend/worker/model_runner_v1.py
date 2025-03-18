@@ -23,11 +23,15 @@ from typing import TYPE_CHECKING, Dict, List, Optional, Union
 import numpy as np
 import torch
 import torch.distributed
+import torch.nn as nn
+from vllm.attention import AttentionType
+from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.platforms import current_platform
@@ -36,14 +40,13 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LayerBlockType, cdiv, is_pin_memory_available)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
-from vllm.v1.engine.mm_input_cache import MMInputCacheClient
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
+                                        KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID, RejectionSampler
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
                                                 AscendMetadata)
@@ -54,7 +57,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class NPUModelRunner(GPUModelRunner):
+class NPUModelRunner:
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
 
@@ -105,14 +108,6 @@ class NPUModelRunner(GPUModelRunner):
         self.input_registry = INPUT_REGISTRY
         self.mm_registry = MULTIMODAL_REGISTRY
         self.uses_mrope = model_config.uses_mrope
-
-        if self.is_multimodal_model:
-            # NOTE: Initialized client is only used for processing dummy
-            # multimodal data into multimodal kwargs for GPU memory profiling.
-            # Only applicable to multimodal models with legacy input mapper.
-            self.mm_input_mapper_profiling = MMInputCacheClient(
-                self.model_config)
-            self.mm_input_mapper_profiling.use_cache = False
 
         encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
             model_config=model_config,
@@ -383,6 +378,9 @@ class NPUModelRunner(GPUModelRunner):
 
         if batch_changed:
             self.input_batch.refresh_sampling_metadata()
+
+    def get_model(self) -> nn.Module:
+        return self.model
 
     @staticmethod
     def make_attention_mask(kv_dtype, kv_device, max_seq_len, seq_lens,
@@ -738,6 +736,34 @@ class NPUModelRunner(GPUModelRunner):
         self.encoder_cache.clear()
         gc.collect()
 
+    def generate_draft_token_ids(
+        self,
+        sampled_token_ids: list[list[int]],
+    ) -> list[list[int]]:
+        # TODO(woosuk): Optimize.
+        draft_token_ids: list[list[int]] = []
+        for i, sampled_ids in enumerate(sampled_token_ids):
+            num_sampled_ids = len(sampled_ids)
+            if not num_sampled_ids:
+                # Skip speculative decoding.
+                draft_token_ids.append([])
+                continue
+
+            # Add sampled_token_ids to token_ids_cpu.
+            start_idx = self.input_batch.num_tokens_no_spec[i]
+            end_idx = start_idx + num_sampled_ids
+            self.input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
+            drafter_output = self.drafter.propose(
+                self.input_batch.token_ids_cpu[i, :end_idx],
+                self.speculative_config.ngram_prompt_lookup_min,
+                self.speculative_config.num_speculative_tokens,
+            )
+            if drafter_output is None or len(drafter_output) == 0:
+                draft_token_ids.append([])
+            else:
+                draft_token_ids.append(drafter_output.tolist())
+        return draft_token_ids
+
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
 
@@ -783,3 +809,42 @@ class NPUModelRunner(GPUModelRunner):
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
+
+    def get_kv_cache_spec(self) -> KVCacheSpec:
+        """
+        Generates the KVCacheSpec by parsing the kv cache format from each
+        Attention module in the static forward context.
+        Returns:
+            KVCacheSpec: A dictionary mapping layer names to their KV cache
+            format. Layers that do not need KV cache are not included.
+        """
+
+        forward_ctx = self.vllm_config.compilation_config.static_forward_context
+        block_size = self.vllm_config.cache_config.block_size
+        use_mla = self.vllm_config.model_config.use_mla
+        kv_cache_spec: KVCacheSpec = {}
+        for layer_name, attn_module in forward_ctx.items():
+            if isinstance(attn_module, FusedMoE):
+                continue
+
+            # TODO: Support other attention modules, e.g., sliding window,
+            # cross-attention
+            assert isinstance(attn_module, Attention)
+            if attn_module.attn_type == AttentionType.DECODER:
+                kv_cache_spec[layer_name] = FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=attn_module.num_kv_heads,
+                    head_size=attn_module.head_size,
+                    dtype=attn_module.dtype,
+                    use_mla=use_mla)
+            elif attn_module.attn_type in (AttentionType.ENCODER,
+                                           AttentionType.ENCODER_ONLY):
+                # encoder-only attention does not need KV cache.
+                continue
+            elif attn_module.attn_type == AttentionType.ENCODER_DECODER:
+                raise NotImplementedError
+            else:
+                raise ValueError(
+                    f"Unknown attention type: {attn_module.attn_type}")
+
+        return kv_cache_spec

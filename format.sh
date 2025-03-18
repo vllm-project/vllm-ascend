@@ -144,7 +144,7 @@ CODESPELL_EXCLUDES=(
 )
 
 CODESPELL_IGNORE_WORDS=(
-    '-L' 'CANN,NNAL,ASCEND'
+    '-L' 'CANN,cann,NNAL,nnal,ASCEND,ascend'
 )
 
 # check spelling of specified files

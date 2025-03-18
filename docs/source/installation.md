@@ -64,7 +64,7 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
-:::{dropdown} Click here to see "Install CANN manally"
+:::{dropdown} Click here to see "Install CANN manually"
 :animate: fade-in-slide-down
 You can also install CANN manually:
 
