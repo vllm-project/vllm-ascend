@@ -152,7 +152,7 @@ spell_check() {
     codespell "$@" "${CODESPELL_IGNORE_WORDS[@]}"
 }
 
-spell_check_all(){
+spell_check_all() {
   codespell --toml pyproject.toml "${CODESPELL_EXCLUDES[@]}" "${CODESPELL_IGNORE_WORDS[@]}"
 }
 
@@ -167,6 +167,7 @@ spell_check_changed() {
     MERGEBASE="$(git merge-base origin/main HEAD)"
     if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
         git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
+            codespell "${CODESPELL_EXCLUDES[@]}" "${CODESPELL_IGNORE_WORDS[@]}"
             codespell "${CODESPELL_EXCLUDES[@]}" "${CODESPELL_IGNORE_WORDS[@]}"
     fi
 }
