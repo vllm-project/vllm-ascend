@@ -612,31 +612,18 @@ class NPUModelRunner:
         )
         dummy_mm_data = dummy_request_data.multi_modal_data
 
+        if not isinstance(dummy_mm_data, MultiModalKwargs):
+            # TODO: Delete this check once input mapper is fully removed.
+            raise RuntimeError("Legacy input mapper is not supported in V1")
+
         # Dummy data definition in V0 may contain multiple multimodal items
         # (e.g, multiple images) for a single request, therefore here we
         # always replicate first item by max_num_mm_items times since in V1
         # they are scheduled to be processed separately.
 
-        # Case when models have a merged processor, their dummy data is
-        # already batched `MultiModalKwargs`, therefore we take the first
-        # `MultiModalKwargsItem` from the desired modality to profile on.
-        if isinstance(dummy_mm_data, MultiModalKwargs):
-            dummy_mm_item = dummy_mm_data.get_item(
-                modality=dummy_data_modality, item_index=0)
-            dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
-
-        # Case when models have dummy data explicitly defined as
-        # `MultiModalDataDict`, so they need to be processed through input
-        # mapper.
-        # TODO (ywang96): deprecate this path once merged processor is
-        # supported on all models.
-        else:
-            mm_kwargs_list = self.mm_input_mapper_profiling.process_inputs(
-                mm_data=dummy_mm_data,
-                mm_hashes=None,
-                mm_processor_kwargs=None,
-                precomputed_mm_inputs=None)
-            dummy_mm_kwargs = mm_kwargs_list[0]
+        dummy_mm_item = dummy_mm_data.get_item(modality=dummy_data_modality,
+                                               item_index=0)
+        dummy_mm_kwargs = MultiModalKwargs.from_items([dummy_mm_item])
 
         batched_dummy_mm_inputs = MultiModalKwargs.batch([dummy_mm_kwargs] *
                                                          max_num_mm_items)
