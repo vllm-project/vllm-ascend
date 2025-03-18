@@ -66,5 +66,6 @@ def rope_forward_oot(
     return query.view(query_shape), key.view(key_shape)
 
 
+# TODO: Patch when aclnn ops avaiable
 RotaryEmbedding.forward_oot = rope_forward_oot
 DeepseekScalingRotaryEmbedding.forward = rope_forward_oot

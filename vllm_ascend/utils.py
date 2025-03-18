@@ -22,6 +22,8 @@ from packaging.version import Version
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs
+import os
+VLLM_ENABLE_GRAPH_MODE = os.environ.get('VLLM_ENABLE_GRAPH_MODE', '0')
 
 
 def try_register_lib(lib_name: str, lib_info: str = ""):
