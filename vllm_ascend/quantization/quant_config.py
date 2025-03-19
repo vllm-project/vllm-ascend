@@ -91,7 +91,8 @@ class AscendQuantConfig(QuantizationConfig):
             return AscendLinearMethod(self, prefix,
                                       self.packed_modules_mapping)
         if isinstance(layer, Attention) and \
-            'fa_quant_type' in self.quant_description.keys():
+            'fa_quant_type' in self.quant_description.keys() and \
+            self.quant_description['fa_quant_type'] is not None:
             return AscendKVCacheMethod(self, prefix)
         return None
 
