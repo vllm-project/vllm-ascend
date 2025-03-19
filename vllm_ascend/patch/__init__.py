@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import vllm_ascend.patch.patch_cache_dtype  # noqa
 import vllm_ascend.patch.patch_metrics  # noqa
 import vllm_ascend.patch.patch_minicpm  # noqa
 import vllm_ascend.patch.patch_rejection_sampler  # noqa
