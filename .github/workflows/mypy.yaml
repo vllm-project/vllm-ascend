@@ -18,17 +18,6 @@
 name: mypy
 
 on:
-  # Trigger the workflow on push or pull request,
-  # but only for the main branch
-  push:
-    branches:
-      - 'main'
-      - '*-dev'
-    paths:
-      - '**/*.py'
-      - '.github/workflows/mypy.yaml'
-      - 'tools/mypy.sh'
-      - 'mypy.ini'
   pull_request:
     branches:
       - 'main'
