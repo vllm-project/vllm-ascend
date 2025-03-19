@@ -16,7 +16,6 @@
 #
 
 from dataclasses import dataclass
-from itertools import accumulate
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import numpy as np
@@ -216,9 +215,6 @@ class AscendMetadata(AttentionMetadata):
     # Maximum sequence length among decode batch. 0 if there are prefill
     # requests only.
     max_decode_seq_len: int
-    # (batch_size,) A tensor of context lengths (tokens that are computed
-    # so far).
-    context_lens_tensor: Optional[torch.Tensor]
 
     # (batch_size, max_blocks_per_seq).
     # Block addresses per sequence. (Seq id -> list of physical block)
@@ -233,18 +229,6 @@ class AscendMetadata(AttentionMetadata):
 
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int] = None
-
-    # Max number of query tokens among request in the batch.
-    max_decode_query_len: Optional[int] = None
-
-    # (batch_size + 1,). The cumulative subquery lengths of the sequences in
-    # the batch, used to index into subquery. E.g., if the subquery length
-    # is [4, 6], it is [0, 4, 10].
-    query_start_loc: Optional[torch.Tensor] = None
-    # (batch_size + 1,). The cumulative sequence lengths of the sequences in
-    # the batch, used to index into sequence. E.g., if the sequence length is
-    # [4, 6], it is [0, 4, 10].
-    seq_start_loc: Optional[torch.Tensor] = None
 
     # Self-attention prefill/decode metadata cache
     _cached_prefill_metadata: Optional["AscendMetadata"] = None
@@ -283,18 +267,10 @@ class AscendMetadata(AttentionMetadata):
                 or (self.encoder_seq_lens is not None))
 
         # Compute some attn_metadata fields which default to None.
-        query_start_loc = (None if self.query_start_loc is None else
-                           self.query_start_loc[:self.num_prefills + 1])
         slot_mapping = (None if self.slot_mapping is None else
                         self.slot_mapping[:self.num_prefill_tokens])
         seq_lens = (None if self.seq_lens is None else
                     self.seq_lens[:self.num_prefills])
-        seq_lens_tensor = (None if self.seq_lens_tensor is None else
-                           self.seq_lens_tensor[:self.num_prefills])
-        seq_start_loc = (None if self.seq_start_loc is None else
-                         self.seq_start_loc[:self.num_prefills + 1])
-        context_lens_tensor = (None if self.context_lens_tensor is None else
-                               self.context_lens_tensor[:self.num_prefills])
         block_tables = (None if self.block_tables is None else
                         self.block_tables[:self.num_prefills])
 
@@ -311,11 +287,7 @@ class AscendMetadata(AttentionMetadata):
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=self.max_query_len,
             max_prefill_seq_len=self.max_prefill_seq_len,
-            max_decode_query_len=0,
             max_decode_seq_len=0,
-            query_start_loc=query_start_loc,
-            seq_start_loc=seq_start_loc,
-            context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
@@ -343,8 +315,6 @@ class AscendMetadata(AttentionMetadata):
                         self.slot_mapping[self.num_prefill_tokens:])
         seq_lens = (None if self.seq_lens is None else
                     self.seq_lens[self.num_prefills:])
-        seq_lens_tensor = (None if self.seq_lens_tensor is None else
-                           self.seq_lens_tensor[self.num_prefills:])
         block_tables = (None if self.block_tables is None else
                         self.block_tables[self.num_prefills:])
         seq_lens_tensor = (None if self.seq_lens_tensor is None else
@@ -357,19 +327,9 @@ class AscendMetadata(AttentionMetadata):
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
-            max_decode_query_len=self.max_decode_query_len,
             max_query_len=self.max_query_len,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
-            # Batch may be composed of prefill|decodes, adjust query start
-            # indices to refer to the start of decodes. E.g.
-            # in tokens:[3 prefills|6 decodes], query_start_loc=[3,9] => [0,6].
-            query_start_loc=(self.query_start_loc[self.num_prefills:] -
-                             self.query_start_loc[self.num_prefills])
-            if self.query_start_loc is not None else None,
-            seq_start_loc=self.seq_start_loc[self.num_prefills:]
-            if self.seq_start_loc is not None else None,
-            context_lens_tensor=None,
             block_tables=block_tables,
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
@@ -426,14 +386,6 @@ class AscendMetadata(AttentionMetadata):
         assert self.seq_lens_tensor.shape == (num_seqs, )
         assert self.max_query_len == 1
         assert self.max_prefill_seq_len == 0
-
-        assert self.query_start_loc is not None
-        assert self.query_start_loc.shape == (num_queries + 1, )
-        assert self.seq_start_loc is not None
-        assert self.seq_start_loc.shape == (num_seqs + 1, )
-
-        assert self.context_lens_tensor is not None
-        assert self.context_lens_tensor.shape == (num_queries, )
 
         assert self.block_tables is not None
         assert self.block_tables.shape[0] == num_seqs
@@ -576,11 +528,6 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
         device = self.runner.device
 
         max_query_len = max(query_lens)
-        decode_query_lens = query_lens[self.num_prefills:]
-        if len(decode_query_lens) > 0:
-            max_decode_query_len = max(decode_query_lens)
-        else:
-            max_decode_query_len = 1
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
         max_decode_seq_len = max(self.curr_seq_lens, default=0)
 
@@ -592,8 +539,6 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
         else:
             self.attn_mask = None
         num_decode_tokens = self.num_decode_tokens
-        query_start_loc = list(accumulate(query_lens, initial=0))
-        seq_start_loc = list(accumulate(seq_lens, initial=0))
 
         block_tables = make_tensor_with_pad(
             self.block_tables,
@@ -604,26 +549,15 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
         assert max_query_len > 0, "query_lens: {}".format(query_lens)
 
         assert device is not None
-        context_lens_tensor = async_tensor_h2d(self.context_lens, torch.int,
-                                               device, self.runner.pin_memory)
         slot_mapping_tensor = async_tensor_h2d(self.slot_mapping, torch.int32,
                                                device, self.runner.pin_memory)
         seq_lens_tensor = async_tensor_h2d(seq_lens, torch.int, device,
                                            self.runner.pin_memory)
-        query_start_loc_tensor = async_tensor_h2d(query_start_loc, torch.int32,
-                                                  device,
-                                                  self.runner.pin_memory)
-        seq_start_loc_tensor = async_tensor_h2d(seq_start_loc, torch.int32,
-                                                device, self.runner.pin_memory)
         placeholder_index_maps = {
             modality: placeholder_map.index_map()
             for modality, placeholder_map in
             self.multimodal_placeholder_maps.items()
         }
-
-        seq_lens_tensor = torch.tensor(seq_lens,
-                                       dtype=torch.long,
-                                       device=device)
 
         return AscendMetadata(
             num_prefills=self.num_prefills,
@@ -635,12 +569,8 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
             enable_kv_scales_calculation=True,
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=max_query_len,
-            max_decode_query_len=max_decode_query_len,
             max_prefill_seq_len=max_prefill_seq_len,
             max_decode_seq_len=max_decode_seq_len,
-            query_start_loc=query_start_loc_tensor,
-            seq_start_loc=seq_start_loc_tensor,
-            context_lens_tensor=context_lens_tensor,
             block_tables=block_tables,
             attn_mask=self.attn_mask,
         )
