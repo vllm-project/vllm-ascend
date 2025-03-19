@@ -19,11 +19,10 @@
 #
 
 import torch
-
-from vllm.worker.cache_engine import CacheEngine
 from vllm.config import CacheConfig, DeviceConfig, ModelConfig, ParallelConfig
 from vllm.logger import init_logger
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, get_dtype_size)
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, LayerBlockType, get_dtype_size
+from vllm.worker.cache_engine import CacheEngine
 
 logger = init_logger(__name__)
 
@@ -44,10 +43,10 @@ class NPUCacheEngine(CacheEngine):
         device_config: DeviceConfig,
     ) -> None:
         CacheEngine.__init__(self,
-                             cache_config = cache_config,
-                             model_config = model_config,
-                             parallel_config = parallel_config,
-                             device_config = device_config)
+                             cache_config=cache_config,
+                             model_config=model_config,
+                             parallel_config=parallel_config,
+                             device_config=device_config)
         self.dtype = _get_cache_dtype(cache_config, model_config)
 
     @staticmethod
@@ -75,9 +74,10 @@ class NPUCacheEngine(CacheEngine):
         return dtype_size * total
 
 
-def _get_cache_dtype(cache_config: CacheConfig,
-                     model_config: ModelConfig,
-    ) -> torch.dtype:
+def _get_cache_dtype(
+    cache_config: CacheConfig,
+    model_config: ModelConfig,
+) -> torch.dtype:
     if cache_config.cache_dtype == "auto":
         return model_config.dtype
     if cache_config.cache_dtype == "int8":

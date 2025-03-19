@@ -271,7 +271,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = [
             NPUCacheEngine(self.cache_config, self.model_config,
-                        self.parallel_config, self.device_config)
+                           self.parallel_config, self.device_config)
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
         import torch_npu
