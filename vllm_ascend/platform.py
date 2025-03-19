@@ -19,12 +19,7 @@ import os
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
-
-try:
-    import torch_npu  # noqa: F401
-except ImportError:
-    print("Failed to import torch_npu.")
-
+import torch_npu  # noqa: F401
 from vllm.config import VllmConfig
 from vllm.platforms import Platform, PlatformEnum
 
@@ -135,3 +130,11 @@ class NPUPlatform(Platform):
     @classmethod
     def get_stream_cls(cls) -> str:
         return "torch_npu.npu.Stream"
+
+    @classmethod
+    def get_current_stream(cls) -> str:
+        return torch_npu.npu.current_stream()
+
+    @classmethod
+    def get_event_cls(cls) -> str:
+        return "torch_npu.npu.Event"
