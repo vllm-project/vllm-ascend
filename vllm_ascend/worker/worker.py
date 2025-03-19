@@ -37,7 +37,6 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
 from vllm.utils import bind_kv_cache
-from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner_base import ModelRunnerBase
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
@@ -47,6 +46,7 @@ from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import try_register_lib
 from vllm_ascend.worker.model_runner import NPUModelRunner
 from vllm_ascend.worker.pooling_model_runner import NPUPoolingModelRunner
+from vllm_ascend.worker.cache_engine import NPUCacheEngine
 
 logger = init_logger(__name__)
 
@@ -118,9 +118,9 @@ class NPUWorker(LocalOrDistributedWorkerBase):
 
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine: List[CacheEngine]
-        # Initialize gpu_cache as embedding models don't initialize kv_caches
-        self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
+        self.cache_engine: List[NPUCacheEngine]
+        # Initialize npu_cache as embedding models don't initialize kv_caches
+        self.npu_cache: Optional[List[List[torch.Tensor]]] = None
         self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
 
         # Torch profiler. Enabled and configured through env vars:
@@ -270,7 +270,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
         self.cache_engine = [
-            CacheEngine(self.cache_config, self.model_config,
+            NPUCacheEngine(self.cache_config, self.model_config,
                         self.parallel_config, self.device_config)
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
@@ -280,12 +280,12 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             for i in range(num_layers):
                 torch_npu.npu_format_cast(self.cache_engine[ve].gpu_cache[i],
                                           2)
-        self.gpu_cache = [
+        self.npu_cache = [
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
         ]
         bind_kv_cache(self.compilation_config.static_forward_context,
-                      self.gpu_cache)
+                      self.npu_cache)
 
     def _warm_up_model(self) -> None:
         # model capture is not supported, thus we just set seed here.
@@ -299,7 +299,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
 
     @property
     def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
-        return self.gpu_cache
+        return self.npu_cache
 
     @torch.inference_mode()
     def prepare_worker_input(
@@ -451,9 +451,9 @@ class NPUWorker(LocalOrDistributedWorkerBase):
     def get_cache_block_size_bytes(self) -> int:
         """Get the size of the KV cache block size in bytes.
         """
-        return CacheEngine.get_cache_block_size(self.cache_config,
-                                                self.model_config,
-                                                self.parallel_config)
+        return NPUCacheEngine.get_cache_block_size(self.cache_config,
+                                                   self.model_config,
+                                                   self.parallel_config)
 
     def _init_worker_distributed_environment(
             self,

@@ -19,12 +19,7 @@ import os
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
-
-try:
-    import torch_npu  # noqa: F401
-except ImportError:
-    print("Failed to import torch_npu.")
-
+import torch_npu  # noqa: F401
 from vllm.config import VllmConfig
 from vllm.platforms import Platform, PlatformEnum
 
@@ -122,8 +117,10 @@ class NPUPlatform(Platform):
         if cache_config.enable_prefix_caching and cache_config.block_size != 128:
             raise ValueError(
                 "If prefix caching is enabled, block size must be set to 128.")
-        if vllm_config.quant_config is not None and \
-            'fa_quant_type' in vllm_config.quant_config.quant_description.keys():
+
+        quant_config = vllm_config.quant_config
+        if quant_config is not None and \
+            'fa_quant_type' in quant_config.quant_description.keys():
             # Ascend attention quant uses int8 dtype.
             cache_config.cache_dtype = 'int8'
 
