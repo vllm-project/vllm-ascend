@@ -835,6 +835,7 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
             CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
             import torchair  # type: ignore
             from torchair import patch_for_hcom  # type: ignore
+
             # 通信算子成图
             patch_for_hcom()
             # 设置npu的config，如果不设置config，可以使用默认的，那可以设置npu_backend="npu"

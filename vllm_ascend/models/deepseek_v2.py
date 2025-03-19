@@ -35,13 +35,15 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.models.deepseek_v2 import \
+    DeepseekV2ForCausalLM  # ruff: noqa: E501
+from vllm.model_executor.models.deepseek_v2 import \
+    yarn_get_mscale  # ruff: noqa: E501
 from vllm.model_executor.models.deepseek_v2 import (DeepseekV2Attention,
                                                     DeepseekV2DecoderLayer,
-                                                    DeepseekV2ForCausalLM,
                                                     DeepseekV2MLAAttention,
                                                     DeepseekV2MLP,
-                                                    DeepseekV2MoE,
-                                                    yarn_get_mscale)
+                                                    DeepseekV2MoE)
 from vllm.model_executor.models.utils import (
     PPMissingLayer, make_empty_intermediate_tensors_factory, make_layers,
     maybe_prefix)
