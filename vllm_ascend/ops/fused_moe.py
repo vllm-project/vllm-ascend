@@ -67,14 +67,19 @@ def group_topk(hidden_states: torch.Tensor,
     scores = scores.masked_fill(~score_mask.bool(), 0.0)
 
     if e_score_correction_bias is not None:
-        topk_ids = torch.topk(scores, k=topk, dim=-1, sorted=False)[1]
+        topk_ids = torch.topk(scores.to(torch.float32),
+                              k=topk,
+                              dim=-1,
+                              sorted=False)[1]
         # Use original unbiased scores for the routing weights
         topk_weights = original_scores.gather(1, topk_ids)
     else:
-        topk_weights, topk_ids = torch.topk(scores,
+        topk_weights, topk_ids = torch.topk(scores.to(torch.float32),
                                             k=topk,
                                             dim=-1,
                                             sorted=False)
+
+    topk_weights = topk_weights.to(scores.dtype)
 
     if renormalize:
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
@@ -177,6 +182,21 @@ def forward_oot(
         topk_group=topk_group,
         scoring_func=scoring_func,
         e_score_correction_bias=e_score_correction_bias)
+
+    # TODO: Find way to use this op in graph mode.
+    # topk_weights, topk_ids, _ = torch.ops.npu_inference.npu_moe_gating_top_k(
+    #         router_logits,
+    #         k=top_k,
+    #         bias=e_score_correction_bias,
+    #         k_group=topk_group,
+    #         group_count=num_expert_group,
+    #         group_select_mode=1, # 0: group中的最大; 1: topk2.sum(fix)
+    #         renorm=0, # 0: softmax->topk(fix); 1: topk->softmax
+    #         norm_type=1 if scoring_func == 'sigmoid' else 0, # 0: softmax; 1: sigmoid(fix)
+    #         # out_flag=False, # todo new api; 第三个输出是否输出
+    #         # y2_flag=False, # old api; 第三个输出是否输出
+    #         routed_scaling_factor=1,
+    #         eps=float(1e-20))
 
     return fused_experts(hidden_states=x,
                          w1=layer.w13_weight,
