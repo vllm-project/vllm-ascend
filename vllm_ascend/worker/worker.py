@@ -41,6 +41,7 @@ from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner_base import ModelRunnerBase
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
+
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import try_register_lib
 from vllm_ascend.worker.cache_engine import NPUCacheEngine
@@ -67,6 +68,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             model_runner_cls: Optional[Type[ModelRunnerBase]] = None) -> None:
         # TODO: Remove this line after fixing the hard-coding issue in VLLM later.
         from torch_npu.contrib import transfer_to_npu  # noqa: F401
+
         # Register ops and patch when worker init.
         from vllm_ascend import ops  # noqa: F401
         from vllm_ascend import patch  # noqa: F401
