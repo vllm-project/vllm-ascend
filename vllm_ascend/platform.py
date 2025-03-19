@@ -123,7 +123,8 @@ class NPUPlatform(Platform):
             raise ValueError(
                 "If prefix caching is enabled, block size must be set to 128.")
         if vllm_config.quant_config is not None and \
-            'fa_quant_type' in vllm_config.quant_config.quant_description.keys():
+            'fa_quant_type' in vllm_config.quant_config.quant_description.keys() and \
+            vllm_config.quant_config.quant_description['fa_quant_type'] is not None:
             # Ascend attention quant uses int8 dtype.
             cache_config.cache_dtype = 'int8'
 
