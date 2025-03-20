@@ -36,7 +36,9 @@ from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder,
                                            compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
-                                           is_block_tables_empty)
+                                           is_block_tables_empty,
+                                           PAD_SLOT_ID)
+
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 from vllm_ascend.worker.model_runner import (
@@ -553,10 +555,33 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
                 inter_data.block_tables,
             )
 
+   def _get_graph_runner_block_tables(
+            self, num_seqs: int,
+            block_tables: List[List[int]]) -> torch.Tensor:
+        # The shape of graph_block_tables is
+        # [max batch size, max context len // block size].
+        
+        max_batch_size, max_blocks = self.runner.graph_block_tables.shape
+        assert max_batch_size >= num_seqs
+
+        graph_block_tables = self.runner.graph_block_tables # [:num_seqs]
+        for i, block_table in enumerate(block_tables):
+            if block_table:
+                num_blocks = len(block_table)
+                if num_blocks <= max_blocks:
+                    graph_block_tables[i, :num_blocks] = block_table
+                else:
+                    graph_block_tables[
+                        i, :max_blocks] = block_table[:max_blocks]
+
+        return torch.from_numpy(graph_block_tables).to(
+            device=self.runner.device, non_blocking=True)
+    
     def build(
         self,
         seq_lens: List[int],
         query_lens: List[int],
+        graph_pad_size: int,
     ):
         """Build attention metadata with on-device tensors.
 
@@ -569,6 +594,8 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
                                 self.input_builder.chunked_prefill_enabled)
 
         device = self.runner.device
+        dtype = self.runner.model_config.dtype
+        use_torchair_graph = graph_pad_size != -1
 
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
@@ -583,12 +610,49 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
             self.attn_mask = None
         num_decode_tokens = self.num_decode_tokens
 
-        block_tables = make_tensor_with_pad(
-            self.block_tables,
-            pad=0,
-            dtype=torch.int32,
-            device=device,
-        )
+        if max_query_len > 1:
+            block_tables = make_tensor_with_pad(
+                self.block_tables,
+                pad=0,
+                dtype=torch.int32,
+                device=device,
+            )
+        else:
+            num_seqs = len(seq_lens)
+            if use_torchair_graph:
+                self.slot_mapping.extend([PAD_SLOT_ID] * graph_pad_size)
+                self.block_tables.extend([[]] * graph_pad_size)
+                block_tables = self._get_graph_runner_block_tables(
+                    num_seqs, self.block_tables)
+
+        if self.num_prefills > 0:
+            if block_tables is None or block_tables.numel() == 0:
+                # normal mask
+                self.attn_mask = AscendMetadataBuilder._attn_mask_builder.get_attn_mask(  # type: ignore
+                    max_prefill_seq_len, dtype, device)
+            elif self.num_decode_tokens == 0 and not self.input_builder.chunked_prefill_enabled:
+                # compress mask for prefix cache
+                self.compress_mask = AscendMetadataBuilder._attn_mask_builder.get_attn_mask(  # type: ignore
+                    128, dtype, device)
+            else:
+                # chunk_mask for chunk prefill
+                attn_mask = AscendMetadataBuilder._attn_mask_builder.get_attn_mask(  # type: ignore
+                    max_seq_len, dtype, device)
+                if attn_mask[0][1] > 0:
+                    attn_mask *= -10000
+                chunk_mask_list = []
+                for i, seq_len in enumerate(seq_lens):
+                    context_len = self.context_lens[i]
+                    chunk_mask_list.append(attn_mask[context_len:seq_len])
+                self.chunk_mask = torch.cat(chunk_mask_list, 0)
+        else:
+            self.attn_mask = None
+            self.compress_mask = None
+            self.chunk_mask = None
+        num_decode_tokens = self.num_decode_tokens
+        query_start_loc = list(accumulate(query_lens, initial=0))
+        seq_start_loc = list(accumulate(seq_lens, initial=0))
+
         assert max_query_len > 0, "query_lens: {}".format(query_lens)
 
         assert device is not None
