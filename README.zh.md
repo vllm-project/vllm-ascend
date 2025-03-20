@@ -20,6 +20,7 @@ vLLM Ascend Plugin
 ---
 *最新消息* 🔥
 
+- [2024/03] 我们在3月16日举办了[首届vLLM中国meetup](https://mp.weixin.qq.com/s/CGDuMoB301Uytnrkc2oyjg)，请点击[这里](https://drive.google.com/drive/folders/1Pid6NSFLU43DZRi0EaTcPgXsAzDvbBqF)获取相关资料。
 - [2024/12] 我们正在与 vLLM 社区合作，以支持 [[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162).
 ---
 ## 总览
@@ -42,32 +43,6 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个让vLLM在Ascend NPU无缝运行的�
 在[此处](docs/source/installation.md)，您可以了解如何逐步准备环境。
 
 ## 开始使用
-
-> [!NOTE]
-> 目前，我们正在积极与 vLLM 社区合作以支持 Ascend 后端插件，一旦支持，您可以使用一行命令: `pip install vllm vllm-ascend` 来完成安装。
-
-通过源码安装:
-```bash
-# 安装vllm main 分支参考文档:
-# https://docs.vllm.ai/en/latest/getting_started/installation/cpu/index.html#build-wheel-from-source
-git clone --depth 1 https://github.com/vllm-project/vllm.git
-cd vllm
-pip install -r requirements/build.txt
-VLLM_TARGET_DEVICE=empty pip install .
-
-# 安装vllm-ascend main 分支
-git clone https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-pip install -e .
-```
-
-运行如下命令使用 [Qwen/Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) 模型启动服务:
-
-```bash
-# 设置环境变量 VLLM_USE_MODELSCOPE=true 加速下载
-vllm serve Qwen/Qwen2.5-0.5B-Instruct
-curl http://localhost:8000/v1/models
-```
 
 请查看[快速开始](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html)和[安装指南](https://vllm-ascend.readthedocs.io/en/latest/installation.html)了解更多.
 

@@ -20,6 +20,7 @@ vLLM Ascend Plugin
 ---
 *Latest News* 🔥
 
+- [2025/03] We hosted [the first vLLM China Meetup](https://mp.weixin.qq.com/s/CGDuMoB301Uytnrkc2oyjg). Please find the meetup slides [here](https://drive.google.com/drive/folders/1Pid6NSFLU43DZRi0EaTcPgXsAzDvbBqF)
 - [2024/12] We are working with the vLLM community to support [[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162).
 ---
 ## Overview
@@ -43,33 +44,8 @@ Find more about how to setup your environment step by step in [here](docs/source
 
 ## Getting Started
 
-> [!NOTE]
-> Currently, we are actively collaborating with the vLLM community to support the Ascend backend plugin, once supported you can use one line command `pip install vllm vllm-ascend` to compelete installation.
-
-Installation from source code:
-```bash
-# Install vllm main branch according:
-# https://docs.vllm.ai/en/latest/getting_started/installation/cpu/index.html#build-wheel-from-source
-git clone --depth 1 https://github.com/vllm-project/vllm.git
-cd vllm
-pip install -r requirements/build.txt
-VLLM_TARGET_DEVICE=empty pip install .
-
-# Install vllm-ascend main branch
-git clone https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-pip install -e .
-```
-
-Run the following command to start the vLLM server with the [Qwen/Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) model:
-
-```bash
-# export VLLM_USE_MODELSCOPE=true to speed up download
-vllm serve Qwen/Qwen2.5-0.5B-Instruct
-curl http://localhost:8000/v1/models
-```
-
 Please refer to [QuickStart](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/latest/installation.html) for more details.
+
 
 ## Contributing
 See [CONTRIBUTING](docs/source/developer_guide/contributing.md) for more details, which is a step-by-step guide to help you set up development environment, build and test.
