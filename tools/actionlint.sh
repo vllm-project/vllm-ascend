@@ -20,7 +20,7 @@
 #
 
 if command -v actionlint &> /dev/null; then
-    # NOTE: avoid check .github/workflows/vllm_ascend_test.yaml becase sel-hosted runner `npu-arm64` is unknown
+    # NOTE: avoid check .github/workflows/vllm_ascend_test.yaml because sel-hosted runner `npu-arm64` is unknown
     actionlint .github/workflows/*.yml .github/workflows/mypy.yaml
     exit 0
 elif [ -x ./actionlint ]; then
