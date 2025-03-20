@@ -314,13 +314,13 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             num_layers = len(self.cache_engine[ve].gpu_cache)
             for i in range(num_layers):
                 if torch.is_tensor(self.cache_engine[ve].gpu_cache[i]):
-                    torch_npu.npu_format_cast(
-                        self.cache_engine[ve].gpu_cache[i], 2)
+                    torch_npu.npu_format_cast(self.cache_engine[ve].gpu_cache[i],
+                                              2)
                 else:
-                    torch_npu.npu_format_cast(
-                        self.cache_engine[ve].gpu_cache[i][0], 2)
-                    torch_npu.npu_format_cast(
-                        self.cache_engine[ve].gpu_cache[i][1], 2)
+                    torch_npu.npu_format_cast(self.cache_engine[ve].gpu_cache[i][0],
+                                              2)
+                    torch_npu.npu_format_cast(self.cache_engine[ve].gpu_cache[i][1],
+                                              2)
         self.gpu_cache = [
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
