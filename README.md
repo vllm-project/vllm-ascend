@@ -44,32 +44,6 @@ Find more about how to setup your environment step by step in [here](docs/source
 
 ## Getting Started
 
-> [!NOTE]
-> Currently, we are actively collaborating with the vLLM community to support the Ascend backend plugin, once supported you can use one line command `pip install vllm vllm-ascend` to compelete installation.
-
-Installation from source code:
-```bash
-# Install vllm main branch according:
-# https://docs.vllm.ai/en/latest/getting_started/installation/cpu/index.html#build-wheel-from-source
-git clone --depth 1 https://github.com/vllm-project/vllm.git
-cd vllm
-pip install -r requirements/build.txt
-VLLM_TARGET_DEVICE=empty pip install .
-
-# Install vllm-ascend main branch
-git clone https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-pip install -e .
-```
-
-Run the following command to start the vLLM server with the [Qwen/Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) model:
-
-```bash
-# export VLLM_USE_MODELSCOPE=true to speed up download
-vllm serve Qwen/Qwen2.5-0.5B-Instruct
-curl http://localhost:8000/v1/models
-```
-
 Please refer to [QuickStart](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/latest/installation.html) for more details.
 
 ## Contributing

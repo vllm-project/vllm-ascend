@@ -45,32 +45,6 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 
 ## 开始使用
 
-> [!NOTE]
-> 目前，我们正在积极与 vLLM 社区合作以支持 Ascend 后端插件，一旦支持，您可以使用一行命令: `pip install vllm vllm-ascend` 来完成安装。
-
-通过源码安装:
-```bash
-# 安装vllm main 分支参考文档:
-# https://docs.vllm.ai/en/latest/getting_started/installation/cpu/index.html#build-wheel-from-source
-git clone --depth 1 https://github.com/vllm-project/vllm.git
-cd vllm
-pip install -r requirements/build.txt
-VLLM_TARGET_DEVICE=empty pip install .
-
-# 安装vllm-ascend main 分支
-git clone https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-pip install -e .
-```
-
-运行如下命令使用 [Qwen/Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) 模型启动服务:
-
-```bash
-# 设置环境变量 VLLM_USE_MODELSCOPE=true 加速下载
-vllm serve Qwen/Qwen2.5-0.5B-Instruct
-curl http://localhost:8000/v1/models
-```
-
 请查看[快速开始](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html)和[安装指南](https://vllm-ascend.readthedocs.io/en/latest/installation.html)了解更多.
 
 ## 分支
