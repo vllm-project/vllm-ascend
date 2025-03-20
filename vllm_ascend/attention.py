@@ -44,9 +44,19 @@ from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 from vllm_ascend.utils import VLLM_ENABLE_GRAPH_MODE
 
+# import torchair as tng
+# from torchair.configs.compiler_config import CompilerConfig
+# import torchair._contrib.custom_torch_ops
+
+# config = CompilerConfig()
+# config.experimental_config.keep_inference_input_mutations = True
+# npu_backend = tng.get_npu_backend(compiler_config=config)
+
 if TYPE_CHECKING:
     from vllm_ascend.worker.model_runner import (
         ModelInputForNPUBuilder, ModelInputForNPUWithSamplingMetadata)
+
+# COUNT = 0
 
 
 def generate_attn_mask(max_seq_len: int, dtype=torch.float16):
@@ -957,6 +967,51 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         return self.output.view(num_tokens, self.hidden_size)
 
+def rotate_half(x):
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+def golden_func(kv, 
+                gamma,
+                cos,
+                sin,
+                index,
+                k_cache,
+                ckv_cache,
+                k_rope_scale=None,
+                c_kv_scale=None,
+                k_rope_offset=None,
+                c_kv_offset=None,
+                epsilon=1e-05,
+                cache_mode="Norm",
+                is_output_kv=False):
+    batch_size, _, seq_len, _ = kv.shape
+    if "PA" in cache_mode:
+        block_num, block_size, _, _ = k_cache.shape
+
+    # split input
+    rms_in, rope_in = kv.split([512, 64], dim=-1)
+    rms_in = rms_in.to(torch.float32)
+    rope_in = rope_in.to(torch.float32)
+    # calc rmsnorm
+    y = rms_in / torch.sqrt(torch.mean(rms_in ** 2, dim=-1, keepdim=True) + epsilon)
+    y = y * gamma.to(torch.float32)
+    # calc rope
+    k = rope_in.view(batch_size, 1, seq_len, 32, 2).transpose(4, 3).reshape(batch_size, 1, seq_len, 64)
+    k_embed = (k * cos.to(torch.float32)) + (rotate_half(k) * sin.to(torch.float32))
+
+    k_embed = k_embed.to(k_cache.dtype)
+    y = y.to(k_cache.dtype)
+
+    page = index // block_size
+    slot = index % block_size
+    slot_indices = torch.stack([page, slot], dim=-1)
+    torch_npu.scatter_update_(k_cache, slot_indices, k_embed, -3)
+    torch_npu.scatter_update_(ckv_cache, slot_indices, y, -3)
+
+    return k_cache, ckv_cache
 
 class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
 
@@ -1025,17 +1080,20 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         kv = self.kv_a_proj_with_mqa(hidden_states)[0]
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv = kv.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-        # cos = cos.view(B, S, N, -1)
-        # sin = sin.view(B, S, N, -1)
-        k_pe, k_nope = torch.ops.npu_inference.npu_kv_rmsnorm_rope_cache(
+
+        index = slots[:B].to(torch.int64)
+        k_pe, k_nope = golden_func(
             kv,
             self.kv_a_layernorm.weight,
             cos,
             sin,
-            slots,
+            index,
             kv_cache[1],
             kv_cache[0],
-            epsilon=self.kv_a_layernorm.variance_epsilon)
+            epsilon=self.kv_a_layernorm.variance_epsilon,
+            cache_mode="PA",
+        )
+
         return k_pe, k_nope
 
     def apply_rotary_emb(
@@ -1116,15 +1174,16 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
                                dim=-1)
         if k_pe is None and attn_metadata.decode_metadata:
-            cos_sin = self.rotary_emb.cos_sin_cache[
-                attn_metadata.input_positions]
-            if self.rotary_emb.cos_sin_cache.device != q_pe.device:
-                cos_sin = cos_sin.to(q_pe.device)
-            if self.rotary_emb.cos_sin_cache.dtype != q_pe.dtype:
-                cos_sin = cos_sin.to(q_pe.dtype)
-            cos, sin = cos_sin.chunk(2, dim=-1)
-            q_pe = self.apply_rotary_emb(q_pe, cos, sin,
-                                         self.rotary_emb.is_neox_style)
+            q_pe, _ = self.rotary_emb(attn_metadata.input_positions, q_pe, q_pe)
+            q_pe = q_pe.view(num_tokens, self.num_heads, -1)
+            seq_len = self.rotary_emb.max_position_embeddings
+
+            cos = self.rotary_emb.cos_cached[:seq_len].to(dtype=q_pe.dtype)
+            sin = self.rotary_emb.sin_cached[:seq_len].to(dtype=q_pe.dtype)
+            cos = cos[attn_metadata.input_positions]
+            sin = sin[attn_metadata.input_positions]
+            cos = cos[:, None, None, :]
+            sin = sin[:, None, None, :]
             k_pe, k_nope = self.exec_kv(hidden_states_or_kv_c_normed, cos, sin,
                                         kv_cache, attn_metadata.slot_mapping)
         else:
