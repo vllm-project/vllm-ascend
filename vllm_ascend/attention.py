@@ -37,7 +37,9 @@ from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder,
                                            compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
-                                           is_block_tables_empty)
+                                           is_block_tables_empty,
+                                           PAD_SLOT_ID)
+
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 from vllm_ascend.utils import VLLM_ENABLE_GRAPH_MODE
@@ -574,10 +576,33 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
                 inter_data.block_tables,
             )
 
+   def _get_graph_runner_block_tables(
+            self, num_seqs: int,
+            block_tables: List[List[int]]) -> torch.Tensor:
+        # The shape of graph_block_tables is
+        # [max batch size, max context len // block size].
+        
+        max_batch_size, max_blocks = self.runner.graph_block_tables.shape
+        assert max_batch_size >= num_seqs
+
+        graph_block_tables = self.runner.graph_block_tables # [:num_seqs]
+        for i, block_table in enumerate(block_tables):
+            if block_table:
+                num_blocks = len(block_table)
+                if num_blocks <= max_blocks:
+                    graph_block_tables[i, :num_blocks] = block_table
+                else:
+                    graph_block_tables[
+                        i, :max_blocks] = block_table[:max_blocks]
+
+        return torch.from_numpy(graph_block_tables).to(
+            device=self.runner.device, non_blocking=True)
+    
     def build(
         self,
         seq_lens: List[int],
         query_lens: List[int],
+        graph_pad_size: int,
     ):
         """Build attention metadata with on-device tensors.
 
@@ -591,6 +616,7 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
 
         device = self.runner.device
         dtype = self.runner.model_config.dtype
+        use_torchair_graph = graph_pad_size != -1
 
         max_query_len = max(query_lens)
         decode_query_lens = query_lens[self.num_prefills:]
@@ -602,12 +628,20 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
         max_decode_seq_len = max(self.curr_seq_lens, default=0)
         max_seq_len = max(max_prefill_seq_len, max_decode_seq_len)
 
-        block_tables = make_tensor_with_pad(
-            self.block_tables,
-            pad=0,
-            dtype=torch.int32,
-            device=device,
-        )
+        if max_query_len > 1:
+            block_tables = make_tensor_with_pad(
+                self.block_tables,
+                pad=0,
+                dtype=torch.int32,
+                device=device,
+            )
+        else:
+            num_seqs = len(seq_lens)
+            if use_torchair_graph:
+                self.slot_mapping.extend([PAD_SLOT_ID] * graph_pad_size)
+                self.block_tables.extend([[]] * graph_pad_size)
+                block_tables = self._get_graph_runner_block_tables(
+                    num_seqs, self.block_tables)
 
         if self.num_prefills > 0:
             if block_tables is None or block_tables.numel() == 0:

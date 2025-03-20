@@ -28,6 +28,7 @@ import torch
 import torch.distributed
 import torch.nn as nn
 import torch_npu
+import numpy as np
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.utils import CommonAttentionState
@@ -514,7 +515,13 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
                 device=self.runner.device)
 
         # Attention metadata.
-        attn_metadata = self.attn_metadata_builder.build(seq_lens, query_lens)
+        # Add graph_pad_size here
+        if self.runner.vllm_config.compilation_config.level ==\
+           CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+            graph_pad_size = self.runner.scheduler_config.max_num_seqs - len(seq_lens)
+        else:
+            graph_pad_size = -1
+        attn_metadata = self.attn_metadata_builder.build(seq_lens, query_lens, graph_pad_size)
 
         # Multi-modal data.
         multi_modal_kwargs_list = [
@@ -523,13 +530,12 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
         ]
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
-        # TODO:(hrz) 如果想追求极致性能走静态图，在dynamic true场景可标记输入Tensor静态
-        # if self.runner.vllm_config.compilation_config.level ==\
-        #    CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
-        #    torch._dynamo.mark_static(input_tokens_tensor)
-        #    torch._dynamo.mark_static(input_positions_tensor)
-        #    torch._dynamo.mark_static(attn_metadata.block_tables)
-        #    torch._dynamo.mark_static(attn_metadata.slot_mapping)
+        if self.runner.vllm_config.compilation_config.level ==\
+            CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+            torch._dynamo.mark_static(input_tokens_tensor)
+            torch._dynamo.mark_static(input_positions_tensor)
+            torch._dynamo.mark_static(attn_metadata.block_tables)
+            torch._dynamo.mark_static(attn_metadata.slot_mapping)
 
         return self.model_input_cls(
             input_tokens=input_tokens_tensor,
@@ -768,6 +774,10 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         self.has_inner_state = model_config.has_inner_state
 
         self.in_profile_run = False
+        
+        self.graph_block_tables = np.zeros(
+            (self.vllm_config.scheduler_config.max_num_seqs, (model_config.max_model_len + self.block_size - 1) // self.block_size),
+            dtype=np.int32)
 
         # Attention-free but stateful models like Mamba need a placeholder attn
         # backend, as the attention metadata is needed to manage internal state.
@@ -842,6 +852,7 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
             config = torchair.CompilerConfig()
             config.experimental_config.frozen_parameter = True
             config.experimental_config.tiling_schedule_optimize = True
+            torch.npu.set_compile_mode(jit_compile=False)
             npu_backend = torchair.get_npu_backend(compiler_config=config)
             self.compile_model = torch.compile(
                 self.model,
