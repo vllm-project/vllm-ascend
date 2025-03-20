@@ -555,9 +555,9 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
                 inter_data.block_tables,
             )
 
-   def _get_graph_runner_block_tables(
-            self, num_seqs: int,
-            block_tables: List[List[int]]) -> torch.Tensor:
+    def _get_graph_runner_block_tables(
+        self, num_seqs: int,
+        block_tables: List[List[int]]) -> torch.Tensor:
         # The shape of graph_block_tables is
         # [max batch size, max context len // block size].
         
@@ -610,20 +610,19 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
             self.attn_mask = None
         num_decode_tokens = self.num_decode_tokens
 
-        if max_query_len > 1:
+        if max_query_len == 1 and use_torchair_graph:
+            num_seqs = len(seq_lens)
+            self.slot_mapping.extend([PAD_SLOT_ID] * graph_pad_size)
+            self.block_tables.extend([[]] * graph_pad_size)
+            block_tables = self._get_graph_runner_block_tables(
+                num_seqs, self.block_tables)
+        else:
             block_tables = make_tensor_with_pad(
                 self.block_tables,
                 pad=0,
                 dtype=torch.int32,
                 device=device,
             )
-        else:
-            num_seqs = len(seq_lens)
-            if use_torchair_graph:
-                self.slot_mapping.extend([PAD_SLOT_ID] * graph_pad_size)
-                self.block_tables.extend([[]] * graph_pad_size)
-                block_tables = self._get_graph_runner_block_tables(
-                    num_seqs, self.block_tables)
 
         if self.num_prefills > 0:
             if block_tables is None or block_tables.numel() == 0:
