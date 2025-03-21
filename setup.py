@@ -267,7 +267,7 @@ class cmake_build_ext(build_ext):
     def run(self):
         # First, run the standard build_ext command to compile the extensions
         super().run()
-        _C_so = glob.glob("vllm_ascend_C*.so", root_dir=self.build_temp)
+        _C_so = glob.glob(os.path.join(self.build_temp, "vllm_ascend_C*.so"))
         _C_so = _C_so[0]
         kernels_so = "lib/libvllm_ascend_kernels.so"
         target_so = [_C_so, kernels_so]

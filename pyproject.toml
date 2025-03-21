@@ -3,6 +3,7 @@
 requires = [
     "setuptools>=64",
     "setuptools-scm>=8",
+    "cmake"
     "decorator",
     "pyyaml",
     "scipy",
