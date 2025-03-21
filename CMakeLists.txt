@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-# project(vllm-ascend LANGUAGE CXX)
+project(vllm_ascend_C)
 
 # include(CheckCXXcompilerFlag)
 # check_cxx_compiler_flag("-std=c++17", COMPILER_SUPPORTS_CXX17)
