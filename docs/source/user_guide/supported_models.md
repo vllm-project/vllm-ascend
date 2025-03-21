@@ -18,6 +18,7 @@
 | GLM-4v |  |Need test|
 | Molomo | ✅ ||
 | LLaVA 1.5 | ✅ ||
+| LLaVA 1.6 | ✅ |Modify the default value of `max_position_embeddings` in the weight file `config.json` to `5120` to run LLaVA 1.6 on Ascend NPU|
 | Mllama |  |Need test|
 | LLaVA-Next |  |Need test|
 | LLaVA-Next-Video |  |Need test|
