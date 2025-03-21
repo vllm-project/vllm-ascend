@@ -596,8 +596,6 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
             torch._dynamo.mark_static(input_positions_tensor)
             torch._dynamo.mark_static(attn_metadata.block_tables)
             torch._dynamo.mark_static(attn_metadata.slot_mapping)
-            torch._dynamo.mark_static(model_input.attn_metadata.query_start_loc)
-            torch._dynamo.mark_static(model_input.attn_metadata.seq_start_loc)
 
         return self.model_input_cls(
             input_tokens=input_tokens_tensor,
@@ -1259,12 +1257,12 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
         self.attn_state.begin_forward(model_input)
 
         assert model_input.attn_metadata is not None
-        if self.runner.vllm_config.compilation_config.level ==\
+        if self.vllm_config.compilation_config.level ==\
             CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
-            torch._dynamo.mark_static(input_tokens_tensor)
-            torch._dynamo.mark_static(input_positions_tensor)
-            torch._dynamo.mark_static(attn_metadata.block_tables)
-            torch._dynamo.mark_static(attn_metadata.slot_mapping)
+            torch._dynamo.mark_static(model_input.input_tokens)
+            torch._dynamo.mark_static(model_input.input_positions)
+            torch._dynamo.mark_static(model_input.attn_metadata.block_tables)
+            torch._dynamo.mark_static(model_input.attn_metadata.slot_mapping)
             torch._dynamo.mark_static(model_input.attn_metadata.query_start_loc)
             torch._dynamo.mark_static(model_input.attn_metadata.seq_start_loc)
 
