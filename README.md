@@ -34,24 +34,23 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
 ## Prerequisites
 
 - Hardware: Atlas 800I A2 Inference series, Atlas A2 Training series
+- OS: Linux
 - Software:
   * Python >= 3.9
   * CANN >= 8.0.0
   * PyTorch >= 2.5.1, torch-npu >= 2.5.1.dev20250308
   * vLLM (the same version as vllm-ascend)
 
-Find more about how to setup your environment step by step in [here](docs/source/installation.md).
-
 ## Getting Started
 
 Please refer to [QuickStart](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/latest/installation.html) for more details.
 
 ## Contributing
-See [CONTRIBUTING](docs/source/developer_guide/contributing.md) for more details, which is a step-by-step guide to help you set up development environment, build and test.
+See [CONTRIBUTING](https://vllm-ascend.readthedocs.io/en/main/developer_guide/contributing.html) for more details, which is a step-by-step guide to help you set up development environment, build and test.
 
 We welcome and value any contributions and collaborations:
 - Please let us know if you encounter a bug by [filing an issue](https://github.com/vllm-project/vllm-ascend/issues)
-- Please use [User forum] for usage questions and help.
+- Please use [User forum](https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support) for usage questions and help.
 
 ## Branch
 
@@ -68,7 +67,7 @@ Below is maintained branches:
 | v0.7.1-dev | Unmaintained | Only doc fixed is allowed |
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version |
 
-Please refer to [Versioning policy](docs/source/developer_guide/versioning_policy.md) for more details.
+Please refer to [Versioning policy](https://vllm-ascend.readthedocs.io/en/main/developer_guide/versioning_policy.html) for more details.
 
 ## License
 

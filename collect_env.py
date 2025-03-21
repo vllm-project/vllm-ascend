@@ -47,10 +47,9 @@ SystemEnv = namedtuple(
         'pip_version',  # 'pip' or 'pip3'
         'pip_packages',
         'conda_packages',
-        'is_xnnpack_available',
         'cpu_info',
         'vllm_version',  # vllm specific field
-        'vllm_build_flags',  # vllm specific field
+        'vllm_ascend_version',  # vllm ascend specific field
         'env_vars',
         'npu_info',  # ascend specific field
         'cann_info',  # ascend specific field
@@ -155,17 +154,27 @@ def get_cmake_version(run_lambda):
                                      r'cmake (.*)')
 
 
+def _parse_version(version, version_tuple):
+    version_str = version_tuple[-1]
+    if version_str.startswith('g'):
+        if '.' in version_str:
+            git_sha = version_str.split('.')[0][1:]
+            date = version_str.split('.')[-1][1:]
+            return f"{version} (git sha: {git_sha}, date: {date})"
+        else:
+            git_sha = version_str[1:]  # type: ignore
+            return f"{version} (git sha: {git_sha})"
+    return version
+
+
 def get_vllm_version():
     from vllm import __version__, __version_tuple__
+    return _parse_version(__version__, __version_tuple__)
 
-    if __version__ == "dev":
-        return "N/A (dev)"
 
-    if len(__version_tuple__) == 4:  # dev build
-        git_sha = __version_tuple__[-1][1:]  # type: ignore
-        return f"{__version__} (git sha: {git_sha}"
-
-    return __version__
+def get_vllm_ascend_version():
+    from vllm_ascend._version import __version__, __version_tuple__
+    return _parse_version(__version__, __version_tuple__)
 
 
 def get_cpu_info(run_lambda):
@@ -284,23 +293,6 @@ def get_pip_packages(run_lambda, patterns=None):
     return pip_version, out
 
 
-def summarize_vllm_build_flags():
-    # This could be a static method if the flags are constant, or dynamic if you need to check environment variables, etc.
-    return 'ROCm: {}; Neuron: {}'.format(
-        'Enabled' if os.environ.get('ROCM_HOME') else 'Disabled',
-        'Enabled' if os.environ.get('NEURON_CORES') else 'Disabled',
-    )
-
-
-def is_xnnpack_available():
-    if TORCH_AVAILABLE:
-        import torch.backends.xnnpack
-        return str(
-            torch.backends.xnnpack.enabled)  # type: ignore[attr-defined]
-    else:
-        return "N/A"
-
-
 def get_npu_info(run_lambda):
     return run_and_read_all(run_lambda, 'npu-smi info')
 
@@ -317,7 +309,7 @@ def get_cann_info(run_lambda):
 def get_env_vars():
     env_vars = ''
     secret_terms = ('secret', 'token', 'api', 'access', 'password')
-    report_prefix = ("TORCH", "PYTORCH", "ASCEND_")
+    report_prefix = ("TORCH", "PYTORCH", "ASCEND_", "ATB_")
     for k, v in os.environ.items():
         if any(term in k.lower() for term in secret_terms):
             continue
@@ -343,9 +335,6 @@ def get_env_info():
 
     conda_packages = get_conda_packages(run_lambda)
 
-    vllm_version = get_vllm_version()
-    vllm_build_flags = summarize_vllm_build_flags()
-
     return SystemEnv(
         torch_version=version_str,
         is_debug_build=debug_mode_str,
@@ -361,10 +350,9 @@ def get_env_info():
         gcc_version=get_gcc_version(run_lambda),
         clang_version=get_clang_version(run_lambda),
         cmake_version=get_cmake_version(run_lambda),
-        is_xnnpack_available=is_xnnpack_available(),
         cpu_info=get_cpu_info(run_lambda),
-        vllm_version=vllm_version,
-        vllm_build_flags=vllm_build_flags,
+        vllm_version=get_vllm_version(),
+        vllm_ascend_version=get_vllm_ascend_version(),
         env_vars=get_env_vars(),
         npu_info=get_npu_info(run_lambda),
         cann_info=get_cann_info(run_lambda),
@@ -383,7 +371,6 @@ Libc version: {libc_version}
 
 Python version: {python_version}
 Python platform: {python_platform}
-Is XNNPACK available: {is_xnnpack_available}
 
 CPU:
 {cpu_info}
@@ -400,10 +387,11 @@ env_info_fmt += "\n"
 
 env_info_fmt += """
 vLLM Version: {vllm_version}
-vLLM Build Flags:
-{vllm_build_flags}
+vLLM Ascend Version: {vllm_ascend_version}
 
+ENV Variables:
 {env_vars}
+
 NPU:
 {npu_info}
 
