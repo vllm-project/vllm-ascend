@@ -28,9 +28,11 @@ import torch
 import torch.distributed
 import torch.nn as nn
 import torch_npu
+import numpy as np
+import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.utils import CommonAttentionState
-from vllm.config import VllmConfig
+from vllm.config import CompilationLevel, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import get_kv_transfer_group, get_pp_group
 from vllm.forward_context import set_forward_context
@@ -53,7 +55,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import (DeviceMemoryProfiler, PyObjectCache, flatten_2d_lists,
-                        is_pin_memory_available)
+                        is_pin_memory_available, supports_dynamo)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -513,7 +515,13 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
                 device=self.runner.device)
 
         # Attention metadata.
-        attn_metadata = self.attn_metadata_builder.build(seq_lens, query_lens)
+        # Add graph_pad_size here
+        if self.runner.vllm_config.compilation_config.level ==\
+           CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+            graph_pad_size = self.runner.scheduler_config.max_num_seqs - len(seq_lens)
+        else:
+            graph_pad_size = -1
+        attn_metadata = self.attn_metadata_builder.build(seq_lens, query_lens, graph_pad_size)
 
         # Multi-modal data.
         multi_modal_kwargs_list = [
@@ -521,6 +529,13 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
             if data.multi_modal_kwargs is not None
         ]
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
+
+        if self.runner.vllm_config.compilation_config.level ==\
+            CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+            torch._dynamo.mark_static(input_tokens_tensor)
+            torch._dynamo.mark_static(input_positions_tensor)
+            torch._dynamo.mark_static(attn_metadata.block_tables)
+            torch._dynamo.mark_static(attn_metadata.slot_mapping)
 
         return self.model_input_cls(
             input_tokens=input_tokens_tensor,
@@ -759,6 +774,10 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         self.has_inner_state = model_config.has_inner_state
 
         self.in_profile_run = False
+        
+        self.graph_block_tables = np.zeros(
+            (self.vllm_config.scheduler_config.max_num_seqs, (model_config.max_model_len + self.block_size - 1) // self.block_size),
+            dtype=np.int32)
 
         # Attention-free but stateful models like Mamba need a placeholder attn
         # backend, as the attention metadata is needed to manage internal state.
@@ -820,6 +839,26 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
+
+        # adapter torch compile with npu_backend
+        if self.vllm_config.compilation_config.level ==\
+            CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+            import torchair  # type: ignore
+            from torchair import patch_for_hcom  # type: ignore
+
+            # 通信算子成图
+            patch_for_hcom()
+            # 设置npu的config，如果不设置config，可以使用默认的，那可以设置npu_backend="npu"
+            config = torchair.CompilerConfig()
+            config.experimental_config.frozen_parameter = True
+            config.experimental_config.tiling_schedule_optimize = True
+            torch.npu.set_compile_mode(jit_compile=False)
+            npu_backend = torchair.get_npu_backend(compiler_config=config)
+            self.compile_model = torch.compile(
+                self.model,
+                dynamic=True,
+                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                backend=npu_backend)
 
     def save_sharded_state(
         self,
@@ -1092,10 +1131,23 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
         self.attn_state.begin_forward(model_input)
 
         assert model_input.attn_metadata is not None
+        if self.vllm_config.compilation_config.level ==\
+            CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+            torch._dynamo.mark_static(model_input.input_tokens)
+            torch._dynamo.mark_static(model_input.input_positions)
+            torch._dynamo.mark_static(model_input.attn_metadata.block_tables)
+            torch._dynamo.mark_static(model_input.attn_metadata.slot_mapping)
+            torch._dynamo.mark_static(model_input.attn_metadata.query_start_loc)
+            torch._dynamo.mark_static(model_input.attn_metadata.seq_start_loc)
+
         # TODO(andoorve): We can remove this once all
         # virtual engines share the same kv cache.
         virtual_engine = model_input.virtual_engine
-        model_executable = self.model
+        prefill_meta = model_input.attn_metadata.prefill_metadata
+        if prefill_meta is None and self.vllm_config.compilation_config.level > 0:
+            model_executable = self.compile_model
+        else:
+            model_executable = self.model
 
         # Receive KV cache in distributed KV cache transfer setting
         # In disagg prefill setting, it will also recv hidden states and bypass
