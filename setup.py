@@ -45,13 +45,15 @@ ROOT_DIR = os.path.dirname(__file__)
 logger = logging.getLogger(__name__)
 
 
-def check_or_set_default_env(cmake_args, env_name, env_variable, default_path=""):
+def check_or_set_default_env(cmake_args,
+                             env_name,
+                             env_variable,
+                             default_path=""):
     if env_variable is None:
         logging.warning(
             f"No {env_name} found in your environment, pleause try to set {env_name} "
             "if you customize the installation path of this library, otherwise default "
-            "path will be adapted during build this project"
-        )
+            "path will be adapted during build this project")
         logging.warning(f"Set default {env_name}: {default_path}")
         env_variable = default_path
     else:
@@ -63,7 +65,8 @@ def check_or_set_default_env(cmake_args, env_name, env_variable, default_path=""
     return cmake_args
 
 
-envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm_ascend", "envs.py"))
+envs = load_module_from_path("envs",
+                             os.path.join(ROOT_DIR, "vllm_ascend", "envs.py"))
 
 
 class CMakeExtension(Extension):
@@ -110,9 +113,9 @@ class cmake_build_ext(build_ext):
         # Default use release mode to compile the csrc code
         # Turbo now support compiled with Release, Debug and RelWithDebugInfo
         if envs.CMAKE_BUILD_TYPE is None or envs.CMAKE_BUILD_TYPE not in [
-            "Debug",
-            "Release",
-            "RelWithDebugInfo",
+                "Debug",
+                "Release",
+                "RelWithDebugInfo",
         ]:
             envs.CMAKE_BUILD_TYPE = "Release"
         cmake_args += [f"-DCMAKE_BUILD_TYPE={envs.CMAKE_BUILD_TYPE}"]
@@ -130,24 +133,20 @@ class cmake_build_ext(build_ext):
         )
 
         # find PYTHON_EXECUTABLE
-        check_or_set_default_env(cmake_args, "PYTHON_EXECUTABLE", sys.executable)
+        check_or_set_default_env(cmake_args, "PYTHON_EXECUTABLE",
+                                 sys.executable)
 
         # find PYTHON_INCLUDE_PATH
-        check_or_set_default_env(
-            cmake_args, "PYHTON_INCLUDE_PATH", get_paths()["include"]
-        )
+        check_or_set_default_env(cmake_args, "PYHTON_INCLUDE_PATH",
+                                 get_paths()["include"])
 
         # ccache and ninja can not be applied at ascendc kernels now
 
         try:
             # if pybind11 is installed via pip
-            pybind11_cmake_path = (
-                subprocess.check_output(
-                    [python_executable, "-m", "pybind11", "--cmake"]
-                )
-                .decode()
-                .strip()
-            )
+            pybind11_cmake_path = (subprocess.check_output(
+                [python_executable, "-m", "pybind11",
+                 "--cmake"]).decode().strip())
         except subprocess.CalledProcessError as e:
             # else specify pybind11 path installed from source code on CI container
             raise RuntimeError(f"CMake configuration failed: {e}")
@@ -159,7 +158,8 @@ class cmake_build_ext(build_ext):
             "npu-smi info | grep OK | awk '{print $3}' | head -n 1",
         ]
         try:
-            soc_version = subprocess.check_output(soc_command, text=True).strip()
+            soc_version = subprocess.check_output(soc_command,
+                                                  text=True).strip()
             soc_version = "Ascend" + soc_version
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Retrive Soc version failed: {e}")
@@ -371,6 +371,7 @@ setup(
     extras_require={},
     entry_points={
         "vllm.platform_plugins": ["ascend = vllm_ascend:register"],
-        "vllm.general_plugins": ["ascend_enhanced_model = vllm_ascend:register_model"],
+        "vllm.general_plugins":
+        ["ascend_enhanced_model = vllm_ascend:register_model"],
     },
 )
