@@ -22,5 +22,9 @@ def register():
 
 
 def register_model():
+    from . import config  # noqa
+    from . import forward_context  # noqa
+    from .distributed import utils  # noqa
+    from .engine import llm_engine  # noqa
     from .models import register_model
     register_model()
