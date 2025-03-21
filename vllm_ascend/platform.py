@@ -26,12 +26,15 @@ from vllm.config import CompilationLevel, VllmConfig
 from vllm.logger import init_logger
 try:
     # register custom ops into torch_library here
-    import vllm_ascend.vllm_ascend_C   # noqa: F401
+    import vllm_ascend.vllm_ascend_C  # noqa: F401
 except ImportError as e:
-    if not str(e) == "dynamic module does not define module export function (PyInit_vllm_ascend_C)":
-        logging.warning("Warning: Failed to register custom ops, all custom ops will be disabled")
+    if not str(
+            e
+    ) == "dynamic module does not define module export function (PyInit_vllm_ascend_C)":
+        logging.warning(
+            "Warning: Failed to register custom ops, all custom ops will be disabled"
+        )
 
-from vllm.config import VllmConfig
 from vllm.platforms import Platform, PlatformEnum
 
 if TYPE_CHECKING:

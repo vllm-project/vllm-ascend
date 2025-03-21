@@ -11,8 +11,7 @@ import torch
 import torch_npu  # noqa: F401
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.platforms import current_platform
-import vllm_ascend.platform   # noqa: F401
-
+import vllm_ascend.platform  # noqa: F401
 
 # Only Neox style true scenario is supported for now
 IS_NEOX_STYLE = [True]
@@ -64,7 +63,9 @@ def test_rotary_embedding_quant_with_leading_dim(
     rope = rope.to(dtype=dtype)
     num_tokens = batch_size * seq_len
     positions = torch.randint(0, max_position, (batch_size, seq_len))
-    qkv_tensor = torch.randn(num_tokens, num_heads * head_size * 3, dtype=dtype)
+    qkv_tensor = torch.randn(num_tokens,
+                             num_heads * head_size * 3,
+                             dtype=dtype)
     query, key, _ = qkv_tensor.split(
         [num_heads * head_size, num_heads * head_size, num_heads * head_size],
         dim=-1,
@@ -72,7 +73,8 @@ def test_rotary_embedding_quant_with_leading_dim(
 
     # because the custom kernel is in-place.
     rope.cos_sin_cache = rope.cos_sin_cache.float()
-    ref_query, ref_key = rope.forward_native(positions, query.float(), key.float())
+    ref_query, ref_key = rope.forward_native(positions, query.float(),
+                                             key.float())
     torch.ops._C.rotary_embedding(
         positions,
         query,
@@ -83,5 +85,11 @@ def test_rotary_embedding_quant_with_leading_dim(
     )
 
     # Compare the results.
-    torch.testing.assert_close(query, ref_query, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
-    torch.testing.assert_close(key, ref_key, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(query,
+                               ref_query,
+                               atol=DEFAULT_ATOL,
+                               rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(key,
+                               ref_key,
+                               atol=DEFAULT_ATOL,
+                               rtol=DEFAULT_RTOL)
