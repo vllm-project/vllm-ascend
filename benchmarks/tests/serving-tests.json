@@ -8,7 +8,7 @@
       "inf"
     ],
     "server_parameters": {
-      "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+      "model": "meta-llama/Llama-3.1-8B-Instruct",
       "tensor_parallel_size": 1,
       "swap_space": 16,
       "disable_log_stats": "",
@@ -16,7 +16,7 @@
       "load_format": "dummy"
     },
     "client_parameters": {
-      "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
+      "model": "meta-llama/Llama-3.1-8B-Instruct",
       "backend": "vllm",
       "dataset_name": "sharegpt",
       "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",

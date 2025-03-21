@@ -18,20 +18,13 @@ check_npus() {
 }
 
 ensure_sharegpt_downloaded() {
-  local FILE=$SHAREGPT_PATH
+  local FILE=ShareGPT_V3_unfiltered_cleaned_split.json
   if [ ! -f "$FILE" ]; then
-    wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/"$FILE"
+    echo "$FILE not found, downloading from hf-mirror ..."
+    wget https://hf-mirror.com/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/$FILE
   else
     echo "$FILE already exists."
   fi
-}
-
-ensure_model_downloaded() {
-  local DIR=$LLAMA_3_1_8B_PATH
-  if [ ! -d "$DIR" ]; then
-    exit 1
-  fi
-  echo "$DIR"
 }
 
 json2args() {
@@ -44,15 +37,7 @@ json2args() {
   args=$(
     echo "$json_string" | jq -r '
       to_entries |
-      map(
-        if .key == "model" then
-          "--model " + (env[.value] // .value)
-        elif .key ==  "dataset_path" then
-          "--dataset-path " + (env[.value] // .value)
-        else
-          "--" + (.key | gsub("_"; "-")) + " " + (.value | tostring)
-        end
-      ) |
+      map("--" + (.key | gsub("_"; "-")) + " " + (.value | tostring)) |
       join(" ")
     '
   )
@@ -73,7 +58,6 @@ get_cur_npu_id() {
 }
 
 kill_npu_processes() {
-
   ps -aux
   lsof -t -i:8000 | xargs -r kill -9
   pgrep python3 | xargs -r kill -9
@@ -110,7 +94,7 @@ run_latency_tests() {
     latency_params=$(echo "$params" | jq -r '.parameters')
     latency_args=$(json2args "$latency_params")
 
-    latency_command="python3 benchmark_latency.py \
+    latency_command="python3 vllm_benchmarks/benchmark_latency.py \
       --output-json $RESULTS_FOLDER/${test_name}.json \
       $latency_args"
 
@@ -151,7 +135,7 @@ run_throughput_tests() {
     throughput_params=$(echo "$params" | jq -r '.parameters')
     throughput_args=$(json2args "$throughput_params")
 
-    throughput_command="python3 benchmark_throughput.py \
+    throughput_command="python3 vllm_benchmarks/benchmark_throughput.py \
       --output-json $RESULTS_FOLDER/${test_name}.json \
       $throughput_args"
 
@@ -235,7 +219,7 @@ run_serving_tests() {
 
       new_test_name=$test_name"_qps_"$qps
 
-      client_command="python3 benchmark_serving.py \
+      client_command="python3 vllm_benchmarks/benchmark_serving.py \
         --save-result \
         --result-dir $RESULTS_FOLDER \
         --result-filename ${new_test_name}.json \
@@ -255,7 +239,13 @@ run_serving_tests() {
 }
 
 cleanup() {
-  rm -rf $RESULTS_FOLDER
+  rm -rf ./vllm_benchmarks
+}
+
+get_benchmarks_scripts() {
+  git clone -b main --depth=1 git@github.com:vllm-project/vllm.git && \
+  mv vllm/benchmarks vllm_benchmarks
+  rm -rf ./vllm
 }
 
 main() {
@@ -276,18 +266,20 @@ main() {
 
   # prepare for benchmarking
   cd benchmarks || exit 1
-  QUICK_BENCHMARK_ROOT=./scripts
+  get_benchmarks_scripts
+  trap cleanup EXIT
+
+  QUICK_BENCHMARK_ROOT=./
 
   declare -g RESULTS_FOLDER=results
   mkdir -p $RESULTS_FOLDER
-  
-  trap cleanup EXIT
 
+  ensure_sharegpt_downloaded
   # benchmarks
   run_serving_tests $QUICK_BENCHMARK_ROOT/tests/serving-tests.json
   run_latency_tests $QUICK_BENCHMARK_ROOT/tests/latency-tests.json
   run_throughput_tests $QUICK_BENCHMARK_ROOT/tests/throughput-tests.json
-  
+
   END_TIME=$(date +%s)
   ELAPSED_TIME=$((END_TIME - START_TIME))
   echo "Total execution time: $ELAPSED_TIME seconds"
