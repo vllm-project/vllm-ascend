@@ -652,8 +652,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.query_len_cpu_tensor = None
         self.key_cache = None
         self.value_cache = None
-        # TODO: FIXME revert me when torch-npu sync issue is solved
-        self.output: torch.Tensor = None
 
     def forward(
         self,
@@ -692,11 +690,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
         value = value.contiguous()
         attn_type = self.attn_type
 
-        self.output = torch.empty(num_tokens,
-                                  self.num_heads,
-                                  self.head_size,
-                                  dtype=query.dtype,
-                                  device=query.device)
+        output = torch.empty(num_tokens,
+                             self.num_heads,
+                             self.head_size,
+                             dtype=query.dtype,
+                             device=query.device)
 
         if kv_cache.numel() > 0:
             if self.key_cache is None:
@@ -729,7 +727,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 block_tables,
                 isPrefill,
                 attn_metadata,
-                self.output,
+                output,
                 seq_lens_tensor_cpu=self.seq_lens_tensor_cpu)
         else:
             if self.key_cache is not None:
@@ -768,7 +766,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                 is_causal=causal_attn and mask is None,
                                 scale=self.scale).squeeze(0).movedim(
                                     query.dim() - 2, 0)
-                            self.output[start_q:end_q, :, :] = sub_out
+                            output[start_q:end_q, :, :] = sub_out
                             start_q, start_kv = end_q, end_kv
                     else:
                         assert attn_metadata.attn_mask is not None
@@ -786,7 +784,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             scale_value=self.scale,
                             num_heads=self.num_heads,
                             num_kv_heads=self.num_kv_heads,
-                            out=self.output)
+                            out=output)
                 elif attn_metadata.num_decode_tokens == 0 and not attn_metadata.chunked_prefill_enabled:
                     assert kv_cache is not None
                     assert attn_metadata.prefill_metadata is not None
@@ -812,7 +810,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         num_kv_heads=self.num_kv_heads,
                         num_heads=self.num_heads,
                         scale_value=self.scale,
-                        out=self.output)
+                        out=output)
                 # Splitfuse
                 else:
                     assert kv_cache is not None
@@ -834,7 +832,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         num_kv_heads=self.num_kv_heads,
                         num_heads=self.num_heads,
                         scale_value=self.scale,
-                        out=self.output)
+                        out=output)
             # Decode only
             else:
                 assert kv_cache is not None
@@ -852,9 +850,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     scale_value=self.scale,
                     block_table=block_tables,
                     context_lens=self.seq_lens_tensor_cpu,
-                    out=self.output)
+                    out=output)
 
-        return self.output.view(num_tokens, self.hidden_size)
+        # TODO: FIXME revert me when torch-npu sync issue is solved
+        torch.npu.synchronize()
+        return output.view(num_tokens, self.hidden_size)
 
 
 class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
