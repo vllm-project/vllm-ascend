@@ -1,7 +1,7 @@
-### Introduction
+# Introduction
 This document outlines the benchmarking process for vllm-ascend, designed to evaluate its performance under various workloads. The primary goal is to help developers assess whether their pull requests improve or degrade vllm-ascend's performance.To maintain consistency with the vllm community, we have reused the vllm community [benchmark](https://github.com/vllm-project/vllm/tree/main/benchmarks) script.
-### Overview
-**Benchmarking Coverage**: We measure latency, throughput, and fixed-QPS serving on the Atlas800I A2 (see [quick_start](./quick_start.md) to learn more supported devices list), with different models(coming soon).
+# Overview
+**Benchmarking Coverage**: We measure latency, throughput, and fixed-QPS serving on the Atlas800I A2 (see [quick_start](../docs/source/quick_start.md) to learn more supported devices list), with different models(coming soon).
 - Latency tests
     - Input length: 32 tokens.
     - Output length: 128 tokens.
@@ -26,8 +26,8 @@ This document outlines the benchmarking process for vllm-ascend, designed to eva
 **Benchmarking Duration**: about 800senond for single model.
 
 
-### Quick Use
-#### Prerequisites
+# Quick Use
+## Prerequisites
 Before running the benchmarks, ensure the following:
 - vllm and vllm-ascend are installed and properly set up in an NPU environment, as these scripts are specifically designed for NPU devices.
 - Install necessary dependencies for benchmarks:
@@ -37,7 +37,7 @@ Before running the benchmarks, ensure the following:
     
 - Models and datasets are cached locally to accelerate execution. Modify the paths in the JSON files located in benchmarks/tests accordingly. feel free to add your own models and parameters in the JSON to run your customized benchmarks.
 
-#### Run benchmarks
+## Run benchmarks
 The provided scripts automatically execute performance tests for serving, throughput, and latency. To start the benchmarking process, run command in the vllm-ascend root directory:
 ```
 bash benchmarks/scripts/run-performance-benchmarks.sh
