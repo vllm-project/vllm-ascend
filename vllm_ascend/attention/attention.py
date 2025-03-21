@@ -1005,13 +1005,12 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv = kv.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
 
-        index = slots[:B].to(torch.int64)
-        k_pe, k_nope = golden_func(
+        k_pe, k_nope = torch.ops.npu_inference.npu_kv_rmsnorm_rope_cache(
             kv,
             self.kv_a_layernorm.weight,
             cos,
             sin,
-            index,
+            slots.to(torch.int64),
             kv_cache[1],
             kv_cache[0],
             epsilon=self.kv_a_layernorm.variance_epsilon,
@@ -1217,10 +1216,10 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                 q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
                 attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
                     q_nope,
-                    kv_cache[0],
-                    kv_cache[0],
+                    k_nope,
+                    k_nope,
                     query_rope=q_pe,
-                    key_rope=kv_cache[1],
+                    key_rope=k_pe,
                     num_heads=self.num_heads,
                     num_key_value_heads=1,
                     input_layout="BNSD",
