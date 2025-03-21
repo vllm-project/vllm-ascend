@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+import logging
 import os
 from typing import TYPE_CHECKING, Optional, Tuple
 
@@ -26,6 +27,19 @@ except ImportError:
     print("Failed to import torch_npu.")
 
 from vllm.config import VllmConfig
+
+try:
+    # register custom ops into torch_library here
+    import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+
+except ImportError as e:
+    if not str(
+            e
+    ) == "dynamic module does not define module export function (PyInit_vllm_ascend_C)":
+        logging.warning(
+            "Warning: Failed to register custom ops, all custom ops will be disabled"
+        )
+
 from vllm.platforms import Platform, PlatformEnum
 
 if TYPE_CHECKING:
