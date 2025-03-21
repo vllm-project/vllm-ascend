@@ -30,7 +30,7 @@ from vllm.config import VllmConfig
 
 try:
     # register custom ops into torch_library here
-    import vllm_ascend.vllm_ascend_C  # noqa: F401
+    import vllm_ascend.vllm_ascend_C  # type: ignore
 
 except ImportError as e:
     if not str(
