@@ -33,13 +33,14 @@ Before running the benchmarks, ensure the following:
 - Install necessary dependencies for benchmarks:
     ```
     pip install -r benchmarks/requirements-bench.txt
+    ```
+    
 - Models and datasets are cached locally to accelerate execution. Modify the paths in the JSON files located in benchmarks/tests accordingly. feel free to add your own models and parameters in the JSON to run your customized benchmarks.
 
 #### Run benchmarks
-The provided scripts automatically execute performance tests for serving, throughput, and latency. To start the benchmarking process, run:
+The provided scripts automatically execute performance tests for serving, throughput, and latency. To start the benchmarking process, run command in the vllm-ascend root directory:
 ```
-cd benchmarks
-bash scripts/run-performance-benchmarks.sh
+bash benchmarks/scripts/run-performance-benchmarks.sh
 ```
 Once the script completes, you can find the results in the benchmarks/results folder. The output files may resemble the following:
 ```
