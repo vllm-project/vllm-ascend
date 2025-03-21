@@ -16,7 +16,7 @@
 #
 
 import importlib
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 CUSTOMIZED_QUANTIZER_TYPE: List[str] = []
 
@@ -25,7 +25,11 @@ class AscendQuantizer:
     """An interface to different quantization implementations for ascend hardwares."""
 
     @classmethod
-    def get_quantizer(cls, quant_config: Dict[str, Any]):
+    def get_quantizer(cls,
+                      quant_config: Dict[str, Any],
+                      prefix: str,
+                      packed_modules_mapping: Optional[Dict[str,
+                                                            Any]] = dict()):
         # TODO: Need a param to choose quantization algorithms.
         quantization_algorithm = ''
 
@@ -35,11 +39,12 @@ class AscendQuantizer:
         try:
             module = importlib.import_module("mindie_turbo")
             MindIETurboQuantizer = module.MindIETurboQuantizer
-        except Exception:
+        except ImportError:
             raise NotImplementedError(
                 "There is no available ascend quantizer.")
 
-        return MindIETurboQuantizer.get_quantizer(quant_config)
+        return MindIETurboQuantizer.get_quantizer(quant_config, prefix,
+                                                  packed_modules_mapping)
 
     def build_linear_method(self):
         raise NotImplementedError

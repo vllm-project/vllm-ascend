@@ -21,7 +21,7 @@ source ./.venv/bin/activate
 # Clone vllm code and install
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
-pip install -r requirements-build.txt
+pip install -r requirements/build.txt
 VLLM_TARGET_DEVICE="empty" pip install .
 cd ..
 
@@ -53,21 +53,21 @@ locally. The simplest way to run these integration tests locally is through a co
 git clone https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 
-IMAGE=vllm-ascend-dev-image
-CONTAINER_NAME=vllm-ascend-dev
-DEVICE=/dev/davinci1
+export IMAGE=vllm-ascend-dev-image
+export CONTAINER_NAME=vllm-ascend-dev
+export DEVICE=/dev/davinci1
 
 # The first build will take about 10 mins (10MB/s) to download the base image and packages
 docker build -t $IMAGE -f ./Dockerfile .
 # You can also specify the mirror repo via setting VLLM_REPO to speedup
 # docker build -t $IMAGE -f ./Dockerfile . --build-arg VLLM_REPO=https://gitee.com/mirrors/vllm
 
-docker run --name $CONTAINER_NAME --network host --device $DEVICE \
+docker run --rm --name $CONTAINER_NAME --network host --device $DEVICE \
            --device /dev/davinci_manager --device /dev/devmm_svm \
            --device /dev/hisi_hdc -v /usr/local/dcmi:/usr/local/dcmi \
            -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
            -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-           -ti --rm $IMAGE bash
+           -ti $IMAGE bash
 
 cd vllm-ascend
 pip install -r requirements-dev.txt
