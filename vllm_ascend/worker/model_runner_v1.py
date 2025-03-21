@@ -52,7 +52,7 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
                                                 AscendMetadata)
 
 if TYPE_CHECKING:
-    from vllm.v1.core.scheduler_output import SchedulerOutput
+    from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
 
