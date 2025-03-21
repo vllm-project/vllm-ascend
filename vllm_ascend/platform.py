@@ -40,7 +40,7 @@ class NPUPlatform(Platform):
     _enum = PlatformEnum.OOT
     device_name: str = "npu"
     device_type: str = "npu"
-    simple_compile_backend: str = "npu"
+    simple_compile_backend: str = "eager"  # Disable torch.compile()
     ray_device_key: str = "NPU"
     device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
     dispatch_key: str = "PrivateUse1"
@@ -99,11 +99,13 @@ class NPUPlatform(Platform):
         if parallel_config.worker_cls == "auto":
             if envs.VLLM_USE_V1:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
+            elif vllm_config.speculative_config:
+                parallel_config.worker_cls = "vllm.spec_decode.spec_decode_worker.create_spec_worker"
+                parallel_config.sd_worker_cls = "vllm_ascend.worker.worker.NPUWorker"
+            elif vllm_config.scheduler_config.is_multi_step:
+                parallel_config.worker_cls = "vllm_ascend.worker.multi_step_worker.MultiStepWorker"
             else:
-                if vllm_config.scheduler_config.is_multi_step:
-                    parallel_config.worker_cls = "vllm_ascend.worker.multi_step_worker.MultiStepWorker"
-                else:
-                    parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
+                parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
 
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
