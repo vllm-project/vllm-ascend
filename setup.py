@@ -17,20 +17,20 @@
 # limitations under the License.
 #
 
-import os
-from typing import List, Dict
+import glob
 import importlib.util
+import logging
+import os
+import subprocess
+import sys
+from pathlib import Path
 from sysconfig import get_paths
+from typing import Dict, List
 
 from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
 from setuptools.command.install import install
 from setuptools_scm import get_version
-import logging
-import sys
-import subprocess
-from pathlib import Path
-import glob
 
 
 def load_module_from_path(module_name, path):
@@ -45,15 +45,13 @@ ROOT_DIR = os.path.dirname(__file__)
 logger = logging.getLogger(__name__)
 
 
-def check_or_set_default_env(cmake_args,
-                             env_name,
-                             env_variable,
-                             default_path=""):
+def check_or_set_default_env(cmake_args, env_name, env_variable, default_path=""):
     if env_variable is None:
         logging.warning(
             f"No {env_name} found in your environment, pleause try to set {env_name} "
             "if you customize the installation path of this library, otherwise default "
-            "path will be adapted during build this project")
+            "path will be adapted during build this project"
+        )
         logging.warning(f"Set default {env_name}: {default_path}")
         env_variable = default_path
     else:
@@ -65,13 +63,12 @@ def check_or_set_default_env(cmake_args,
     return cmake_args
 
 
-envs = load_module_from_path('envs',
-                             os.path.join(ROOT_DIR, 'vllm_ascend', 'envs.py'))
+envs = load_module_from_path("envs", os.path.join(ROOT_DIR, "vllm_ascend", "envs.py"))
 
 
 class CMakeExtension(Extension):
 
-    def __init__(self, name: str, cmake_lists_dir: str = '.', **kwa) -> None:
+    def __init__(self, name: str, cmake_lists_dir: str = ".", **kwa) -> None:
         super().__init__(name, sources=[], py_limited_api=True, **kwa)
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
 
@@ -113,9 +110,9 @@ class cmake_build_ext(build_ext):
         # Default use release mode to compile the csrc code
         # Turbo now support compiled with Release, Debug and RelWithDebugInfo
         if envs.CMAKE_BUILD_TYPE is None or envs.CMAKE_BUILD_TYPE not in [
-                "Debug",
-                "Release",
-                "RelWithDebugInfo",
+            "Debug",
+            "Release",
+            "RelWithDebugInfo",
         ]:
             envs.CMAKE_BUILD_TYPE = "Release"
         cmake_args += [f"-DCMAKE_BUILD_TYPE={envs.CMAKE_BUILD_TYPE}"]
@@ -133,32 +130,36 @@ class cmake_build_ext(build_ext):
         )
 
         # find PYTHON_EXECUTABLE
-        check_or_set_default_env(cmake_args, "PYTHON_EXECUTABLE",
-                                 sys.executable)
+        check_or_set_default_env(cmake_args, "PYTHON_EXECUTABLE", sys.executable)
 
         # find PYTHON_INCLUDE_PATH
-        check_or_set_default_env(cmake_args, "PYHTON_INCLUDE_PATH",
-                                 get_paths()["include"])
+        check_or_set_default_env(
+            cmake_args, "PYHTON_INCLUDE_PATH", get_paths()["include"]
+        )
 
         # ccache and ninja can not be applied at ascendc kernels now
 
         try:
             # if pybind11 is installed via pip
-            pybind11_cmake_path = (subprocess.check_output(
-                [python_executable, "-m", "pybind11",
-                 "--cmake"]).decode().strip())
+            pybind11_cmake_path = (
+                subprocess.check_output(
+                    [python_executable, "-m", "pybind11", "--cmake"]
+                )
+                .decode()
+                .strip()
+            )
         except subprocess.CalledProcessError as e:
             # else specify pybind11 path installed from source code on CI container
             raise RuntimeError(f"CMake configuration failed: {e}")
 
         # try retrive soc version from npu-smi
         soc_command = [
-            "bash", "-c",
-            "npu-smi info | grep OK | awk '{print $3}' | head -n 1"
+            "bash",
+            "-c",
+            "npu-smi info | grep OK | awk '{print $3}' | head -n 1",
         ]
         try:
-            soc_version = subprocess.check_output(soc_command,
-                                                  text=True).strip()
+            soc_version = subprocess.check_output(soc_command, text=True).strip()
             soc_version = "Ascend" + soc_version
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Retrive Soc version failed: {e}")
@@ -176,7 +177,7 @@ class cmake_build_ext(build_ext):
         # To override this, set the FETCHCONTENT_BASE_DIR environment variable.
         fc_base_dir = os.path.join(ROOT_DIR, ".deps")
         fc_base_dir = os.environ.get("FETCHCONTENT_BASE_DIR", fc_base_dir)
-        cmake_args += ['-DFETCHCONTENT_BASE_DIR={}'.format(fc_base_dir)]
+        cmake_args += ["-DFETCHCONTENT_BASE_DIR={}".format(fc_base_dir)]
 
         build_tool = []
         # TODO(ganyi): ninja and ccache support for ascend c auto codegen. now we can only use make build
@@ -192,15 +193,16 @@ class cmake_build_ext(build_ext):
             raise RuntimeError(f"CMake configuration failed: {e}")
 
         subprocess.check_call(
-            ['cmake', ext.cmake_lists_dir, *build_tool, *cmake_args],
-            cwd=self.build_temp)
+            ["cmake", ext.cmake_lists_dir, *build_tool, *cmake_args],
+            cwd=self.build_temp,
+        )
 
     def build_extensions(self) -> None:
         # Ensure that CMake is present and working
         try:
-            subprocess.check_output(['cmake', '--version'])
+            subprocess.check_output(["cmake", "--version"])
         except OSError as e:
-            raise RuntimeError(f'Cannot find CMake executable: {e}')
+            raise RuntimeError(f"Cannot find CMake executable: {e}")
 
         # Create build directory if it does not exist.
         if not os.path.exists(self.build_temp):
@@ -231,7 +233,7 @@ class cmake_build_ext(build_ext):
         try:
             subprocess.check_call(["cmake", *build_args], cwd=self.build_temp)
         except OSError as e:
-            raise RuntimeError(f'Build library failed: {e}')
+            raise RuntimeError(f"Build library failed: {e}")
         # Install the libraries
         for ext in self.extensions:
             # Install the extension into the proper location
@@ -247,13 +249,18 @@ class cmake_build_ext(build_ext):
             # CMake, this is currently true for current extensions but may not
             # always be the case.
             prefix = outdir
-            if '.' in ext.name:
+            if "." in ext.name:
                 prefix = prefix.parent
 
             # prefix here should actually be the same for all components
             install_args = [
-                "cmake", "--install", ".", "--prefix", prefix, "--component",
-                target_name(ext.name)
+                "cmake",
+                "--install",
+                ".",
+                "--prefix",
+                prefix,
+                "--component",
+                target_name(ext.name),
             ]
             subprocess.check_call(install_args, cwd=self.build_temp)
 
@@ -331,7 +338,7 @@ def get_requirements() -> List[str]:
 cmdclass = {"build_ext": cmake_build_ext, "install": custom_install}
 
 setup(
-    name='vllm_ascend',
+    name="vllm_ascend",
     # Follow:
     # https://packaging.python.org/en/latest/specifications/version-specifiers
     version=VERSION,
@@ -363,7 +370,7 @@ setup(
     cmdclass=cmdclass,
     extras_require={},
     entry_points={
-        'vllm.platform_plugins': ["ascend = vllm_ascend:register"],
-        'vllm.general_plugins':
-        ["ascend_enhanced_model = vllm_ascend:register_model"]
-    })
+        "vllm.platform_plugins": ["ascend = vllm_ascend:register"],
+        "vllm.general_plugins": ["ascend_enhanced_model = vllm_ascend:register_model"],
+    },
+)

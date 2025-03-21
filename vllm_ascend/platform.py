@@ -15,15 +15,16 @@
 # limitations under the License.
 #
 
+import logging
 import os
 from typing import TYPE_CHECKING, Optional, Tuple
-import logging
 
 import torch
 import torch_npu  # noqa: F401
 import vllm.envs as envs
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.logger import init_logger
+
 try:
     # register custom ops into torch_library here
     import vllm_ascend.vllm_ascend_C  # noqa: F401

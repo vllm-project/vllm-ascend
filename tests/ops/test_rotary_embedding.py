@@ -11,6 +11,7 @@ import torch
 import torch_npu  # noqa: F401
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.platforms import current_platform
+
 import vllm_ascend.platform  # noqa: F401
 
 # Only Neox style true scenario is supported for now
