@@ -475,7 +475,8 @@ class NPUWorker(LocalOrDistributedWorkerBase):
                                      backend)
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
-            parallel_config.pipeline_parallel_size)
+            parallel_config.pipeline_parallel_size,
+            parallel_config.expert_tensor_parallel_size)
 
 
 def raise_if_cache_size_invalid(num_gpu_blocks, block_size, is_attention_free,
