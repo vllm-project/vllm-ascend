@@ -48,6 +48,8 @@ def fused_experts(
         hidden_states: Hidden states after routing.
     """
     # Check constraints.
+    if torch.distributed.get_rank() == 0:
+        print(w1.shape)
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
@@ -317,21 +319,6 @@ def forward_oot(
         scoring_func=scoring_func,
         e_score_correction_bias=e_score_correction_bias,
     )
-
-    # TODO: Find way to use this op in graph mode.
-    # topk_weights, topk_ids, _ = torch.ops.npu_inference.npu_moe_gating_top_k(
-    #         router_logits,
-    #         k=top_k,
-    #         bias=e_score_correction_bias,
-    #         k_group=topk_group,
-    #         group_count=num_expert_group,
-    #         group_select_mode=1, # 0: group中的最大; 1: topk2.sum(fix)
-    #         renorm=0, # 0: softmax->topk(fix); 1: topk->softmax
-    #         norm_type=1 if scoring_func == 'sigmoid' else 0, # 0: softmax; 1: sigmoid(fix)
-    #         # out_flag=False, # todo new api; 第三个输出是否输出
-    #         # y2_flag=False, # old api; 第三个输出是否输出
-    #         routed_scaling_factor=1,
-    #         eps=float(1e-20))
 
     return fused_experts(hidden_states=x,
                          w1=layer.w13_weight,
