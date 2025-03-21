@@ -51,7 +51,9 @@ user_guide/release_notes
 % How to contribute to the vLLM project
 :::{toctree}
 :caption: Developer Guide
-:maxdepth: 1
+:maxdepth: 2
 developer_guide/contributing
 developer_guide/versioning_policy
+developer_guide/evaluation/index
+developer_guide/evaluation/using_opencompass
 :::
