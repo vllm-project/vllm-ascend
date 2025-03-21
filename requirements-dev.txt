@@ -1,4 +1,5 @@
 -r requirements-lint.txt
 modelscope<1.23.0
 pytest >= 6.0
+pybind
 pytest-asyncio

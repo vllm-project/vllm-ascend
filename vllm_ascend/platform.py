@@ -27,6 +27,7 @@ except ImportError:
     print("Failed to import torch_npu.")
 
 from vllm.config import VllmConfig
+
 try:
     # register custom ops into torch_library here
     import vllm_ascend.vllm_ascend_C  # noqa: F401
