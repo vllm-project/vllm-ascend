@@ -835,6 +835,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     context_lens=self.seq_lens_tensor_cpu,
                     out=output)
 
+        torch.npu.synchronize()
         return output.view(num_tokens, self.hidden_size)
 
 
