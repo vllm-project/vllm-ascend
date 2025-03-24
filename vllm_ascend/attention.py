@@ -1135,6 +1135,17 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         x = x.view(B, N, S, D)
         x = torch.ops.npu_inference.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
+    
+    def process_weights_after_loading(self, act_dtype: torch.dtype):
+        if self.w_kc is None or self.w_vc is None:
+            kv_b_proj_weight = self.kv_b_proj.weight.reshape(
+                self.num_heads, self.qk_nope_head_dim + self.v_head_dim,
+                self.kv_lora_rank)
+            self.w_kc = kv_b_proj_weight[:, :self.
+                                         qk_nope_head_dim, :].contiguous()
+            self.w_vc = kv_b_proj_weight[:,
+                                         self.qk_nope_head_dim:, :].transpose(
+                                             1, 2).contiguous()
 
     def forward(
         self,
@@ -1205,16 +1216,6 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
             else:
                 q_pe, k_pe = self.rotary_emb(attn_metadata.input_positions,
                                              q_pe, k_pe)
-
-        if self.w_kc is None or self.w_vc is None:
-            kv_b_proj_weight = self.kv_b_proj.weight.reshape(
-                self.num_heads, self.qk_nope_head_dim + self.v_head_dim,
-                self.kv_lora_rank)
-            self.w_kc = kv_b_proj_weight[:, :self.
-                                         qk_nope_head_dim, :].contiguous()
-            self.w_vc = kv_b_proj_weight[:,
-                                         self.qk_nope_head_dim:, :].transpose(
-                                             1, 2).contiguous()
 
         if attn_metadata.num_prefills > 0:
             kv = self.kv_b_proj(kv_c_normed)[0].view(num_tokens,

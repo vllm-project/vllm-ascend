@@ -1139,6 +1139,10 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
             torch._dynamo.mark_static(model_input.attn_metadata.slot_mapping)
             torch._dynamo.mark_static(model_input.attn_metadata.query_start_loc)
             torch._dynamo.mark_static(model_input.attn_metadata.seq_start_loc)
+            for kv in kv_caches:
+                if isinstance(kv, tuple):
+                    torch._dynamo.mark_static(kv[0])
+                    torch._dynamo.mark_static(kv[1])
 
         # TODO(andoorve): We can remove this once all
         # virtual engines share the same kv cache.
