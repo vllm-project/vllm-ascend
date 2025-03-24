@@ -34,7 +34,10 @@ from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import (get_pp_group,
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_reduce)
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
@@ -55,6 +58,87 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.utils import VLLM_ENABLE_GRAPH_MODE
 
+
+class CustomDeepseekV2MoE(nn.Module):
+
+    top_k: int
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.routed_scaling_factor = config.routed_scaling_factor
+        self.n_shared_experts = config.n_shared_experts
+        self.routed_scaling_factor = config.routed_scaling_factor
+        if self.tp_size > config.n_routed_experts:
+            raise ValueError(
+                f"Tensor parallel size {self.tp_size} is greater than "
+                f"the number of experts {config.n_routed_experts}.")
+
+        if config.hidden_act != "silu":
+            raise ValueError(f"Unsupported activation: {config.hidden_act}. "
+                             "Only silu is supported for now.")
+
+        self.gate = ReplicatedLinear(config.hidden_size,
+                                     config.n_routed_experts,
+                                     bias=False,
+                                     quant_config=None,
+                                     prefix=f"{prefix}.gate")
+        if config.topk_method == "noaux_tc":
+            self.gate.e_score_correction_bias = nn.Parameter(
+                torch.empty(config.n_routed_experts))
+        else:
+            self.gate.e_score_correction_bias = None
+
+        self.experts = FusedMoE(
+            num_experts=config.n_routed_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            reduce_results=False,
+            renormalize=config.norm_topk_prob,
+            quant_config=quant_config,
+            use_grouped_topk=True,
+            num_expert_group=config.n_group,
+            topk_group=config.topk_group,
+            prefix=f"{prefix}.experts",
+            scoring_func=config.scoring_func,
+            e_score_correction_bias=self.gate.e_score_correction_bias)
+
+        if config.n_shared_experts is not None:
+            intermediate_size = (config.moe_intermediate_size *
+                                 config.n_shared_experts)
+            self.shared_experts = DeepseekV2MLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                reduce_results=False,
+            )
+        CustomDeepseekV2MoE.top_k = config.num_experts_per_tok
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        num_tokens, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+        if self.n_shared_experts is not None:
+            shared_output = self.shared_experts(hidden_states)
+        # router_logits: (num_tokens, n_experts)
+        router_logits, _ = self.gate(hidden_states)
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            top_k=CustomDeepseekV2MoE.top_k) * self.routed_scaling_factor
+        if shared_output is not None:
+            final_hidden_states = final_hidden_states + shared_output
+        if self.tp_size > 1:
+            final_hidden_states = tensor_model_parallel_all_reduce(
+                final_hidden_states)
+
+        return final_hidden_states.view(num_tokens, hidden_dim)
 
 class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
 
@@ -251,7 +335,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         if (config.n_routed_experts is not None
                 and layer_idx >= config.first_k_dense_replace
                 and layer_idx % config.moe_layer_freq == 0):
-            self.mlp = DeepseekV2MoE(
+            self.mlp = CustomDeepseekV2MoE(
                 config=config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
