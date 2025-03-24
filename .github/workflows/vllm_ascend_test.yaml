@@ -130,11 +130,12 @@ jobs:
         run: |
           VLLM_USE_V1=0 pytest -sv tests
 
-      # FIXME: make vllm test pass
-      #- name: Checkout vllm-project/vllm repo
-      #- name: Run vllm-project/vllm test
-      #  run: |
-      #    VLLM_USE_V1=0 pytest -sv
+      - name: Run vllm-project/vllm test
+        env:
+          VLLM_USE_V1: 0
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+        run: |
+          pytest -sv
 
   post_cleanup:
     name: vLLM Ascend test (post-cleanup)
