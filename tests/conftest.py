@@ -18,7 +18,7 @@
 #
 
 import os
-from typing import Any, Optional, TypeVar, Union, List, Tuple
+from typing import Any, List, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 import pytest
@@ -29,13 +29,11 @@ from PIL import Image
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
                           BatchEncoding, BatchFeature)
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
-
 from vllm import LLM, SamplingParams
 from vllm.config import TaskOption, _get_and_verify_dtype
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
-                         TokensPrompt, to_enc_dec_tuple_list,
-                         )
+                         TokensPrompt, to_enc_dec_tuple_list)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
@@ -53,9 +51,9 @@ PromptImageInput = _PromptMultiModalInput[Image.Image]
 PromptAudioInput = _PromptMultiModalInput[Tuple[np.ndarray, int]]
 PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 
-
 _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
+
 
 class VllmRunner:
 
@@ -343,7 +341,9 @@ class VllmRunner:
 def vllm_runner():
     return VllmRunner
 
+
 _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
+
 
 class HfRunner:
 
@@ -773,6 +773,7 @@ def example_prompts() -> list[str]:
     for filename in _TEST_PROMPTS:
         prompts += _read_prompts(filename)
     return prompts
+
 
 def _read_prompts(filename: str) -> List[str]:
     with open(filename) as f:

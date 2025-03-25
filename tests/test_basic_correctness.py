@@ -16,7 +16,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
 Run `pytest tests/basic_correctness/test_basic_correctness.py`.
@@ -28,9 +27,7 @@ import pytest
 from conftest import VllmRunner
 from model_utils import check_outputs_equal
 
-MODELS = [
-    "Qwen/Qwen2.5-7B-Instruct"
-]
+MODELS = ["Qwen/Qwen2.5-7B-Instruct"]
 
 TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
 
