@@ -9,6 +9,7 @@
 | Qwen2-Audio | ✅ ||
 | Qwen2.5 | ✅ ||
 | Qwen2.5-VL | ✅ ||
+| QwQ-32B | ✅ ||
 | MiniCPM |✅| |
 | LLama3.1/3.2 | ✅ ||
 | Mistral |  | Need test |
