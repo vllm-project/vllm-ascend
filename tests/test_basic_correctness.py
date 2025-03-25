@@ -41,7 +41,7 @@ def test_models(
     enforce_eager: bool,
 ) -> None:
     prompt = "The following numbers of the sequence " + ", ".join(
-            str(i) for i in range(1024)) + " are:"
+        str(i) for i in range(1024)) + " are:"
     example_prompts = [prompt]
     with hf_runner(model) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
@@ -50,8 +50,7 @@ def test_models(
                     max_model_len=8192,
                     enforce_eager=enforce_eager,
                     gpu_memory_utilization=0.7) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy(example_prompts,
-                                                      max_tokens)
+        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     check_outputs_equal(
         outputs_0_lst=hf_outputs,
