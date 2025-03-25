@@ -330,37 +330,5 @@ def forward_oot(
                          top_k=top_k,
                          expert_map=expert_map)
 
-def forward(self, hidden_states: torch.Tensor,
-                router_logits: torch.Tensor, top_k=None):
-    assert self.quant_method is not None
-
-    if top_k:
-        real_top_k = top_k
-    else:
-        real_top_k = self.top_k
-
-    # Matrix multiply.
-    final_hidden_states = self.quant_method.apply(
-        layer=self,
-        x=hidden_states,
-        router_logits=router_logits,
-        top_k=real_top_k,
-        renormalize=self.renormalize,
-        use_grouped_topk=self.use_grouped_topk,
-        global_num_experts=self.num_experts,
-        expert_map=self.expert_map,
-        topk_group=self.topk_group,
-        num_expert_group=self.num_expert_group,
-        custom_routing_function=self.custom_routing_function,
-        scoring_func=self.scoring_func,
-        e_score_correction_bias=self.e_score_correction_bias)
-
-    if self.reduce_results and self.tp_size > 1:
-        final_hidden_states = tensor_model_parallel_all_reduce(
-            final_hidden_states)
-
-    return final_hidden_states
-
 
 UnquantizedFusedMoEMethod.forward_oot = forward_oot
-FusedMoE.forward = forward
