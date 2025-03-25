@@ -25,9 +25,6 @@ import os
 
 import pytest
 
-from vllm import LLM
-from vllm.platforms import current_platform
-
 from conftest import VllmRunner
 from model_utils import check_outputs_equal
 
@@ -75,5 +72,3 @@ def test_models(
             name_0="hf",
             name_1="vllm",
         )
-        print(hf_outputs)
-        print(vllm_outputs)
