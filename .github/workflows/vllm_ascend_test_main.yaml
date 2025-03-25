@@ -126,11 +126,15 @@ jobs:
           cd /code/pta/
           pip install ./torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 
-      - name: Run vllm-project/vllm-ascend test
+      - name: Run vllm-project/vllm-ascend test for V0 Engine
         run: |
           VLLM_USE_V1=0 pytest -sv tests
 
-      - name: Run vllm-project/vllm test
+      - name: Run vllm-project/vllm-ascend test for V1 Engine
+        run: |
+          VLLM_USE_V1=1 VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -sv tests
+
+      - name: Run vllm-project/vllm test for V0 Engine
         env:
           VLLM_USE_V1: 0
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
