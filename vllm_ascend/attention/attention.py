@@ -628,7 +628,7 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
             self.attn_mask = None
         num_decode_tokens = self.num_decode_tokens
 
-        if max_query_len == 1 and use_torchair_graph:
+        if self.num_prefills == 0 and use_torchair_graph:
             num_seqs = len(seq_lens)
             self.slot_mapping.extend([PAD_SLOT_ID] * graph_pad_size)
             self.block_tables.extend([[]] * graph_pad_size)

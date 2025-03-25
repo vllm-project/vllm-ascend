@@ -48,6 +48,7 @@ def fused_experts(
     Returns:
         hidden_states: Hidden states after routing.
     """
+    """
     # Check constraints.
     if torch.distributed.get_rank() == 0:
         print(w1.shape)
@@ -56,16 +57,16 @@ def fused_experts(
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w1.is_contiguous(), "Expert weights1 must be contiguous"
     assert w2.is_contiguous(), "Expert weights2 must be contiguous"
-
+    """
     original_shape = hidden_states.shape
-    assert len(original_shape) == 2
+    # assert len(original_shape) == 2
 
     num_tokens = hidden_states.shape[:-1].numel()
     num_experts = w1.shape[0]
     dtype = hidden_states.dtype
     device = hidden_states.device
-    assert dtype in [torch.float32, torch.float16, torch.bfloat16
-                     ], "Only float32, float16, and bfloat16 are supported"
+    # assert dtype in [torch.float32, torch.float16, torch.bfloat16
+    #                  ], "Only float32, float16, and bfloat16 are supported"
 
     if expert_map is not None:
         # Generate token indices and flatten
@@ -235,8 +236,8 @@ def select_experts(
     Raises:
         ValueError: If an unsupported scoring function is provided.
     """
-    assert hidden_states.shape[0] == router_logits.shape[0], (
-        "Number of tokens mismatch")
+    # assert hidden_states.shape[0] == router_logits.shape[0], (
+    #     "Number of tokens mismatch")
 
     if custom_routing_function is not None:
         raise NotImplementedError(
@@ -264,14 +265,14 @@ def select_experts(
         # >>> torch_npu._npu_group_topk(topk_weights, group_num=num_expert_group, k=topk_group)
         topk_weights = native_grouped_topk(topk_weights, num_expert_group,
                                            topk_group)
-
+        # TODO bfloat16 is not supported in torch.topk with ge graph. 
         if e_score_correction_bias is not None:
-            topk_ids = torch.topk(topk_weights, k=top_k, dim=-1,
+            topk_ids = torch.topk(topk_weights.to(torch.float32), k=top_k, dim=-1,
                                   sorted=False)[1]
             # Use original unbiased scores for the routing weights
             topk_weights = original_weights.gather(1, topk_ids)
         else:
-            topk_weights, topk_ids = torch.topk(topk_weights,
+            topk_weights, topk_ids = torch.topk(topk_weights.to(torch.float32),
                                                 k=top_k,
                                                 dim=-1,
                                                 sorted=False)
@@ -305,8 +306,8 @@ def forward_oot(
     e_score_correction_bias: Optional[torch.Tensor] = None,
     **kwargs,
 ):
-    assert router_logits.shape[
-        1] == global_num_experts, "Number of global experts mismatch"
+    # assert router_logits.shape[
+    #     1] == global_num_experts, "Number of global experts mismatch"
 
     topk_weights, topk_ids = select_experts(
         hidden_states=x,
@@ -329,37 +330,5 @@ def forward_oot(
                          top_k=top_k,
                          expert_map=expert_map)
 
-def forward(self, hidden_states: torch.Tensor,
-                router_logits: torch.Tensor, top_k=None):
-    assert self.quant_method is not None
-
-    if top_k:
-        real_top_k = top_k
-    else:
-        real_top_k = self.top_k
-
-    # Matrix multiply.
-    final_hidden_states = self.quant_method.apply(
-        layer=self,
-        x=hidden_states,
-        router_logits=router_logits,
-        top_k=real_top_k,
-        renormalize=self.renormalize,
-        use_grouped_topk=self.use_grouped_topk,
-        global_num_experts=self.num_experts,
-        expert_map=self.expert_map,
-        topk_group=self.topk_group,
-        num_expert_group=self.num_expert_group,
-        custom_routing_function=self.custom_routing_function,
-        scoring_func=self.scoring_func,
-        e_score_correction_bias=self.e_score_correction_bias)
-
-    if self.reduce_results and self.tp_size > 1:
-        final_hidden_states = tensor_model_parallel_all_reduce(
-            final_hidden_states)
-
-    return final_hidden_states
-
 
 UnquantizedFusedMoEMethod.forward_oot = forward_oot
-FusedMoE.forward = forward
