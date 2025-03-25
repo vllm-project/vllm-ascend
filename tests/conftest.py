@@ -65,6 +65,8 @@ class VllmRunner:
         tokenizer_mode: str = "auto",
         trust_remote_code: bool = True,
         seed: Optional[int] = 0,
+        # Use smaller max model length, otherwise bigger model cannot run due
+        # to kv cache size limit.
         max_model_len: int = 1024,
         dtype: str = "auto",
         disable_log_stats: bool = True,
@@ -350,6 +352,7 @@ class HfRunner:
     def get_default_device(self):
         from vllm.platforms import current_platform
 
+        # Set npu compatible device
         return current_platform.device_name or 'cpu'
 
     def wrap_device(self, x: _T, device: Optional[str] = None) -> _T:
