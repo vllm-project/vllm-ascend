@@ -23,7 +23,6 @@ Run `pytest tests/basic_correctness/test_basic_correctness.py`.
 import os
 
 import pytest
-
 from conftest import VllmRunner
 from model_utils import check_outputs_equal
 
