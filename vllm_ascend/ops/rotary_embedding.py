@@ -119,9 +119,10 @@ def rotate_half(x):
 def yarn_find_correction_dim(
     num_rotations, dim, base=10000, max_position_embeddings=2048
 ):
-    return (dim * math.log(max_position_embeddings / (num_rotations * 2 * math.pi))) / (
-        2 * math.log(base)
-    )
+    # Note: use torch instead of math to solve MTP compilation error.
+    return (dim * torch.log(torch.tensor(max_position_embeddings) / 
+                            (num_rotations * 2 * torch.pi))) / (
+                                2 * torch.log(torch.tensor(base)))
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
     if scale <= 1:
@@ -132,19 +133,21 @@ def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
 def yarn_find_correction_range(
     low_rot, high_rot, dim, base=10000, max_position_embeddings=2048
 ):
-    low = math.floor(
+    # Note: use torch instead of math to solve MTP compilation error.
+    low = torch.floor(
         yarn_find_correction_dim(low_rot, dim, base, max_position_embeddings)
     )
-    high = math.ceil(
+    high = torch.ceil(
         yarn_find_correction_dim(high_rot, dim, base, max_position_embeddings)
     )
-    return max(low, 0), min(high, dim - 1)  # Clamp values just in case
+    # Note: use torch instead of max/min to solve MTP compilation error.
+    return torch.clamp(low, min=0), torch.clamp(high, max=dim-1)
 
-def yarn_linear_ramp_mask(min, max, dim):
-    if min == max:
-        max += 0.001  # Prevent singularity
-
-    linear_func = (torch.arange(dim, dtype=torch.float32) - min) / (max - min)
+def yarn_linear_ramp_mask(min_value, max_value, dim):
+    # Note: The if conditional branch is not used here 
+    # to solve MTP compilation error.
+    max_value += (min_value == max_value).float() * 0.001
+    linear_func = (torch.arange(dim, dtype=torch.float32) - min_value) / (max_value - min_value)
     ramp_func = torch.clamp(linear_func, 0, 1)
     return ramp_func
 
