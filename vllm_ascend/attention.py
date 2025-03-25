@@ -638,7 +638,7 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
         max_decode_seq_len = max(self.curr_seq_lens, default=0)
         max_seq_len = max(max_prefill_seq_len, max_decode_seq_len)
 
-        if max_query_len == 1 and use_torchair_graph:
+        if self.num_prefills == 0 and use_torchair_graph:
             num_seqs = len(seq_lens)
             self.slot_mapping.extend([PAD_SLOT_ID] * graph_pad_size)
             self.block_tables.extend([[]] * graph_pad_size)

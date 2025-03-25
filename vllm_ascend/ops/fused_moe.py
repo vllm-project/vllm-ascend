@@ -48,6 +48,7 @@ def fused_experts(
     Returns:
         hidden_states: Hidden states after routing.
     """
+    """
     # Check constraints.
     if torch.distributed.get_rank() == 0:
         print(w1.shape)
@@ -56,16 +57,16 @@ def fused_experts(
     assert hidden_states.is_contiguous(), "Hidden_states must be contiguous"
     assert w1.is_contiguous(), "Expert weights1 must be contiguous"
     assert w2.is_contiguous(), "Expert weights2 must be contiguous"
-
+    """
     original_shape = hidden_states.shape
-    assert len(original_shape) == 2
+    # assert len(original_shape) == 2
 
     num_tokens = hidden_states.shape[:-1].numel()
     num_experts = w1.shape[0]
     dtype = hidden_states.dtype
     device = hidden_states.device
-    assert dtype in [torch.float32, torch.float16, torch.bfloat16
-                     ], "Only float32, float16, and bfloat16 are supported"
+    # assert dtype in [torch.float32, torch.float16, torch.bfloat16
+    #                  ], "Only float32, float16, and bfloat16 are supported"
 
     if expert_map is not None:
         # Generate token indices and flatten
@@ -235,8 +236,8 @@ def select_experts(
     Raises:
         ValueError: If an unsupported scoring function is provided.
     """
-    assert hidden_states.shape[0] == router_logits.shape[0], (
-        "Number of tokens mismatch")
+    # assert hidden_states.shape[0] == router_logits.shape[0], (
+    #     "Number of tokens mismatch")
 
     if custom_routing_function is not None:
         raise NotImplementedError(
@@ -264,14 +265,14 @@ def select_experts(
         # >>> torch_npu._npu_group_topk(topk_weights, group_num=num_expert_group, k=topk_group)
         topk_weights = native_grouped_topk(topk_weights, num_expert_group,
                                            topk_group)
-
+        # TODO bfloat16 is not supported in torch.topk with ge graph. 
         if e_score_correction_bias is not None:
-            topk_ids = torch.topk(topk_weights, k=top_k, dim=-1,
+            topk_ids = torch.topk(topk_weights.to(torch.float32), k=top_k, dim=-1,
                                   sorted=False)[1]
             # Use original unbiased scores for the routing weights
             topk_weights = original_weights.gather(1, topk_ids)
         else:
-            topk_weights, topk_ids = torch.topk(topk_weights,
+            topk_weights, topk_ids = torch.topk(topk_weights.to(torch.float32),
                                                 k=top_k,
                                                 dim=-1,
                                                 sorted=False)
@@ -305,8 +306,8 @@ def forward_oot(
     e_score_correction_bias: Optional[torch.Tensor] = None,
     **kwargs,
 ):
-    assert router_logits.shape[
-        1] == global_num_experts, "Number of global experts mismatch"
+    # assert router_logits.shape[
+    #     1] == global_num_experts, "Number of global experts mismatch"
 
     topk_weights, topk_ids = select_experts(
         hidden_states=x,

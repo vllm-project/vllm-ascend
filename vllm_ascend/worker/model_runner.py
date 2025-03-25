@@ -19,6 +19,7 @@
 
 import dataclasses
 import weakref
+import itertools
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
@@ -55,7 +56,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import (DeviceMemoryProfiler, PyObjectCache, flatten_2d_lists,
-                        is_pin_memory_available, supports_dynamo)
+                        is_pin_memory_available, supports_dynamo, async_tensor_h2d)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -487,6 +488,7 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
 
         seq_lens = []
         max_decode_seq_len = 0
+        is_prompt = self.inter_data_list[0].is_prompt
         for inter_data in self.inter_data_list:
             seq_lens.extend(inter_data.seq_lens)
             if not inter_data.is_prompt:
@@ -501,7 +503,24 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
             for data in self.inter_data_list
         }
 
-        input_tokens_tensor = torch.tensor(flatten_2d_lists(input_tokens),
+        # Add graph_pad_size here
+        if self.runner.vllm_config.compilation_config.level ==\
+           CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+            graph_pad_size = self.runner.scheduler_config.max_num_seqs - len(seq_lens)
+        else:
+            graph_pad_size = -1
+        
+        #print(f"before tensor input_tokens: {input_tokens}")
+        #print(f"before tensor input_positions: {input_positions}")
+        #print(f"before list seq_lens: {seq_lens}")
+        input_tokens = flatten_2d_lists(input_tokens)
+        input_positions = flatten_2d_lists(input_positions)
+        if graph_pad_size != -1 and not is_prompt:
+            input_tokens.extend(itertools.repeat(0, graph_pad_size))
+            input_positions.extend(itertools.repeat(0, graph_pad_size))
+            seq_lens.extend(itertools.repeat(1, graph_pad_size))
+            query_lens.extend(itertools.repeat(1, graph_pad_size))
+        input_tokens_tensor = torch.tensor(input_tokens,
                                            dtype=torch.long,
                                            device=self.runner.device)
         if mrope_input_positions is not None:
@@ -510,17 +529,14 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
                                                   device=self.runner.device)
         else:
             input_positions_tensor = torch.tensor(
-                flatten_2d_lists(input_positions),
+                input_positions,
                 dtype=torch.long,
                 device=self.runner.device)
+        #print(f"after tensor input_tokens_tensor: {input_tokens_tensor}")
+        #print(f"after tensor input_positions_tensor: {input_positions_tensor}")
+        #print(f"after list seq_lens: {seq_lens}")
 
         # Attention metadata.
-        # Add graph_pad_size here
-        if self.runner.vllm_config.compilation_config.level ==\
-           CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
-            graph_pad_size = self.runner.scheduler_config.max_num_seqs - len(seq_lens)
-        else:
-            graph_pad_size = -1
         attn_metadata = self.attn_metadata_builder.build(seq_lens, query_lens, graph_pad_size)
 
         # Multi-modal data.
@@ -854,11 +870,17 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
             config.experimental_config.tiling_schedule_optimize = True
             torch.npu.set_compile_mode(jit_compile=False)
             npu_backend = torchair.get_npu_backend(compiler_config=config)
-            self.compile_model = torch.compile(
-                self.model,
+            #self.compile_model = torch.compile(
+            #    self.model,
+            #    dynamic=True,
+            #    fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+            #    backend=npu_backend)
+            self.compile_model = torchair.inference.cache_compile(
+                self.model.forward,
                 dynamic=True,
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                backend=npu_backend)
+                config=config, 
+                ge_cache=False)
 
     def save_sharded_state(
         self,
@@ -1178,7 +1200,11 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
         } if self.has_inner_state else {}
 
         previous_hidden_states = kwargs.get("previous_hidden_states")
-        model_kwargs = {}
+        if self.vllm_config.compilation_config.level ==\
+            CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+            model_kwargs = {"inputs_embeds": None}
+        else:
+            model_kwargs = {}
         if previous_hidden_states is not None:
             model_kwargs["previous_hidden_states"] = previous_hidden_states
 
@@ -1240,7 +1266,8 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                 hidden_or_intermediate_states.tensors["model_forward_time"] = (
                     torch.tensor(model_forward_time + orig_model_forward_time))
             return hidden_or_intermediate_states
-
+        # TODO: remove the synchronize here
+        torch.npu.synchronize()
         logits = self.model.compute_logits(hidden_or_intermediate_states,
                                            model_input.sampling_metadata)
 
