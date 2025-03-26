@@ -44,7 +44,7 @@ class NPUPlatform(Platform):
     ray_device_key: str = "NPU"
     device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
     dispatch_key: str = "PrivateUse1"
-
+    supports_spec_decoding: bool = True
     supported_quantization: list[str] = ["ascend"]
 
     @classmethod

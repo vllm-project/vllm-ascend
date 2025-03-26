@@ -37,6 +37,7 @@ from vllm.attention.backends.utils import (CommonAttentionState,
                                            compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
+from vllm.spec_decode.util import register_spec_decode
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 if TYPE_CHECKING:
@@ -182,6 +183,7 @@ class AscendMLAAttentionBackend(AscendAttentionBackend):
 
 
 @dataclass
+@register_spec_decode
 class AscendMetadata(AttentionMetadata):
     """Metadata for Ascendbackend.
         * modified from XFormersbackend
