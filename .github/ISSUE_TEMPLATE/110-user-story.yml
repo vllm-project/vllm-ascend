@@ -1,0 +1,50 @@
+name: 📚 User Story
+description: Apply for an user story to be displayed on https://vllm-ascend.readthedocs.org/user_stories/index.html
+title: "[User Story]: "
+labels: ["user-story"]
+
+body:
+- type: textarea
+  attributes:
+    label: 📚 Title
+    description: >
+      A clear title about what your story is about.
+      A clear and concise description of what content in https://vllm-ascend.readthedocs.org/ is an issue.
+  validations:
+    required: true
+- type: textarea
+  attributes:
+    label: About / Introduction
+    description: >
+      A brief introduction about the background of your use case, like your scenario, hardware size etc.
+      Tell us how we could improve the documentation in this regard.
+- type: textarea
+  attributes:
+    label: About / Introduction
+    description: >
+      A brief introduction about the background of your use case, like your scenario, hardware size etc.
+      Tell us how we could improve the documentation in this regard.
+- type: textarea
+  attributes:
+    label: Bussiness Challenges
+    description: >
+      Tell us how what kind of challenge you faced in this user story.
+- type: textarea
+  attributes:
+    label: Solving challenges with vLLM Ascend
+    description: >
+      Tell us how vLLM Ascend helped you overcome the challenges, including details like how you use it, what version you used, hardware info, etc.
+- type: textarea
+  attributes:
+    label: Benefits using vLLM Ascend
+    description: >
+      Tell us the benefits about using vLLM Ascend
+- type: textarea
+  attributes:
+    label: Extra Info
+    description: >
+      Any extra infomation you want to include in this story
+- type: markdown
+  attributes:
+    value: >
+      Thanks for contributing 🎉!
