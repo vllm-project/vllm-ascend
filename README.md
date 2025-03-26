@@ -10,7 +10,7 @@ vLLM Ascend Plugin
 </h3>
 
 <p align="center">
-| <a href="https://www.hiascend.com/en/"><b>About Ascend</b></a> | <a href="https://vllm-ascend.readthedocs.io/en/latest/"><b>Documentation</b></a> | <a href="https://slack.vllm.ai"><b>Devs Slack (#sig-ascend)</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support"><b>Users forum</b></a> | 
+| <a href="https://www.hiascend.com/en/"><b>About Ascend</b></a> | <a href="https://vllm-ascend.readthedocs.io/en/latest/"><b>Documentation</b></a> | <a href="https://slack.vllm.ai"><b>#sig-ascend</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support"><b>Users Forum</b></a> | <a href="https://tinyurl.com/vllm-ascend-meeting"><b>Weekly Meeting</b></a> |
 </p>
 
 <p align="center">
@@ -68,6 +68,11 @@ Below is maintained branches:
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version |
 
 Please refer to [Versioning policy](https://vllm-ascend.readthedocs.io/en/main/developer_guide/versioning_policy.html) for more details.
+
+## Weekly Meeting
+
+- vLLM Ascend Weekly Meeting: https://tinyurl.com/vllm-ascend-meeting
+- Wednesday, 15:00 - 16:00 (UTC+8, [Convert to your timezone](https://dateful.com/convert/gmt8?t=15))
 
 ## License
 
