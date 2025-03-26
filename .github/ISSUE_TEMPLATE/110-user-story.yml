@@ -8,8 +8,7 @@ body:
   attributes:
     label: 📚 Title
     description: >
-      A clear title about what your story is about.
-      A clear and concise description of what content in https://vllm-ascend.readthedocs.org/ is an issue.
+      A clear title about what your user story is about.
   validations:
     required: true
 - type: textarea
@@ -17,13 +16,6 @@ body:
     label: About / Introduction
     description: >
       A brief introduction about the background of your use case, like your scenario, hardware size etc.
-      Tell us how we could improve the documentation in this regard.
-- type: textarea
-  attributes:
-    label: About / Introduction
-    description: >
-      A brief introduction about the background of your use case, like your scenario, hardware size etc.
-      Tell us how we could improve the documentation in this regard.
 - type: textarea
   attributes:
     label: Bussiness Challenges
@@ -31,14 +23,9 @@ body:
       Tell us how what kind of challenge you faced in this user story.
 - type: textarea
   attributes:
-    label: Solving challenges with vLLM Ascend
+    label: Solving challenges with vLLM Ascend and benefits
     description: >
-      Tell us how vLLM Ascend helped you overcome the challenges, including details like how you use it, what version you used, hardware info, etc.
-- type: textarea
-  attributes:
-    label: Benefits using vLLM Ascend
-    description: >
-      Tell us the benefits about using vLLM Ascend
+      Tell us how vLLM Ascend helped you overcome the challenges, including details like how you use it, what version you used, hardware info, etc. And what kind of benefit do you get from using vLLM Ascend
 - type: textarea
   attributes:
     label: Extra Info
