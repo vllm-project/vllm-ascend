@@ -16,7 +16,7 @@ make html
 ## Open the docs with your browser
 
 ```bash
-python -m http.server -d build/html/
+python -m http.server -d _build/html/
 ```
 
 Launch your browser and open http://localhost:8000/.
