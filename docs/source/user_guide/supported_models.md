@@ -9,6 +9,7 @@
 | Qwen2-Audio | ✅ ||
 | Qwen2.5 | ✅ ||
 | Qwen2.5-VL | ✅ ||
+| QwQ-32B | ✅ ||
 | MiniCPM |✅| |
 | LLama3.1/3.2 | ✅ ||
 | Mistral |  | Need test |
@@ -20,7 +21,8 @@
 | InternVL2.5 | ✅ ||
 | GLM-4v |  |Need test|
 | Molomo | ✅ ||
-| LLaVA1.5 | | Need test|
+| LLaVA1.5 | ✅ ||
+| LLaVA 1.6 | ✅ |Modify the default value of `max_position_embeddings` in the weight file `config.json` to `5120` to run LLaVA 1.6 on Ascend NPU|
 | Mllama |  |Need test|
 | LLaVA-Next |  |Need test|
 | LLaVA-Next-Video |  |Need test|

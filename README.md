@@ -10,7 +10,7 @@ vLLM Ascend Plugin
 </h3>
 
 <p align="center">
-| <a href="https://www.hiascend.com/en/"><b>About Ascend</b></a> | <a href="https://vllm-ascend.readthedocs.io/en/latest/"><b>Documentation</b></a> | <a href="https://slack.vllm.ai"><b>Developer Slack (#sig-ascend)</b></a> |
+| <a href="https://www.hiascend.com/en/"><b>About Ascend</b></a> | <a href="https://vllm-ascend.readthedocs.io/en/latest/"><b>Documentation</b></a> | <a href="https://slack.vllm.ai"><b>Devs Slack (#sig-ascend)</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support"><b>Users forum</b></a> | 
 </p>
 
 <p align="center">
@@ -19,64 +19,38 @@ vLLM Ascend Plugin
 
 ---
 *Latest News* 🔥
-
+- [2025/03] We hosted the [vLLM Beijing Meetup](https://mp.weixin.qq.com/s/VtxO9WXa5fC-mKqlxNUJUQ) with vLLM team! Please find the meetup slides [here](https://drive.google.com/drive/folders/1Pid6NSFLU43DZRi0EaTcPgXsAzDvbBqF).
+- [2025/02] vLLM community officially created [vllm-project/vllm-ascend](https://github.com/vllm-project/vllm-ascend) repo for running vLLM seamlessly on the Ascend NPU.
 - [2024/12] We are working with the vLLM community to support [[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162).
 ---
 ## Overview
 
-vLLM Ascend plugin (`vllm-ascend`) is a backend plugin for running vLLM on the Ascend NPU.
+vLLM Ascend (`vllm-ascend`) is a community maintained hardware plugin for running vLLM seamlessly on the Ascend NPU.
 
-This plugin is the recommended approach for supporting the Ascend backend within the vLLM community. It adheres to the principles outlined in the [[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162), providing a hardware-pluggable interface that decouples the integration of the Ascend NPU with vLLM.
+It is the recommended approach for supporting the Ascend backend within the vLLM community. It adheres to the principles outlined in the [[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162), providing a hardware-pluggable interface that decouples the integration of the Ascend NPU with vLLM.
 
 By using vLLM Ascend plugin, popular open-source models, including Transformer-like, Mixture-of-Expert, Embedding, Multi-modal LLMs can run seamlessly on the Ascend NPU.
 
 ## Prerequisites
 
 - Hardware: Atlas 800I A2 Inference series, Atlas A2 Training series
+- OS: Linux
 - Software:
   * Python >= 3.9
   * CANN >= 8.0.0
-  * PyTorch >= 2.5.1, torch-npu >= 2.5.1.dev20250308
+  * PyTorch >= 2.5.1, torch-npu >= 2.5.1.dev20250320
   * vLLM (the same version as vllm-ascend)
 
-Find more about how to setup your environment step by step in [here](docs/source/installation.md).
-
 ## Getting Started
-
-> [!NOTE]
-> Currently, we are actively collaborating with the vLLM community to support the Ascend backend plugin, once supported you can use one line command `pip install vllm vllm-ascend` to compelete installation.
-
-Installation from source code:
-```bash
-# Install vllm main branch according:
-# https://docs.vllm.ai/en/latest/getting_started/installation/cpu/index.html#build-wheel-from-source
-git clone --depth 1 https://github.com/vllm-project/vllm.git
-cd vllm
-pip install -r requirements/build.txt
-VLLM_TARGET_DEVICE=empty pip install .
-
-# Install vllm-ascend main branch
-git clone https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-pip install -e .
-```
-
-Run the following command to start the vLLM server with the [Qwen/Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) model:
-
-```bash
-# export VLLM_USE_MODELSCOPE=true to speed up download
-vllm serve Qwen/Qwen2.5-0.5B-Instruct
-curl http://localhost:8000/v1/models
-```
 
 Please refer to [QuickStart](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/latest/installation.html) for more details.
 
 ## Contributing
-See [CONTRIBUTING](docs/source/developer_guide/contributing.md) for more details, which is a step-by-step guide to help you set up development environment, build and test.
+See [CONTRIBUTING](https://vllm-ascend.readthedocs.io/en/main/developer_guide/contributing.html) for more details, which is a step-by-step guide to help you set up development environment, build and test.
 
 We welcome and value any contributions and collaborations:
-- Please feel free comments [here](https://github.com/vllm-project/vllm-ascend/issues/19) about your usage of vLLM Ascend Plugin.
-- Please let us know if you encounter a bug by [filing an issue](https://github.com/vllm-project/vllm-ascend/issues).
+- Please let us know if you encounter a bug by [filing an issue](https://github.com/vllm-project/vllm-ascend/issues)
+- Please use [User forum](https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support) for usage questions and help.
 
 ## Branch
 
@@ -93,7 +67,7 @@ Below is maintained branches:
 | v0.7.1-dev | Unmaintained | Only doc fixed is allowed |
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version |
 
-Please refer to [Versioning policy](docs/source/developer_guide/versioning_policy.md) for more details.
+Please refer to [Versioning policy](https://vllm-ascend.readthedocs.io/en/main/developer_guide/versioning_policy.html) for more details.
 
 ## License
 

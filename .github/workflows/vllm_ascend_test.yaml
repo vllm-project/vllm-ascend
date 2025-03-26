@@ -18,16 +18,6 @@
 name: 'e2e test'
 
 on:
-  push:
-    branches:
-      - 'main'
-      - '*-dev'
-    paths:
-      - '*.txt'
-      - '**/*.py'
-      - '.github/workflows/vllm_ascend_test.yaml'
-      - '!docs/**'
-      - 'pytest.ini'
   pull_request:
     branches:
       - 'main'
@@ -82,6 +72,8 @@ jobs:
         - /home/action/cache:/github/home/.cache/
         # for dispatch lock
         - /tmp/:/tmp/
+        # for vllm and vllm-ascend
+        - /data1/code:/code
       options: >-
         --device /dev/davinci${{ needs.dispatch.outputs.number }}
         --device /dev/davinci_manager
@@ -131,18 +123,28 @@ jobs:
 
       - name: Install pta
         run: |
-          mkdir pta
-          cd pta
-          wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250308.3/pytorch_v2.5.1_py310.tar.gz
-          tar -xvf pytorch_v2.5.1_py310.tar.gz
-          pip install ./torch_npu-2.5.1.dev20250308-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
-          cd ..
-          rm -rf pta
+          cd /code/pta/
+          pip install ./torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 
       - name: Run vllm-project/vllm-ascend test
         run: |
-          pytest -sv tests
+          VLLM_USE_V1=0 pytest -sv tests
 
       - name: Run vllm-project/vllm test
+        env:
+          VLLM_USE_V1: 0
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         run: |
           pytest -sv
+
+  post_cleanup:
+    name: vLLM Ascend test (post-cleanup)
+    needs: [test]
+    runs-on: ascend-ci-arm64  # actionlint-ignore: runner-label
+    if: always()
+    steps:
+      - name: Remove dispatch lock if exists
+        run: |
+          if [ -f "/tmp/dispatch.lock" ]; then
+            rm -f "/tmp/dispatch.lock"
+          fi
