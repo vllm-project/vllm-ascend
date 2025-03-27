@@ -62,7 +62,7 @@ public:
         headSize_ = headSize;
         embedDim_ = rotDim / ROTARY_SIZE;
 
-        pipe_->InitBuffer(inQue_, 1, loadSize);
+        pipe_->InitBuffer(inQue_, 1 /* buffer_num */, loadSize /* buffer_size */);
         pipe_->InitBuffer(inQueSinCos_, 1, rotDim_ * sizeof(scalar_t));
         pipe_->InitBuffer(outQue_, 1, loadSize);
         // 2 temperary calculation buffer
