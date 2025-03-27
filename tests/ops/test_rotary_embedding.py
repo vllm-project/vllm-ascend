@@ -4,7 +4,7 @@
 
 # Copyright (c) Huawei Technologies Co., Ltd. 2024-2025. All rights reserved.
 
-from typing import Optional, Union, Tuple
+from typing import Optional, Tuple, Union
 
 import pytest
 import torch
@@ -26,7 +26,6 @@ DEVICES = [f"npu:{0}"]
 # Set tolerance to 1 for quant ops
 DEFAULT_ATOL = 1e-3
 DEFAULT_RTOL = 1e-3
-
 
 
 def _apply_rotary_emb(
@@ -56,6 +55,7 @@ def _apply_rotary_emb(
         return torch.cat((o1, o2), dim=-1)
     else:
         return torch.stack((o1, o2), dim=-1).flatten(-2)
+
 
 # adapted from https://github.com/vllm-project/vllm/vllm/model_executor/layers/rotary_embedding.py
 class RotaryEmbedding(nn.Module):
@@ -133,6 +133,7 @@ class RotaryEmbedding(nn.Module):
         key_rot = _apply_rotary_emb(key_rot, cos, sin, self.is_neox_style)
         key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
         return query, key
+
 
 # test with leading dimension and merge seqlen and batch_size as num_tokens
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
