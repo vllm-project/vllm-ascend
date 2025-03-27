@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 import torch
 import torch_npu  # noqa: F401
 import vllm.envs as envs
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import CompilationLevel, ModelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import Platform, PlatformEnum
 
@@ -139,4 +139,8 @@ class NPUPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls):
+        return True
+
+    @classmethod
+    def supports_v1(cls, model_config: ModelConfig) -> bool:
         return True
