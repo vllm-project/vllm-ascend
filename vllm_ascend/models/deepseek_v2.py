@@ -27,14 +27,19 @@
 # vllm-project/vllm/vllm/model_executor/models/deepseek_v2.py
 """Inference-only DeepseekV2/DeepseekV3 model."""
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union, Dict, Any
 
 import torch
 from torch import nn
+import torch.distributed as dist
 from transformers import PretrainedConfig
+
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (get_pp_group,
+                              get_dp_group,
+                              get_tp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -48,9 +53,21 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.models.deepseek_v2 import (
-    DeepseekV2Attention, DeepseekV2DecoderLayer, DeepseekV2ForCausalLM,
-    DeepseekV2MLAAttention, DeepseekV2MLP, DeepseekV2MoE, yarn_get_mscale)
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, maybe_remap_kv_scale_name)
+
+from vllm.model_executor.models.utils import (
+    PPMissingLayer, is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
+from vllm.model_executor.models.deepseek_v2 import \
+    DeepseekV2ForCausalLM  # ruff: noqa: E501
+from vllm.model_executor.models.deepseek_v2 import \
+    yarn_get_mscale  # ruff: noqa: E501
+from vllm.model_executor.models.deepseek_v2 import (DeepseekV2Attention,
+                                                    DeepseekV2DecoderLayer,
+                                                    DeepseekV2MLAAttention,
+                                                    DeepseekV2MLP,
+                                                    DeepseekV2MoE)
 from vllm.model_executor.models.utils import (
     PPMissingLayer, make_empty_intermediate_tensors_factory, make_layers,
     maybe_prefix)
@@ -118,27 +135,51 @@ class CustomDeepseekV2MoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
+                prefix=f"{prefix}.shared_experts",
             )
         CustomDeepseekV2MoE.top_k = config.num_experts_per_tok
 
+        vllm_config = get_current_vllm_config()
+        self.dp_size = get_dp_group().world_size
+        self.batch_size = vllm_config.scheduler_config.max_num_seqs // self.dp_size
+        
+        params_dtype = torch.get_default_dtype()
+        self.final_hidden_states = torch.zeros([self.batch_size, config.hidden_size],
+                                                dtype=params_dtype, device="npu")
+        self.hidden_dim = config.hidden_size
+        self.tp_group = get_tp_group().device_group
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        B, _ = hidden_states.shape
+        hidden_states = hidden_states.view(-1, self.hidden_dim)
+
+        if B == self.batch_size:
+            hidden_states = dist._functional_collectives.reduce_scatter_tensor(
+                hidden_states,
+                "sum",
+                scatter_dim=0,
+                group=self.tp_group
+            )
+
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        final_hidden_states = self.experts(
+        router_output = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
             top_k=CustomDeepseekV2MoE.top_k) * self.routed_scaling_factor
         if shared_output is not None:
-            final_hidden_states = final_hidden_states + shared_output
-        if self.tp_size > 1:
-            final_hidden_states = tensor_model_parallel_all_reduce(
-                final_hidden_states)
+            output = router_output + shared_output
+        output = output.view(num_tokens, hidden_dim)
 
-        return final_hidden_states.view(num_tokens, hidden_dim)
+        if B == self.batch_size:
+            dist.all_gather_into_tensor(self.final_hidden_states, output, group=self.tp_group)
+            return self.final_hidden_states
+        else:
+            return output
 
 class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
 
@@ -433,6 +474,11 @@ class CustomDeepseekV2Model(nn.Module):
 
 
 class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
+    packed_modules_mapping = {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
+    }
 
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -455,6 +501,108 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
+
+        # Params for weights, fp8 weight scales, fp8 activation scales
+        # (param_name, weight_name, expert_id, shard_id)
+        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=self.config.n_routed_experts)
+
+        params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
+        for name, loaded_weight in weights:
+            if "rotary_emb.inv_freq" in name:
+                continue
+
+            spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
+            if spec_layer is not None:
+                continue  # skip spec decode layers for main model
+
+            if "scale" in name or "offset" in name:
+                loaded_weight = loaded_weight.flatten()
+
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                # Skip non-stacked layers and experts (experts handled below).
+                if weight_name not in name:
+                    continue
+                # We have mlp.experts[0].gate_proj in the checkpoint.
+                # Since we handle the experts below in expert_params_mapping,
+                # we need to skip here BEFORE we update the name, otherwise
+                # name will be updated to mlp.experts[0].gate_up_proj, which
+                # will then be updated below in expert_params_mapping
+                # for mlp.experts[0].gate_gate_up_proj, which breaks load.
+                if (("mlp.experts." in name) and name not in params_dict):
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+
+                if is_pp_missing_parameter(name, self):
+                    continue
+
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                for mapping in expert_params_mapping:
+                    param_name, weight_name, expert_id, shard_id = mapping
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+
+                    if is_pp_missing_parameter(name, self):
+                        continue
+
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param,
+                                  loaded_weight,
+                                  name,
+                                  shard_id=shard_id,
+                                  expert_id=expert_id)
+                    break
+                else:
+                    # Skip loading extra bias for GPTQ models.
+                    if name.endswith(".bias") and name not in params_dict:
+                        continue
+
+                    # Remapping the name of FP8 kv-scale.
+                    name = maybe_remap_kv_scale_name(name, params_dict)
+                    if name is None:
+                        continue
+
+                    if is_pp_missing_parameter(name, self):
+                        continue
+
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
 
 class CustomDeepseekV3ForCausalLM(CustomDeepseekV2ForCausalLM):
     pass
+
+
+def get_spec_layer_idx_from_weight_name(config: PretrainedConfig,
+                                        weight_name: str) -> Optional[int]:
+    if hasattr(config, "num_nextn_predict_layers") and (
+            config.num_nextn_predict_layers > 0):
+        layer_idx = config.num_hidden_layers
+        for i in range(config.num_nextn_predict_layers):
+            if weight_name.startswith(f"model.layers.{layer_idx+i}."):
+                return layer_idx + i
+    return None
