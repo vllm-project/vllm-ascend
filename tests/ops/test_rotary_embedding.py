@@ -9,8 +9,7 @@ from typing import Optional
 import pytest
 import torch
 import torch_npu  # noqa: F401
-from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.platforms import current_platform
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
 import vllm_ascend.platform  # noqa: F401
 
@@ -56,11 +55,11 @@ def test_rotary_embedding_quant_with_leading_dim(
     if rotary_dim is None:
         rotary_dim = head_size
 
-    current_platform.seed_everything(seed)
     torch.set_default_device(device)
     if rotary_dim is None:
         rotary_dim = head_size
-    rope = get_rope(head_size, rotary_dim, max_position, base, is_neox_style)
+    rope = RotaryEmbedding(head_size, rotary_dim, max_position, base,
+                           is_neox_style, dtype)
     rope = rope.to(dtype=dtype)
     num_tokens = batch_size * seq_len
     positions = torch.randint(0, max_position, (batch_size, seq_len))

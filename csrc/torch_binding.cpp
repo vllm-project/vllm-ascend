@@ -34,7 +34,6 @@ void rotary_embedding(at::Tensor &positions, at::Tensor &query, at::Tensor &key,
 {
     int32_t deviceId = 0;
     int64_t num_tokens = query.numel() / query.size(-1);
-    ;
     int rot_dim = cos_sin_cache.size(1);
     int num_heads = query.size(-1) / head_size;
     int num_kv_heads = key.size(-1) / head_size;

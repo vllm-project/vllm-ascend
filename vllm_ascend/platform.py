@@ -141,6 +141,8 @@ class NPUPlatform(Platform):
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 128
+        if not hasattr(cache_config, "enable_prefix_caching"):
+            setattr(cache_config, "enable_prefix_caching", False)
         if cache_config.enable_prefix_caching and cache_config.block_size != 128:
             raise ValueError(
                 "If prefix caching is enabled, block size must be set to 128.")
