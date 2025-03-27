@@ -2,3 +2,4 @@
 modelscope
 pytest >= 6.0
 pytest-asyncio
+sentence_transformers
