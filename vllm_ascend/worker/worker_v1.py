@@ -37,9 +37,10 @@ from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.utils import bind_kv_cache
+from vllm.v1.utils import GiB_bytes, bind_kv_cache
 from vllm.v1.worker.worker_base import WorkerBase
 
+from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 logger = init_logger(__name__)
@@ -116,6 +117,24 @@ class NPUWorker(WorkerBase):
                     torch_profiler_trace_dir))
         else:
             self.profiler = None
+
+    def sleep(self, level: int = 1) -> None:
+        current_platform.set_device(self.device)
+        free_bytes_before_sleep = current_platform.mem_get_info()[0]
+        allocator = CaMemAllocator.get_instance()
+        allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
+        free_bytes_after_sleep, total = current_platform.mem_get_info()
+        freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+        used_bytes = total - free_bytes_after_sleep
+        assert freed_bytes >= 0, "Memory usage increased after sleeping."
+        logger.info(
+            "Sleep mode freed %.2f GiB memory, "
+            "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
+            used_bytes / GiB_bytes)
+
+    def wake_up(self) -> None:
+        allocator = CaMemAllocator.get_instance()
+        allocator.wake_up()
 
     def init_device(self):
         if self.device_config.device.type == "npu":
@@ -198,7 +217,17 @@ class NPUWorker(WorkerBase):
         return output if self.rank == 0 else None
 
     def load_model(self) -> None:
-        self.model_runner.load_model()
+        if self.vllm_config.model_config.enable_sleep_mode:
+            allocator = CaMemAllocator.get_instance()
+            assert allocator.get_current_usage() == 0, (
+                "Sleep mode can only be "
+                "used for one instance per process.")
+            context = allocator.use_memory_pool(tag="weights")
+        else:
+            from contextlib import nullcontext
+            context = nullcontext()  # type: ignore
+        with context:
+            self.model_runner.load_model()
 
     def compile_or_warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
@@ -220,7 +249,14 @@ class NPUWorker(WorkerBase):
     def initialize_cache(self, kv_cache_configs: List[KVCacheConfig]) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
         kv_cache_config = kv_cache_configs[self.rank]
-        self.model_runner.initialize_kv_cache(kv_cache_config)
+        if self.vllm_config.model_config.enable_sleep_mode:
+            allocator = CaMemAllocator.get_instance()
+            context = allocator.use_memory_pool(tag="kv_cache")
+        else:
+            from contextlib import nullcontext
+            context = nullcontext()  # type: ignore
+        with context:
+            self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:
