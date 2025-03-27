@@ -15,7 +15,7 @@ set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
 find_package(pybind11 REQUIRED)
 
 append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
-set(VLLM_ASCEND_INSTALL_PATH "${CMAKE_INSTALL_PREFIX}/vllm_ascend")
+set(VLLM_ASCEND_INSTALL_PATH "${CMAKE_INSTALL_PREFIX}")
 
 find_package(Torch REQUIRED)
 
