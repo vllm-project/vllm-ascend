@@ -12,7 +12,7 @@ This document describes how to install vllm-ascend manually.
     | Software     | Supported version | Note |
     | ------------ | ----------------- | ---- | 
     | CANN         | >= 8.0.0          | Required for vllm-ascend and torch-npu |
-    | torch-npu    | >= 2.5.1.dev20250308       | Required for vllm-ascend |
+    | torch-npu    | >= 2.5.1.dev20250320       | Required for vllm-ascend |
     | torch        | >= 2.5.1          | Required for torch-npu and vllm |
 
 You have 2 way to install:
@@ -158,15 +158,15 @@ Current version depends on a unreleased `torch-npu`, you need to install manuall
 # 
 # Here we take python 3.10 on aarch64 as an example. Feel free to install the correct version for your environment. See:
 #
-# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250308.3/pytorch_v2.5.1_py39.tar.gz
-# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250308.3/pytorch_v2.5.1_py310.tar.gz
-# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250308.3/pytorch_v2.5.1_py311.tar.gz
+# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py39.tar.gz
+# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
+# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py311.tar.gz
 #
 mkdir pta
 cd pta
-wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250308.3/pytorch_v2.5.1_py310.tar.gz
+wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
 tar -xvf pytorch_v2.5.1_py310.tar.gz
-pip install ./torch_npu-2.5.1.dev20250308-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+pip install ./torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 ```
 ::::
 

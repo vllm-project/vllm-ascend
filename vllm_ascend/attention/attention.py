@@ -852,8 +852,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     context_lens=self.seq_lens_tensor_cpu,
                     out=output)
 
-        # TODO: FIXME revert me when torch-npu sync issue is solved
-        torch.npu.synchronize()
         return output.view(num_tokens, self.hidden_size)
 
 

@@ -118,7 +118,7 @@ jobs:
       - name: Install pta
         run: |
           cd /code/pta/
-          pip install ./torch_npu-2.5.1.dev20250308-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+          pip install ./torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 
       - name: Run vllm-project/vllm-ascend test
         run: |
