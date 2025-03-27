@@ -1296,8 +1296,22 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
         # virtual engines share the same kv cache.
         virtual_engine = model_input.virtual_engine
         prefill_meta = model_input.attn_metadata.prefill_metadata
+        previous_hidden_states = kwargs.get("previous_hidden_states")
         if prefill_meta is None and self.vllm_config.compilation_config.level > 0:
             model_executable = self.compile_model
+            # Note: graph_batch_size value not same as GPU
+            graph_batch_size = model_input.input_tokens.shape[0]
+            # Note: previous_hidden_states maybe None not same as GPU
+            if previous_hidden_states is not None:
+                previous_hidden_states = torch.cat([
+                    previous_hidden_states,
+                    torch.empty([
+                        graph_batch_size - previous_hidden_states.shape[0],
+                        *previous_hidden_states.shape[1:]
+                    ],
+                    dtype=previous_hidden_states.dtype,
+                    device=previous_hidden_states.device)
+                ])
         else:
             model_executable = self.model
 
@@ -1325,7 +1339,6 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_inner_state else {}
 
-        previous_hidden_states = kwargs.get("previous_hidden_states")
         if self.vllm_config.compilation_config.level ==\
             CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
             model_kwargs = {"inputs_embeds": None}
@@ -1430,6 +1443,9 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                 hidden_states = hidden_or_intermediate_states.index_select(
                     0, indices)
                 output.prefill_hidden_states = hidden_or_intermediate_states
+            elif self.vllm_config.compilation_config.level == \
+                CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+                hidden_states = hidden_or_intermediate_states[:len(indices)]
             else:
                 hidden_states = hidden_or_intermediate_states
 
