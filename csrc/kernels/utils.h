@@ -37,7 +37,7 @@ template <> struct AccType<int8_t> {
 };
 
 template <typename scalar_t>
-__aicore__ inline void smem2smem(AscendC::LocalTensor<scalar_t> dst, AscendC::LocalTensor<scalar_t> src, int size)
+__aicore__ inline void local_mem_copy(AscendC::LocalTensor<scalar_t> dst, AscendC::LocalTensor<scalar_t> src, int size)
 {
     constexpr int loadSize = 256 / sizeof(scalar_t);
     int loopCnt = size / loadSize;

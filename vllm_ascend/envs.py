@@ -2,13 +2,16 @@ import os
 from typing import Any, Callable, Dict
 
 env_variables: Dict[str, Callable[[], Any]] = {
+    # max compile thread num
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
     "CMAKE_BUILD_TYPE": lambda: os.getenv("CMAKE_BUILD_TYPE"),
-
-    # If set, vllm will print verbose logs during installation
+    # If set, vllm ascend will compile the custom kernel during build phase
+    "COMPILE_CUSTOM_KERNELS":
+    lambda: os.getenv("COMPILE_CUSTOM_KERNELS", None),
+    # If set, vllm-ascend will print verbose logs during compliation
     "VERBOSE": lambda: bool(int(os.getenv('VERBOSE', '0'))),
-    "ASCEND_HOME_PATH": lambda: os.environ.get("ASCEND_HOME_PATH", None),
-    "LD_LIBRARY_PATH": lambda: os.environ.get("LD_LIBRARY_PATH", None),
+    "ASCEND_HOME_PATH": lambda: os.getenv("ASCEND_HOME_PATH", None),
+    "LD_LIBRARY_PATH": lambda: os.getenv("LD_LIBRARY_PATH", None),
 }
 
 

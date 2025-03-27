@@ -205,6 +205,10 @@ class cmake_build_ext(build_ext):
         )
 
     def build_extensions(self) -> None:
+
+        # when COMPILE_CUSTOM_KERNELS flag is not set, disable the custom kernel build process
+        if envs.COMPILE_CUSTOM_KERNELS is None:
+            return
         # Ensure that CMake is present and working
         try:
             subprocess.check_output(["cmake", "--version"])
@@ -283,8 +287,8 @@ except LookupError:
     VERSION = "0.0.0"
 
 ext_modules = []
-
-ext_modules.append(CMakeExtension(name="vllm_ascend.vllm_ascend_C"))
+if envs.COMPILE_CUSTOM_KERNELS is not None:
+    ext_modules.append(CMakeExtension(name="vllm_ascend.vllm_ascend_C"))
 
 
 def get_path(*filepath) -> str:
