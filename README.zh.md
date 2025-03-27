@@ -10,7 +10,7 @@ vLLM Ascend Plugin
 </h3>
 
 <p align="center">
-| <a href="https://www.hiascend.com/en/"><b>关于昇腾</b></a> | <a href="https://vllm-ascend.readthedocs.io/en/latest/"><b>官方文档</b></a> | <a href="https://slack.vllm.ai"><b>开发者 Slack (#sig-ascend)</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support"><b>用户论坛</b></a> |
+| <a href="https://www.hiascend.com/en/"><b>关于昇腾</b></a> | <a href="https://vllm-ascend.readthedocs.io/en/latest/"><b>官方文档</b></a> | <a href="https://slack.vllm.ai"><b>#sig-ascend</b></a> | <a href="https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support"><b>用户论坛</b></a> | <a href="https://tinyurl.com/vllm-ascend-meeting"><b>社区例会</b></a> |
 </p>
 
 <p align="center">
@@ -68,6 +68,11 @@ vllm-ascend有主干分支和开发分支。
 | v0.7.3-dev | Maintained | 基于vLLM v0.7.3版本CI看护 |
 
 请参阅[版本策略](https://vllm-ascend.readthedocs.io/en/main/developer_guide/versioning_policy.html)了解更多详细信息。
+
+## 社区例会
+
+- vLLM Ascend 每周社区例会: https://tinyurl.com/vllm-ascend-meeting
+- 每周三下午，15:00 - 16:00 (UTC+8, [查看您的时区](https://dateful.com/convert/gmt8?t=15))
 
 ## 许可证
 Apache 许可证 2.0，如 [LICENSE](./LICENSE) 文件中所示。
