@@ -103,7 +103,7 @@ class NPUPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         # RayWorkerWrapper monkey patch when setup
-        from vllm_ascend.patch import ray_patch  # noqa: F401
+        from vllm_ascend.patch.bundled import ray_patch  # noqa: F401
 
         compilation_config = vllm_config.compilation_config
         if compilation_config.level != CompilationLevel.NO_COMPILATION:

@@ -14,9 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import vllm_ascend.patch.patch_cache_dtype  # noqa
-import vllm_ascend.patch.patch_metrics  # noqa
-import vllm_ascend.patch.patch_minicpm  # noqa
-import vllm_ascend.patch.patch_multi_step_worker  # noqa
-import vllm_ascend.patch.patch_rejection_sampler  # noqa
-import vllm_ascend.patch.patch_spec_decode_worker  # noqa
+import vllm_ascend.patch.bundled.patch_cache_dtype  # noqa
+import vllm_ascend.patch.bundled.patch_metrics  # noqa
+import vllm_ascend.patch.bundled.patch_minicpm  # noqa
+import vllm_ascend.patch.bundled.patch_multi_step_worker  # noqa
+import vllm_ascend.patch.bundled.patch_rejection_sampler  # noqa
+import vllm_ascend.patch.bundled.patch_spec_decode_worker  # noqa
