@@ -29,13 +29,12 @@ from conftest import VllmRunner
 import vllm_ascend  # noqa: F401
 
 MODELS = [
-    "Qwen/Qwen2.5-0.5B-Instruct",
+    "/root/wl/cache/modelscope/models/Qwen/Qwen2___5-3B-Instruct",
 ]
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
-
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half", "float16"])
@@ -60,3 +59,30 @@ def test_models(
                     enforce_eager=False,
                     gpu_memory_utilization=0.7) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+
+@pytest.mark.multi
+@pytest.mark.parametrize(
+    "model, distributed_executor_backend", [
+        ("Qwen/QwQ-32B", "mp"),
+    ])
+def test_models_distributed(
+    vllm_runner,
+    model: str,
+    distributed_executor_backend: str,
+) -> None:
+        example_prompts = [
+             "Compare and contrast artificial intelligence with human intelligence in terms of processing information.",
+             "Describe the basic components of a neural network and how it can be trained.",
+             "Write a short story about a robot that dreams for the first time.",
+             "Analyze the impact of the COVID-19 pandemic on global economic structures and future business models."
+        ]
+        max_tokens = 5
+        with vllm_runner(
+                model,
+                tensor_parallel_size=2,
+                distributed_executor_backend=distributed_executor_backend,
+        ) as vllm_model:
+            vllm_model.generate_greedy(example_prompts,
+                                                      max_tokens)
