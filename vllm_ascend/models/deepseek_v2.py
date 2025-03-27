@@ -35,7 +35,10 @@ import torch.distributed as dist
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
+<<<<<<< HEAD
 import vllm.envs as envs
+=======
+>>>>>>> 3d960d6 (feat: implement fused_experts_with_mc2)
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (get_pp_group,
