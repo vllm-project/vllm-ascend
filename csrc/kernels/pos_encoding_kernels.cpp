@@ -53,6 +53,7 @@ public:
     {
         pipe_ = pipe;
         rotDim_ = rotDim;
+        // query stride and key stride is used to handle the strided tensor which is not contiguous on num_tokens dim
         queryStride_ = queryStride;
         keyStride_ = keyStride;
         dstQueryStride_ = dstQueryStride;
@@ -79,7 +80,7 @@ public:
         // need to consider upcast the bf16 to fp32, so we might need 4 buffer just in case
         // 2 temperary buffer, 2 input buffer, 1 cos buffer, 1 sin buffer, 2 scale buffer (headSize), 2 zp
         // buffer(headSize int8), 1 dst_temp buffer(headSize, int32)
-        pipe_->InitBuffer(calcBuf_, tempBufferSize_ /* buffer_size */););
+        pipe_->InitBuffer(calcBuf_, tempBufferSize_ /* buffer_size */);
         if constexpr (!std::is_same_v<scalar_t, acc_t>) {
             pipe_->InitBuffer(copyBuf_, loadSize);
         }

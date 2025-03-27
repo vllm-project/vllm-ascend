@@ -23,7 +23,7 @@
 #include "kernels/types.h"
 
 namespace vllm_ascend {
-  extern void rotary_embedding_kernel(AscendType type, bool isNeox, void *stream, int64_t *positions, void *queryDst,
+  extern void rotary_embedding_impl(AscendType type, bool isNeox, void *stream, int64_t *positions, void *queryDst,
     void *keyDst, void *query, void *key, void *cosSinCache, const int rotDim,
     const int64_t queryStride, const int64_t keyStride, const int64_t dstQueryStride,
     const int64_t dstKeyStride, const int numHeads, const int numKvHeads,
