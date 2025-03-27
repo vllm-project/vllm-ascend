@@ -249,6 +249,17 @@ class cmake_build_ext(build_ext):
             subprocess.check_call(install_args, cwd=self.build_temp)
         except OSError as e:
             raise RuntimeError(f"Install library failed: {e}")
+    
+        # copy back to build folder for editable build
+        if isinstance(self.distribution.get_command_obj("develop"), develop):
+            import shutil
+            for root, _, files in os.walk(self.build_temp):
+                for file in files:
+                    if file.endswith(".so"):
+                        src_path = os.path.join(root, file)
+                        dst_path = os.path.join(self.build_lib, "vllm_ascend", file)
+                        shutil.copy(src_path, dst_path)
+                        print(f"Copy: {src_path} -> {dst_path}")
 
     def run(self):
         # First, run the standard build_ext command to compile the extensions
