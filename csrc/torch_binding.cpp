@@ -73,9 +73,6 @@ TORCH_LIBRARY_EXPAND(_C, ops)
 
     // Rotary embedding
     // Apply GPT-NeoX style rotary embedding to query and key.
-    ops.def("rotary_embedding(Tensor positions, Tensor! query,"
-            "                 Tensor! key, int head_size,"
-            "                 Tensor cos_sin_cache, bool is_neox) -> ()");
     ops.impl("rotary_embedding", torch::kPrivateUse1, &vllm_ascend::rotary_embedding);
 }
 
