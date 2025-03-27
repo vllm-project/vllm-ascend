@@ -257,6 +257,7 @@ class CustomDeepseekV2Model(nn.Module):
 
 
 class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
+    # add `packed_modules_mapping` in `DeepseekV2ForCausalLM` to support weight merging
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts":
@@ -306,6 +307,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
 
+            # w8a8 weight from modelslim need flatten before load_weight
             if "scale" in name or "offset" in name:
                 loaded_weight = loaded_weight.flatten()
 

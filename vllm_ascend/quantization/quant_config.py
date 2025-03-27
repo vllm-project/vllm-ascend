@@ -344,6 +344,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
 
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value})
+        # load `offset` weight in `fused_moe_perchannel_weight_loader`, the original weight load in vllm 0.7.3 could only load `scale` and `zero`
         extra_weight_attrs.update(
             {"weight_loader": fused_moe_perchannel_weight_loader})
         dynamic_quant_param = self.quant_method.get_dynamic_quant_param(
