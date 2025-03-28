@@ -24,7 +24,7 @@ import os
 
 import pytest
 import vllm  # noqa: F401
-from conftest import VllmRunner
+from .conftest import VllmRunner
 
 import vllm_ascend  # noqa: F401
 

@@ -16,15 +16,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import gc
 import json
 import re
-import gc
 import weakref
 
-import torch
 import jsonschema
 import pytest
-
+import torch
 from vllm.distributed.parallel_state import (destroy_distributed_environment,
                                              destroy_model_parallel)
 from vllm.entrypoints.llm import LLM
