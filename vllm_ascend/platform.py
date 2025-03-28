@@ -21,13 +21,16 @@ from typing import TYPE_CHECKING, Optional, Tuple
 import torch
 import torch_npu  # noqa: F401
 import vllm.envs as envs
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import CompilationLevel
 from vllm.logger import init_logger
 from vllm.platforms import Platform, PlatformEnum
 
 if TYPE_CHECKING:
+    from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
 else:
+    ModelConfig = None
+    VllmConfig = None
     FlexibleArgumentParser = None
 
 os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
@@ -108,14 +111,14 @@ class NPUPlatform(Platform):
                 parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
 
         cache_config = vllm_config.cache_config
-        if cache_config and cache_config.block_size is None:
-            cache_config.block_size = 128
-
-        if envs.VLLM_USE_V1 and cache_config and cache_config.enable_prefix_caching:
-            logger.warning(
-                "Prefix caching is not supported for V1 now, disable prefix caching"
-            )
-            cache_config.enable_prefix_caching = False
+        if cache_config:
+            if cache_config.block_size is None:
+                cache_config.block_size = 128
+            if envs.VLLM_USE_V1 and cache_config.enable_prefix_caching:
+                logger.warning(
+                    "Prefix caching is not supported for V1 now, disable prefix caching"
+                )
+                cache_config.enable_prefix_caching = False
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
@@ -139,4 +142,11 @@ class NPUPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(cls):
+        return True
+
+    @classmethod
+    def supports_v1(cls, model_config: ModelConfig) -> bool:
+        """Returns whether the current platform can support v1 for the supplied
+        model configuration.
+        """
         return True

@@ -61,7 +61,6 @@ DEFAULT_CONDA_PATTERNS = {
     "soumith",
     "mkl",
     "magma",
-    "triton",
     "optree",
     "transformers",
     "zmq",
@@ -73,7 +72,6 @@ DEFAULT_PIP_PATTERNS = {
     "numpy",
     "mypy",
     "flake8",
-    "triton",
     "optree",
     "onnx",
     "transformers",
@@ -156,7 +154,7 @@ def get_cmake_version(run_lambda):
 
 def _parse_version(version, version_tuple):
     version_str = version_tuple[-1]
-    if version_str.startswith('g'):
+    if isinstance(version_str, str) and version_str.startswith('g'):
         if '.' in version_str:
             git_sha = version_str.split('.')[0][1:]
             date = version_str.split('.')[-1][1:]
