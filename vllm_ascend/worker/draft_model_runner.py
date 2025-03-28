@@ -113,8 +113,10 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             attn_metadata=attn_metadata,
             seq_lens=attn_metadata.seq_lens,
             query_lens=model_input.query_lens,
-            lora_mapping=model_input.lora_mapping,
-            lora_requests=model_input.lora_requests,
+            # Notes: If vllm_ascend supports LORA, we need to
+            # add the following two params.
+            # lora_mapping=model_input.lora_mapping,
+            # lora_requests=model_input.lora_requests,
             multi_modal_kwargs=model_input.multi_modal_kwargs,
             sampling_metadata=model_input.sampling_metadata,
             is_prompt=False,
@@ -156,7 +158,8 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             if seq_group.is_prompt:
                 return False
 
-        # TODO: Add support for other attn backends
+        # TODO: Add support for ASCEND when outer multi_step_worker
+        # could work correct.
         if self.attn_backend.get_name() not in ("FLASH_ATTN", "TRITON_MLA"):
             return False
 
@@ -266,6 +269,10 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 compute_logits_kwargs["spec_step_idx"] = spec_step_idx
             with set_forward_context(model_input.attn_metadata,
                                      self.vllm_config):
+
+                if model_input.attn_metadata is not None:
+                    model_input.attn_metadata.input_positions = model_input.input_positions
+
                 hidden_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,
