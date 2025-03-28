@@ -22,6 +22,7 @@ from typing import List
 
 from setuptools import find_packages, setup
 from setuptools_scm import get_version
+from torch.utils.cpp_extension import BuildExtension, CppExtension
 
 ROOT_DIR = os.path.dirname(__file__)
 try:
@@ -103,4 +104,11 @@ setup(
         'vllm.platform_plugins': ["ascend = vllm_ascend:register"],
         'vllm.general_plugins':
         ["ascend_enhanced_model = vllm_ascend:register_model"]
-    })
+    },
+    ext_modules=[
+        CppExtension(
+            'vllm_ascend_binding',
+            ['vllm_ascend/csrc/torch_binding.cpp'],
+            extra_compile_args=['-std=c++17'])
+    ],
+    cmdclass={'build_ext': BuildExtension})
