@@ -89,14 +89,14 @@ class NPUPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         compilation_config = vllm_config.compilation_config
-        if compilation_config.level != CompilationLevel.NO_COMPILATION:
+        if compilation_config and compilation_config.level != CompilationLevel.NO_COMPILATION:
             logger.warning(
                 "Compilation level %s is not supported on NPU now, forcing compilation level to NO_COMPILATION",
                 compilation_config.level)
             compilation_config.level = CompilationLevel.NO_COMPILATION
 
         parallel_config = vllm_config.parallel_config
-        if parallel_config.worker_cls == "auto":
+        if parallel_config and parallel_config.worker_cls == "auto":
             if envs.VLLM_USE_V1:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
             elif vllm_config.speculative_config:
@@ -111,7 +111,7 @@ class NPUPlatform(Platform):
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 128
 
-        if envs.VLLM_USE_V1 and cache_config.enable_prefix_caching:
+        if envs.VLLM_USE_V1 and cache_config and cache_config.enable_prefix_caching:
             logger.warning(
                 "Prefix caching is not supported for V1 now, disable prefix caching"
             )
