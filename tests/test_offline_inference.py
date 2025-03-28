@@ -24,9 +24,10 @@ import os
 
 import pytest
 import vllm  # noqa: F401
-from .conftest import VllmRunner
 
 import vllm_ascend  # noqa: F401
+
+from .conftest import VllmRunner
 
 MODELS = [
     "Qwen/Qwen2.5-0.5B-Instruct",
