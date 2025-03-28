@@ -46,8 +46,6 @@ else:
     VllmConfig = None
     FlexibleArgumentParser = None
 
-os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
-
 logger = init_logger(__name__)
 
 
