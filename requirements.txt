@@ -1,6 +1,7 @@
 decorator
 pyyaml
 scipy
+pybind11
 setuptools
 setuptools-scm
 

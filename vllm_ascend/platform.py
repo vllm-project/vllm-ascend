@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+import logging
 import os
 from typing import TYPE_CHECKING, Optional, Tuple
 
@@ -23,6 +24,19 @@ import torch_npu  # noqa: F401
 import vllm.envs as envs
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.logger import init_logger
+
+try:
+    # register custom ops into torch_library here
+    import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+
+except ImportError as e:
+    if not str(
+            e
+    ) == "dynamic module does not define module export function (PyInit_vllm_ascend_C)":
+        logging.warning(
+            "Warning: Failed to register custom ops, all custom ops will be disabled"
+        )
+
 from vllm.platforms import Platform, PlatformEnum
 
 if TYPE_CHECKING:
@@ -127,6 +141,8 @@ class NPUPlatform(Platform):
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 128
+        if not hasattr(cache_config, "enable_prefix_caching"):
+            setattr(cache_config, "enable_prefix_caching", False)
         if cache_config.enable_prefix_caching and cache_config.block_size != 128:
             raise ValueError(
                 "If prefix caching is enabled, block size must be set to 128.")

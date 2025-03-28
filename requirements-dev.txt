@@ -2,3 +2,4 @@
 modelscope<1.23.0
 pytest >= 6.0
 pytest-asyncio
+pybind11
