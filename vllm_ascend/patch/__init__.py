@@ -19,3 +19,4 @@ import vllm_ascend.patch.patch_metrics  # noqa
 import vllm_ascend.patch.patch_minicpm  # noqa
 import vllm_ascend.patch.patch_rejection_sampler  # noqa
 import vllm_ascend.patch.patch_spec_decode_worker  # noqa
+import vllm_ascend.patch.patch_kv_connector

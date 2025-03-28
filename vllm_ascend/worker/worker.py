@@ -25,7 +25,8 @@ import torch.distributed
 from torch import nn
 from vllm import envs
 from vllm.config import ParallelConfig, VllmConfig
-from vllm.distributed import (ensure_model_parallel_initialized,
+from vllm.distributed import (ensure_kv_transfer_initialized,
+                              ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.logger import init_logger
@@ -168,7 +169,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        self._init_worker_distributed_environment(self.parallel_config,
+        self._init_worker_distributed_environment(self.vllm_config,
                                                   self.rank,
                                                   self.distributed_init_method,
                                                   self.local_rank)
@@ -463,12 +464,13 @@ class NPUWorker(LocalOrDistributedWorkerBase):
 
     def _init_worker_distributed_environment(
             self,
-            parallel_config: ParallelConfig,
+            vllm_config: VllmConfig,
             rank: int,
             distributed_init_method: Optional[str] = None,
             local_rank: int = -1,
             backend: str = "hccl") -> None:
         """Initialize the distributed environment."""
+        parallel_config = vllm_config.parallel_config
         set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
         init_distributed_environment(parallel_config.world_size, rank,
                                      distributed_init_method, local_rank,
@@ -477,6 +479,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size,
             parallel_config.expert_tensor_parallel_size)
+        ensure_kv_transfer_initialized(vllm_config)
 
 
 def raise_if_cache_size_invalid(num_gpu_blocks, block_size, is_attention_free,
