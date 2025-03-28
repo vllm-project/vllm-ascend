@@ -100,3 +100,4 @@ def test_fused_experts(
                                  e_map)
         # TODO: The native params are: atol=2e-2, rtol=0, maybe related to the nan problem
         torch.testing.assert_close(output, torch_output, atol=4e-2, rtol=1)
+    torch.npu.empty_cache()

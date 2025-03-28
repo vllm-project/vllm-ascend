@@ -45,8 +45,6 @@ def test_models(
     dtype: str,
     max_tokens: int,
 ) -> None:
-    os.environ["VLLM_ATTENTION_BACKEND"] = "ASCEND"
-
     # 5042 tokens for gemma2
     # gemma2 has alternating sliding window size of 4096
     # we need a prompt with more than 4096 tokens to test the sliding window
@@ -60,3 +58,8 @@ def test_models(
                     enforce_eager=False,
                     gpu_memory_utilization=0.7) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+if __name__ == "__main__":
+    import pytest
+    pytest.main([__file__])
