@@ -459,24 +459,4 @@ def forward_oot(
                              top_k=top_k,
                              expert_map=expert_map)
 
-
-def __init__(self):
-    super().__init__()
-    vllm_config = get_current_vllm_config()
-
-    ep_group = get_ep_group()
-    self.ep_size = ep_group.world_size
-    self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
-    self.local_batch_size = self.global_batch_size // self.ep_size
-
-    try:
-        device_group = ep_group.device_group
-        # TODO: Try local_rank = ep_group.rank_in_group
-        local_rank = torch.distributed.get_rank(group=device_group)
-        backend = device_group._get_backend(torch.device("npu"))
-        self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
-    except AttributeError as e:
-        self.moe_all_to_all_group_name = None
-
-UnquantizedFusedMoEMethod.__init__ = __init__
 UnquantizedFusedMoEMethod.forward_oot = forward_oot

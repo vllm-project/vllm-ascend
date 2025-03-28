@@ -1184,6 +1184,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
                                dim=-1)
         if k_pe is None and attn_metadata.decode_metadata:
+            # TODO: Replace this with rope_single
             q_pe, _ = self.rotary_emb(attn_metadata.input_positions, q_pe, q_pe)
             q_pe = q_pe.view(num_tokens, self.num_heads, -1)
             seq_len = self.rotary_emb.max_position_embeddings
@@ -1198,6 +1199,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                                         kv_cache, attn_metadata.slot_mapping)
         else:
             if k_pe is None:
+                # NOTE: k_pe is None when graph mode enabled
                 kv_c, k_pe = self.kv_a_proj_with_mqa(
                     hidden_states_or_kv_c_normed)[0].split(
                         [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
@@ -1206,6 +1208,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                 kv_c_normed = hidden_states_or_kv_c_normed
             k_pe = k_pe.view(num_tokens, self.num_kv_heads, -1)
             if self.rotary_emb.__class__.__name__ == 'RotaryEmbedding':
+                # NOTE: When scaling not specified
                 ori_q_pe_shape, ori_k_pe_shape = q_pe.shape, k_pe.shape
                 q_pe = q_pe.reshape(num_tokens, -1)
                 k_pe = k_pe.reshape(num_tokens, -1)
@@ -1230,10 +1233,12 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         query = torch.cat([q_nope, q_pe], dim=-1).view(num_tokens,
                                                        self.num_heads, -1)
 
+        # TODO: Replace the env with more flexible expressions
         if VLLM_ENABLE_GRAPH_MODE == '1':
             if len(kv_cache) > 0 and kv_cache[0].numel(
             ) > 0 and attn_metadata.num_prefills > 0:
                 slots = attn_metadata.slot_mapping
+                # NOTE: Seperate the kv cache in advance to avoid OOM or other issues
                 torch_npu._npu_reshape_and_cache(key=kv_c_normed.view(
                     num_tokens, self.num_kv_heads, -1),
                                                  value=k_pe,
