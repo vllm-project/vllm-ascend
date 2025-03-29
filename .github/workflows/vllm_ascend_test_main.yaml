@@ -100,7 +100,7 @@ jobs:
           VLLM_USE_V1: 0
           HF_ENDPOINT: https://hf-mirror.com
         run: |
-          VLLM_USE_V1=0 pytest -sv tests
+          VLLM_USE_V1=0 pytest -sv -m 'not multi' tests
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         env:
