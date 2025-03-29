@@ -73,7 +73,7 @@ def get_requirements() -> List[str]:
 
 USE_NINJA = os.getenv("USE_NINJA") == "1"
 current_dir = os.path.dirname(os.path.abspath(__file__))
-cpp_src_path = os.path.join(current_dir, "vllm_ascend", "csrc", "torch_bindings.cpp")
+cpp_src_path = os.path.join(current_dir, "csrc", "torch_binding.cpp")
 
 setup(
     name='vllm_ascend',
