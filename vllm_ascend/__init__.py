@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+import vllm_ascend_binding
 
 def register():
     """Register the NPU platform."""
