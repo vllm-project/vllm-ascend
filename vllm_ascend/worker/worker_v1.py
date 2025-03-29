@@ -18,7 +18,7 @@
 #
 
 import gc
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 import torch
 import torch.nn as nn
@@ -41,6 +41,7 @@ from vllm.v1.worker.worker_base import WorkerBase
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import try_register_lib, vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 
 if vllm_version_is("0.8.4"):
     from vllm.distributed import ensure_kv_transfer_initialized
@@ -81,6 +82,7 @@ class NPUWorker(WorkerBase):
         else:
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype]
+        self.additional_config = vllm_config.additional_config
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -217,6 +219,13 @@ class NPUWorker(WorkerBase):
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
+        expert_tensor_parallel_size = 1
+        if self.additional_config is not None and hasattr(self.additional_config, "expert_tensor_parallel_size"):
+            expert_tensor_parallel_size = getattr(self.additional_config, "expert_tensor_parallel_size")
+        # initailize the EP group and ETP group in vllm_ascend
+        init_ascend_model_parallel(self.parallel_config.tensor_parallel_size,
+                                self.parallel_config.pipeline_parallel_size,
+                                expert_tensor_parallel_size)
         ensure_kv_transfer_initialized(self.vllm_config)
 
     def _init_profiler(self):
@@ -226,19 +235,17 @@ class NPUWorker(WorkerBase):
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)
-
             experimental_config = torch_npu.profiler._ExperimentalConfig(
-                export_type=torch_npu.profiler.ExportType.Text,
-                profiler_level=torch_npu.profiler.ProfilerLevel.Level0,
-                msprof_tx=False,
-                aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
-                l2_cache=False,
-                op_attr=False,
-                data_simplification=False,
-                record_op_args=False,
-                gc_detect_threshold=None,
-            )
-
+                    export_type=torch_npu.profiler.ExportType.Text,
+                    profiler_level=torch_npu.profiler.ProfilerLevel.Level0,
+                    msprof_tx=False,
+                    aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
+                    l2_cache=False,
+                    op_attr=False,
+                    data_simplification=False,
+                    record_op_args=False,
+                    gc_detect_threshold=None,
+                )
             return torch_npu.profiler.profile(
                 activities=[
                     torch_npu.profiler.ProfilerActivity.CPU,

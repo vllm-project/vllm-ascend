@@ -15,7 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 import vllm_ascend.ops.activation  # noqa
-import vllm_ascend.ops.attention  # noqa
 import vllm_ascend.ops.fused_moe  # noqa
 import vllm_ascend.ops.layernorm  # noqa
 import vllm_ascend.ops.rotary_embedding  # noqa

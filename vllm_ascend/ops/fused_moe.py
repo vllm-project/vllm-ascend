@@ -20,21 +20,25 @@ from typing import Callable, Optional
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_ep_group
 from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.model_executor.layers.fused_moe.layer import \
-    UnquantizedFusedMoEMethod, FusedMoE
+    UnquantizedFusedMoEMethod, FusedMoE, determine_expert_map
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig, QuantizeMethodBase)
+from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
+from vllm.forward_context import ForwardContext, get_forward_context
 
 
 def fused_experts_with_mc2(
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        top_k: int,
-        expert_map: torch.Tensor = None,
-        moe_all_to_all_group_name: str = None,
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    top_k: int,
+    expert_map: torch.Tensor = None,
+    moe_all_to_all_group_name: str = None,
 ) -> torch.Tensor:
     # Decoder Stage, seq = 1
     # if torch.distributed.get_rank() == 0:
@@ -79,10 +83,13 @@ def fused_experts_with_mc2(
 
     output = torch_npu.npu_moe_distribute_dispatch(**kwargs)
     # comm_stream.wait_stream(torch.npu.current_stream())
-    expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[0:5]
+    expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[
+        0:5]
 
     w1 = w1.transpose(1, 2)
-    expert_token_nums = torch.cumsum(expert_token_nums, dim=0, dtype=torch.int64)
+    expert_token_nums = torch.cumsum(expert_token_nums,
+                                     dim=0,
+                                     dtype=torch.int64)
     group_list = expert_token_nums.to(torch.int64)
     gate_up_out_list = torch_npu.npu_grouped_matmul(
         x=[expand_x],
@@ -120,7 +127,9 @@ def fused_experts_with_mc2(
         "moe_expert_num": moe_expert_num,
         "global_bs": 0,
     }
-    tp_recv_counts = torch.empty(1, dtype=torch.int32, device=hidden_states.device)
+    tp_recv_counts = torch.empty(1,
+                                 dtype=torch.int32,
+                                 device=hidden_states.device)
     stage3_kwargs = {
         "ep_send_counts": ep_recv_counts,
         "group_ep": moe_all_to_all_group_name,
@@ -382,9 +391,11 @@ def select_experts(
         # >>> torch_npu._npu_group_topk(topk_weights, group_num=num_expert_group, k=topk_group)
         topk_weights = native_grouped_topk(topk_weights, num_expert_group,
                                            topk_group)
-        # TODO bfloat16 is not supported in torch.topk with ge graph. 
+        # TODO bfloat16 is not supported in torch.topk with ge graph.
         if e_score_correction_bias is not None:
-            topk_ids = torch.topk(topk_weights.to(torch.float32), k=top_k, dim=-1,
+            topk_ids = torch.topk(topk_weights.to(torch.float32),
+                                  k=top_k,
+                                  dim=-1,
                                   sorted=False)[1]
             # Use original unbiased scores for the routing weights
             topk_weights = original_weights.gather(1, topk_ids)
@@ -406,77 +417,231 @@ def select_experts(
     return topk_weights, topk_ids
 
 
-def forward_oot(
-    self,
-    layer: torch.nn.Module,
-    x: torch.Tensor,
-    use_grouped_topk: bool,
-    top_k: int,
-    router_logits: torch.Tensor,
-    renormalize: bool,
-    topk_group: Optional[int] = None,
-    num_expert_group: Optional[int] = None,
-    global_num_experts: int = -1,
-    expert_map: Optional[torch.Tensor] = None,
-    custom_routing_function: Optional[Callable] = None,
-    scoring_func: str = "softmax",
-    e_score_correction_bias: Optional[torch.Tensor] = None,
-    **kwargs,
-):
-    # assert router_logits.shape[
-    #     1] == global_num_experts, "Number of global experts mismatch"
+class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
-    topk_weights, topk_ids = select_experts(
-        hidden_states=x,
-        router_logits=router_logits,
-        top_k=top_k,
-        use_grouped_topk=use_grouped_topk,
-        renormalize=renormalize,
-        topk_group=topk_group,
-        num_expert_group=num_expert_group,
-        custom_routing_function=custom_routing_function,
-        scoring_func=scoring_func,
-        e_score_correction_bias=e_score_correction_bias,
-    )
+    def __init__(self):
+        super().__init__()
+        vllm_config = get_current_vllm_config()
 
-    if x.shape[0] == self.local_batch_size:
-        return fused_experts_with_mc2(
+        ep_group = get_ep_group()
+        self.ep_size = ep_group.world_size
+        self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
+        self.local_batch_size = self.global_batch_size // self.ep_size
+
+        try:
+            device_group = ep_group.device_group
+            # TODO: Try local_rank = ep_group.rank_in_group
+            local_rank = torch.distributed.get_rank(group=device_group)
+            backend = device_group._get_backend(torch.device("npu"))
+            self.moe_all_to_all_group_name = backend.get_hccl_comm_name(
+                local_rank)
+        except AttributeError as e:
+            self.moe_all_to_all_group_name = None
+
+    def process_weights_after_loading(self, layer):
+        super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
+        layer.w13_weight = torch.nn.Parameter(self._maybe_pad_weight(
+            layer.w13_weight.data),
+                                              requires_grad=False)
+        layer.w2_weight = torch.nn.Parameter(self._maybe_pad_weight(
+            layer.w2_weight.data),
+                                             requires_grad=False)
+
+    def forward_oot(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        **kwargs,
+    ):
+        # assert router_logits.shape[
+        #     1] == global_num_experts, "Number of global experts mismatch"
+
+        topk_weights, topk_ids = select_experts(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
+            router_logits=router_logits,
             top_k=top_k,
-            expert_map=expert_map,
-            moe_all_to_all_group_name=self.moe_all_to_all_group_name
+            use_grouped_topk=use_grouped_topk,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias,
         )
-    else:
-        return fused_experts(hidden_states=x,
-                             w1=layer.w13_weight,
-                             w2=layer.w2_weight,
-                             topk_weights=topk_weights,
-                             topk_ids=topk_ids,
-                             top_k=top_k,
-                             expert_map=expert_map)
+
+        if x.shape[0] == self.local_batch_size:
+            return fused_experts_with_mc2(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                top_k=top_k,
+                expert_map=expert_map,
+                moe_all_to_all_group_name=self.moe_all_to_all_group_name)
+        else:
+            return fused_experts(hidden_states=x,
+                                 w1=layer.w13_weight,
+                                 w2=layer.w2_weight,
+                                 topk_weights=topk_weights,
+                                 topk_ids=topk_ids,
+                                 top_k=top_k,
+                                 expert_map=expert_map)
 
 
-def __init__(self):
-    super().__init__()
-    vllm_config = get_current_vllm_config()
+class AscendFusedMoE(FusedMoE):
 
-    ep_group = get_ep_group()
-    self.ep_size = ep_group.world_size
-    self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
-    self.local_batch_size = self.global_batch_size // self.ep_size
+    def __init__(self,
+                 num_experts,
+                 top_k,
+                 hidden_size,
+                 intermediate_size,
+                 params_dtype=None,
+                 reduce_results=False,
+                 renormalize=True,
+                 use_grouped_topk=False,
+                 num_expert_group=None,
+                 topk_group=None,
+                 quant_config=None,
+                 tp_size=None,
+                 ep_size=None,
+                 dp_size=None,
+                 prefix="",
+                 custom_routing_function=None,
+                 scoring_func="softmax",
+                 e_score_correction_bias=None,
+                 activation="silu"):
+        super(FusedMoE, self).__init__()
 
-    try:
-        device_group = ep_group.device_group
-        # TODO: Try local_rank = ep_group.rank_in_group
-        local_rank = torch.distributed.get_rank(group=device_group)
-        backend = device_group._get_backend(torch.device("npu"))
-        self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
-    except AttributeError as e:
-        self.moe_all_to_all_group_name = None
+        if params_dtype is None:
+            params_dtype = torch.get_default_dtype()
 
-UnquantizedFusedMoEMethod.__init__ = __init__
-UnquantizedFusedMoEMethod.forward_oot = forward_oot
+        self.ep_size = get_ep_group().world_size
+        self.tp_size = get_etp_group().world_size
+        self.dp_size = (dp_size
+                        if dp_size is not None else get_dp_group().world_size)
+        self.dp_rank = (0
+                        if self.dp_size == 1 else get_dp_group().rank_in_group)
+
+        self.top_k = top_k
+        self.num_experts = num_experts
+        self.global_num_experts = num_experts
+        assert intermediate_size % self.tp_size == 0
+        self.intermediate_size_per_partition = intermediate_size // self.tp_size
+        self.reduce_results = reduce_results
+        self.renormalize = renormalize
+        self.use_grouped_topk = use_grouped_topk
+        if self.use_grouped_topk:
+            assert num_expert_group is not None and topk_group is not None
+        self.num_expert_group = num_expert_group
+        self.topk_group = topk_group
+        self.custom_routing_function = custom_routing_function
+        self.scoring_func = scoring_func
+        self.e_score_correction_bias = e_score_correction_bias
+        self.expert_map = None
+        self.activation = activation
+
+        if self.ep_size > 1:
+            # Create a tensor of size num_experts filled with -1
+            self.local_num_experts, self.expert_map = determine_expert_map(self.ep_size, get_ep_group().rank_in_group, self.global_num_experts)
+            self.tp_rank = get_etp_group().rank_in_group
+            self.ep_rank = get_ep_group().rank_in_group
+        else:
+            # Adjust TP size for DP attention
+            # haven't test its functionality yet, may remove in the future
+            self.tp_rank = self.tp_size * self.dp_rank
+            self.ep_rank = 0
+            self.tp_size = self.tp_size * self.dp_size
+            self.ep_size = 1
+            self.local_num_experts = self.global_num_experts
+            self.expert_map = None
+
+        if self.scoring_func != "softmax" and not self.use_grouped_topk:
+            raise ValueError("Only softmax scoring function is supported for "
+                             "non-grouped topk.")
+
+        if quant_config is None:
+            self.quant_method: Optional[QuantizeMethodBase] = (
+                AscendUnquantizedFusedMoEMethod())
+        else:
+            self.quant_method = quant_config.get_quant_method(self, prefix)
+        assert self.quant_method is not None
+
+        local_num_experts = torch.sum(self.expert_map != -1) \
+            if self.expert_map is not None else num_experts
+
+        moe_quant_params = {
+            "num_experts": local_num_experts,
+            "hidden_size": hidden_size,
+            "intermediate_size_per_partition":
+            self.intermediate_size_per_partition,
+            "params_dtype": params_dtype,
+            "weight_loader": self.weight_loader,
+        }
+        # need full intermediate size pre-sharding for WNA16 act order
+        if (self.quant_method.__class__.__name__
+                in ("GPTQMarlinMoEMethod", "CompressedTensorsWNA16MoEMethod")):
+            moe_quant_params["intermediate_size_full"] = intermediate_size
+
+        self.quant_method.create_weights(layer=self, **moe_quant_params)
+
+    def forward(self,
+                hidden_states: torch.Tensor,
+                router_logits: torch.Tensor,
+                top_k=None):
+        assert self.quant_method is not None
+
+        if top_k:
+            real_top_k = top_k
+        else:
+            real_top_k = self.top_k
+
+        if self.dp_size > 1:
+            cu_tokens_across_dp_cpu = get_forward_context(
+            ).dp_metadata.cu_tokens_across_dp_cpu
+            hidden_states = self.naive_multicast(hidden_states,
+                                                 cu_tokens_across_dp_cpu)
+            router_logits = self.naive_multicast(router_logits,
+                                                 cu_tokens_across_dp_cpu)
+
+        # Matrix multiply.
+        final_hidden_states = self.quant_method.apply(
+            layer=self,
+            x=hidden_states,
+            router_logits=router_logits,
+            top_k=real_top_k,
+            renormalize=self.renormalize,
+            use_grouped_topk=self.use_grouped_topk,
+            global_num_experts=self.num_experts,
+            expert_map=self.expert_map,
+            topk_group=self.topk_group,
+            num_expert_group=self.num_expert_group,
+            custom_routing_function=self.custom_routing_function,
+            scoring_func=self.scoring_func,
+            e_score_correction_bias=self.e_score_correction_bias)
+
+        if self.dp_size > 1:
+            start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
+                self.dp_rank - 1]
+            end = cu_tokens_across_dp_cpu[self.dp_rank]
+
+            all_hidden_states = get_dp_group().all_reduce(final_hidden_states)
+            final_hidden_states = all_hidden_states[start:end, :]
+
+        # if self.reduce_results and self.tp_size > 1:
+        if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
+            final_hidden_states = tensor_model_parallel_all_reduce(
+                final_hidden_states)
+
+        return final_hidden_states
