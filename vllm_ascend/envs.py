@@ -8,7 +8,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # If set, vllm ascend will compile the custom kernel during build phase
     "COMPILE_CUSTOM_KERNELS":
     lambda: os.getenv("COMPILE_CUSTOM_KERNELS", None),
-    # If set, vllm-ascend will print verbose logs during compliation
+    # If set, vllm-ascend will print verbose logs during complication
     "VERBOSE": lambda: bool(int(os.getenv('VERBOSE', '0'))),
     "ASCEND_HOME_PATH": lambda: os.getenv("ASCEND_HOME_PATH", None),
     "LD_LIBRARY_PATH": lambda: os.getenv("LD_LIBRARY_PATH", None),
