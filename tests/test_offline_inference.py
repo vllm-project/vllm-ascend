@@ -58,6 +58,33 @@ def test_models(
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+pytest.mark.multi
+@pytest.mark.parametrize(
+    "model, distributed_executor_backend", [
+        ("Qwen/QwQ-32B", "mp"),
+    ])
+def test_models_distributed(
+    vllm_runner,
+    model: str,
+    distributed_executor_backend: str,
+) -> None:
+    example_prompts = [
+        "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
+        "Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.",
+        "Compare and contrast artificial intelligence with human intelligence in terms of processing information.",
+    ]
+    dtype = "half"
+    max_tokens = 5
+    with vllm_runner(
+                model,
+                dtype=dtype,
+                tensor_parallel_size=2,
+                distributed_executor_backend=distributed_executor_backend,
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts,
+                                                      max_tokens)
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__])
