@@ -1,16 +1,24 @@
+import copy
 import dataclasses
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 import torch
 from vllm.distributed import broadcast_tensor_dict, get_pp_group
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.sequence import ExecuteModelRequest
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.sequence import (ExecuteModelRequest, HiddenStates, SequenceData,
+                           SequenceGroupMetadata)
+from vllm.spec_decode.interfaces import (SpeculativeProposals,
+                                         SpeculativeProposer)
+from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.worker.model_runner_base import BroadcastableModelInput
 from vllm.worker.multi_step_model_runner import StatefulModelInput
+from vllm.worker.worker_base import DelegateWorkerBase
 
+from vllm_ascend.worker.draft_model_runner import TP1DraftModelRunner
 from vllm_ascend.worker.multi_step_runner import MultiStepModelNPURunner
-from vllm_ascend.worker.worker import NPUWorker, WorkerInput
+from vllm_ascend.worker.worker import WorkerInput
 
 
 @dataclass
@@ -19,7 +27,7 @@ class MultiStepState:
     model_input: StatefulModelInput
 
 
-class MultiStepWorker(NPUWorker):
+class MultiStepWorker(ProposerWorkerBase, DelegateWorkerBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -36,6 +44,7 @@ class MultiStepWorker(NPUWorker):
         self.multi_step_states: List[
             Optional[MultiStepState]] = [None] * pipeline_parallel_size
         self.temp_output = None
+        self._proposer: SpeculativeProposer
 
     def _get_driver_input_and_broadcast(
         self, execute_model_req: ExecuteModelRequest
@@ -192,3 +201,234 @@ class MultiStepWorker(NPUWorker):
         assert model_input is not None
         assert worker_input is not None
         return model_input, worker_input, kwargs
+
+    @torch.inference_mode()
+    def sampler_output(
+        self,
+        execute_model_req: ExecuteModelRequest,
+        sample_len: int,
+        seq_ids_with_bonus_token_in_last_step: Set[int],
+    ) -> Tuple[List[SamplerOutput], bool]:
+        """Run the model forward pass sample_len times. Returns the list of
+        sampler output, one per model forward pass, along with indicator of
+        whether torch tensor in sampler output need to be transposed in latter
+        sampler_output_to_torch logic.
+
+        For multi step worker, this indicator shall be True.
+        """
+        self._raise_if_unsupported(execute_model_req)
+        # Expand the batch for sequences with a bonus token.
+        # Perform a forward pass on the expanded batch and filter the
+        # response to retain only the original sequences' responses.
+        expanded_request, indices_of_seq_with_bonus_tokens =\
+            self._expand_execute_model_request(
+                execute_model_req, seq_ids_with_bonus_token_in_last_step)
+
+        # Run model sample_len times.
+        model_outputs: List[SamplerOutput] = []
+        if isinstance(self.model_runner, TP1DraftModelRunner) \
+            and self.model_runner.supports_gpu_multi_step(expanded_request):
+            # Here we run the draft_model_runner with multi-step prepare
+            # on the NPU directly
+            expanded_request.num_steps = sample_len
+            self.model_runner.set_indices_of_seq_with_bonus_tokens(
+                indices_of_seq_with_bonus_tokens)
+            model_outputs = self.execute_model(
+                execute_model_req=expanded_request)
+        else:
+            # Here we run multi-step directly, with every step prepared
+            # on the CPU.
+            # TODO: Remove this branch once DraftModelRunner supports TP>1
+            # and other restrictions that are part of DraftModelRunner's
+            # supports_gpu_multi_step(..)
+            for _ in range(sample_len):
+                model_output: List[SamplerOutput] = self.worker.execute_model(
+                    execute_model_req=expanded_request)
+                assert (len(model_output) == 1
+                        ), "composing multistep workers not supported"
+                model_output = model_output[0]
+
+                self._append_new_tokens(
+                    model_output, expanded_request.seq_group_metadata_list,
+                    indices_of_seq_with_bonus_tokens)
+                model_outputs.append(model_output)
+
+        # move indices to device to avoid stream sync
+        indices_of_seq_with_bonus_tokens = torch.tensor(
+            indices_of_seq_with_bonus_tokens, device=self.device)
+        filtered_model_outputs = self._filter_model_output(
+            model_outputs, indices_of_seq_with_bonus_tokens)
+        return filtered_model_outputs, True
+
+    @staticmethod
+    def _expand_execute_model_request(
+        execute_model_req: ExecuteModelRequest,
+        seq_with_bonus_token_in_last_step: set,
+    ) -> Tuple[ExecuteModelRequest, List[int]]:
+        """
+        Expands the execute model request based on sequences with bonus
+        tokens.
+
+        For each sequence with a bonus token, this method creates a new
+        sequence without the bonus token and adds it to the execute model
+        request. The original sequence groups are also retained. The indices
+        of the original sequence groups are returned for further processing.
+
+        Args:
+            execute_model_req (ExecuteModelRequest): The original execute
+            model request.
+            seq_with_bonus_token_in_last_step (set): Set of sequence IDs that 
+            contain bonus tokens.
+
+        Returns:
+            Tuple[ExecuteModelRequest, List[int]]: The updated execute model
+            request with expanded sequences and a list of indices corresponding
+            to the original sequence groups.
+        """
+        updated_seq_group_metadata_list: List[SequenceGroupMetadata] = []
+        updated_execute_model_req = execute_model_req.clone(
+            updated_seq_group_metadata_list)
+        indices_of_original_sequence_groups = []
+        for seq_group in execute_model_req.seq_group_metadata_list:
+            seq_group_has_bonus_tokens = False
+            for seq_id, _ in seq_group.seq_data.items():
+                # Identify sequences with bonus tokens in the sequence group.
+                if seq_id in seq_with_bonus_token_in_last_step:
+                    seq_group_has_bonus_tokens = True
+                    break
+            if seq_group_has_bonus_tokens:
+                #Create new sequences without the last bonus token. These new
+                # sequence have the same sequence id as the original sequence.
+                # We create a new sequence group and add them there.
+                updated_seq_group_without_bonus_token  = \
+                    MultiStepWorker._copy_seq_metadata_excluding_last_token(
+                        seq_group, seq_with_bonus_token_in_last_step)
+                updated_seq_group_metadata_list.append(
+                    updated_seq_group_without_bonus_token)
+            # Add the original sequence group.
+            updated_seq_group_metadata_list.append(
+                MultiStepWorker._shallow_copy_seq_group_metadata(seq_group))
+            # Record the index of the original sequence group.
+            indices_of_original_sequence_groups.append(
+                len(updated_seq_group_metadata_list) - 1)
+
+        updated_execute_model_req.seq_group_metadata_list =\
+            updated_seq_group_metadata_list
+
+        if isinstance(updated_execute_model_req.previous_hidden_states,
+                      HiddenStates):
+            updated_execute_model_req.previous_hidden_states\
+                .expand_with_bonus_tokens(seq_with_bonus_token_in_last_step)
+
+        return updated_execute_model_req, indices_of_original_sequence_groups
+
+    @staticmethod
+    def _shallow_copy_seq_group_metadata(
+        seq_group_metadata: SequenceGroupMetadata, ) -> SequenceGroupMetadata:
+        """Copy input data structures to remove side-effects when input data
+        structures are shared with other modules.
+
+        Helpful when the vLLM scheduler runs in the same process as the worker.
+        The alternative is deep-copying (or other form of deep copy); this has
+        performance downsides.
+        """
+        # Shallow-copy the SequenceGroupMetadata. This allows us to
+        # append tokens and change is_prompt without external side-effects.
+        # We must shallow-copy seq_group_metadata as is_prompt could change.
+        new_seq_group_metadata = copy.copy(seq_group_metadata)
+
+        # We must shallow-copy seq_data as we will append token ids
+        new_seq_data: Dict[int, SequenceData] = {}
+        for seq_id, old_seq_data in seq_group_metadata.seq_data.items():
+            new_seq_data[seq_id] = copy.copy(old_seq_data)
+            new_seq_data[seq_id].output_token_ids =\
+                old_seq_data.output_token_ids[:]
+
+        new_seq_group_metadata.seq_data = new_seq_data
+        return new_seq_group_metadata
+
+    @staticmethod
+    def _copy_seq_metadata_excluding_last_token(
+        seq_group_metadata: SequenceGroupMetadata,
+        seq_ids_to_copy: Set[int],
+    ) -> SequenceGroupMetadata:
+        """
+        Creates a shallow copy of the given SequenceGroupMetadata, retaining
+        only the sequence IDs specified in seq_ids_to_copy. For each of these
+        sequence IDs, all output_token_ids except the last one are copied.
+        Sequence IDs not in seq_ids_to_copy are excluded from the copy.
+        
+        Parameters:
+        seq_group_metadata (SequenceGroupMetadata): The original sequence
+            group metadata.
+        seq_ids_to_copy (Set[int]): The set of sequence IDs to include in the
+            copy.
+        
+        Returns:
+        SequenceGroupMetadata: A shallow copy of the sequence group metadata
+            with the specified modifications.
+        """
+        # Shallow-copy the SequenceGroupMetadata.
+        new_seq_group_metadata = copy.copy(seq_group_metadata)
+        # Shallow-copy seq_data and modify the output_token_ids.
+        new_seq_data: Dict[int, SequenceData] = {}
+        for seq_id, old_seq_data in seq_group_metadata.seq_data.items():
+            if (seq_id in seq_ids_to_copy):
+                new_seq_data[seq_id] = copy.copy(old_seq_data)
+                # Copy all the output token ids except the last.
+                # Also reduce num_computed_tokens by 1 since we are not
+                # including the last output token.
+                # NOTE: num_computed_tokens is not directly used by the
+                # speculative decoding workers, as it is only relevant for
+                # chunked prefill, which is disabled for speculative decoding.
+                # However, to maintain consistency in num_computed_tokens,
+                # we update it here.
+                new_seq_data[seq_id].output_token_ids =\
+                    old_seq_data.output_token_ids[:-1]
+                new_seq_data[seq_id].update_num_computed_tokens(-1)
+        new_seq_group_metadata.seq_data = new_seq_data
+        return new_seq_group_metadata
+
+    def _raise_if_unsupported(
+        self,
+        execute_model_req: ExecuteModelRequest,
+    ) -> None:
+        """MultiStepWorker does not yet implement support for cache swap
+        operations or beam search.
+        """
+        if any([
+                execute_model_req.blocks_to_swap_in,
+                execute_model_req.blocks_to_swap_out,
+                execute_model_req.blocks_to_copy
+        ]):
+            raise NotImplementedError(
+                "MultiStepWorker does not support cache operations")
+
+        if any(
+                len(seq_group_metadata.seq_data.keys()) != 1
+                for seq_group_metadata in
+                execute_model_req.seq_group_metadata_list):
+            raise NotImplementedError(
+                "MultiStepWorker does not support beam search.")
+
+    def get_spec_proposals(
+        self,
+        execute_model_req: ExecuteModelRequest,
+        seq_ids_with_bonus_token_in_last_step: set,
+    ) -> SpeculativeProposals:
+        """Produce speculations given an input batch of sequences. The number of
+        speculative tokens per sequence is determined by max_proposal_len.
+        """
+        return self._proposer.get_spec_proposals(
+            execute_model_req, seq_ids_with_bonus_token_in_last_step)
+
+    def maybe_load_lm_head_weight(
+        self,
+        lm_head_weight: torch.Tensor,
+    ) -> None:
+        weight_loader = getattr(
+            self.worker.model_runner.model_runner.model.lm_head.weight,
+            "weight_loader", default_weight_loader)
+        weight_loader(
+            self.worker.model_runner.model_runner.model.lm_head.weight,
+            lm_head_weight)
