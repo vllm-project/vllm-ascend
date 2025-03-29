@@ -125,7 +125,7 @@ You can install `vllm` and `vllm-ascend` from **pre-built wheel** (**Unreleased 
    :substitutions:
 
 # Install vllm-project/vllm from pypi
-pip install vllm==|pip_vllm_version|
+VLLM_TARGET_DEVICE=empty pip install vllm==|pip_vllm_version|
 
 # Install vllm-project/vllm-ascend from pypi.
 pip install vllm-ascend==|pip_vllm_ascend_version| --extra-index https://download.pytorch.org/whl/cpu/
