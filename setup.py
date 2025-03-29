@@ -22,7 +22,8 @@ from typing import List
 
 from setuptools import find_packages, setup
 from setuptools_scm import get_version
-from torch.utils.cpp_extension import BuildExtension, CppExtension
+from torch.utils.cpp_extension import BuildExtension,
+from torch_npu.utils.cpp_extension import NpuExtension
 
 ROOT_DIR = os.path.dirname(__file__)
 try:
@@ -70,6 +71,9 @@ def get_requirements() -> List[str]:
     return requirements
 
 
+USE_NINJA = os.getenv("USE_NINJA") == "1"
+
+
 setup(
     name='vllm_ascend',
     # Follow:
@@ -106,9 +110,9 @@ setup(
         ["ascend_enhanced_model = vllm_ascend:register_model"]
     },
     ext_modules=[
-        CppExtension(
+        NpuExtension(
             'vllm_ascend_binding',
             ['vllm_ascend/csrc/torch_binding.cpp'],
-            extra_compile_args=['-std=c++17'])
+            extra_compile_args=['-g'])
     ],
-    cmdclass={'build_ext': BuildExtension})
+    cmdclass={'build_ext': BuildExtension.with_options(use_ninja=USE_NINJA)})

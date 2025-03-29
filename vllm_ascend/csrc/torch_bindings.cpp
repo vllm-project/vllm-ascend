@@ -1,14 +1,13 @@
 #include <torch/library.h>
 #include <torch/extension.h>
 
-#include "torch_npu/csrc/core/npu/DeviceUtils.h"
 #include "torch_npu/csrc/aten/common/from_blob.h"
 
 namespace {
     torch::Tensor weak_ref_tensor(torch::Tensor& tensor)
     {
         // Ensure tensor is on NPU
-        if (torch_npu::utils::is_npu(tensor)) {
+        if (tensor.is_privateuseone()) {
           throw std::runtime_error("Tensor must be on NPU device");
         }
 
