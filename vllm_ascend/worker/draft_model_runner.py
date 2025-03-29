@@ -157,7 +157,8 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 return False
 
         # TODO: Add support for other attn backends
-        if self.attn_backend.get_name() not in ("FLASH_ATTN", "TRITON_MLA"):
+        if self.attn_backend.get_name() not in ("FLASH_ATTN", "TRITON_MLA",
+                                                "ASCEND"):
             return False
 
         # TODO: Add support for LORA
@@ -266,6 +267,10 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 compute_logits_kwargs["spec_step_idx"] = spec_step_idx
             with set_forward_context(model_input.attn_metadata,
                                      self.vllm_config):
+
+                if model_input.attn_metadata is not None:
+                    model_input.attn_metadata.input_positions = model_input.input_positions
+
                 hidden_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,
