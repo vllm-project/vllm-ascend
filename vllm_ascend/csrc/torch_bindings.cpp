@@ -35,3 +35,7 @@ namespace {
 TORCH_LIBRARY_IMPL(_C, PrivateUse1, m) {
     m.impl("weak_ref_tensor", &weak_ref_tensor);
 }
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    m.def("weak_ref_tensor", &weak_ref_tensor, "return a weak ref for npu tensor");
+}

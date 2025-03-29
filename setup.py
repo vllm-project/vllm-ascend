@@ -72,7 +72,8 @@ def get_requirements() -> List[str]:
 
 
 USE_NINJA = os.getenv("USE_NINJA") == "1"
-
+current_dir = os.path.dirname(os.path.abspath(__file__))
+cpp_src_path = os.path.join(current_dir, "vllm_ascend", "csrc", "torch_bindings.cpp")
 
 setup(
     name='vllm_ascend',
@@ -112,7 +113,7 @@ setup(
     ext_modules=[
         NpuExtension(
             'vllm_ascend_binding',
-            ['vllm_ascend/csrc/torch_binding.cpp'],
-            extra_compile_args=['-g'])
+            [cpp_src_path],
+            extra_compile_args=['-std=c++17'])
     ],
     cmdclass={'build_ext': BuildExtension.with_options(use_ninja=USE_NINJA)})
