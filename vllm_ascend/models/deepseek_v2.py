@@ -169,11 +169,15 @@ class CustomDeepseekV2MoE(nn.Module):
                 dist.all_gather_into_tensor(self.final_hidden_states,
                                             hidden_states,
                                             group=self.tp_group)
+                return self.final_hidden_states
             else:
-                self.final_hidden_states = tensor_model_parallel_all_reduce(
+                final_hidden_states = tensor_model_parallel_all_reduce(
                     hidden_states)
-
-        return self.final_hidden_states.view(num_tokens, hidden_dim)
+                return final_hidden_states.view(-1, hidden_dim)
+        
+        # # TODO: Strange that it raise error here when enable torch.compile
+        # # if we merge the final_hidden_states above
+        return hidden_states.view(-1, hidden_dim)
 
 class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
 

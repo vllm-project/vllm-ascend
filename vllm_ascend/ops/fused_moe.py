@@ -273,11 +273,11 @@ def fused_experts(
         final_hidden_states = torch.zeros(*original_shape,
                                           device=hidden_states.device,
                                           dtype=dtype)
-        final_hidden_states.index_add_(0, sorted_token_indices,
-                                       weighted_down_out)
-        # TODO: This should not happen! Look into it!
-        # fill nan with 0.0
-        final_hidden_states[torch.isnan(final_hidden_states)] = 0.0
+
+        num_valid_tokens = mask.sum()
+        valid_token_mask = torch.arange(0, sorted_token_indices.shape[0], device=device).unsqueeze(1) < num_valid_tokens
+        valid_output = torch.where(valid_token_mask, weighted_down_out, torch.zeros_like(weighted_down_out)).to(dtype)
+        final_hidden_states.index_add_(0, sorted_token_indices, valid_output)
     else:
         # TODO: Reorder device memory 2 times here, replace the current
         # implementation here when suitable operators become available.

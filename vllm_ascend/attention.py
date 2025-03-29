@@ -1184,9 +1184,6 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
                                dim=-1)
         if k_pe is None and attn_metadata.decode_metadata:
-            # TODO: Replace this with rope_single
-            q_pe, _ = self.rotary_emb(attn_metadata.input_positions, q_pe, q_pe)
-            q_pe = q_pe.view(num_tokens, self.num_heads, -1)
             seq_len = self.rotary_emb.max_position_embeddings
 
             cos = self.rotary_emb.cos_cached[:seq_len].to(dtype=q_pe.dtype)
@@ -1195,6 +1192,8 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
             sin = sin[attn_metadata.input_positions]
             cos = cos[:, None, None, :]
             sin = sin[:, None, None, :]
+
+            q_pe = self.rope_single(q_pe, cos, sin)
             k_pe, k_nope = self.exec_kv(hidden_states_or_kv_c_normed, cos, sin,
                                         kv_cache, attn_metadata.slot_mapping)
         else:
