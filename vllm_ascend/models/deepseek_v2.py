@@ -154,7 +154,9 @@ class CustomDeepseekV2MoE(nn.Module):
         B, _ = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_dim)
 
-        if B == self.batch_size:
+        # TODO: "B == self.batch_size" is not the final solution
+        # Should consider batch padding and then switch to "self.dp_size > 1"
+        if self.tp_size > 1 and B == self.batch_size:
             hidden_states = dist._functional_collectives.reduce_scatter_tensor(
                 hidden_states,
                 "sum",
@@ -168,19 +170,22 @@ class CustomDeepseekV2MoE(nn.Module):
             shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        router_output = self.experts(
+        hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
             top_k=CustomDeepseekV2MoE.top_k) * self.routed_scaling_factor
         if shared_output is not None:
-            output = router_output + shared_output
-        output = output.view(num_tokens, hidden_dim)
+            hidden_states = hidden_states + shared_output
+        if self.tp_size > 1:
+            if B == self.batch_size:
+                dist.all_gather_into_tensor(self.final_hidden_states,
+                                            hidden_states,
+                                            group=self.tp_group)
+            else:
+                self.final_hidden_states = tensor_model_parallel_all_reduce(
+                    hidden_states)
 
-        if B == self.batch_size:
-            dist.all_gather_into_tensor(self.final_hidden_states, output, group=self.tp_group)
-            return self.final_hidden_states
-        else:
-            return output
+        return self.final_hidden_states.view(num_tokens, hidden_dim)
 
 class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
 
