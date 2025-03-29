@@ -22,7 +22,7 @@ from typing import List
 
 from setuptools import find_packages, setup
 from setuptools_scm import get_version
-from torch.utils.cpp_extension import BuildExtension,
+from torch.utils.cpp_extension import BuildExtension
 from torch_npu.utils.cpp_extension import NpuExtension
 
 ROOT_DIR = os.path.dirname(__file__)
