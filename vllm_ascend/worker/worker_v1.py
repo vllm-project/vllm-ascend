@@ -18,7 +18,7 @@
 #
 
 import gc
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 import torch
 import torch.distributed
@@ -41,6 +41,7 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 
 logger = init_logger(__name__)
 
@@ -68,6 +69,7 @@ class NPUWorker(WorkerBase):
         self.lora_config = vllm_config.lora_config
         self.load_config = vllm_config.load_config
         self.parallel_config = vllm_config.parallel_config
+        self.addtional_config = vllm_config.additional_config
         self.scheduler_config = vllm_config.scheduler_config
         self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
@@ -128,8 +130,8 @@ class NPUWorker(WorkerBase):
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        init_worker_distributed_environment(self.parallel_config, self.rank,
-                                            self.distributed_init_method,
+        init_worker_distributed_environment(self.parallel_config, self.addtional_config,
+                                            self.rank, self.distributed_init_method,
                                             self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
@@ -233,6 +235,7 @@ class NPUWorker(WorkerBase):
 
 def init_worker_distributed_environment(
         parallel_config: ParallelConfig,
+        addtional_config: Optional[Dict[str, Any]],
         rank: int,
         distributed_init_method: Optional[str] = None,
         local_rank: int = -1) -> None:
@@ -244,3 +247,11 @@ def init_worker_distributed_environment(
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
+
+    expert_tensor_parallel_size = 1
+    if addtional_config is not None and hasattr(addtional_config, "expert_tensor_parallel_size"):
+        expert_tensor_parallel_size = getattr(addtional_config, "expert_tensor_parallel_size")
+    # initailize the EP group and ETP group in vllm_ascend
+    init_ascend_model_parallel(parallel_config.tensor_parallel_size,
+                               parallel_config.pipeline_parallel_size,
+                               expert_tensor_parallel_size)

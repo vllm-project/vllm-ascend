@@ -273,8 +273,14 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         for ve in range(self.parallel_config.pipeline_parallel_size):
             num_layers = len(self.cache_engine[ve].gpu_cache)
             for i in range(num_layers):
-                torch_npu.npu_format_cast(self.cache_engine[ve].gpu_cache[i],
-                                          2)
+                if torch.is_tensor(self.cache_engine[ve].gpu_cache[i]):
+                    torch_npu.npu_format_cast(self.cache_engine[ve].gpu_cache[i],
+                                              2)
+                else:
+                    torch_npu.npu_format_cast(self.cache_engine[ve].gpu_cache[i][0],
+                                              2)
+                    torch_npu.npu_format_cast(self.cache_engine[ve].gpu_cache[i][1],
+                                              2)
         self.gpu_cache = [
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
@@ -464,7 +470,8 @@ class NPUWorker(LocalOrDistributedWorkerBase):
                                      backend)
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
-            parallel_config.pipeline_parallel_size)
+            parallel_config.pipeline_parallel_size,
+            parallel_config.expert_tensor_parallel_size)
 
 
 def raise_if_cache_size_invalid(num_gpu_blocks, block_size, is_attention_free,
