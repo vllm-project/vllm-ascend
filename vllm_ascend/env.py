@@ -21,15 +21,18 @@ import os
 from typing import TYPE_CHECKING, Any, Callable
 
 from vllm.envs import VLLM_USE_V1
+from vllm.logger import init_logger
 from vllm.utils import update_environment_variables
 
 if TYPE_CHECKING:
     RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: str = "1"
     ACL_OP_INIT_MODE: str = "1"
 
+logger = init_logger(__name__)
+
 npu_env_vars: dict[str, Callable[[], Any]] = {
 
-    # Allowing set device at runtime when using ray backend
+    # Allowing SetDevice at runtime when using ray backend
     "RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES":
     lambda: os.getenv("RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES", "1"),
 
@@ -56,7 +59,10 @@ def load_npu_env_vars() -> None:
 
     for k, v in npu_env_vars.items():
         env_vars[k] = str(v())
+        logger.info("Set npu related environment variables: %s = %s", k, v())
     if VLLM_USE_V1:
         env_vars["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+        logger.info("Set npu related environment variables: \
+                    VLLM_WORKER_MULTIPROC_METHOD = spawn")
 
     update_environment_variables(env_vars)
