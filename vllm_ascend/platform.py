@@ -150,3 +150,34 @@ class NPUPlatform(Platform):
         model configuration.
         """
         return True
+
+    @classmethod
+    def destroy_platform_model_parallel(cls) -> None:
+        from vllm_ascend.distributed.parallel_state import _EP, _ETP
+        if _EP:
+            _EP.destroy()
+        _EP = None
+
+        if _ETP:
+            _ETP.destroy()
+        _ETP = None
+
+    @classmethod
+    def platform_has_backend_register(cls) -> bool:
+        return True
+
+    @classmethod
+    def platform_register_backend(cls, pg, prefix_store, group_rank, group_size,
+                                         backend_options, timeout) -> None:
+        from torch.distributed import ProcessGroup, is_hccl_available
+        assert is_hccl_available()
+        import torch_npu  # noqa
+        from torch_npu._C._distributed_c10d import ProcessGroupHCCL
+        backend_options = ProcessGroupHCCL.Options()
+        backend_options._timeout = timeout
+        backend_class = ProcessGroupHCCL(prefix_store, group_rank, group_size,
+                                         backend_options)
+        device = torch.device("npu")
+        backend_class._set_sequence_number_for_group()
+        backend_type = ProcessGroup.BackendType.CUSTOM
+        pg._register_backend(device, backend_type, backend_class)

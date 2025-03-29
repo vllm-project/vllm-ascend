@@ -20,10 +20,15 @@ from typing import Callable, Optional
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
-from vllm.distributed import get_ep_group
 from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.model_executor.layers.fused_moe.layer import \
     UnquantizedFusedMoEMethod, FusedMoE
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig, QuantizeMethodBase)
+from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
+from vllm.forward_context import ForwardContext, get_forward_context
+
 
 
 def fused_experts_with_mc2(
@@ -460,7 +465,7 @@ def forward_oot(
                              expert_map=expert_map)
 
 
-def __init__(self):
+def unquantized_fused_moe_init__(self):
     super().__init__()
     vllm_config = get_current_vllm_config()
 
@@ -478,5 +483,157 @@ def __init__(self):
     except AttributeError as e:
         self.moe_all_to_all_group_name = None
 
-UnquantizedFusedMoEMethod.__init__ = __init__
+def fused_moe_init__(
+    self,
+    num_experts: int,
+    top_k: int,
+    hidden_size: int,
+    intermediate_size: int,
+    params_dtype: Optional[torch.dtype] = None,
+    reduce_results: bool = False,
+    renormalize: bool = True,
+    use_grouped_topk: bool = False,
+    num_expert_group: Optional[int] = None,
+    topk_group: Optional[int] = None,
+    quant_config: Optional[QuantizationConfig] = None,
+    tp_size: Optional[int] = None,
+    ep_size: Optional[int] = None,
+    dp_size: Optional[int] = None,
+    prefix: str = "",
+    custom_routing_function: Optional[Callable] = None,
+    scoring_func: str = "softmax",
+    e_score_correction_bias: Optional[torch.Tensor] = None,
+):
+    super().__init__()
+
+    if params_dtype is None:
+        params_dtype = torch.get_default_dtype()
+
+    self.ep_size = get_ep_group().world_size
+    self.tp_size = get_etp_group().world_size
+    self.dp_size = (dp_size
+                    if dp_size is not None else get_dp_group().world_size)
+    self.dp_rank = (0
+                    if self.dp_size == 1 else get_dp_group().rank_in_group)
+
+    self.top_k = top_k
+    self.num_experts = num_experts
+    assert intermediate_size % self.tp_size == 0
+    self.intermediate_size_per_partition = intermediate_size // self.tp_size
+    self.reduce_results = reduce_results
+    self.renormalize = renormalize
+    self.use_grouped_topk = use_grouped_topk
+    if self.use_grouped_topk:
+        assert num_expert_group is not None and topk_group is not None
+    self.num_expert_group = num_expert_group
+    self.topk_group = topk_group
+    self.custom_routing_function = custom_routing_function
+    self.scoring_func = scoring_func
+    self.e_score_correction_bias = e_score_correction_bias
+    self.expert_map = None
+
+    if self.ep_size > 1:
+        # Create a tensor of size num_experts filled with -1
+        self.expert_map = torch.full((self.num_experts, ),
+                                        -1,
+                                        dtype=torch.int32)
+        # Create a expert map for the local experts
+        local_num_experts = num_experts // self.ep_size
+        ep_rank = get_ep_group().rank_in_group
+        if ep_rank < (self.ep_size - 1):
+            # Each non-last rank gets local_num_experts experts.
+            self.expert_map[ep_rank * local_num_experts:
+                            (ep_rank + 1) * local_num_experts] = \
+                torch.arange(0, local_num_experts, dtype=torch.int32)
+        else:
+            # All remaining experts are assigned to the last rank.
+            local_num_experts = num_experts - ep_rank * local_num_experts
+            self.expert_map[-local_num_experts:] = \
+                torch.arange(0, local_num_experts, dtype=torch.int32)
+
+    if self.scoring_func != "softmax" and not self.use_grouped_topk:
+        raise ValueError("Only softmax scoring function is supported for "
+                            "non-grouped topk.")
+
+    if quant_config is None:
+        self.quant_method: Optional[QuantizeMethodBase] = (
+            UnquantizedFusedMoEMethod())
+    else:
+        self.quant_method = quant_config.get_quant_method(self, prefix)
+    assert self.quant_method is not None
+
+    local_num_experts = torch.sum(self.expert_map != -1) \
+        if self.expert_map is not None else num_experts
+
+    moe_quant_params = {
+        "num_experts": local_num_experts,
+        "hidden_size": hidden_size,
+        "intermediate_size_per_partition":
+        self.intermediate_size_per_partition,
+        "params_dtype": params_dtype,
+        "weight_loader": self.weight_loader,
+    }
+    # need full intermediate size pre-sharding for WNA16 act order
+    if (self.quant_method.__class__.__name__
+            in ("GPTQMarlinMoEMethod", "CompressedTensorsWNA16MoEMethod")):
+        moe_quant_params["intermediate_size_full"] = intermediate_size
+
+    self.quant_method.create_weights(layer=self, **moe_quant_params)
+
+
+def fused_moe_forward(self, hidden_states: torch.Tensor,
+            router_logits: torch.Tensor,
+            top_k = None):
+    assert self.quant_method is not None
+
+    if top_k:
+        real_top_k = top_k
+    else:
+        real_top_k = self.top_k
+
+    if self.dp_size > 1:
+        cu_tokens_across_dp_cpu = get_forward_context(
+        ).dp_metadata.cu_tokens_across_dp_cpu
+        hidden_states = self.naive_multicast(hidden_states,
+                                                        cu_tokens_across_dp_cpu)
+        router_logits = self.naive_multicast(router_logits,
+                                                        cu_tokens_across_dp_cpu)
+
+    # Matrix multiply.
+    final_hidden_states = self.quant_method.apply(
+        layer=self,
+        x=hidden_states,
+        router_logits=router_logits,
+        top_k=real_top_k,
+        renormalize=self.renormalize,
+        use_grouped_topk=self.use_grouped_topk,
+        global_num_experts=self.num_experts,
+        expert_map=self.expert_map,
+        topk_group=self.topk_group,
+        num_expert_group=self.num_expert_group,
+        custom_routing_function=self.custom_routing_function,
+        scoring_func=self.scoring_func,
+        e_score_correction_bias=self.e_score_correction_bias)
+
+    if self.dp_size > 1:
+        start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
+                self.dp_rank - 1]
+        end = cu_tokens_across_dp_cpu[self.dp_rank]
+
+        all_hidden_states = get_dp_group().all_reduce(final_hidden_states)
+        final_hidden_states = all_hidden_states[start:end, :]
+
+
+    # if self.reduce_results and self.tp_size > 1:
+    if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
+        final_hidden_states = tensor_model_parallel_all_reduce(
+            final_hidden_states)
+
+    return final_hidden_states
+
+UnquantizedFusedMoEMethod.__init__ = unquantized_fused_moe_init__
 UnquantizedFusedMoEMethod.forward_oot = forward_oot
+
+
+FusedMoE.__init__ = fused_moe_init__
+FusedMoE.forward = fused_moe_forward
