@@ -31,7 +31,6 @@ import vllm_ascend  # noqa: F401
 MODELS = [
     "Qwen/Qwen2.5-0.5B-Instruct",
 ]
-os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 
@@ -59,10 +58,11 @@ def test_models(
 
 
 pytest.mark.multi
-@pytest.mark.parametrize(
-    "model, distributed_executor_backend", [
-        ("Qwen/QwQ-32B", "mp"),
-    ])
+
+
+@pytest.mark.parametrize("model, distributed_executor_backend", [
+    ("Qwen/QwQ-32B", "mp"),
+])
 def test_models_distributed(
     vllm_runner,
     model: str,
@@ -76,13 +76,12 @@ def test_models_distributed(
     dtype = "half"
     max_tokens = 5
     with vllm_runner(
-                model,
-                dtype=dtype,
-                tensor_parallel_size=2,
-                distributed_executor_backend=distributed_executor_backend,
+            model,
+            dtype=dtype,
+            tensor_parallel_size=4,
+            distributed_executor_backend=distributed_executor_backend,
     ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts,
-                                                      max_tokens)
+        vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
 if __name__ == "__main__":
