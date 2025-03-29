@@ -62,6 +62,7 @@ jobs:
       - name: Install system dependencies
         run: |
           apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Install dependencies
         run: |
@@ -78,10 +79,6 @@ jobs:
         run: |
           VLLM_TARGET_DEVICE=empty pip install -e .
 
-      - name: Install vllm-project/vllm-ascend
-        run: |
-          pip install -e .
-
       - name: Install pta
         run: |
           if [ ! -d /root/.cache/pta ]; then
@@ -96,6 +93,10 @@ jobs:
           fi
 
           pip install /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+
+      - name: Install vllm-project/vllm-ascend
+        run: |
+          pip install -e .
 
       - name: Run vllm-project/vllm-ascend test for V0 Engine
         env:
