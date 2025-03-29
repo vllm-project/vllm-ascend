@@ -21,15 +21,17 @@ import gc
 from typing import Dict, List, Optional
 
 import torch
+import torch.distributed
 import torch.nn as nn
 import torch_npu
 from vllm import envs
-from vllm.config import VllmConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
-from vllm.logger import logger
+from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
+from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -38,22 +40,19 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.worker_base import WorkerBase
 
-from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+logger = init_logger(__name__)
 
 
 class NPUWorker(WorkerBase):
 
-    def __init__(
-            self,
-            vllm_config: VllmConfig,
-            local_rank: int,
-            rank: int,
-            distributed_init_method: str,
-            is_driver_worker: bool = False,
-            # Additional parameters for compatibility with vllm
-            **kwargs):
-        """Initialize the worker for Ascend."""
+    def __init__(self,
+                 vllm_config: VllmConfig,
+                 local_rank: int,
+                 rank: int,
+                 distributed_init_method: str,
+                 is_driver_worker: bool = False):
         # Register ops when worker init.
         from vllm_ascend import ops  # noqa: F401
 
@@ -62,6 +61,19 @@ class NPUWorker(WorkerBase):
                          rank=rank,
                          distributed_init_method=distributed_init_method,
                          is_driver_worker=is_driver_worker)
+
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        self.lora_config = vllm_config.lora_config
+        self.load_config = vllm_config.load_config
+        self.parallel_config = vllm_config.parallel_config
+        self.scheduler_config = vllm_config.scheduler_config
+        self.device_config = vllm_config.device_config
+        self.speculative_config = vllm_config.speculative_config
+        self.prompt_adapter_config = vllm_config.prompt_adapter_config
+        self.observability_config = vllm_config.observability_config
+
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
@@ -72,21 +84,53 @@ class NPUWorker(WorkerBase):
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
+        # Torch profiler. Enabled and configured through env vars:
+        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
+        if envs.VLLM_TORCH_PROFILER_DIR:
+            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
+            logger.info("Profiling enabled. Traces will be saved to: %s",
+                        torch_profiler_trace_dir)
 
-        self.profiler = self._init_profiler()
+            experimental_config = torch_npu.profiler._ExperimentalConfig(
+                export_type=torch_npu.profiler.ExportType.Text,
+                profiler_level=torch_npu.profiler.ProfilerLevel.Level0,
+                msprof_tx=False,
+                aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
+                l2_cache=False,
+                op_attr=False,
+                data_simplification=False,
+                record_op_args=False,
+                gc_detect_threshold=None,
+            )
+
+            self.profiler = torch_npu.profiler.profile(
+                activities=[
+                    torch_npu.profiler.ProfilerActivity.CPU,
+                    torch_npu.profiler.ProfilerActivity.NPU,
+                ],
+                with_stack=True,
+                profile_memory=True,
+                with_modules=True,
+                experimental_config=experimental_config,
+                on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
+                    torch_profiler_trace_dir))
+        else:
+            self.profiler = None
 
     def init_device(self):
         if self.device_config.device.type == "npu":
             self.device = torch.device(f"npu:{self.local_rank}")
-            NPUPlatform.set_device(self.device)
-            NPUPlatform.empty_cache()
-            self.init_npu_memory = NPUPlatform.mem_get_info()[0]
+            current_platform.set_device(self.device)
+
+            current_platform.empty_cache()
+            self.init_npu_memory = current_platform.mem_get_info()[0]
         else:
-            info = f"Not support device type: {self.device_config.device}"
-            logger.error(info)
-            raise RuntimeError(info)
+            raise RuntimeError(
+                f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        self._init_worker_distributed_environment()
+        init_worker_distributed_environment(self.parallel_config, self.rank,
+                                            self.distributed_init_method,
+                                            self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -98,15 +142,14 @@ class NPUWorker(WorkerBase):
         kv_cache_spec = self.model_runner.get_kv_cache_spec()
         for layer_name, layer_spec in kv_cache_spec.items():
             if isinstance(layer_spec, FullAttentionSpec):
+                dtype = layer_spec.dtype
+
                 # Use an empty tensor instead of `None`` to force Dynamo to pass
                 # it by reference, rather by specializing on the value ``None``.
-                npu_k_cache = torch.tensor([],
-                                           dtype=layer_spec.dtype,
-                                           device=self.device)
-                npu_v_cache = torch.tensor([],
-                                           dtype=layer_spec.dtype,
-                                           device=self.device)
-                kv_caches[layer_name] = (npu_k_cache, npu_v_cache)
+                tpu_k_cache = torch.tensor([], dtype=dtype, device=self.device)
+                tpu_v_cache = torch.tensor([], dtype=dtype, device=self.device)
+
+                kv_caches[layer_name] = (tpu_k_cache, tpu_v_cache)
             else:
                 raise NotImplementedError
 
@@ -118,7 +161,7 @@ class NPUWorker(WorkerBase):
 
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
-        NPUPlatform.empty_cache()
+        current_platform.empty_cache()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -126,7 +169,7 @@ class NPUWorker(WorkerBase):
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
-        free_npu_memory, total_npu_memory = NPUPlatform.mem_get_info()
+        free_npu_memory, total_npu_memory = current_platform.mem_get_info()
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
         peak_memory = self.init_npu_memory - free_npu_memory
@@ -139,7 +182,7 @@ class NPUWorker(WorkerBase):
         gc.collect()
         # TODO: don`t need impl this func after empty_cache in
         # Worker.determine_num_available_blocks() unified`
-        NPUPlatform.empty_cache()
+        current_platform.empty_cache()
         usable_memory_size = total_npu_memory * self.cache_config.gpu_memory_utilization - peak_memory
         npu_kv_cache_bytes = max(usable_memory_size, 0)
         logger.info(
@@ -187,47 +230,17 @@ class NPUWorker(WorkerBase):
         else:
             self.profiler.stop()
 
-    def _init_worker_distributed_environment(self) -> None:
-        """Initialize the distributed environment."""
-        set_custom_all_reduce(
-            not self.parallel_config.disable_custom_all_reduce)
-        init_distributed_environment(self.parallel_config.world_size,
-                                     self.rank, self.distributed_init_method,
-                                     self.local_rank, "hccl")
-        ensure_model_parallel_initialized(
-            self.parallel_config.tensor_parallel_size,
-            self.parallel_config.pipeline_parallel_size)
 
-    def _init_profiler(self):
-        # Torch profiler. Enabled and configured through env vars:
-        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
-        if envs.VLLM_TORCH_PROFILER_DIR:
-            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
-            logger.info("Profiling enabled. Traces will be saved to: %s",
-                        torch_profiler_trace_dir)
+def init_worker_distributed_environment(
+        parallel_config: ParallelConfig,
+        rank: int,
+        distributed_init_method: Optional[str] = None,
+        local_rank: int = -1) -> None:
+    """Initialize the distributed environment."""
+    set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
-            experimental_config = torch_npu.profiler._ExperimentalConfig(
-                export_type=torch_npu.profiler.ExportType.Text,
-                profiler_level=torch_npu.profiler.ProfilerLevel.Level0,
-                msprof_tx=False,
-                aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
-                l2_cache=False,
-                op_attr=False,
-                data_simplification=False,
-                record_op_args=False,
-                gc_detect_threshold=None,
-            )
+    init_distributed_environment(parallel_config.world_size, rank,
+                                 distributed_init_method, local_rank, "hccl")
 
-            return torch_npu.profiler.profile(
-                activities=[
-                    torch_npu.profiler.ProfilerActivity.CPU,
-                    torch_npu.profiler.ProfilerActivity.NPU,
-                ],
-                with_stack=True,
-                profile_memory=True,
-                with_modules=True,
-                experimental_config=experimental_config,
-                on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
-                    torch_profiler_trace_dir))
-        else:
-            return None
+    ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
+                                      parallel_config.pipeline_parallel_size)
