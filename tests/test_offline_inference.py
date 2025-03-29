@@ -34,8 +34,6 @@ MODELS = [
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
-TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
-
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half", "float16"])
