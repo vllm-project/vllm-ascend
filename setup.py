@@ -205,7 +205,8 @@ class cmake_build_ext(build_ext):
         )
 
     def build_extensions(self) -> None:
-
+        if envs.COMPILE_CUSTOM_KERNELS is None:
+            return 
         # Ensure that CMake is present and working
         try:
             subprocess.check_output(["cmake", "--version"])
@@ -283,7 +284,10 @@ except LookupError:
     # only checks out the commit. In this case, we set a dummy version.
     VERSION = "0.0.0"
 
-ext_modules = [CMakeExtension(name="vllm_ascend.vllm_ascend_C")]
+
+ext_modules = []
+if envs.COMPILE_CUSTOM_KERNELS is not None:
+    ext_modules = [CMakeExtension(name="vllm_ascend.vllm_ascend_C")]
 
 
 def get_path(*filepath) -> str:
