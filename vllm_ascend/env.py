@@ -62,6 +62,7 @@ def load_npu_env_vars() -> None:
         if not is_set(name):
             env_vars[name] = str(value())
             logger.info("Set environment variables: %s = %s", name, value())
+    
     if VLLM_USE_V1 and not is_set("VLLM_WORKER_MULTIPROC_METHOD"):
         env_vars["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
         logger.info("Set environment variables: \
