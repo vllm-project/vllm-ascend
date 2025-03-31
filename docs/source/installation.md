@@ -119,7 +119,14 @@ Once it's done, you can start to set up `vllm` and `vllm-ascend`.
 :selected:
 :sync: pip
 
-You can install `vllm` and `vllm-ascend` from **pre-built wheel** (**Unreleased yet**, please build from source code):
+First install system dependencies:
+
+```bash
+apt update  -y
+apt install -y gcc g++ libnuma-dev
+```
+
+You can install `vllm` and `vllm-ascend` from **pre-built wheel**:
 
 ```{code-block} bash
    :substitutions:
