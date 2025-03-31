@@ -23,9 +23,11 @@ import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
-
+from vllm.utils import direct_register_custom_op
+from vllm.forward_context import ForwardContext, get_forward_context
 
 class AscendAttentionBackend(AttentionBackend):
+    accept_output_buffer: bool = True
 
     @staticmethod
     def get_name() -> str:
@@ -150,6 +152,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
+        trace_flag: bool = True,
     ) -> torch.Tensor:
         """Forward pass with Ascend attention.
         Args:
@@ -167,59 +170,100 @@ class AscendAttentionBackendImpl(AttentionImpl):
             shape = [batch_size * seq_len, num_heads, head_size]
         """
         num_tokens = query.shape[0]
-        output = torch.empty(num_tokens,
+        if output is None:
+            output = torch.empty(num_tokens,
                              self.num_heads,
                              self.head_size,
                              dtype=query.dtype,
                              device=query.device)
-
-        if attn_metadata is None:
-            # Profiling run.
-            return output.view(num_tokens, self.hidden_size)
-        assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
-        attn_type = self.attn_type
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError("Encoder self-attention and "
-                                      "encoder/decoder cross-attention "
-                                      "are not implemented for "
-                                      "PallasAttentionBackendImpl")
-        # View q k v to BSH.
-        query = query.view(-1, self.num_heads, self.head_size)
-        key = key.view(-1, self.num_kv_heads, self.head_size)
-        value = value.view(-1, self.num_kv_heads, self.head_size)
-        # TODO: Remove this contiguous in the future.
-        value = value.contiguous()
-
-        if hasattr(layer, 'quant_method'):
-            # TODO: Add attr (num_prefills, prefill_metadata, decode_metadata) to AscendMetadata
-            pass
-        else:
-            if kv_cache.numel() > 0:
-                key_cache, value_cache = kv_cache[0], kv_cache[1]
-                num_blocks, block_size, _ = key_cache.shape
-                key_cache = key_cache.view(num_blocks, block_size,
-                                           self.num_kv_heads, self.head_size)
-                value_cache = value_cache.view(num_blocks, block_size,
-                                               self.num_kv_heads,
-                                               self.head_size)
-                slots = attn_metadata.slot_mapping
-                torch_npu._npu_reshape_and_cache(key=key,
-                                                 value=value,
-                                                 key_cache=key_cache,
-                                                 value_cache=value_cache,
-                                                 slot_indices=slots)
-
-            # use paged attention
-            torch_npu._npu_paged_attention_splitfuse(
+        if trace_flag:
+            torch.ops.vllm.unified_ascend_attention_with_output(
                 query=query,
-                key_cache=key_cache,
-                value_cache=value_cache,
-                mask=attn_metadata.attn_mask,
-                block_table=attn_metadata.block_tables,
-                seq_len=attn_metadata.seq_lens,
-                context_lens=attn_metadata.context_lens,
-                num_kv_heads=self.num_kv_heads,
-                num_heads=self.num_heads,
-                scale_value=self.scale,
-                out=output)
+                key=key,
+                value=value,
+                output=output,
+                layer_name=self.name
+            )
+        else:
+            num_tokens = query.shape[0]
+            if attn_metadata is None:
+                return output.view(num_tokens, self.hidden_size)
+            assert layer._k_scale_float == 1.0 and layer._v_scale_float == 1.0
+            attn_type = self.attn_type
+            if attn_type != AttentionType.DECODER:
+                raise NotImplementedError("Encoder self-attention and "
+                                            "encoder/decoder cross-attention "
+                                            "are not implemented for "
+                                            "PallasAttentionBackendImpl")
+            # View q k v to BSH.
+            query = query.view(-1, self.num_heads, self.head_size)
+            key = key.view(-1, self.num_kv_heads, self.head_size)
+            value = value.view(-1, self.num_kv_heads, self.head_size)
+            # TODO: Remove this contiguous in the future.
+            value = value.contiguous()
+
+            if hasattr(layer, 'quant_method'):
+                # TODO: Add attr (num_prefills, prefill_metadata, decode_metadata) to AscendMetadata
+                pass
+            else:
+                if kv_cache.numel() > 0:
+                    key_cache, value_cache = kv_cache[0], kv_cache[1]
+                    num_blocks, block_size, _ = key_cache.shape
+                    key_cache = key_cache.view(num_blocks, block_size,
+                                                self.num_kv_heads, self.head_size)
+                    value_cache = value_cache.view(num_blocks, block_size,
+                                                    self.num_kv_heads,
+                                                    self.head_size)
+                    slots = attn_metadata.slot_mapping
+                    torch_npu._npu_reshape_and_cache(key=key,
+                                                        value=value,
+                                                        key_cache=key_cache,
+                                                        value_cache=value_cache,
+                                                        slot_indices=slots)
+                # use paged attention
+                torch_npu._npu_paged_attention_splitfuse(
+                    query=query,
+                    key_cache=key_cache,
+                    value_cache=value_cache,
+                    mask=attn_metadata.attn_mask,
+                    block_table=attn_metadata.block_tables,
+                    seq_len=attn_metadata.seq_lens,
+                    context_lens=attn_metadata.context_lens,
+                    num_kv_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale_value=self.scale,
+                    out=output)
         return output.view(num_tokens, self.hidden_size)
+
+
+def unified_ascend_attention_with_output(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    self = forward_context.no_compile_layers[layer_name]
+    kv_cache = self.kv_cache[forward_context.virtual_engine]
+    return self.impl.forward(self, query, key, value, kv_cache, attn_metadata, trace_flag=False)
+
+
+def unified_attention_with_output_fake(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="unified_ascend_attention_with_output",
+    op_func=unified_ascend_attention_with_output,
+    mutates_args=["output"],
+    fake_impl=unified_attention_with_output_fake,
+    dispatch_key="PrivateUse1",
+)
