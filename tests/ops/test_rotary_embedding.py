@@ -137,7 +137,7 @@ class RotaryEmbedding(nn.Module):
 
 # test with leading dimension and merge seqlen and batch_size as num_tokens
 # TODO(ganyi): open this test in the future
-@pytest.skip(
+@pytest.mark.skip(
     reason=
     "skip this test by default for now because of ci issue, will enable it in the future"
 )
