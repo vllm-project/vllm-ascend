@@ -9,6 +9,7 @@ requires = [
     "pyyaml",
     "scipy",
     "torch_npu >= 2.5.1rc1",
-    "torch >= 2.5.1"
+    "torch >= 2.5.1",
+    "pip"
 ]
 build-backend = "setuptools.build_meta"
