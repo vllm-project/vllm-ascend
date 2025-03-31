@@ -18,6 +18,7 @@
 #
 
 import gc
+import os
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 import numpy as np
@@ -51,6 +52,8 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+
+NPU_PAGED_ATTENTION_MASK_VALUE = -10000
 
 logger = init_logger(__name__)
 
@@ -210,6 +213,19 @@ class NPUModelRunner:
                                                 self.max_num_tokens,
                                                 device="cpu")
 
+        # NOTE: Pre-construct a mask matrix to improve the efficiency of attention mask construction during inference.
+        # Note that the length of the matrix needs to be carefully balanced: a matrix that is too large will consume excessive VRAM, while a matrix that is too small will require dynamic concatenation during inference, leading to performance degradation.
+        # Therefore, an environment variable is added here to dynamically set the size of the pre-constructed mask matrix based on requirements.
+        mask_len = os.getenv("PAGED_ATTENTION_MASK_LEN", 10000)
+        self.attn_mask_len = min(self.max_model_len, int(mask_len))
+        self.attn_mask_npu = torch.full(
+            (self.attn_mask_len, self.attn_mask_len),
+            NPU_PAGED_ATTENTION_MASK_VALUE,
+            device=self.device,
+            dtype=self.vllm_config.model_config.dtype)
+        self.attn_mask_npu.masked_fill_(
+            self.attn_mask_npu.tril() == NPU_PAGED_ATTENTION_MASK_VALUE, 0)
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
         output.
@@ -365,25 +381,35 @@ class NPUModelRunner:
     def get_model(self) -> nn.Module:
         return self.model
 
-    @staticmethod
-    def make_attention_mask(kv_dtype, kv_device, max_seq_len, seq_lens,
-                            query_lens):
-        # for paged attention
-        atten_mask = np.zeros([0, max_seq_len])
-        for i, context_length in enumerate(seq_lens):
-            q_len = query_lens[i]
-            ones_len = context_length - q_len
-            ones = np.ones((q_len, ones_len), dtype=np.float16)
-            bias_cache = np.tril(
-                np.ones((q_len, max_seq_len - ones_len), dtype=np.float16))
-            bias_cache = np.concatenate((ones, bias_cache), axis=1)
-            mask_value = -10000
-            bias_cache[bias_cache == 0] = mask_value
-            bias_cache[bias_cache == 1] = 0
+    def make_attention_mask(self, seq_lens, query_lens,
+                            position) -> torch.Tensor:
+        max_seq_len = max(seq_lens, default=0)
+        if max_seq_len <= self.attn_mask_len:
+            return torch.index_select(self.attn_mask_npu,
+                                      dim=0,
+                                      index=position)[:, :max_seq_len]
 
-            atten_mask = np.concatenate([atten_mask, bias_cache], axis=0)
-        atten_mask = torch.from_numpy(atten_mask).to(kv_dtype).to(kv_device)
-        return atten_mask
+        total_q_len = sum(query_lens)
+        attn_mask = torch.zeros((total_q_len, max_seq_len),
+                                dtype=self.vllm_config.model_config.dtype,
+                                device="cpu")
+
+        current_row = 0
+        for i in range(len(query_lens)):
+            seq_len = seq_lens[i]
+            q_len = query_lens[i]
+            context_len = seq_len - q_len
+
+            assert context_len >= 0
+            attn_mask[current_row:current_row + q_len,
+                      context_len:] = NPU_PAGED_ATTENTION_MASK_VALUE
+            right_tensor = attn_mask[current_row:current_row + q_len,
+                                     context_len:seq_len]
+            right_tensor.mask_fill_(
+                right_tensor.tril() == NPU_PAGED_ATTENTION_MASK_VALUE, 0)
+            current_row += q_len
+
+        return attn_mask.to(self.device, non_blocking=True)
 
     def _process_reqs(
         self,
@@ -444,9 +470,9 @@ class NPUModelRunner:
         slot_mapping = self.slot_mapping_cpu[:total_num_scheduled_tokens].to(
             self.device, non_blocking=True)
 
-        attn_mask = self.make_attention_mask(
-            self.vllm_config.model_config.dtype, self.device,
-            max(seq_lens, default=0), seq_lens, num_scheduled_tokens)
+        attn_mask = self.make_attention_mask(seq_lens=seq_lens,
+                                             query_lens=num_scheduled_tokens,
+                                             position=positions)
 
         attn_metadata = AscendMetadata(
             seq_lens=query_lens,
