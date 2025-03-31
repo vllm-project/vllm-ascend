@@ -153,23 +153,6 @@ class cmake_build_ext(build_ext):
             # else specify pybind11 path installed from source code on CI container
             raise RuntimeError(f"CMake configuration failed: {e}")
 
-        # try retrive soc version from npu-smi
-        soc_command = [
-            "bash",
-            "-c",
-            "npu-smi info | grep OK | awk '{print $3}' | head -n 1",
-        ]
-        try:
-            soc_version = subprocess.check_output(soc_command,
-                                                  text=True).strip()
-            soc_version = soc_version.split("-")[0]
-            soc_version = "Ascend" + soc_version
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Retrive Soc version failed: {e}")
-
-        # add SOC_VERSION
-        cmake_args += [f"-DSOC_VERSION={soc_version}"]
-
         install_path = os.path.join(ROOT_DIR, self.build_lib)
         if isinstance(self.distribution.get_command_obj("develop"), develop):
             install_path = os.path.join(ROOT_DIR, "vllm_ascend")
@@ -178,6 +161,8 @@ class cmake_build_ext(build_ext):
 
         cmake_args += [f"-DCMAKE_PREFIX_PATH={pybind11_cmake_path}"]
 
+        cmake_args += [f"-DSOC_VERSION={envs.SOC_VERSION}"]
+
         # Override the base directory for FetchContent downloads to $ROOT/.deps
         # This allows sharing dependencies between profiles,
         # and plays more nicely with sccache.
@@ -185,6 +170,17 @@ class cmake_build_ext(build_ext):
         fc_base_dir = os.path.join(ROOT_DIR, ".deps")
         fc_base_dir = os.environ.get("FETCHCONTENT_BASE_DIR", fc_base_dir)
         cmake_args += ["-DFETCHCONTENT_BASE_DIR={}".format(fc_base_dir)]
+
+        torch_npu_command = "python3 -m pip show torch-npu | grep '^Location:' | awk '{print $2}'"
+        try:
+            torch_npu_path = subprocess.check_output(
+                torch_npu_command, shell=True).decode().strip()
+            torch_npu_path += "/torch_npu"
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Retrieve torch version version failed: {e}")
+
+        # add TORCH_NPU_PATH
+        cmake_args += [f"-DTORCH_NPU_PATH={torch_npu_path}"]
 
         build_tool = []
         # TODO(ganyi): ninja and ccache support for ascend c auto codegen. now we can only use make build
@@ -205,7 +201,7 @@ class cmake_build_ext(build_ext):
         )
 
     def build_extensions(self) -> None:
-        if envs.COMPILE_CUSTOM_KERNELS is None:
+        if not envs.COMPILE_CUSTOM_KERNELS:
             return
         # Ensure that CMake is present and working
         try:
@@ -285,7 +281,7 @@ except LookupError:
     VERSION = "0.0.0"
 
 ext_modules = []
-if envs.COMPILE_CUSTOM_KERNELS is not None:
+if envs.COMPILE_CUSTOM_KERNELS:
     ext_modules = [CMakeExtension(name="vllm_ascend.vllm_ascend_C")]
 
 

@@ -9,16 +9,8 @@ name: 'image'
 #   - commits are merge into main/*-dev  ==> vllm-ascend:main / vllm-ascend:*-dev
 # 3. tags push trigger image publish
 #   - is for final release image
-#   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3-openeuler|latest / vllm-ascend:v1.2.3rc1-openeuler
+#   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3|latest / vllm-ascend:v1.2.3rc1
 on:
-  pull_request:
-    branches:
-      - 'main'
-      - '*-dev'
-    paths:
-      - '.github/workflows/image_openeuler.yml'
-      - 'Dockerfile.openEuler'
-      - 'vllm_ascend/**'
   push:
     # Publish image when tagging, the Dockerfile in tag will be build as tag image
     branches:
@@ -27,22 +19,17 @@ on:
     tags:
       - 'v*'
     paths:
-      - '.github/workflows/image_openeuler.yml'
-      - 'Dockerfile.openEuler'
+      - '.github/workflows/image.yml'
+      - 'Dockerfile'
       - 'vllm_ascend/**'
-
 jobs:
+
   build:
-    name: vllm-ascend openEuler image
-    runs-on: ubuntu-latest
+    name: vllm-ascend image
+    runs-on: image-build
 
     steps:
     - uses: actions/checkout@v4
-
-    - name: Print
-      run: |
-        lscpu
-
     - name: Docker meta
       id: meta
       uses: docker/metadata-action@v5
@@ -53,31 +40,16 @@ jobs:
         # Note for test case
         # https://github.com/marketplace/actions/docker-metadata-action#typeref
         # 1. branch job pulish per main/*-dev branch commits
-        # 2. main and dev pull_request is build only, so the tag pr-N-openeuler is fine
+        # 2. main and dev pull_request is build only, so the tag pr-N is fine
         # 3. only pep440 matched tag will be published:
-        #    - v0.7.1 --> v0.7.1-openeuler, latest
-        #    - pre/post/dev: v0.7.1rc1-openeuler/v0.7.1rc1-openeuler/v0.7.1rc1.dev1-openeuler/v0.7.1.post1-openeuler, no latest
+        #    - v0.7.1 --> v0.7.1, latest
+        #    - pre/post/dev: v0.7.1rc1/v0.7.1rc1/v0.7.1rc1.dev1/v0.7.1.post1, no latest
         #      which follow the rule from vLLM with prefix v
         # TODO(yikun): the post release might be considered as latest release
         tags: |
-          type=ref,event=branch,suffix=-openeuler
-          type=ref,event=pr,suffix=-openeuler
-          type=pep440,pattern={{raw}}-openeuler
-
-    - name: Free up disk space
-      uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
-      with:
-        tool-cache: true
-        docker-images: false
-
-    - name: Build - Set up QEMU
-      uses: docker/setup-qemu-action@v3
-      # TODO(yikun): remove this after https://github.com/docker/setup-qemu-action/issues/198 resolved
-      with:
-        image: tonistiigi/binfmt:qemu-v7.0.0-28
-
-    - name: Build - Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+            type=ref,event=branch
+            type=ref,event=pr
+            type=pep440,pattern={{raw}}
 
     - name: Publish - Login to Quay Container Registry
       if: ${{ github.event_name == 'push' && github.repository_owner == 'vllm-project' }}
@@ -91,12 +63,10 @@ jobs:
       uses: docker/build-push-action@v6
       with:
         platforms: linux/amd64,linux/arm64
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        cache-from: quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10
         # only trigger when tag, branch/main push
-        push: ${{ github.event_name == 'push' && github.repository_owner == 'vllm-project' }}
+        push: true
         labels: ${{ steps.meta.outputs.labels }}
         tags: ${{ steps.meta.outputs.tags }}
-        file: Dockerfile.openEuler
         build-args: |
-          PIP_INDEX_URL=https://pypi.org/simple
+            PIP_INDEX_URL=https://pypi.org/simple

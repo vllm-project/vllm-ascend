@@ -9,7 +9,7 @@
 ## Setup environment using container
 
 :::::{tab-set}
-::::{tab-item} Ubuntu OS
+::::{tab-item} Ubuntu
 
 ```{code-block} bash
    :substitutions:
@@ -35,7 +35,7 @@ docker run --rm \
 ```
 ::::
 
-::::{tab-item} openEuler OS
+::::{tab-item} openEuler
 
 ```{code-block} bash
    :substitutions:

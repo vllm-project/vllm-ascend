@@ -3,14 +3,21 @@ from typing import Any, Callable, Dict
 
 env_variables: Dict[str, Callable[[], Any]] = {
     # max compile thread num
-    "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
-    "CMAKE_BUILD_TYPE": lambda: os.getenv("CMAKE_BUILD_TYPE"),
+    "MAX_JOBS":
+    lambda: os.getenv("MAX_JOBS", None),
+    "CMAKE_BUILD_TYPE":
+    lambda: os.getenv("CMAKE_BUILD_TYPE"),
     "COMPILE_CUSTOM_KERNELS":
-    lambda: os.getenv("COMPILE_CUSTOM_KERNELS", None),
-    # If set, vllm-ascend will print verbose logs during compliation
-    "VERBOSE": lambda: bool(int(os.getenv('VERBOSE', '0'))),
-    "ASCEND_HOME_PATH": lambda: os.getenv("ASCEND_HOME_PATH", None),
-    "LD_LIBRARY_PATH": lambda: os.getenv("LD_LIBRARY_PATH", None),
+    lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
+    "SOC_VERSION":
+    lambda: os.getenv("SOC_VERSION", "ASCEND910B1"),
+    # If set, vllm-ascend will print verbose logs during compilation
+    "VERBOSE":
+    lambda: bool(int(os.getenv('VERBOSE', '0'))),
+    "ASCEND_HOME_PATH":
+    lambda: os.getenv("ASCEND_HOME_PATH", None),
+    "LD_LIBRARY_PATH":
+    lambda: os.getenv("LD_LIBRARY_PATH", None),
 }
 
 
