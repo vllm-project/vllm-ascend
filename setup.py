@@ -206,7 +206,7 @@ class cmake_build_ext(build_ext):
 
     def build_extensions(self) -> None:
         if envs.COMPILE_CUSTOM_KERNELS is None:
-            return 
+            return
         # Ensure that CMake is present and working
         try:
             subprocess.check_output(["cmake", "--version"])
@@ -283,7 +283,6 @@ except LookupError:
     # The checkout action in github action CI does not checkout the tag. It
     # only checks out the commit. In this case, we set a dummy version.
     VERSION = "0.0.0"
-
 
 ext_modules = []
 if envs.COMPILE_CUSTOM_KERNELS is not None:
