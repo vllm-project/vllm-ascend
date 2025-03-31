@@ -158,14 +158,8 @@ def fused_experts_with_mc2(
         expert_map: torch.Tensor = None,
         moe_all_to_all_group_name: str = None,
 ) -> torch.Tensor:
-    # Decoder Stage, seq = 1
-    # if torch.distributed.get_rank() == 0:
-    #     print(w1.shape)
-    #     print(hidden_states.shape)
-
     global_bs = 0
     moe_expert_num = len(expert_map)
-    # hidden_states = hidden_states.bfloat16()
     kwargs = {
         "x": hidden_states,
         "expert_ids": topk_ids,
@@ -395,11 +389,14 @@ def fused_experts(
         final_hidden_states = torch.zeros(*original_shape,
                                           device=hidden_states.device,
                                           dtype=dtype)
-        final_hidden_states.index_add_(0, sorted_token_indices,
-                                       weighted_down_out)
-        # TODO: This should not happen! Look into it!
-        # fill nan with 0.0
-        final_hidden_states[torch.isnan(final_hidden_states)] = 0.0
+
+        # TODO: npu_grouped_matmul output random values at [num_valid_tokens:, ...]
+        # This created multiple NaN and index_add_ will mix them up which harms accracy
+        # remove this mask and filter after it being fixed
+        num_valid_tokens = mask.sum()
+        valid_token_mask = torch.arange(0, sorted_token_indices.shape[0], device=device).unsqueeze(1) < num_valid_tokens
+        valid_output = torch.where(valid_token_mask, weighted_down_out, torch.zeros_like(weighted_down_out)).to(dtype)
+        final_hidden_states.index_add_(0, sorted_token_indices, valid_output)
     else:
         # TODO: Reorder device memory 2 times here, replace the current
         # implementation here when suitable operators become available.

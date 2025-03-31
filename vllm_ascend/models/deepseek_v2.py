@@ -142,21 +142,18 @@ class CustomDeepseekV2MoE(nn.Module):
 
         vllm_config = get_current_vllm_config()
         self.dp_size = get_dp_group().world_size
-        self.batch_size = vllm_config.scheduler_config.max_num_seqs // self.dp_size
+        batch_size = vllm_config.scheduler_config.max_num_seqs // self.dp_size
         
         params_dtype = torch.get_default_dtype()
-        self.final_hidden_states = torch.zeros([self.batch_size, config.hidden_size],
+        self.final_hidden_states = torch.zeros([batch_size, config.hidden_size],
                                                 dtype=params_dtype, device="npu")
-        self.hidden_dim = config.hidden_size
         self.tp_group = get_tp_group().device_group
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        B, _ = hidden_states.shape
-        hidden_states = hidden_states.view(-1, self.hidden_dim)
+        num_tokens, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
 
-        # TODO: "B == self.batch_size" is not the final solution
-        # Should consider batch padding and then switch to "self.dp_size > 1"
-        if self.tp_size > 1 and B == self.batch_size:
+        if self.tp_size > 1 and self.dp_size > 1:
             hidden_states = dist._functional_collectives.reduce_scatter_tensor(
                 hidden_states,
                 "sum",
@@ -164,28 +161,25 @@ class CustomDeepseekV2MoE(nn.Module):
                 group=self.tp_group
             )
 
-        num_tokens, hidden_dim = hidden_states.shape
-        hidden_states = hidden_states.view(-1, hidden_dim)
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        hidden_states = self.experts(
+        final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
             top_k=CustomDeepseekV2MoE.top_k) * self.routed_scaling_factor
         if shared_output is not None:
-            hidden_states = hidden_states + shared_output
+            final_hidden_states = final_hidden_states + shared_output
         if self.tp_size > 1:
-            if B == self.batch_size:
-                dist.all_gather_into_tensor(self.final_hidden_states,
-                                            hidden_states,
-                                            group=self.tp_group)
+            if self.dp_size > 1:
+                dist.all_gather_into_tensor(self.final_hidden_states, final_hidden_states, self.tp_group)
+                return self.final_hidden_states
             else:
-                self.final_hidden_states = tensor_model_parallel_all_reduce(
-                    hidden_states)
+                final_hidden_states = tensor_model_parallel_all_reduce(
+                    final_hidden_states)
 
-        return self.final_hidden_states.view(num_tokens, hidden_dim)
+        return final_hidden_states.view(num_tokens, hidden_dim)
 
 class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
 
