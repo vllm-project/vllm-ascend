@@ -96,10 +96,6 @@ jobs:
 
           pip install /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 
-      - name: Install vllm-project/vllm-ascend
-        run: |
-          pip install -e .
-
       - name: Run vllm-project/vllm-ascend test for V0 Engine
         env:
           VLLM_USE_V1: 0
