@@ -44,19 +44,9 @@ from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 from vllm_ascend.utils import VLLM_ENABLE_GRAPH_MODE
 
-# import torchair as tng
-# from torchair.configs.compiler_config import CompilerConfig
-# import torchair._contrib.custom_torch_ops
-
-# config = CompilerConfig()
-# config.experimental_config.keep_inference_input_mutations = True
-# npu_backend = tng.get_npu_backend(compiler_config=config)
-
 if TYPE_CHECKING:
     from vllm_ascend.worker.model_runner import (
         ModelInputForNPUBuilder, ModelInputForNPUWithSamplingMetadata)
-
-# COUNT = 0
 
 
 def generate_attn_mask(max_seq_len: int, dtype=torch.float16):
@@ -967,52 +957,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         return self.output.view(num_tokens, self.hidden_size)
 
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
-
-def golden_func(kv, 
-                gamma,
-                cos,
-                sin,
-                index,
-                k_cache,
-                ckv_cache,
-                k_rope_scale=None,
-                c_kv_scale=None,
-                k_rope_offset=None,
-                c_kv_offset=None,
-                epsilon=1e-05,
-                cache_mode="Norm",
-                is_output_kv=False):
-    batch_size, _, seq_len, _ = kv.shape
-    if "PA" in cache_mode:
-        block_num, block_size, _, _ = k_cache.shape
-
-    # split input
-    rms_in, rope_in = kv.split([512, 64], dim=-1)
-    rms_in = rms_in.to(torch.float32)
-    rope_in = rope_in.to(torch.float32)
-    # calc rmsnorm
-    y = rms_in / torch.sqrt(torch.mean(rms_in ** 2, dim=-1, keepdim=True) + epsilon)
-    y = y * gamma.to(torch.float32)
-    # calc rope
-    k = rope_in.view(batch_size, 1, seq_len, 32, 2).transpose(4, 3).reshape(batch_size, 1, seq_len, 64)
-    k_embed = (k * cos.to(torch.float32)) + (rotate_half(k) * sin.to(torch.float32))
-
-    k_embed = k_embed.to(k_cache.dtype)
-    y = y.to(k_cache.dtype)
-
-    page = index // block_size
-    slot = index % block_size
-    slot_indices = torch.stack([page, slot], dim=-1)
-    torch_npu.scatter_update_(k_cache, slot_indices, k_embed, -3)
-    torch_npu.scatter_update_(ckv_cache, slot_indices, y, -3)
-
-    return k_cache, ckv_cache
-
 class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
 
     def __init__(
@@ -1184,9 +1128,6 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
                                dim=-1)
         if k_pe is None and attn_metadata.decode_metadata:
-            # TODO: Replace this with rope_single
-            q_pe, _ = self.rotary_emb(attn_metadata.input_positions, q_pe, q_pe)
-            q_pe = q_pe.view(num_tokens, self.num_heads, -1)
             seq_len = self.rotary_emb.max_position_embeddings
 
             cos = self.rotary_emb.cos_cached[:seq_len].to(dtype=q_pe.dtype)
@@ -1195,6 +1136,8 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
             sin = sin[attn_metadata.input_positions]
             cos = cos[:, None, None, :]
             sin = sin[:, None, None, :]
+
+            q_pe = self.rope_single(q_pe, cos, sin)
             k_pe, k_nope = self.exec_kv(hidden_states_or_kv_c_normed, cos, sin,
                                         kv_cache, attn_metadata.slot_mapping)
         else:
