@@ -27,6 +27,7 @@
 # vllm-project/vllm/vllm/model_executor/models/deepseek_v2.py
 """Inference-only DeepseekV2/DeepseekV3 model."""
 
+import os
 from typing import Iterable, List, Optional, Set, Tuple, Union, Dict, Any
 
 import torch
@@ -153,7 +154,7 @@ class CustomDeepseekV2MoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        if self.tp_size > 1 and self.dp_size > 1:
+        if self.tp_size > 1 and self.dp_size > 1 and os.environ.get("VLLM_ENABLE_MC2") == 1:
             hidden_states = dist._functional_collectives.reduce_scatter_tensor(
                 hidden_states,
                 "sum",
@@ -172,7 +173,7 @@ class CustomDeepseekV2MoE(nn.Module):
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
         if self.tp_size > 1:
-            if self.dp_size > 1:
+            if self.dp_size > 1 and os.environ.get("VLLM_ENABLE_MC2") == 1:
                 dist.all_gather_into_tensor(self.final_hidden_states, final_hidden_states, self.tp_group)
                 return self.final_hidden_states
             else:
