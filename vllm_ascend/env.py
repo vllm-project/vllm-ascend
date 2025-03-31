@@ -20,7 +20,7 @@
 import os
 from typing import TYPE_CHECKING, Any, Callable
 
-from vllm.envs import VLLM_USE_V1
+from vllm.envs import VLLM_USE_V1, is_set
 from vllm.logger import init_logger
 from vllm.utils import update_environment_variables
 
@@ -57,12 +57,14 @@ def __dir__():
 def load_npu_env_vars() -> None:
     env_vars: dict[str, str] = {}
 
-    for k, v in npu_env_vars.items():
-        env_vars[k] = str(v())
-        logger.info("Set npu related environment variables: %s = %s", k, v())
-    if VLLM_USE_V1:
+    for name, value in npu_env_vars.items():
+        # If the env var is not explicitly set by the user, set it.
+        if not is_set(name):
+            env_vars[name] = str(value())
+            logger.info("Set environment variables: %s = %s", name, value())
+    if VLLM_USE_V1 and not is_set("VLLM_WORKER_MULTIPROC_METHOD"):
         env_vars["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-        logger.info("Set npu related environment variables: \
+        logger.info("Set environment variables: \
                     VLLM_WORKER_MULTIPROC_METHOD = spawn")
 
     update_environment_variables(env_vars)
