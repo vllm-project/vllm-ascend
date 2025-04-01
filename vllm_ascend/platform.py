@@ -93,17 +93,17 @@ class NPUPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         compilation_config = vllm_config.compilation_config
         import os
-        aclgraph_enabled = os.getenv('ENABL_ACLGRAPH')
+        aclgraph_enabled = os.getenv('ENABLE_ACLGRAPH')
 
         if aclgraph_enabled == '1' and compilation_config and compilation_config.level == CompilationLevel.PIECEWISE:
             logger.warning(
                 "Compilation level %s is supported on NPU now, But use_inductor is no support",
                 compilation_config.level)
             compilation_config.use_inductor = False
-            compilation_config.splitting_ops = compilation_config.splitting_ops.append("vllm.unified_ascend_attention_with_output")
+            compilation_config.splitting_ops = ["vllm.unified_ascend_attention_with_output"]
         elif compilation_config and compilation_config.level != CompilationLevel.NO_COMPILATION:
             logger.warning(
-                "ENABL_ACLGRAPH is not set, Compilation level %s is not supported on NPU now, forcing compilation level to NO_COMPILATION",
+                "ENABLE_ACLGRAPH is not set, Compilation level %s is not supported on NPU now, forcing compilation level to NO_COMPILATION",
                 compilation_config.level)
             compilation_config.level = CompilationLevel.NO_COMPILATION
 
