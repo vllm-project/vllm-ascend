@@ -23,7 +23,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.model_executor.layers.fused_moe.layer import \
-    UnquantizedFusedMoEMethod, FusedMoE
+    UnquantizedFusedMoEMethod, FusedMoE, determine_expert_map
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
@@ -438,6 +438,15 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         except AttributeError as e:
             self.moe_all_to_all_group_name = None
 
+    def process_weights_after_loading(self, layer):
+        super(UnquantizedFusedMoEMethod, self).process_weights_after_loading(layer)
+        layer.w13_weight = torch.nn.Parameter(self._maybe_pad_weight(
+            layer.w13_weight.data),
+                                              requires_grad=False)
+        layer.w2_weight = torch.nn.Parameter(self._maybe_pad_weight(
+            layer.w2_weight.data),
+                                             requires_grad=False)
+
     def forward_oot(
         self,
         layer: torch.nn.Module,
@@ -527,6 +536,7 @@ class AscendFusedMoE(FusedMoE):
 
         self.top_k = top_k
         self.num_experts = num_experts
+        self.global_num_experts = num_experts
         assert intermediate_size % self.tp_size == 0
         self.intermediate_size_per_partition = intermediate_size // self.tp_size
         self.reduce_results = reduce_results
@@ -540,25 +550,20 @@ class AscendFusedMoE(FusedMoE):
         self.scoring_func = scoring_func
         self.e_score_correction_bias = e_score_correction_bias
         self.expert_map = None
+        self.activation = activation
 
         if self.ep_size > 1:
             # Create a tensor of size num_experts filled with -1
-            self.expert_map = torch.full((self.num_experts, ),
-                                         -1,
-                                         dtype=torch.int32)
-            # Create a expert map for the local experts
-            local_num_experts = num_experts // self.ep_size
-            ep_rank = get_ep_group().rank_in_group
-            if ep_rank < (self.ep_size - 1):
-                # Each non-last rank gets local_num_experts experts.
-                self.expert_map[ep_rank * local_num_experts:
-                                (ep_rank + 1) * local_num_experts] = \
-                    torch.arange(0, local_num_experts, dtype=torch.int32)
-            else:
-                # All remaining experts are assigned to the last rank.
-                local_num_experts = num_experts - ep_rank * local_num_experts
-                self.expert_map[-local_num_experts:] = \
-                    torch.arange(0, local_num_experts, dtype=torch.int32)
+            self.local_num_experts, self.expert_map = determine_expert_map(self.ep_size, get_ep_group().rank_in_group, self.global_num_experts)
+        else:
+            # Adjust TP size for DP attention
+            # haven't test its functionality yet, may remove in the future
+            self.tp_rank = self.tp_size * self.dp_rank
+            self.ep_rank = 0
+            self.tp_size = self.tp_size * self.dp_size
+            self.ep_size = 1
+            self.local_num_experts = self.global_num_experts
+            self.expert_map = None
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "

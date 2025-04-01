@@ -595,32 +595,20 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
             )
 
         if self.num_prefills > 0:
-            if block_tables is None or block_tables.numel() == 0:
-                # normal mask
-                self.attn_mask = AscendMetadataBuilder._attn_mask_builder.get_attn_mask(  # type: ignore
-                    max_prefill_seq_len, dtype, device)
-            elif self.num_decode_tokens == 0 and not self.input_builder.chunked_prefill_enabled:
-                # compress mask for prefix cache
-                self.compress_mask = AscendMetadataBuilder._attn_mask_builder.get_attn_mask(  # type: ignore
-                    128, dtype, device)
-            else:
-                # chunk_mask for chunk prefill
-                attn_mask = AscendMetadataBuilder._attn_mask_builder.get_attn_mask(  # type: ignore
-                    max_seq_len, dtype, device)
-                if attn_mask[0][1] > 0:
-                    attn_mask *= -10000
-                chunk_mask_list = []
-                for i, seq_len in enumerate(seq_lens):
-                    context_len = self.context_lens[i]
-                    chunk_mask_list.append(attn_mask[context_len:seq_len])
-                self.chunk_mask = torch.cat(chunk_mask_list, 0)
+            self.attn_mask = AscendMetadataBuilder._attn_mask_builder.get_attn_mask(  # type: ignore
+                max_prefill_seq_len,
+                self.input_builder.runner.model_config.dtype,
+                self.input_builder.runner.device)
         else:
             self.attn_mask = None
-            self.compress_mask = None
-            self.chunk_mask = None
         num_decode_tokens = self.num_decode_tokens
-        query_start_loc = list(accumulate(query_lens, initial=0))
-        seq_start_loc = list(accumulate(seq_lens, initial=0))
+
+        block_tables = make_tensor_with_pad(
+            self.block_tables,
+            pad=0,
+            dtype=torch.int32,
+            device=device,
+        )
 
         assert max_query_len > 0, "query_lens: {}".format(query_lens)
 
@@ -1053,6 +1041,10 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
                                       "PallasAttentionBackendImpl")
+
+        if attn_metadata is None:
+            # for profile run
+            return hidden_states_or_q_c
 
         num_tokens = hidden_states_or_q_c.shape[0]
         q = self.q_proj(hidden_states_or_q_c)[0].view(-1, self.num_heads,
