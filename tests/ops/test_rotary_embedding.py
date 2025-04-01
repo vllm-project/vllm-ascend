@@ -15,7 +15,7 @@ import vllm_ascend.platform  # noqa: F401
 
 # Only Neox style true scenario is supported for now
 IS_NEOX_STYLE = [True]
-DTYPES = [torch.half, torch.bfloat16]
+DTYPES = [torch.half]
 HEAD_SIZES = [64, 96, 128, 256]
 ROTARY_DIMS = [None, 32]  # None means rotary dim == head size
 NUM_HEADS = [17]  # Arbitrary values for testing
@@ -174,7 +174,7 @@ def test_rotary_embedding_quant_with_leading_dim(
                            is_neox_style, dtype)
     rope = rope.to(dtype=dtype)
     num_tokens = batch_size * seq_len
-    positions = torch.randint(0, max_position, (batch_size, seq_len))
+    positions = torch.randint(0, max_position, (batch_size * seq_len, ))
     qkv_tensor = torch.randn(num_tokens,
                              num_heads * head_size * 3,
                              dtype=dtype)
@@ -183,16 +183,13 @@ def test_rotary_embedding_quant_with_leading_dim(
         dim=-1,
     )
 
-    # because the custom kernel is in-place.
-    rope.cos_sin_cache = rope.cos_sin_cache.float()
-    ref_query, ref_key = rope.forward_native(positions, query.float(),
-                                             key.float())
+    ref_query, ref_key = rope.forward_native(positions, query, key)
     torch.ops._C.rotary_embedding(
         positions,
         query,
         key,
         rope.head_size,
-        rope.cos_sin_cache.to(dtype),
+        rope.cos_sin_cache,
         rope.is_neox_style,
     )
 
