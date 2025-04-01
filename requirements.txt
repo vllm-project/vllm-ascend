@@ -3,3 +3,4 @@ pyyaml
 scipy
 setuptools
 setuptools-scm
+numpy==1.26.4
