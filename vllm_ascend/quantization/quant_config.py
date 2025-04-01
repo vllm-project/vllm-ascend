@@ -16,12 +16,16 @@
 # limitations under the License.
 #
 from types import MappingProxyType
-from typing import Any, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 import torch
 import torch_npu  # noqa: F401
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
+                                                  FusedMoeWeightScaleSupported)
+from vllm.model_executor.layers.fused_moe.layer import \
+    UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                RowParallelLinear,
                                                UnquantizedLinearMethod)
@@ -33,6 +37,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
+from vllm.model_executor.utils import set_weight_attrs
 
 from .quantizer import AscendQuantizer
 
@@ -90,9 +95,16 @@ class AscendQuantConfig(QuantizationConfig):
                 return UnquantizedLinearMethod()
             return AscendLinearMethod(self, prefix,
                                       self.packed_modules_mapping)
-        if isinstance(layer, Attention) and \
-            'fa_quant_type' in self.quant_description.keys():
+        elif isinstance(layer, Attention) and \
+            'fa_quant_type' in self.quant_description.keys() and \
+            self.quant_description['fa_quant_type'] is not None:
             return AscendKVCacheMethod(self, prefix)
+        elif isinstance(layer, FusedMoE):
+            if self.is_layer_skipped_ascend(prefix,
+                                            self.packed_modules_mapping):
+                return UnquantizedFusedMoEMethod()
+            return AscendFusedMoEMethod(self, prefix,
+                                        self.packed_modules_mapping)
         return None
 
     def is_layer_skipped_ascend(
@@ -162,12 +174,10 @@ class AscendLinearMethod(LinearMethodBase):
                                                    output_size_per_partition,
                                                    params_dtype)
         for weight_name, weight_param in weight_dict.items():
-            layer.register_parameter(
-                weight_name,
-                ModelWeightParameter(data=weight_param,
-                                     input_dim=1,
-                                     output_dim=0,
-                                     weight_loader=weight_loader))
+            param = torch.nn.Parameter(weight_param, requires_grad=False)
+            set_weight_attrs(param, {"input_dim": 1, "output_dim": 0})
+            layer.register_parameter(weight_name, param)
+            set_weight_attrs(param, extra_weight_attrs)
 
         pertensor_dict = self.quant_method.get_pertensor_param(params_dtype)
         for pertensor_name, pertensor_param in pertensor_dict.items():
@@ -180,11 +190,10 @@ class AscendLinearMethod(LinearMethodBase):
         perchannel_dict = self.quant_method.get_perchannel_param(
             output_size_per_partition, params_dtype)
         for perchannel_name, perchannel_param in perchannel_dict.items():
-            layer.register_parameter(
-                perchannel_name,
-                ChannelQuantScaleParameter(data=perchannel_param,
-                                           output_dim=0,
-                                           weight_loader=weight_loader))
+            param = torch.nn.Parameter(perchannel_param, requires_grad=False)
+            set_weight_attrs(param, {"output_dim": 0})
+            layer.register_parameter(perchannel_name, param)
+            set_weight_attrs(param, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
@@ -253,3 +262,74 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
                                        attn_metadata.slot_mapping,
                                        output,
                                        seq_lens_tensor_cpu=seq_lens_tensor_cpu)
+
+
+class AscendFusedMoEMethod(FusedMoEMethodBase):
+    """FusedMoE method for Ascend quantization.
+
+    This class calls AscendQuantizer to search a specific quantization
+    implementations supported on ascend hardware for kvcache methods.
+
+    Args:
+        quant_config: The Ascend quantization config.
+    """
+
+    def __init__(self, quant_config: AscendQuantConfig, prefix: str,
+                 packed_modules_mapping: Dict[str, Any]):
+        self.quantizer = AscendQuantizer.get_quantizer(
+            quant_config.quant_description, prefix, packed_modules_mapping)
+        self.quant_method = self.quantizer.build_moe_method()
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ) -> None:
+        weight_param = self.quant_method.get_weight(
+            num_experts, intermediate_size_per_partition, hidden_size,
+            params_dtype)
+        for param_key, param_value in weight_param.items():
+            param = torch.nn.Parameter(param_value, requires_grad=False)
+            layer.register_parameter(param_key, param)
+            set_weight_attrs(param, extra_weight_attrs)
+
+        extra_weight_attrs.update(
+            {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value})
+        dynamic_quant_param = self.quant_method.get_dynamic_quant_param(
+            num_experts, intermediate_size_per_partition, hidden_size,
+            params_dtype)
+        for param_key, param_value in dynamic_quant_param.items():
+            param = torch.nn.Parameter(param_value, requires_grad=False)
+            layer.register_parameter(param_key, param)
+            set_weight_attrs(param, extra_weight_attrs)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        global_num_experts: int,
+        expert_map: torch.Tensor,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        is_prefill: bool = True,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
+        return self.quant_method.apply(layer, x, use_grouped_topk, top_k,
+                                       router_logits, renormalize, topk_group,
+                                       num_expert_group, global_num_experts, expert_map,
+                                       is_prefill, custom_routing_function, scoring_func,
+                                       e_score_correction_bias)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if hasattr(self.quant_method, "process_weights_after_loading"):
+            self.quant_method.process_weights_after_loading(layer)

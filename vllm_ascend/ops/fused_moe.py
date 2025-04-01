@@ -15,6 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import Callable, Optional
 
 import torch
@@ -415,6 +416,7 @@ def forward_oot(
     num_expert_group: Optional[int] = None,
     global_num_experts: int = -1,
     expert_map: Optional[torch.Tensor] = None,
+    is_prefill: bool = True,
     custom_routing_function: Optional[Callable] = None,
     scoring_func: str = "softmax",
     e_score_correction_bias: Optional[torch.Tensor] = None,
@@ -436,7 +438,7 @@ def forward_oot(
         e_score_correction_bias=e_score_correction_bias,
     )
 
-    if x.shape[0] == self.local_batch_size:
+    if os.environ.get("VLLM_ENABLE_MC2") == "1" and not is_prefill:
         return fused_experts_with_mc2(
             hidden_states=x,
             w1=layer.w13_weight,

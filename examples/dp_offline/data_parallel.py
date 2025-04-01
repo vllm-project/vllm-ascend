@@ -12,6 +12,9 @@ import os
 import gc
 
 
+VLLM_ENABLE_GRAPGH_MODE = os.environ.get("VLLM_ENABLE_GRAPH_MODE") == "1"
+
+
 def main():
     dp_rank = int(os.environ['RANK'])
     local_rank = int(os.environ['LOCAL_RANK'])
@@ -48,19 +51,22 @@ def main():
     if len(prompts) == 0:
         prompts = ["Placeholder"]
     print(f"DP rank {dp_rank} needs to process {len(prompts)} prompts")
-
+    num_seqs = len(prompts)
 
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
                                      max_tokens= 4,
                                      min_tokens = 4)
     # Create an LLM.
-    llm = LLM(model="deepseek-ai/DeepSeek-V2-Lite-Chat",
-              tensor_parallel_size=tp_size,
-              trust_remote_code=True,
-              expert_tensor_parallel_size=etp_size,
-              max_model_len=4096,
-              enforce_eager=True)
+    llm = LLM(
+        model="deepseek-ai/DeepSeek-V2-Lite-Chat",
+        tensor_parallel_size=tp_size,
+        trust_remote_code=True,
+        expert_tensor_parallel_size=etp_size,
+        max_model_len=4096,
+        max_num_seqs=num_seqs,
+        compilation_config=1 if VLLM_ENABLE_GRAPGH_MODE else 0,
+    )
 
     outputs = llm.generate(prompts, sampling_params)
     for output in outputs:
