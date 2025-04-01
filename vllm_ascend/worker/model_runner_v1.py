@@ -18,6 +18,7 @@
 #
 
 import gc
+import time
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 import numpy as np
@@ -27,8 +28,8 @@ import torch.distributed
 import torch.nn as nn
 from vllm.attention import AttentionType
 from vllm.attention.layer import Attention
-from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.config import VllmConfig, CompilationLevel
+from vllm.distributed.parallel_state import get_pp_group, graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import init_logger
@@ -44,6 +45,13 @@ from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.triton_utils import HAS_TRITON
+if HAS_TRITON:
+    from vllm.v1.sample.rejection_sampler import INVALID_TOKEN_ID, RejectionSampler
+else:
+    INVALID_TOKEN_ID = None
+    RejectionSampler = None
+from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -209,6 +217,12 @@ class NPUModelRunner:
         self.input_positions_cpu = torch.arange(0,
                                                 self.max_num_tokens,
                                                 device="cpu")
+        self.use_cuda_graph = (self.vllm_config.compilation_config.level
+                                == CompilationLevel.PIECEWISE
+                                and not self.model_config.enforce_eager)
+        self.cudagraph_batch_sizes = list(
+            reversed(
+                self.vllm_config.compilation_config.cudagraph_capture_sizes))
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -790,3 +804,32 @@ class NPUModelRunner:
                     f"Unknown attention type: {attn_module.attn_type}")
 
         return kv_cache_spec
+
+
+    def capture_model(self) -> None:
+        if not self.use_cuda_graph:
+            logger.warning(
+                "Skipping NPU graph capture. Please add "
+                "-O %s to use CUDA graphs.", CompilationLevel.PIECEWISE)
+            return
+
+        start_time = time.perf_counter()
+        start_free_gpu_memory = torch.cuda.mem_get_info()[0]
+
+        # Trigger CUDA graph capture for specific shapes.
+        # Capture the large shapes first so that the smaller shapes
+        # can reuse the memory pool allocated for the large shapes.
+        with graph_capture(device=self.device):
+            for num_tokens in reversed(self.cudagraph_batch_sizes):
+                for _ in range(self.vllm_config.compilation_config.
+                               cudagraph_num_of_warmups):
+                    self._dummy_run(num_tokens)
+                self._dummy_run(num_tokens)
+
+        end_time = time.perf_counter()
+        end_free_gpu_memory = torch.cuda.mem_get_info()[0]
+        elapsed_time = end_time - start_time
+        cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
+        # This usually takes 5~20 seconds.
+        logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
+                    elapsed_time, cuda_graph_size / (1 << 30))
