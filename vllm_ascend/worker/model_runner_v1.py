@@ -213,9 +213,14 @@ class NPUModelRunner:
                                                 self.max_num_tokens,
                                                 device="cpu")
 
-        # NOTE: Pre-construct a mask matrix to improve the efficiency of attention mask construction during inference.
-        # Note that the length of the matrix needs to be carefully balanced: a matrix that is too large will consume excessive VRAM, while a matrix that is too small will require dynamic concatenation during inference, leading to performance degradation.
-        # Therefore, an environment variable is added here to dynamically set the size of the pre-constructed mask matrix based on requirements.
+        # NOTE: Pre-construct a mask matrix to improve the efficiency of
+        # attention mask construction during inference.
+        # Note that the length of the matrix needs to be carefully balanced: a
+        # matrix that is too large will consume excessive VRAM, while a matrix
+        # that is too small will require dynamic concatenation during inference,
+        # leading to performance degradation.
+        # Therefore, an environment variable is added here to dynamically set
+        # the size of the pre-constructed mask matrix based on requirements.
         mask_len = os.getenv("PAGED_ATTENTION_MASK_LEN", 10000)
         self.attn_mask_len = min(self.max_model_len, int(mask_len))
         self.attn_mask_npu = torch.full(
@@ -416,15 +421,17 @@ class NPUModelRunner:
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
-        # check input valid
+        # Check input valid
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
+        # Copy the blocks from CPU to NPU.
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit(num_reqs)
+
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
         num_scheduled_tokens = np.empty(num_reqs, dtype=np.int32)
@@ -435,7 +442,7 @@ class NPUModelRunner:
             max_num_scheduled_tokens = max(max_num_scheduled_tokens,
                                            num_tokens)
 
-        # prepare positions
+        # Prepare positions
         req_indices = np.repeat(self.arange_np[:num_reqs],
                                 num_scheduled_tokens)
         cu_num_tokens = np.cumsum(num_scheduled_tokens)
@@ -483,7 +490,7 @@ class NPUModelRunner:
             attn_mask=attn_mask,
         )
 
-        # prepare input_ids
+        # Prepare input_ids
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
         torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
@@ -494,6 +501,7 @@ class NPUModelRunner:
         self.input_ids[:total_num_scheduled_tokens].copy_(
             self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
         input_ids = self.input_ids[:total_num_scheduled_tokens]
+
         # Run forward pass
         with set_forward_context(attn_metadata, self.vllm_config):
             assert self.model is not None
