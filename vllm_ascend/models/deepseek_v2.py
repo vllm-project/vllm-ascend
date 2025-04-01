@@ -138,28 +138,34 @@ class CustomDeepseekV2MoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=False,
+                prefix=f"{prefix}.shared_experts",
             )
         CustomDeepseekV2MoE.top_k = config.num_experts_per_tok
 
         vllm_config = get_current_vllm_config()
         self.dp_size = get_dp_group().world_size
-        batch_size = vllm_config.scheduler_config.max_num_seqs // self.dp_size
-        
+        batch_size = vllm_config.scheduler_config.max_num_seqs
+        self.enable_mc2 = os.environ.get("VLLM_ENABLE_MC2") == "1"
+
         params_dtype = torch.get_default_dtype()
         self.final_hidden_states = torch.zeros([batch_size, config.hidden_size],
                                                 dtype=params_dtype, device="npu")
         self.tp_group = get_tp_group().device_group
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, hidden_states: torch.Tensor, attn_metadata: AttentionMetadata
+    ) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        if self.tp_size > 1 and self.dp_size > 1 and os.environ.get("VLLM_ENABLE_MC2") == 1:
+        if (
+            self.tp_size > 1
+            and self.dp_size > 1
+            and self.enable_mc2
+            and attn_metadata.num_prefills == 0
+        ):
             hidden_states = dist._functional_collectives.reduce_scatter_tensor(
-                hidden_states,
-                "sum",
-                scatter_dim=0,
-                group=self.tp_group
+                hidden_states, "sum", scatter_dim=0, group=self.tp_group
             )
 
         if self.n_shared_experts is not None:
@@ -169,18 +175,24 @@ class CustomDeepseekV2MoE(nn.Module):
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
-            top_k=CustomDeepseekV2MoE.top_k) * self.routed_scaling_factor
+            is_prefill=attn_metadata.num_prefills > 0,
+            top_k=CustomDeepseekV2MoE.top_k
+        ) * self.routed_scaling_factor
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
         if self.tp_size > 1:
-            if self.dp_size > 1 and os.environ.get("VLLM_ENABLE_MC2") == 1:
-                dist.all_gather_into_tensor(self.final_hidden_states, final_hidden_states, self.tp_group)
+            if self.dp_size > 1 and self.enable_mc2 and attn_metadata.num_prefills == 0:
+                dist.all_gather_into_tensor(
+                    self.final_hidden_states, final_hidden_states, self.tp_group
+                )
                 return self.final_hidden_states
             else:
                 final_hidden_states = tensor_model_parallel_all_reduce(
-                    final_hidden_states)
+                    final_hidden_states
+                )
 
         return final_hidden_states.view(num_tokens, hidden_dim)
+
 
 class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
 
@@ -476,12 +488,12 @@ class CustomDeepseekV2Model(nn.Module):
 
 
 class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
+    # add `packed_modules_mapping` in `DeepseekV2ForCausalLM` to support weight merging
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
         "experts":
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
     }
-
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)

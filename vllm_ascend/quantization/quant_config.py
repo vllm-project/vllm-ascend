@@ -171,12 +171,10 @@ class AscendLinearMethod(LinearMethodBase):
                                                    output_size_per_partition,
                                                    params_dtype)
         for weight_name, weight_param in weight_dict.items():
-            layer.register_parameter(
-                weight_name,
-                ModelWeightParameter(data=weight_param,
-                                     input_dim=1,
-                                     output_dim=0,
-                                     weight_loader=weight_loader))
+            param = torch.nn.Parameter(weight_param, requires_grad=False)
+            set_weight_attrs(param, {"input_dim": 1, "output_dim": 0})
+            layer.register_parameter(weight_name, param)
+            set_weight_attrs(param, extra_weight_attrs)
 
         pertensor_dict = self.quant_method.get_pertensor_param(params_dtype)
         for pertensor_name, pertensor_param in pertensor_dict.items():
@@ -189,11 +187,10 @@ class AscendLinearMethod(LinearMethodBase):
         perchannel_dict = self.quant_method.get_perchannel_param(
             output_size_per_partition, params_dtype)
         for perchannel_name, perchannel_param in perchannel_dict.items():
-            layer.register_parameter(
-                perchannel_name,
-                ChannelQuantScaleParameter(data=perchannel_param,
-                                           output_dim=0,
-                                           weight_loader=weight_loader))
+            param = torch.nn.Parameter(perchannel_param, requires_grad=False)
+            set_weight_attrs(param, {"output_dim": 0})
+            layer.register_parameter(perchannel_name, param)
+            set_weight_attrs(param, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
@@ -264,48 +261,6 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
                                        seq_lens_tensor_cpu=seq_lens_tensor_cpu)
 
 
-def fused_moe_perchannel_weight_loader(param: torch.nn.Parameter,
-                                       loaded_weight: torch.Tensor,
-                                       weight_name: str, shard_id: str,
-                                       expert_id: int) -> None:
-
-    if shard_id not in ("w1", "w2", "w3"):
-        raise ValueError(f"shard_id must be ['w1','w2','w3'] but "
-                         f"got {shard_id}.")
-
-    # Fetch the dim to shard the parameter/loaded weight
-    # based on the shard id. This will be whatever
-    # dimension intermediate_size_per_partition is used.
-    SHARD_ID_TO_SHARDED_DIM = {"w1": 0, "w2": 1, "w3": 0}
-
-    expert_data = param.data[expert_id]
-    tp_rank = get_tensor_model_parallel_rank()
-
-    # is_transposed: if the dim to shard the weight
-    # should be flipped. Required by GPTQ, compressed-tensors
-    # should be whatever dimension intermediate_size_per_partition is
-    is_transposed = getattr(param, "is_transposed", False)
-    shard_dim = SHARD_ID_TO_SHARDED_DIM[shard_id]
-    if is_transposed:
-        shard_dim = int(not shard_dim)
-
-    if shard_id == "w2":
-        expert_data.copy_(loaded_weight)
-    elif shard_id in ("w1", "w3"):
-        shard_size = expert_data.shape[shard_dim] // 2
-        loaded_weight = loaded_weight.narrow(shard_dim, shard_size * tp_rank,
-                                             shard_size)
-        # Narrow parameter and load.
-        # w1, gate_proj: Load into first logical weight of w13.
-        if shard_id == "w1":
-            expert_data = expert_data.narrow(shard_dim, 0, shard_size)
-        # w3, up_proj: Load into second logical weight of w13.
-        else:
-            assert shard_id == "w3"
-            expert_data = expert_data.narrow(shard_dim, shard_size, shard_size)
-        expert_data.copy_(loaded_weight)
-
-
 class AscendFusedMoEMethod(FusedMoEMethodBase):
     """FusedMoE method for Ascend quantization.
 
@@ -341,9 +296,6 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
 
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value})
-        # load `offset` weight in `fused_moe_perchannel_weight_loader`, the original weight load in vllm 0.7.3 could only load `scale` and `zero`
-        extra_weight_attrs.update(
-            {"weight_loader": fused_moe_perchannel_weight_loader})
         dynamic_quant_param = self.quant_method.get_dynamic_quant_param(
             num_experts, intermediate_size_per_partition, hidden_size,
             params_dtype)
@@ -360,16 +312,19 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         top_k: int,
         router_logits: torch.Tensor,
         renormalize: bool,
+        global_num_experts: int,
+        expert_map: torch.Tensor,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
+        is_prefill: bool = True,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         return self.quant_method.apply(layer, x, use_grouped_topk, top_k,
                                        router_logits, renormalize, topk_group,
-                                       num_expert_group,
-                                       custom_routing_function, scoring_func,
+                                       num_expert_group, global_num_experts, expert_map,
+                                       is_prefill, custom_routing_function, scoring_func,
                                        e_score_correction_bias)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

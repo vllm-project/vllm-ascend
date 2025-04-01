@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/kernels/test_moe.py
 
+import os
 from typing import Callable, Optional
 
 import torch
@@ -572,11 +573,12 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
+        is_prefill = False,
         **kwargs,
     ):
         # assert router_logits.shape[
         #     1] == global_num_experts, "Number of global experts mismatch"
-
+        # set prefill as false always, should fix this
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -590,7 +592,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             e_score_correction_bias=e_score_correction_bias,
         )
 
-        if x.shape[0] == self.local_batch_size:
+        if os.environ.get("VLLM_ENABLE_MC2") == "1" and not is_prefill:
             return fused_experts_with_mc2(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -709,6 +711,7 @@ class AscendFusedMoE(FusedMoE):
     def forward(self,
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
+                is_prefill: bool, 
                 top_k=None):
         assert self.quant_method is not None
 
@@ -739,7 +742,8 @@ class AscendFusedMoE(FusedMoE):
             num_expert_group=self.num_expert_group,
             custom_routing_function=self.custom_routing_function,
             scoring_func=self.scoring_func,
-            e_score_correction_bias=self.e_score_correction_bias)
+            e_score_correction_bias=self.e_score_correction_bias,
+            is_prefill=is_prefill)
 
         if self.dp_size > 1:
             start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
