@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from vllm_ascend.env import load_npu_env_vars
+from vllm_ascend.envs import load_npu_env_vars
 
 load_npu_env_vars()
 
