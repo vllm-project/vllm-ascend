@@ -22,6 +22,9 @@ This is 2nd release candidate of v0.7.3 for vllm-ascend. Please follow the [offi
 - Fixed a bug to make sure multi step scheduler feature work. [#349](https://github.com/vllm-project/vllm-ascend/pull/349)
 - Fixed a bug to make prefix cache feature works with correct accuracy. [#424](https://github.com/vllm-project/vllm-ascend/pull/424)
 
+### Known issues
+- There is a error in the case of long prefix input when set `enable_prefix_caching=True` as [issue](https://github.com/vllm-project/vllm-ascend/issues/447) show, which rely on CANN 8.1 NNAL package release.
+
 ## v0.7.3rc1
 
 🎉 Hello, World! This is the first release candidate of v0.7.3 for vllm-ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/v0.7.3-dev) to start the journey.
