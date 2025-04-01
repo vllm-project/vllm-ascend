@@ -3,7 +3,7 @@
 |           Feature        | Supported | CI Coverage | Guidance Document |     Current Status        |    Next Step       |
 |--------------------------|-----------|-------------|-------------------|---------------------------|--------------------|
 | Chunked Prefill          |     ❌    |             |                   |          NA               | Rely on CANN 8.1 NNAL package release |
-| Automatic Prefix Caching |     ✅    |             |                   | Basic functions available |   Need fully test  |
+| Automatic Prefix Caching |     ✅    |             |                   | Basic functions available |   Rely on CANN 8.1 NNAL package release |
 |          LoRA            |     ❌    |             |                   |          NA               | Plan in 2025.06.30 |
 |      Prompt adapter      |     ❌    |             |                   |          NA               | Plan in 2025.06.30 |
 |    Speculative decoding  |     ✅    |             |                   | Basic functions available |   Need fully test  |
