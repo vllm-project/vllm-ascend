@@ -63,10 +63,6 @@ jobs:
         run: |
           apt-get -y install `cat packages.txt`
 
-      - name: Install dependencies
-        run: |
-          pip install -r requirements-dev.txt
-
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v4
         with:
@@ -80,6 +76,8 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         run: |
+          pip uninstall -y numpy
+          pip install -r requirements-dev.txt
           pip install -e .
 
       - name: Install pta
