@@ -153,23 +153,6 @@ class cmake_build_ext(build_ext):
             # else specify pybind11 path installed from source code on CI container
             raise RuntimeError(f"CMake configuration failed: {e}")
 
-        # try retrive soc version from npu-smi
-        soc_command = [
-            "bash",
-            "-c",
-            "npu-smi info | grep OK | awk '{print $3}' | head -n 1",
-        ]
-        try:
-            soc_version = subprocess.check_output(soc_command,
-                                                  text=True).strip()
-            soc_version = soc_version.split("-")[0]
-            soc_version = "Ascend" + soc_version
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Retrive Soc version failed: {e}")
-
-        # add SOC_VERSION
-        cmake_args += [f"-DSOC_VERSION={soc_version}"]
-
         install_path = os.path.join(ROOT_DIR, self.build_lib)
         if isinstance(self.distribution.get_command_obj("develop"), develop):
             install_path = os.path.join(ROOT_DIR, "vllm_ascend")
@@ -185,6 +168,16 @@ class cmake_build_ext(build_ext):
         fc_base_dir = os.path.join(ROOT_DIR, ".deps")
         fc_base_dir = os.environ.get("FETCHCONTENT_BASE_DIR", fc_base_dir)
         cmake_args += ["-DFETCHCONTENT_BASE_DIR={}".format(fc_base_dir)]
+
+        torch_npu_command = "python3 -m pip show torch-npu | grep '^Location:' | awk '{print $2}'"
+        try:
+            torch_npu_path = subprocess.check_output(torch_npu_command, shell=True).decode().strip()
+            torch_npu_path += "/torch_npu"
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(f"Retrive torch verison version failed: {e}")
+
+        # add TORCH_NPU_PATH
+        cmake_args += [f"-DTORCH_NPU_PATH={torch_npu_path}"]
 
         build_tool = []
         # TODO(ganyi): ninja and ccache support for ascend c auto codegen. now we can only use make build

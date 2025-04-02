@@ -4,4 +4,4 @@ scipy
 pybind11
 setuptools
 setuptools-scm
-
+torch-npu
