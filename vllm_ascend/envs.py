@@ -1,7 +1,8 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
-# Adapted from vllm-project/vllm/vllm/worker/worker.py
+#
+# This fill is mainly Adapted from vllm-project/vllm/vllm/envs.py
 # Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");

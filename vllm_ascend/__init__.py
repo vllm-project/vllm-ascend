@@ -17,11 +17,10 @@
 
 from vllm_ascend.envs import load_npu_env_vars
 
-load_npu_env_vars()
-
 
 def register():
     """Register the NPU platform."""
+    load_npu_env_vars()
     return "vllm_ascend.platform.NPUPlatform"
 
 
