@@ -1,6 +1,5 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
 # Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# This file is a part of the vllm-ascend project.
 #
 from types import MappingProxyType
 from typing import Any, Callable, Dict, List, Mapping, Optional

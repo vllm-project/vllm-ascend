@@ -1,9 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-# Adapted from
-# vllm-project/vllm/blob/main/vllm/model_executor/models/deepseek_v2.py
-# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
-# vllm-project/vllm/vllm/model_executor/models/deepseek_v2.py
 # Copyright 2023 The vLLM team.
 # Copyright 2023 DeepSeek-AI and the HuggingFace Inc. team. All rights reserved.
 #
@@ -23,6 +19,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Adapted from
+# vllm-project/vllm/blob/main/vllm/model_executor/models/deepseek_v2.py
+# https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
+# vllm-project/vllm/vllm/model_executor/models/deepseek_v2.py
 """Inference-only DeepseekV2/DeepseekV3 model."""
 from typing import List, Optional, Union
 
