@@ -342,6 +342,8 @@ namespace vllm_ascend {
             reinterpret_cast<TYPE *>(cosSinCache), rotDim, queryStride, keyStride, dstQueryStride, dstKeyStride, \
             numHeads, numKvHeads, headSize, numTokens, loopCnt, blockDim);
 
+// maximum number for runtime to launch a ascendc kernel. 
+// we use this to constrain the maximum number of block size
 static const int64_t maxParallelSize = 65535;
 
 extern void rotary_embedding_impl(AscendType type, bool isNeox, void *stream, int64_t *positions, void *queryDst,
