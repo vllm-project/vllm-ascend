@@ -77,8 +77,8 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         run: |
-          pip uninstall -y numpy
           pip install -r requirements-dev.txt
+          pip uninstall -y numpy
           pip install -e .
 
       - name: Install pta
