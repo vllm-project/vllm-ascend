@@ -327,7 +327,8 @@ def select_experts(
     num_expert_group: Optional[int] = None,
     custom_routing_function: Optional[Callable] = None,
     scoring_func: str = "softmax",
-    e_score_correction_bias: Optional[torch.Tensor] = None
+    e_score_correction_bias: Optional[torch.Tensor] = None,
+    is_prefill: Optional[bool] = True
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Select top-k experts based on router logits.
@@ -353,6 +354,21 @@ def select_experts(
     """
     # assert hidden_states.shape[0] == router_logits.shape[0], (
     #     "Number of tokens mismatch")
+    if os.environ.get("VLLM_ENABLE_GRAPH_MODE") == "1" and not is_prefill:
+        topk_weight, topk_idx, _ = torch.ops.npu_inference.npu_moe_gating_top_k(
+            router_logits, 
+            k=top_k, # topk当前写8
+            bias=e_score_correction_bias, 
+            k_group=topk_group, # fix: 4 
+            group_count=num_expert_group, # fix 8
+            group_select_mode=1, # 0: group中的最大; 1: topk2.sum(fix)
+            renorm=0, # 0: softmax->topk(fix); 1: topk->softmax
+            norm_type=1, # 0: softmax; 1: sigmoid(fix) 
+            # out_flag=False, # todo new api; 第三个输出是否输出 
+            # y2_flag=False, # old api; 第三个输出是否输出
+            routed_scaling_factor=1,
+            eps=float(1e-20))
+        return topk_weight, topk_idx
 
     if custom_routing_function is not None:
         raise NotImplementedError(
@@ -436,6 +452,7 @@ def forward_oot(
         custom_routing_function=custom_routing_function,
         scoring_func=scoring_func,
         e_score_correction_bias=e_score_correction_bias,
+        is_prefill=is_prefill,
     )
 
     if os.environ.get("VLLM_ENABLE_MC2") == "1" and not is_prefill:

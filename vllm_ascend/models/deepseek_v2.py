@@ -160,12 +160,15 @@ class CustomDeepseekV2MoE(nn.Module):
             shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
+        is_prefill = True if attn_metadata.prefill_metadata is not None else False
+        # is_prefill = attn_metadata.num_prefills > 0
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
-            is_prefill=attn_metadata.num_prefills > 0,
+            is_prefill=is_prefill,
             top_k=CustomDeepseekV2MoE.top_k
         ) * self.routed_scaling_factor
+
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
         if self.tp_size > 1:
