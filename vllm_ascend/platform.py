@@ -106,14 +106,14 @@ class NPUPlatform(Platform):
         from vllm_ascend.patch import ray_patch  # noqa: F401
 
         compilation_config = vllm_config.compilation_config
-        if compilation_config.level != CompilationLevel.NO_COMPILATION:
+        if compilation_config and compilation_config.level != CompilationLevel.NO_COMPILATION:
             logger.warning(
                 "Compilation level %s is not supported on NPU now, forcing compilation level to NO_COMPILATION",
                 compilation_config.level)
             compilation_config.level = CompilationLevel.NO_COMPILATION
 
         parallel_config = vllm_config.parallel_config
-        if parallel_config.worker_cls == "auto":
+        if parallel_config and parallel_config.worker_cls == "auto":
             if envs.VLLM_USE_V1:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
             elif vllm_config.speculative_config:
@@ -127,9 +127,9 @@ class NPUPlatform(Platform):
         cache_config = vllm_config.cache_config
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 128
-        if not hasattr(cache_config, "enable_prefix_caching"):
+        if cache_config and not hasattr(cache_config, "enable_prefix_caching"):
             setattr(cache_config, "enable_prefix_caching", False)
-        if cache_config.enable_prefix_caching and cache_config.block_size != 128:
+        if cache_config and cache_config.enable_prefix_caching and cache_config.block_size != 128:
             raise ValueError(
                 "If prefix caching is enabled, block size must be set to 128.")
         if vllm_config.quant_config is not None and \
@@ -138,7 +138,7 @@ class NPUPlatform(Platform):
             # Ascend attention quant uses int8 dtype.
             cache_config.cache_dtype = 'int8'
 
-        if envs.VLLM_USE_V1 and cache_config.enable_prefix_caching:
+        if envs.VLLM_USE_V1 and cache_config and cache_config.enable_prefix_caching:
             logger.warning(
                 "Prefix caching is not supported for V1 now, disable prefix caching"
             )

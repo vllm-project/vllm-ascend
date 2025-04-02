@@ -103,16 +103,23 @@ jobs:
           apt-get -y install `cat packages.txt`
           apt-get -y install gcc g++ cmake libnuma-dev
 
-      - name: Install dependencies
+      - name: Install system dependencies
         run: |
-          pip install -r requirements-dev.txt
+          apt-get -y install `cat packages.txt`
 
-      - name: Install vllm-project/vllm from pypi
+      - name: Clone vllm-project/vllm repo
         run: |
-          pip install vllm==0.7.3
+          git clone --depth 1 --branch v0.7.3 https://github.com/vllm-project/vllm.git ./vllm-empty
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
 
       - name: Install vllm-project/vllm-ascend
         run: |
+          pip uninstall -y numpy
+          pip install -r requirements-dev.txt
           pip install -e .
 
       - name: Install pta
@@ -120,9 +127,28 @@ jobs:
           cd /code/pta/
           pip install ./torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 
-      - name: Run vllm-project/vllm-ascend test
+      - name: Run vllm-project/vllm-ascend e2e test
         run: |
-          pytest -sv tests
+          pytest -sv tests/test_offline_inference.py
+
+      # only run test on spec decode when the related code changed
+      - name: Check for changes in Speculative Decode
+        id: filter
+        uses: dorny/paths-filter@v2
+        with:
+          filters: |
+            speculative_tests_changed:
+              - "tests/spec_decode/**"
+              - "vllm_ascend/worker/multi_step_runner.py"
+              - "vllm_ascend/worker/multi_step_worker.py"
+              - "vllm_ascend/patch/patch_rejection_sampler.py"
+              - "vllm_ascend/patch/patch_spec_decode_worker.py"
+              - "vllm_ascend/patch/patch_multi_step_worker.py"
+
+      - name: Run vllm-project/vllm-ascend key feature test
+        if: steps.filter.outputs.speculative_tests_changed
+        run: |
+          pytest -sv tests/spec_decode
 
       - name: Run vllm-project/vllm test
         run: |
