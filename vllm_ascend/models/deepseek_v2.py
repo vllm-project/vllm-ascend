@@ -125,7 +125,7 @@ class CustomDeepseekV2MoE(nn.Module):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=False,
+                reduce_results=True,
                 prefix=f"{prefix}.shared_experts",
             )
         CustomDeepseekV2MoE.top_k = config.num_experts_per_tok
@@ -133,7 +133,7 @@ class CustomDeepseekV2MoE(nn.Module):
         vllm_config = get_current_vllm_config()
         self.dp_size = get_dp_group().world_size
         batch_size = vllm_config.scheduler_config.max_num_seqs
-        self.enable_mc2 = os.environ.get("VLLM_ENABLE_MC2") == "1"
+        self.enable_mc2 = int(os.environ.get("VLLM_ENABLE_MC2")) == 1
 
         params_dtype = torch.get_default_dtype()
         self.final_hidden_states = torch.zeros([batch_size, config.hidden_size],
@@ -146,18 +146,20 @@ class CustomDeepseekV2MoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
+        if self.n_shared_experts is not None:
+            shared_output = self.shared_experts(hidden_states)
+
         if (
             self.tp_size > 1
-            and self.dp_size > 1
             and self.enable_mc2
             and attn_metadata.num_prefills == 0
         ):
-            hidden_states = dist._functional_collectives.reduce_scatter_tensor(
-                hidden_states, "sum", scatter_dim=0, group=self.tp_group
-            )
+            # hidden_states = dist._functional_collectives.reduce_scatter_tensor(
+            #     hidden_states, "sum", scatter_dim=0, group=self.tp_group
+            # )
+            chunks = torch.chunk(hidden_states, get_tp_group().world_size, dim=0)
+            hidden_states = chunks[get_tp_group().rank_in_group]
 
-        if self.n_shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         is_prefill = True if attn_metadata.prefill_metadata is not None else False
@@ -169,18 +171,19 @@ class CustomDeepseekV2MoE(nn.Module):
             top_k=CustomDeepseekV2MoE.top_k
         ) * self.routed_scaling_factor
 
-        if shared_output is not None:
-            final_hidden_states = final_hidden_states + shared_output
         if self.tp_size > 1:
-            if self.dp_size > 1 and self.enable_mc2 and attn_metadata.num_prefills == 0:
+            if self.enable_mc2 and attn_metadata.num_prefills == 0:
                 dist.all_gather_into_tensor(
                     self.final_hidden_states, final_hidden_states, self.tp_group
                 )
-                return self.final_hidden_states
+                final_hidden_states = self.final_hidden_states
             else:
                 final_hidden_states = tensor_model_parallel_all_reduce(
                     final_hidden_states
                 )
+        
+        if shared_output is not None:
+            final_hidden_states = final_hidden_states + shared_output
 
         return final_hidden_states.view(num_tokens, hidden_dim)
 

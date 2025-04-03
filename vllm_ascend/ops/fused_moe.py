@@ -115,7 +115,7 @@ def fused_experts_with_mc2(
         "moe_expert_num": moe_expert_num,
         "global_bs": 0,
     }
-    tp_recv_counts = torch.empty(1, dtype=torch.int32, device=hidden_states.device)
+    tp_recv_counts = output[5]
     stage3_kwargs = {
         "ep_send_counts": ep_recv_counts,
         "group_ep": moe_all_to_all_group_name,
