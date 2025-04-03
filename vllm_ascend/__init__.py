@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+from vllm_ascend.patch.single import patch_config  # noqa: F401
 
 
 def register():
