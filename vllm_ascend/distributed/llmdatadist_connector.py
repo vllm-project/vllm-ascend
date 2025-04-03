@@ -14,15 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import re
 import os
+import re
 import subprocess
 from typing import TYPE_CHECKING, List, Tuple, Union
 
 import torch
-import torchair
 import torch_npu
-
+import torchair
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.logger import init_logger
@@ -31,15 +30,8 @@ from vllm.sequence import IntermediateTensors
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
-from llm_datadist import (
-    CacheDesc,
-    CacheKey,
-    CacheKeyByIdAndIndex,
-    DataType,
-    LLMClusterInfo,
-    LLMDataDist,
-    LLMRole,
-)
+from llm_datadist import (CacheDesc, CacheKey, CacheKeyByIdAndIndex, DataType,
+                          LLMClusterInfo, LLMDataDist, LLMRole)
 
 logger = init_logger(__name__)
 
