@@ -21,7 +21,7 @@
 import os
 from typing import TYPE_CHECKING, Any, Callable, Dict
 
-from vllm.envs import VLLM_USE_V1
+from vllm.envs import VLLM_USE_V1, is_set
 from vllm.logger import init_logger
 from vllm.utils import update_environment_variables
 
@@ -87,8 +87,10 @@ def load_env_variables() -> None:
     env_vars: dict[str, str] = {}
 
     for name, value in env_variables.items():
-        env_vars[name] = str(value())
-        logger.info("Set environment variables: %s = %s", name, value())
+        # If this env var is not explicitly set by the user, then set it
+        if not is_set(name):
+            env_vars[name] = str(value())
+            logger.info("Set environment variables: %s = %s", name, value())
 
     if VLLM_USE_V1:
         env_vars["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
