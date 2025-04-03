@@ -374,3 +374,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
                                        num_expert_group,
                                        custom_routing_function, scoring_func,
                                        e_score_correction_bias)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if hasattr(self.quant_method, "process_weights_after_loading"):
+            self.quant_method.process_weights_after_loading(layer)
