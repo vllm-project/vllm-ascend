@@ -30,14 +30,8 @@ from vllm.sequence import IntermediateTensors
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
-from llm_datadist import (
-    CacheDesc,
-    CacheKey,
-    CacheKeyByIdAndIndex,
-    DataType,
-    LLMClusterInfo,
-    LLMDataDist,
-    LLMRole)  # type: ignore
+from llm_datadist import (CacheDesc, CacheKey, CacheKeyByIdAndIndex, DataType,  # type: ignore
+                          LLMClusterInfo, LLMDataDist, LLMRole)  # type: ignore
 
 logger = init_logger(__name__)
 
