@@ -650,7 +650,7 @@ class NPUModelRunner:
         if self.uses_mrope:
             positions = self.mrope_positions[:, :num_tokens]
         else:
-            positions = self.input_positions_cpu[:num_tokens]
+            positions = self.positions[:num_tokens]
 
         if get_pp_group().is_first_rank:
             intermediate_tensors = None
@@ -668,7 +668,7 @@ class NPUModelRunner:
 
         with set_forward_context(None, self.vllm_config):
             hidden_states = model(input_ids=input_ids,
-                                  positions=positions.to(self.device),
+                                  positions=positions,
                                   intermediate_tensors=intermediate_tensors,
                                   inputs_embeds=inputs_embeds)
         return hidden_states
