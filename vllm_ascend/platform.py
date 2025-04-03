@@ -123,6 +123,8 @@ class NPUPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla):
+        if use_v1:
+            return "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
         if use_mla:
             return "vllm_ascend.attention.attention.AscendMLAAttentionBackend"
         return "vllm_ascend.attention.attention.AscendAttentionBackend"

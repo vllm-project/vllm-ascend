@@ -25,6 +25,7 @@ import torch.distributed as dist
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
+import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (get_pp_group,
@@ -342,7 +343,8 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep='.')[-1])
-        if model_config.use_mla:
+        # TODO: enable mla in vllm-ascend
+        if model_config.use_mla and not envs.VLLM_USE_V1:
             attn_cls = CustomDeepseekV2MLAAttention
         else:
             attn_cls = DeepseekV2Attention
