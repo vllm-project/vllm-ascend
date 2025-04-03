@@ -24,6 +24,7 @@ from multiprocessing import Event, Process
 
 def clean_up():
     import gc
+
     import torch
     from vllm.distributed.parallel_state import (
         destroy_distributed_environment, destroy_model_parallel)
