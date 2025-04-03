@@ -28,6 +28,13 @@ from vllm.utils import update_environment_variables
 if TYPE_CHECKING:
     RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES: str = "1"
     ACL_OP_INIT_MODE: str = "1"
+    MAX_JOBS = None
+    CMAKE_BUILD_TYPE = None
+    COMPILE_CUSTOM_KERNELS = None
+    VERBOSE = None
+    ASCEND_HOME_PATH = None
+    LD_LIBRARY_PATH = None
+
 
 logger = init_logger(__name__)
 
