@@ -24,7 +24,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
                     Type, TypeVar, Union)
-
+import time
 import torch
 import torch.distributed
 import torch.nn as nn
@@ -63,14 +63,14 @@ from vllm.worker.model_runner_base import (
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
-
+from vllm_ascend.utils import profiling_this
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
 logger = init_logger(__name__)
 
 TModelInputForNPU = TypeVar('TModelInputForNPU', bound="ModelInputForNPU")
-
+ENCODER_NUM = 0
 
 @dataclass(frozen=True)
 class ModelInputForNPU(ModelRunnerInputBase):
@@ -1227,62 +1227,72 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
             model_forward_end = torch_npu.npu.Event(enable_timing=True)
             model_forward_start.record()
 
-        if not bypass_model_exec:
-            with set_forward_context(model_input.attn_metadata,
-                                     self.vllm_config, virtual_engine):
-                if model_input.attn_metadata is not None:
-                    model_input.attn_metadata.input_positions = model_input.input_positions
-                hidden_or_intermediate_states = model_executable(
-                    input_ids=model_input.input_tokens,
-                    positions=model_input.input_positions,
-                    kv_caches=kv_caches,
-                    attn_metadata=model_input.attn_metadata,
-                    intermediate_tensors=intermediate_tensors,
-                    **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
-                                                 device=self.device),
-                    **seqlen_agnostic_kwargs,
-                    **model_kwargs,
+        # torch.npu.synchronize()
+        # is_prefill = model_input.attn_metadata.num_prefills > 0
+        # start_time = time.time()
+
+        global ENCODER_NUM
+        is_prefill = model_input.attn_metadata.num_prefills > 0
+        
+        with profiling_this(ENCODER_NUM, is_prefill):
+            if not bypass_model_exec:
+                with set_forward_context(model_input.attn_metadata,
+                                        self.vllm_config, virtual_engine):
+                    if model_input.attn_metadata is not None:
+                        model_input.attn_metadata.input_positions = model_input.input_positions
+                    if not is_prefill:
+                        ENCODER_NUM += 1
+                    hidden_or_intermediate_states = model_executable(
+                        input_ids=model_input.input_tokens,
+                        positions=model_input.input_positions,
+                        kv_caches=kv_caches,
+                        attn_metadata=model_input.attn_metadata,
+                        intermediate_tensors=intermediate_tensors,
+                        **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
+                                                    device=self.device),
+                        **seqlen_agnostic_kwargs,
+                        **model_kwargs,
+                    )
+
+            if (self.observability_config is not None
+                    and self.observability_config.collect_model_forward_time):
+                model_forward_end.record()
+
+            # Sending KV cache in distributed KV cache transfer setting
+            # NOTE: the send operation is non-blocking
+            if self.need_send_kv(model_input, kv_caches):
+                get_kv_transfer_group().send_kv_caches_and_hidden_states(
+                    # model_executable is used to know which layer the current
+                    # worker is working on, so that we can send KV for only those
+                    # layers.
+                    model_executable,
+                    model_input,
+                    kv_caches,
+                    hidden_or_intermediate_states,
                 )
 
-        if (self.observability_config is not None
-                and self.observability_config.collect_model_forward_time):
-            model_forward_end.record()
-
-        # Sending KV cache in distributed KV cache transfer setting
-        # NOTE: the send operation is non-blocking
-        if self.need_send_kv(model_input, kv_caches):
-            get_kv_transfer_group().send_kv_caches_and_hidden_states(
-                # model_executable is used to know which layer the current
-                # worker is working on, so that we can send KV for only those
-                # layers.
-                model_executable,
-                model_input,
-                kv_caches,
-                hidden_or_intermediate_states,
-            )
-
-        # Compute the logits in the last pipeline stage.
-        if not get_pp_group().is_last_rank:
-            if (self.is_driver_worker
-                    and hidden_or_intermediate_states is not None
-                    and isinstance(hidden_or_intermediate_states,
-                                   IntermediateTensors)
-                    and self.observability_config is not None
-                    and self.observability_config.collect_model_forward_time):
-                model_forward_end.synchronize()
-                model_forward_time = model_forward_start.elapsed_time(
-                    model_forward_end)
-                orig_model_forward_time = 0.0
-                if intermediate_tensors is not None:
-                    orig_model_forward_time = intermediate_tensors.tensors.get(
-                        "model_forward_time", torch.tensor(0.0)).item()
-                hidden_or_intermediate_states.tensors["model_forward_time"] = (
-                    torch.tensor(model_forward_time + orig_model_forward_time))
-            return hidden_or_intermediate_states
-        # TODO: remove the synchronize here
-        torch.npu.synchronize()
-        logits = self.model.compute_logits(hidden_or_intermediate_states,
-                                           model_input.sampling_metadata)
+            # Compute the logits in the last pipeline stage.
+            if not get_pp_group().is_last_rank:
+                if (self.is_driver_worker
+                        and hidden_or_intermediate_states is not None
+                        and isinstance(hidden_or_intermediate_states,
+                                    IntermediateTensors)
+                        and self.observability_config is not None
+                        and self.observability_config.collect_model_forward_time):
+                    model_forward_end.synchronize()
+                    model_forward_time = model_forward_start.elapsed_time(
+                        model_forward_end)
+                    orig_model_forward_time = 0.0
+                    if intermediate_tensors is not None:
+                        orig_model_forward_time = intermediate_tensors.tensors.get(
+                            "model_forward_time", torch.tensor(0.0)).item()
+                    hidden_or_intermediate_states.tensors["model_forward_time"] = (
+                        torch.tensor(model_forward_time + orig_model_forward_time))
+                return hidden_or_intermediate_states
+            # TODO: remove the synchronize here
+            torch.npu.synchronize()
+            logits = self.model.compute_logits(hidden_or_intermediate_states,
+                                            model_input.sampling_metadata)
 
         if not self.is_driver_worker:
             return []
