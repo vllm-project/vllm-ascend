@@ -16,7 +16,6 @@
 #
 
 import logging
-import os
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
@@ -45,8 +44,6 @@ else:
     ModelConfig = None
     VllmConfig = None
     FlexibleArgumentParser = None
-
-os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
 
 logger = init_logger(__name__)
 

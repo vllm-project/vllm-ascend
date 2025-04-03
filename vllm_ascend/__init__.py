@@ -15,9 +15,12 @@
 # limitations under the License.
 #
 
+from vllm_ascend.envs import load_env_variables
+
 
 def register():
     """Register the NPU platform."""
+    load_env_variables()
     return "vllm_ascend.platform.NPUPlatform"
 
 
