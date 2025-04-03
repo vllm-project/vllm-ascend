@@ -16,12 +16,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
-"""
- This file demonstrates the example usage of disaggregated prefilling
- We will launch 2 vllm instances (NPU 0,1 for prefill and NPU 2,3 for decode),
- and then transfer the KV cache between them.
- """
 import os
 import time
 
