@@ -30,20 +30,19 @@ from vllm.sequence import IntermediateTensors
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
-from llm_datadist import (CacheDesc, CacheKey, CacheKeyByIdAndIndex, DataType,  # type: ignore
-                          LLMClusterInfo, LLMDataDist, LLMRole)  # type: ignore
+import llm_datadist  # type: ignore
 
 logger = init_logger(__name__)
 
 TORCH_DTYPE_TO_NPU_DTYPE = {
-    torch.half: DataType.DT_FLOAT16,
-    torch.float16: DataType.DT_FLOAT16,
-    torch.bfloat16: DataType.DT_BF16,
-    torch.float: DataType.DT_FLOAT,
-    torch.float32: DataType.DT_FLOAT,
-    torch.int8: DataType.DT_INT8,
-    torch.int64: DataType.DT_INT64,
-    torch.int32: DataType.DT_INT32
+    torch.half: llm_datadist.DataType.DT_FLOAT16,
+    torch.float16: llm_datadist.DataType.DT_FLOAT16,
+    torch.bfloat16: llm_datadist.DataType.DT_BF16,
+    torch.float: llm_datadist.DataType.DT_FLOAT,
+    torch.float32: llm_datadist.DataType.DT_FLOAT,
+    torch.int8: llm_datadist.DataType.DT_INT8,
+    torch.int64: llm_datadist.DataType.DT_INT64,
+    torch.int32: llm_datadist.DataType.DT_INT32
 }
 
 # Get all device ips using hccn_tool
@@ -84,7 +83,7 @@ class KVTransferEng:
         self.device_ip_list = get_device_ips()
         self.local_rank = local_rank
         self.cluster_id = local_rank
-        self.data_dist = LLMDataDist(self.role, self.cluster_id)
+        self.data_dist = llm_datadist.LLMDataDist(self.role, self.cluster_id)
 
         prompt_device_ids = os.environ.get('PROMPT_DEVICE_ID', None)
         decode_device_ids = os.environ.get('DECODE_DEVICE_ID', None)
@@ -106,7 +105,7 @@ class KVTransferEng:
         options = {
             "llm.SyncKvCacheWaitTime": "5000",
         }
-        if self.role == LLMRole.PROMPT:
+        if self.role == llm_datadist.LLMRole.PROMPT:
             options["ge.exec.deviceId"] = str(self.local_rank)
             options[
                 "llm.listenIpInfo"] = f"{self.prompt_ip_list[self.local_rank]}:26000"
@@ -119,7 +118,7 @@ class KVTransferEng:
             f"{self.local_rank}/{self.world_size} rank data dist is ready")
 
     def make_cluster(self, prefill_ip, cluster_id=-1):
-        cluster = LLMClusterInfo()
+        cluster = llm_datadist.LLMClusterInfo()
         cluster.remote_cluster_id = cluster_id
         local_ip = self.decode_ip_list[self.local_rank]
         remote_ip = prefill_ip
@@ -142,9 +141,9 @@ class LLMDataDistConnector(KVConnectorBase):
         self.local_rank = local_rank
 
         if self.config.kv_transfer_config.kv_role == "kv_producer":
-            self.role = LLMRole.PROMPT
+            self.role = llm_datadist.LLMRole.PROMPT
         elif self.config.kv_transfer_config.kv_role == "kv_consumer":
-            self.role = LLMRole.DECODER
+            self.role = llm_datadist.LLMRole.DECODER
         else:
             raise NotImplementedError(
                 "kv_role should be inside [kv_producer, kv_consumer]")
@@ -155,7 +154,7 @@ class LLMDataDistConnector(KVConnectorBase):
 
         self.llm_datadist_engine = KVTransferEng(self.world_size, self.n_layer,
                                                  self.role, self.local_rank)
-        if self.role == LLMRole.PROMPT:
+        if self.role == llm_datadist.LLMRole.PROMPT:
             self.llm_datadist_engine.prepare_data_dist()
         else:
             self.llm_datadist_engine.prepare_data_dist()
@@ -196,32 +195,32 @@ class LLMDataDistConnector(KVConnectorBase):
         input_dtype = torch.int32
 
         # initialize LLMDatadist data structure
-        key_desc = CacheDesc(num_layer,
+        key_desc = llm_datadist.CacheDesc(num_layer,
                              kv_shape,
                              TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
                              seq_len_dim_index=1)
-        value_desc = CacheDesc(num_layer,
+        value_desc = llm_datadist.CacheDesc(num_layer,
                                kv_shape,
                                TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
                                seq_len_dim_index=1)
-        input_desc = CacheDesc(1,
+        input_desc = llm_datadist.CacheDesc(1,
                                input_shape,
                                TORCH_DTYPE_TO_NPU_DTYPE[input_dtype],
                                seq_len_dim_index=-1)
-        hidden_desc = CacheDesc(1,
+        hidden_desc = llm_datadist.CacheDesc(1,
                                 hidden_shape,
                                 TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
                                 seq_len_dim_index=-1)
 
-        key_cache_keys = [CacheKey(self.llm_datadist_engine.cluster_id, 0, 1)]
+        key_cache_keys = [llm_datadist.CacheKey(self.llm_datadist_engine.cluster_id, 0, 1)]
         value_cache_keys = [
-            CacheKey(self.llm_datadist_engine.cluster_id, 0, 2)
+            llm_datadist.CacheKey(self.llm_datadist_engine.cluster_id, 0, 2)
         ]
         input_cache_keys = [
-            CacheKey(self.llm_datadist_engine.cluster_id, 0, 3)
+            llm_datadist.CacheKey(self.llm_datadist_engine.cluster_id, 0, 3)
         ]
         hidden_cache_keys = [
-            CacheKey(self.llm_datadist_engine.cluster_id, 0, 4)
+            llm_datadist.CacheKey(self.llm_datadist_engine.cluster_id, 0, 4)
         ]
 
         self.key_buffer = self.llm_datadist_engine.kv_transfer.allocate_cache(
@@ -326,19 +325,19 @@ class LLMDataDistConnector(KVConnectorBase):
         input_dtype = torch.int32
 
         # Add LLM DataDist initialization
-        key_desc = CacheDesc(num_layer,
+        key_desc = llm_datadist.CacheDesc(num_layer,
                              kv_shape,
                              TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
                              seq_len_dim_index=-1)
-        value_desc = CacheDesc(num_layer,
+        value_desc = llm_datadist.CacheDesc(num_layer,
                                kv_shape,
                                TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
                                seq_len_dim_index=-1)
-        input_desc = CacheDesc(1,
+        input_desc = llm_datadist.CacheDesc(1,
                                input_shape,
                                TORCH_DTYPE_TO_NPU_DTYPE[input_dtype],
                                seq_len_dim_index=-1)
-        hidden_desc = CacheDesc(1,
+        hidden_desc = llm_datadist.CacheDesc(1,
                                 hidden_shape,
                                 TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
                                 seq_len_dim_index=-1)
@@ -366,13 +365,13 @@ class LLMDataDistConnector(KVConnectorBase):
         self.hidden_cache = torchair.llm_datadist.create_npu_tensors(
             hidden_desc.shape, kv_hidden_dtype, hidden_buffer_addrs)
 
-        key_cache_key = CacheKeyByIdAndIndex(self.cluster.remote_cluster_id, 1,
+        key_cache_key = llm_datadist.CacheKeyByIdAndIndex(self.cluster.remote_cluster_id, 1,
                                              0)
-        value_cache_key = CacheKeyByIdAndIndex(self.cluster.remote_cluster_id,
+        value_cache_key = llm_datadist.CacheKeyByIdAndIndex(self.cluster.remote_cluster_id,
                                                2, 0)
-        input_cache_key = CacheKeyByIdAndIndex(self.cluster.remote_cluster_id,
+        input_cache_key = llm_datadist.CacheKeyByIdAndIndex(self.cluster.remote_cluster_id,
                                                3, 0)
-        hidden_cache_key = CacheKeyByIdAndIndex(self.cluster.remote_cluster_id,
+        hidden_cache_key = llm_datadist.CacheKeyByIdAndIndex(self.cluster.remote_cluster_id,
                                                 4, 0)
 
         self.llm_datadist_engine.kv_transfer.pull_cache(
