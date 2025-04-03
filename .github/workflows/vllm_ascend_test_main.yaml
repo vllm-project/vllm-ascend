@@ -37,7 +37,7 @@ defaults:
     shell: bash -el {0}
 
 jobs:
-  test:
+  test-singlenpu:
     name: vLLM Ascend test (self-host)
     runs-on: linux-arm64-npu-1  # actionlint-ignore: runner-label
     container:
@@ -100,15 +100,7 @@ jobs:
           VLLM_USE_V1: 0
           HF_ENDPOINT: https://hf-mirror.com
         run: |
-          VLLM_USE_V1=0 pytest -sv -m 'not multi' tests
-
-      - name: Run vllm-project/vllm-ascend test for V1 Engine
-        env:
-          VLLM_USE_V1: 1
-          VLLM_WORKER_MULTIPROC_METHOD: spawn
-          HF_ENDPOINT: https://hf-mirror.com
-        run: |
-          pytest -sv tests
+          VLLM_USE_V1=0 pytest -sv -m 'not multinpu' tests
 
       - name: Run vllm-project/vllm test for V0 Engine
         env:
@@ -117,3 +109,76 @@ jobs:
           HF_ENDPOINT: https://hf-mirror.com
         run: |
           pytest -sv
+
+  test2:
+    name: test on multiple npu runner
+    runs-on: linux-arm64-npu-4  
+    container:
+      image: ascendai/cann:8.0.0-910b-ubuntu22.04-py3.10
+      env:
+        HF_ENDPOINT: https://hf-mirror.com
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          # sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+      - name: Install system dependencies
+        run: |
+          apt-get update -y
+          apt-get -y install git wget
+
+      - name: Config git
+        run: |
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/ 
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-dev.txt
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          path: ./vllm-empty
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Install vllm-project/vllm-ascend
+        run: |
+          pip uninstall -y numpy
+          pip install -r requirements-dev.txt
+          pip install -e .
+
+      - name: Install pta
+        run: |
+          if [ ! -d /root/.cache/pta ]; then
+            mkdir -p /root/.cache/pta
+          fi
+
+          if [ ! -f /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl ]; then
+            cd /root/.cache/pta
+            rm -rf pytorch_v2.5.1_py310*
+            wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
+            tar -zxvf pytorch_v2.5.1_py310.tar.gz
+          fi
+
+          pip install /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+      - name: Run vllm-project/vllm-ascend test
+        env:
+          VLLM_USE_V1: 0
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+        run: |
+          pytest -sv -m multinpu tests/
