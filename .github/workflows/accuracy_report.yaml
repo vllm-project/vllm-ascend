@@ -1,0 +1,150 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Accuracy Report
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'choose a dev branch to pr'
+        required: true
+      vllm-ascend-version:
+        description: 'what vllm-ascend version to accuracy test?'
+        required: true
+        type: string
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.branch }}
+
+      - name: Debug List Artifacts
+        run: gh api /repos/${{ github.repository }}/actions/artifacts
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Query artifact run id for Qwen2.5-VL-7B-Instruct V0 latest artifact
+        id: get_Qwen2_5_VL_7B_Instruct_latest_run_id_V0
+        run: |
+          ARTIFACT_JSON=$(gh api "repos/${{ github.repository }}/actions/artifacts")
+          RUN_ID=$(echo "$ARTIFACT_JSON" | \
+            jq -r '[.artifacts[] | select(.name=="${{ github.event.inputs.vllm-ascend-version }}-Qwen2.5-VL-7B-Instruct-V0-report")] | sort_by(.created_at) | last | .workflow_run.id')
+          echo "runid=$RUN_ID" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Query artifact run id for Qwen2.5-7B-Instruct V0 latest artifact
+        id: get_Qwen2_5_7B_Instruct_latest_run_id_V0
+        run: |
+          ARTIFACT_JSON=$(gh api "repos/${{ github.repository }}/actions/artifacts")
+          RUN_ID=$(echo "$ARTIFACT_JSON" | \
+            jq -r '[.artifacts[] | select(.name=="${{ github.event.inputs.vllm-ascend-version }}-Qwen2.5-7B-Instruct-V0-report")] | sort_by(.created_at) | last | .workflow_run.id')
+          echo "runid=$RUN_ID" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Query artifact run id for Llama-3.1-8B-Instruct V0 latest artifact
+        id: get_Llama_3_1_8B_Instruct_latest_run_id_V0
+        run: |
+          ARTIFACT_JSON=$(gh api "repos/${{ github.repository }}/actions/artifacts")
+          RUN_ID=$(echo "$ARTIFACT_JSON" | \
+            jq -r '[.artifacts[] | select(.name=="${{ github.event.inputs.vllm-ascend-version }}-Llama-3.1-8B-Instruct-V0-report")] | sort_by(.created_at) | last | .workflow_run.id')
+          echo "runid=$RUN_ID" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Query artifact run id for Qwen3-8B V0 latest artifact
+        id: get_Qwen3_8B_latest_run_id_V0
+        run: |
+          ARTIFACT_JSON=$(gh api "repos/${{ github.repository }}/actions/artifacts")
+          RUN_ID=$(echo "$ARTIFACT_JSON" | \
+            jq -r '[.artifacts[] | select(.name=="${{ github.event.inputs.vllm-ascend-version }}-Qwen3-8B-V0-report")] | sort_by(.created_at) | last | .workflow_run.id')
+          echo "runid=$RUN_ID" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download Qwen/Qwen2.5-VL-7B-Instruct V0 Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.inputs.vllm-ascend-version }}-Qwen2.5-VL-7B-Instruct-V0-report
+          path: ./docs/source/developer_guide/evaluation/accuracy_report
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: vllm-project/vllm-ascend
+          run-id: ${{ steps.get_Qwen2_5_VL_7B_Instruct_latest_run_id_V0.outputs.runid }}
+
+      - name: Download Qwen/Qwen2.5-7B-Instruct Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.inputs.vllm-ascend-version }}-Qwen2.5-7B-Instruct-V0-report
+          path: ./docs/source/developer_guide/evaluation/accuracy_report
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: vllm-project/vllm-ascend
+          run-id: ${{ steps.get_Qwen2_5_7B_Instruct_latest_run_id_V0.outputs.runid }}
+
+      - name: Download meta-llama/Llama-3.1-8B-Instruct Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.inputs.vllm-ascend-version }}-Llama-3.1-8B-Instruct-V0-report
+          path: ./docs/source/developer_guide/evaluation/accuracy_report
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: vllm-project/vllm-ascend
+          run-id: ${{ steps.get_Llama_3_1_8B_Instruct_latest_run_id_V0.outputs.runid }}
+
+      - name: Download Qwen/Qwen3-8B Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ github.event.inputs.vllm-ascend-version }}-Qwen3-8B-V0-report
+          path: ./docs/source/developer_guide/evaluation/accuracy_report
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: vllm-project/vllm-ascend
+          run-id: ${{ steps.get_Qwen3_8B_latest_run_id_V0.outputs.runid }}
+
+      - name: Display Files
+        working-directory: ./docs/source/developer_guide/evaluation/accuracy_report
+        run: |
+          cat ./Qwen2.5-VL-7B-Instruct.md
+          cat ./Llama-3.1-8B-Instruct.md
+          cat ./Qwen2.5-7B-Instruct.md
+          cat ./Qwen3-8B.md
+      
+      - name: Create Pull Request for markdown update
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.PR_TOKEN }}
+          base: ${{ github.ref_name }}
+          branch: auto-pr/accuracy-test
+          commit-message: "Update accuracy report for ${{ github.event.inputs.branch }}"
+          add-paths: ./docs/source/developer_guide/evaluation/accuracy_report/*.md
+          title: "[Doc]Update accuracy report for ${{ github.event.inputs.branch }}"
+          body: |
+            The accuracy results running on Ascend NPU have changed, I'm updating the report.
+            Please review the changes.
+
+            - [Workflow run][1]
+            - [Qwen2.5-7B-Instruct accuracy report][2]
+            - [Llama-3.1-8B-Instruct accuracy report][3]
+            - [Qwen2.5-VL-7B-Instruct accuracy report][4]
+            - [Qwen3-8B accuracy report][5]
+
+            [1]: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            [2]: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.get_Qwen2_5_7B_Instruct_latest_run_id_V0.outputs.runid }}
+            [3]: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.get_Llama_3_1_8B_Instruct_latest_run_id_V0.outputs.runid }}
+            [4]: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.get_Qwen2_5_VL_7B_Instruct_latest_run_id_V0.outputs.runid }}
+            [5]: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.get_Qwen3_8B_latest_run_id_V0.outputs.runid }}

@@ -52,7 +52,7 @@ user_guide/release_notes
 % How to contribute to the vLLM Ascend project
 :::{toctree}
 :caption: Developer Guide
-:maxdepth: 2
+:maxdepth: 1
 developer_guide/contributing
 developer_guide/versioning_policy
 developer_guide/evaluation/index
