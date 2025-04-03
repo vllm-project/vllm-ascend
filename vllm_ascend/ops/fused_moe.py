@@ -555,6 +555,8 @@ class AscendFusedMoE(FusedMoE):
         if self.ep_size > 1:
             # Create a tensor of size num_experts filled with -1
             self.local_num_experts, self.expert_map = determine_expert_map(self.ep_size, get_ep_group().rank_in_group, self.global_num_experts)
+            self.tp_rank = get_etp_group().rank_in_group
+            self.ep_rank = get_ep_group().rank_in_group
         else:
             # Adjust TP size for DP attention
             # haven't test its functionality yet, may remove in the future
@@ -571,7 +573,7 @@ class AscendFusedMoE(FusedMoE):
 
         if quant_config is None:
             self.quant_method: Optional[QuantizeMethodBase] = (
-                UnquantizedFusedMoEMethod())
+                AscendUnquantizedFusedMoEMethod())
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix)
         assert self.quant_method is not None
