@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Optional, Tuple
 import torch
 import torch_npu  # noqa: F401
 import vllm.envs as envs
-from vllm.config import CompilationLevel
 from vllm.logger import init_logger
 from vllm.platforms import Platform, PlatformEnum
 
@@ -91,6 +90,7 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        from vllm.config import CompilationLevel  # noqa: E402
         compilation_config = vllm_config.compilation_config
         if compilation_config and compilation_config.level != CompilationLevel.NO_COMPILATION:
             logger.warning(
