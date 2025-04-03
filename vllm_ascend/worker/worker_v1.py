@@ -25,7 +25,7 @@ import torch.distributed
 import torch.nn as nn
 import torch_npu
 from vllm import envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (ensure_kv_transfer_initialized,
                               ensure_model_parallel_initialized,
                               init_distributed_environment,
