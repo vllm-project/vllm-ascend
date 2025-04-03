@@ -71,6 +71,12 @@ def __dir__():
 
 
 def load_env_variables() -> None:
+    """
+    Set Ascend related environment variables when NPU platform registered.
+    NOTE: To make `ACL_OP_INIT_MODE` setting valid, you need to use pta of 0403.
+    To install pta of 0403 version, replace the link in `pta_install.sh` with 
+    https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1-7.0.0/20250403.3/pytorch_v2.5.1-7.0.0_py310.tar.gz
+    """
     env_vars: dict[str, str] = {}
 
     for name, value in env_variables.items():
