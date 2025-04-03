@@ -35,7 +35,6 @@ if TYPE_CHECKING:
     ASCEND_HOME_PATH = None
     LD_LIBRARY_PATH = None
 
-
 logger = init_logger(__name__)
 
 env_variables: Dict[str, Callable[[], Any]] = {
