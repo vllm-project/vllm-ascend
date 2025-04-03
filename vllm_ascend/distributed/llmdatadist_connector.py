@@ -195,24 +195,30 @@ class LLMDataDistConnector(KVConnectorBase):
         input_dtype = torch.int32
 
         # initialize LLMDatadist data structure
-        key_desc = llm_datadist.CacheDesc(num_layer,
-                             kv_shape,
-                             TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
-                             seq_len_dim_index=1)
-        value_desc = llm_datadist.CacheDesc(num_layer,
-                               kv_shape,
-                               TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
-                               seq_len_dim_index=1)
-        input_desc = llm_datadist.CacheDesc(1,
-                               input_shape,
-                               TORCH_DTYPE_TO_NPU_DTYPE[input_dtype],
-                               seq_len_dim_index=-1)
-        hidden_desc = llm_datadist.CacheDesc(1,
-                                hidden_shape,
-                                TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
-                                seq_len_dim_index=-1)
+        key_desc = llm_datadist.CacheDesc(
+            num_layer,
+            kv_shape,
+            TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
+            seq_len_dim_index=1)
+        value_desc = llm_datadist.CacheDesc(
+            num_layer,
+            kv_shape,
+            TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
+            seq_len_dim_index=1)
+        input_desc = llm_datadist.CacheDesc(
+            1,
+            input_shape,
+            TORCH_DTYPE_TO_NPU_DTYPE[input_dtype],
+            seq_len_dim_index=-1)
+        hidden_desc = llm_datadist.CacheDesc(
+            1,
+            hidden_shape,
+            TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
+            seq_len_dim_index=-1)
 
-        key_cache_keys = [llm_datadist.CacheKey(self.llm_datadist_engine.cluster_id, 0, 1)]
+        key_cache_keys = [
+            llm_datadist.CacheKey(self.llm_datadist_engine.cluster_id, 0, 1)
+        ]
         value_cache_keys = [
             llm_datadist.CacheKey(self.llm_datadist_engine.cluster_id, 0, 2)
         ]
@@ -325,22 +331,26 @@ class LLMDataDistConnector(KVConnectorBase):
         input_dtype = torch.int32
 
         # Add LLM DataDist initialization
-        key_desc = llm_datadist.CacheDesc(num_layer,
-                             kv_shape,
-                             TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
-                             seq_len_dim_index=-1)
-        value_desc = llm_datadist.CacheDesc(num_layer,
-                               kv_shape,
-                               TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
-                               seq_len_dim_index=-1)
-        input_desc = llm_datadist.CacheDesc(1,
-                               input_shape,
-                               TORCH_DTYPE_TO_NPU_DTYPE[input_dtype],
-                               seq_len_dim_index=-1)
-        hidden_desc = llm_datadist.CacheDesc(1,
-                                hidden_shape,
-                                TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
-                                seq_len_dim_index=-1)
+        key_desc = llm_datadist.CacheDesc(
+            num_layer,
+            kv_shape,
+            TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
+            seq_len_dim_index=-1)
+        value_desc = llm_datadist.CacheDesc(
+            num_layer,
+            kv_shape,
+            TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
+            seq_len_dim_index=-1)
+        input_desc = llm_datadist.CacheDesc(
+            1,
+            input_shape,
+            TORCH_DTYPE_TO_NPU_DTYPE[input_dtype],
+            seq_len_dim_index=-1)
+        hidden_desc = llm_datadist.CacheDesc(
+            1,
+            hidden_shape,
+            TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
+            seq_len_dim_index=-1)
         self.decode_key_buffer = self.llm_datadist_engine.kv_transfer.allocate_cache(
             key_desc)
         self.decode_value_buffer = self.llm_datadist_engine.kv_transfer.allocate_cache(
@@ -365,14 +375,14 @@ class LLMDataDistConnector(KVConnectorBase):
         self.hidden_cache = torchair.llm_datadist.create_npu_tensors(
             hidden_desc.shape, kv_hidden_dtype, hidden_buffer_addrs)
 
-        key_cache_key = llm_datadist.CacheKeyByIdAndIndex(self.cluster.remote_cluster_id, 1,
-                                             0)
-        value_cache_key = llm_datadist.CacheKeyByIdAndIndex(self.cluster.remote_cluster_id,
-                                               2, 0)
-        input_cache_key = llm_datadist.CacheKeyByIdAndIndex(self.cluster.remote_cluster_id,
-                                               3, 0)
-        hidden_cache_key = llm_datadist.CacheKeyByIdAndIndex(self.cluster.remote_cluster_id,
-                                                4, 0)
+        key_cache_key = llm_datadist.CacheKeyByIdAndIndex(
+            self.cluster.remote_cluster_id, 1, 0)
+        value_cache_key = llm_datadist.CacheKeyByIdAndIndex(
+            self.cluster.remote_cluster_id, 2, 0)
+        input_cache_key = llm_datadist.CacheKeyByIdAndIndex(
+            self.cluster.remote_cluster_id, 3, 0)
+        hidden_cache_key = llm_datadist.CacheKeyByIdAndIndex(
+            self.cluster.remote_cluster_id, 4, 0)
 
         self.llm_datadist_engine.kv_transfer.pull_cache(
             key_cache_key, self.decode_key_buffer, 0)
