@@ -162,8 +162,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        self._init_worker_distributed_environment(self.vllm_config,
-                                                  self.rank,
+        self._init_worker_distributed_environment(self.vllm_config, self.rank,
                                                   self.distributed_init_method,
                                                   self.local_rank)
         # Set random seed.

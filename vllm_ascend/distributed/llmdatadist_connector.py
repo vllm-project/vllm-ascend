@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, List, Tuple, Union
 
 import torch
 import torch_npu
-import torchair
+import torchair # type: ignore
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.logger import init_logger
@@ -30,7 +30,7 @@ from vllm.sequence import IntermediateTensors
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
-from llm_datadist import (CacheDesc, CacheKey, CacheKeyByIdAndIndex, DataType,
+from llm_datadist import (CacheDesc, CacheKey, CacheKeyByIdAndIndex, DataType, # type: ignore
                           LLMClusterInfo, LLMDataDist, LLMRole)
 
 logger = init_logger(__name__)
