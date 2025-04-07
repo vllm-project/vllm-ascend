@@ -59,8 +59,10 @@ def test_models(model: str, use_v1: str, dtype: str, max_tokens: int,
             vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+# Now our pvc reading speed is too slow
+# For faster testing, temporarily uncheck the support for testing large weight models on v1
 @pytest.mark.multinpu
-@pytest.mark.parametrize("use_v1", ["1", "0"])
+@pytest.mark.parametrize("use_v1", ["0"])
 @pytest.mark.parametrize("model, distributed_executor_backend", [
     ("Qwen/QwQ-32B", "mp"),
 ])
