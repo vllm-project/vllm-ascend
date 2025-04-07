@@ -1,7 +1,11 @@
+# Should be mirrored in pyporject.toml
+cmake>=3.26
 decorator
+numpy<2.0.0
+pybind11
 pyyaml
 scipy
-pybind11
-setuptools
-setuptools-scm
-numpy==1.26.4
+setuptools>=64
+setuptools-scm>=8
+torch_npu >= 2.5.1rc1
+torch >= 2.5.1

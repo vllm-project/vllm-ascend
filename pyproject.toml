@@ -1,14 +1,15 @@
 [build-system]
 # Should be mirrored in requirements.txt
 requires = [
-    "setuptools>=64",
-    "setuptools-scm>=8",
     "cmake>=3.26",
-    "pybind11",
     "decorator",
+    "numpy<2.0.0",
+    "pybind11",
     "pyyaml",
     "scipy",
+    "setuptools>=64",
+    "setuptools-scm>=8",
     "torch_npu >= 2.5.1rc1",
-    "torch >= 2.5.1"
+    "torch >= 2.5.1",
 ]
 build-backend = "setuptools.build_meta"
