@@ -4,4 +4,4 @@ scipy
 pybind11
 setuptools
 setuptools-scm
-numpy==1.26.4
+numpy
