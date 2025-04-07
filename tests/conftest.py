@@ -53,11 +53,7 @@ def cleanup_dist_env_and_memory():
     destroy_distributed_environment()
     gc.collect()
     torch.npu.empty_cache()
-    try:
-        torch._C._host_emptyCache()
-    except AttributeError:
-        logger.warning(
-            "torch._C._host_emptyCache() only available in Pytorch >=2.5")
+
 
 class VllmRunner:
 

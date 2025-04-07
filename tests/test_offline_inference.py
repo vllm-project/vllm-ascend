@@ -38,13 +38,8 @@ os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 @pytest.mark.parametrize("use_v1", ["1", "0"])
 @pytest.mark.parametrize("dtype", ["half", "float16"])
 @pytest.mark.parametrize("max_tokens", [5])
-def test_models(
-    model: str,
-    use_v1: str,
-    dtype: str,
-    max_tokens: int,
-    monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_models(model: str, use_v1: str, dtype: str, max_tokens: int,
+                monkeypatch: pytest.MonkeyPatch) -> None:
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", use_v1)
         if use_v1 == '1':
@@ -69,13 +64,9 @@ def test_models(
 @pytest.mark.parametrize("model, distributed_executor_backend", [
     ("Qwen/QwQ-32B", "mp"),
 ])
-def test_models_distributed(
-    vllm_runner,
-    use_v1: str,
-    model: str,
-    distributed_executor_backend: str,
-    monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_models_distributed(vllm_runner, use_v1: str, model: str,
+                            distributed_executor_backend: str,
+                            monkeypatch: pytest.MonkeyPatch) -> None:
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", use_v1)
         if use_v1 == '1':
