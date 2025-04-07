@@ -42,7 +42,7 @@ concurrency:
 
 jobs:
   test-singlenpu:
-    name: vLLM Ascend test (self-host)
+    name: vLLM Ascend test (single-npu)
     runs-on: linux-arm64-npu-1  # actionlint-ignore: runner-label
     container:
       image: quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10
@@ -72,6 +72,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: vllm-project/vllm
+          fetch-depth: 0 
           path: ./vllm-empty
 
       - name: Install vllm-project/vllm from source
@@ -99,7 +100,28 @@ jobs:
 
           pip install /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 
-      - name: Run vllm-project/vllm-ascend test for V0 Engine
+      - name: Run vllm-project/vllm-ascend test
+        env:
+          VLLM_USE_V1: 0
+          HF_ENDPOINT: https://hf-mirror.com
+        run: |
+          VLLM_USE_V1=0 pytest -sv -m 'not multinpu' tests
+
+      - name: Run vllm-project/vllm test for V0 Engine
+        env:
+          VLLM_USE_V1: 0
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+          HF_ENDPOINT: https://hf-mirror.com
+        run: |
+          pytest -sv
+      
+      - name: Checkout to vllm 0.8.3
+        working-directory: ./vllm-empty
+        run: |
+          git checkout v0.8.3
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Run vllm-project/vllm-ascend test
         env:
           VLLM_USE_V1: 0
           HF_ENDPOINT: https://hf-mirror.com
@@ -114,8 +136,8 @@ jobs:
         run: |
           pytest -sv
 
-  test2:
-    name: test on multiple npu runner
+  test-multinpu:
+    name: vLLM Ascend test (multi-npu)
     runs-on: linux-arm64-npu-4  
     container:
       image: ascendai/cann:8.0.0-910b-ubuntu22.04-py3.10
@@ -162,7 +184,6 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         run: |
-          pip uninstall -y numpy
           pip install -r requirements-dev.txt
           pip install -e .
 
@@ -180,6 +201,19 @@ jobs:
           fi
 
           pip install /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+      - name: Run vllm-project/vllm-ascend test
+        env:
+          VLLM_USE_V1: 0
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+        run: |
+          pytest -sv -m multinpu tests/
+
+      - name: Checkout to vllm 0.8.3
+        working-directory: ./vllm-empty
+        run: |
+          git checkout v0.8.3
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
       - name: Run vllm-project/vllm-ascend test
         env:
           VLLM_USE_V1: 0
