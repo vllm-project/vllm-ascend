@@ -133,7 +133,7 @@ jobs:
 
       # only run test on spec decode when the related code changed
       - name: Check for changes in Speculative Decode
-        id: filter
+        id: filter_spec_deocde
         uses: dorny/paths-filter@v2
         with:
           filters: |
@@ -145,10 +145,25 @@ jobs:
               - "vllm_ascend/patch/patch_spec_decode_worker.py"
               - "vllm_ascend/patch/patch_multi_step_worker.py"
 
-      - name: Run vllm-project/vllm-ascend key feature test
+      - name: Run vllm-project/vllm-ascend spec decode test
         if: steps.filter.outputs.speculative_tests_changed
         run: |
           pytest -sv tests/spec_decode
+
+      - name: Check for changes in Multi-Step
+        id: filter_multi_step
+        uses: dorny/paths-filter@v2
+        with:
+          filters: |
+            multi_step_tests_changed:
+              - "tests/multi_step/**"
+              - "vllm_ascend/worker/multi_step_runner.py"
+              - "vllm_ascend/worker/multi_step_worker.py"
+
+      - name: Run vllm-project/vllm-ascend multi-step test
+        if: steps.filter.outputs.multi_step_tests_changed
+        run: |
+          pytest -sv tests/multi_step
 
       - name: Run vllm-project/vllm test
         run: |
