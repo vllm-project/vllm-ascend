@@ -42,7 +42,7 @@ concurrency:
 
 jobs:
   test-singlenpu:
-    name: vLLM Ascend test (single-npu)
+    name: vLLM Ascend test main(single-npu)
     runs-on: linux-arm64-npu-1  # actionlint-ignore: runner-label
     container:
       image: quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10
@@ -123,7 +123,7 @@ jobs:
           pytest -sv
 
   test-multinpu:
-    name: vLLM Ascend test (multi-npu)
+    name: vLLM Ascend test main(multi-npu)
     runs-on: linux-arm64-npu-4  
     container:
       image: ascendai/cann:8.0.0-910b-ubuntu22.04-py3.10
@@ -203,7 +203,7 @@ jobs:
           pytest -sv -m 'multinpu' tests
 
   test-singlenpu-v0_8_3:
-    name: vLLM Ascend test (single-npu)
+    name: vLLM Ascend test v0.8.3(single-npu)
     runs-on: linux-arm64-npu-1  # actionlint-ignore: runner-label
     container:
       image: quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10
@@ -285,7 +285,7 @@ jobs:
           pytest -sv
 
   test-multinpu-v0_8_3:
-    name: vLLM Ascend test (multi-npu)
+    name: vLLM Ascend test v0.8.3(multi-npu)
     runs-on: linux-arm64-npu-4
     needs: test-multinpu
     container:
