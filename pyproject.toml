@@ -11,5 +11,6 @@ requires = [
     "setuptools-scm>=8",
     "torch_npu >= 2.5.1rc1",
     "torch >= 2.5.1",
+    "torchvision<0.21.0",
 ]
 build-backend = "setuptools.build_meta"
