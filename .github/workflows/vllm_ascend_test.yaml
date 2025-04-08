@@ -316,7 +316,7 @@ jobs:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
 
-      - name: Install dependencies
+      - name: Install dependencies 
         run: |
           pip install -r requirements-dev.txt
 
