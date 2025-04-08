@@ -17,14 +17,17 @@
 # limitations under the License.
 #
 
+import gc
 from typing import List, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 import pytest
+import torch
 from PIL import Image
 from vllm import LLM, SamplingParams
 from vllm.config import TaskOption
-from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.distributed.parallel_state import (destroy_distributed_environment,
+                                             destroy_model_parallel)
 from vllm.inputs import ExplicitEncoderDecoderPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -37,11 +40,19 @@ from tests.model_utils import (TokensTextLogprobs,
 logger = init_logger(__name__)
 
 _M = TypeVar("_M")
+
 _PromptMultiModalInput = Union[List[_M], List[List[_M]]]
 
 PromptImageInput = _PromptMultiModalInput[Image.Image]
 PromptAudioInput = _PromptMultiModalInput[Tuple[np.ndarray, int]]
 PromptVideoInput = _PromptMultiModalInput[np.ndarray]
+
+
+def cleanup_dist_env_and_memory():
+    destroy_model_parallel()
+    destroy_distributed_environment()
+    gc.collect()
+    torch.npu.empty_cache()
 
 
 class VllmRunner:
