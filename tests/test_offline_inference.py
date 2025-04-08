@@ -35,58 +35,44 @@ os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("use_v1", ["1", "0"])
 @pytest.mark.parametrize("dtype", ["half", "float16"])
 @pytest.mark.parametrize("max_tokens", [5])
-def test_models(model: str, use_v1: str, dtype: str, max_tokens: int,
-                monkeypatch: pytest.MonkeyPatch) -> None:
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", use_v1)
-        if use_v1 == '1':
-            m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-        # 5042 tokens for gemma2
-        # gemma2 has alternating sliding window size of 4096
-        # we need a prompt with more than 4096 tokens to test the sliding window
-        prompt = "The following numbers of the sequence " + ", ".join(
-            str(i) for i in range(1024)) + " are:"
-        example_prompts = [prompt]
+def test_models(model: str, dtype: str, max_tokens: int) -> None:
+    # 5042 tokens for gemma2
+    # gemma2 has alternating sliding window size of 4096
+    # we need a prompt with more than 4096 tokens to test the sliding window
+    prompt = "The following numbers of the sequence " + ", ".join(
+        str(i) for i in range(1024)) + " are:"
+    example_prompts = [prompt]
 
-        with VllmRunner(model,
-                        max_model_len=8192,
-                        dtype=dtype,
-                        enforce_eager=False,
-                        gpu_memory_utilization=0.7) as vllm_model:
-            vllm_model.generate_greedy(example_prompts, max_tokens)
+    with VllmRunner(model,
+                    max_model_len=8192,
+                    dtype=dtype,
+                    enforce_eager=False,
+                    gpu_memory_utilization=0.7) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-# Now our pvc reading speed is too slow
-# For faster testing, temporarily uncheck the support for testing large weight models on v1
 @pytest.mark.multinpu
-@pytest.mark.parametrize("use_v1", ["0"])
 @pytest.mark.parametrize("model, distributed_executor_backend", [
     ("Qwen/QwQ-32B", "mp"),
 ])
-def test_models_distributed(vllm_runner, use_v1: str, model: str,
-                            distributed_executor_backend: str,
-                            monkeypatch: pytest.MonkeyPatch) -> None:
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", use_v1)
-        if use_v1 == '1':
-            m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
-        example_prompts = [
-            "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
-            "Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.",
-            "Compare and contrast artificial intelligence with human intelligence in terms of processing information.",
-        ]
-        dtype = "half"
-        max_tokens = 5
-        with vllm_runner(
-                model,
-                dtype=dtype,
-                tensor_parallel_size=4,
-                distributed_executor_backend=distributed_executor_backend,
-        ) as vllm_model:
-            vllm_model.generate_greedy(example_prompts, max_tokens)
+def test_models_distributed(vllm_runner, model: str,
+                            distributed_executor_backend: str) -> None:
+    example_prompts = [
+        "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
+        "Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.",
+        "Compare and contrast artificial intelligence with human intelligence in terms of processing information.",
+    ]
+    dtype = "half"
+    max_tokens = 5
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            tensor_parallel_size=4,
+            distributed_executor_backend=distributed_executor_backend,
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
 if __name__ == "__main__":
