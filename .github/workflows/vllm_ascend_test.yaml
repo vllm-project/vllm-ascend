@@ -36,9 +36,9 @@ defaults:
   run:
     shell: bash -el {0}
 
-# concurrency:
-#   group: pr-${{ github.event.pull_request.number }}
-#   cancel-in-progress: true
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   test-singlenpu:
@@ -202,7 +202,7 @@ jobs:
         run: |
           pytest -sv -m 'multinpu' tests
 
-  test-singlenpu-v0.8.3:
+  test-singlenpu-v0_8_3:
     name: vLLM Ascend test (single-npu)
     runs-on: linux-arm64-npu-1  # actionlint-ignore: runner-label
     container:
@@ -284,7 +284,7 @@ jobs:
         run: |
           pytest -sv
 
-  test-multinpu-v0.8.3:
+  test-multinpu-v0_8_3:
     name: vLLM Ascend test (multi-npu)
     runs-on: linux-arm64-npu-4
     needs: test-multinpu
