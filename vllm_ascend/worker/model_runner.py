@@ -18,11 +18,12 @@
 #
 
 import dataclasses
+import time
 import weakref
 import itertools
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set, Tuple,
                     Type, TypeVar, Union)
 import time
 import torch
@@ -63,7 +64,8 @@ from vllm.worker.model_runner_base import (
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
-from vllm_ascend.utils import profiling_this
+
+from vllm_ascend.utils import VLLM_ENABLE_GRAPH_MODE, profiling_this
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
@@ -1469,3 +1471,71 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
         self.execute_model(model_input, kv_caches, intermediate_tensors)
         current_platform.synchronize()
         return
+
+    def _dummy_run(
+        self,
+        batch_size: int,
+        seq_len: int,
+        kv_caches: Optional[List[torch.Tensor]] = None,
+        is_prompt: bool = False,
+    ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
+        # Enable top-k sampling to reflect the accurate memory usage.
+        sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
+        seqs: List[SequenceGroupMetadata] = []
+        for group_id in range(batch_size):
+            dummy_data = self.input_registry \
+                .dummy_data_for_profiling(self.model_config,
+                                          seq_len,
+                                          self.mm_registry)
+            seq = SequenceGroupMetadata(
+                request_id=str(group_id),
+                is_prompt=is_prompt,
+                seq_data={group_id: dummy_data.seq_data},
+                sampling_params=sampling_params,
+                block_tables=None,
+                lora_request=None,
+                multi_modal_data=dummy_data.multi_modal_data,
+                multi_modal_placeholders=dummy_data.multi_modal_placeholders,
+            )
+            seqs.append(seq)
+
+        # Run the model with the dummy inputs.
+        finished_requests_ids = [seq.request_id for seq in seqs]
+        model_input = self.prepare_model_input(
+            seqs, finished_requests_ids=finished_requests_ids)
+        intermediate_tensors = None
+        if not get_pp_group().is_first_rank:
+            intermediate_tensors = self.model.make_empty_intermediate_tensors(
+                batch_size=batch_size,
+                dtype=self.model_config.dtype,
+                device=self.device)
+        hidden_states = self.execute_model(model_input, kv_caches, intermediate_tensors)
+        current_platform.synchronize()
+        return hidden_states
+
+    def capture_model(
+        self,
+        kv_caches: Optional[List[torch.Tensor]] = None,
+    ) -> None:
+        if not VLLM_ENABLE_GRAPH_MODE != '1':
+            logger.warning(
+                "Skipping NPU graph capture.")
+            return
+        logger.info("Compiling the model with different input shapes...")
+        start_time = time.perf_counter()
+        start_free_gpu_memory = current_platform.mem_get_info()[0]
+        seq_len = 1
+        for batch_size in reversed(self.vllm_config.compilation_config.cudagraph_capture_sizes):
+                for _ in range(self.vllm_config.compilation_config.
+                               cudagraph_num_of_warmups):
+                    self._dummy_run(batch_size, seq_len, kv_caches, is_prompt=False)
+                    current_platform.synchronize()
+                self._dummy_run(batch_size, seq_len, kv_caches, is_prompt=False)
+                current_platform.synchronize()
+        end_time = time.perf_counter()
+        end_free_gpu_memory = current_platform.mem_get_info()[0]
+        elapsed_time = end_time - start_time
+        cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
+        # This usually takes 5~20 seconds.
+        logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
+                    elapsed_time, cuda_graph_size / (1 << 30))

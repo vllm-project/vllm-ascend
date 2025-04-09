@@ -45,7 +45,7 @@ from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import try_register_lib
+from vllm_ascend.utils import VLLM_ENABLE_GRAPH_MODE, try_register_lib
 from vllm_ascend.worker.model_runner import NPUModelRunner
 from vllm_ascend.worker.pooling_model_runner import NPUPoolingModelRunner
 
@@ -295,9 +295,8 @@ class NPUWorker(LocalOrDistributedWorkerBase):
                       self.gpu_cache)
 
     def _warm_up_model(self) -> None:
-        # model capture is not supported, thus we just set seed here.
-        # Reset the seed to ensure that the random state is not affected by
-        # the model initialization and profiling.
+        if  VLLM_ENABLE_GRAPH_MODE == '1':
+            self.model_runner.capture_model(self.gpu_cache)
         set_random_seed(self.model_config.seed)
 
     @property
