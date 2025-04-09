@@ -8,6 +8,9 @@
 
 ## Setup environment using container
 
+:::::{tab-set}
+::::{tab-item} Ubuntu OS
+
 ```{code-block} bash
    :substitutions:
 
@@ -15,6 +18,32 @@
 export DEVICE=/dev/davinci0
 # Update the vllm-ascend image
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+docker run --rm \
+--name vllm-ascend \
+--device $DEVICE \
+--device /dev/davinci_manager \
+--device /dev/devmm_svm \
+--device /dev/hisi_hdc \
+-v /usr/local/dcmi:/usr/local/dcmi \
+-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+-v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+-v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+-v /etc/ascend_install.info:/etc/ascend_install.info \
+-v /root/.cache:/root/.cache \
+-p 8000:8000 \
+-it $IMAGE bash
+```
+::::
+
+::::{tab-item} OpenEuler OS
+
+```{code-block} bash
+   :substitutions:
+
+# Update DEVICE according to your device (/dev/davinci[0-7])
+export DEVICE=/dev/davinci0
+# Update the vllm-ascend image
+export IMAGE=docker.io/openeuler/vllm-ascend:latest
 docker run --rm \
 --name vllm-ascend \
 --device $DEVICE \
