@@ -9,7 +9,7 @@ name: 'image'
 #   - commits are merge into main/*-dev  ==> vllm-ascend:main / vllm-ascend:*-dev
 # 3. tags push trigger image publish
 #   - is for final release image
-#   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3-oe|latest / vllm-ascend:v1.2.3rc1-oe
+#   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3-openeuler|latest / vllm-ascend:v1.2.3rc1-openeuler
 on:
   pull_request:
     branches:
@@ -55,14 +55,14 @@ jobs:
         # 1. branch job pulish per main/*-dev branch commits
         # 2. main and dev pull_request is build only, so the tag pr-N is fine
         # 3. only pep440 matched tag will be published:
-        #    - v0.7.1 --> v0.7.1-oe, latest
-        #    - pre/post/dev: v0.7.1rc1/v0.7.1rc1/v0.7.1rc1.dev1/v0.7.1.post1, no latest
+        #    - v0.7.1 --> v0.7.1-openeuler, latest
+        #    - pre/post/dev: v0.7.1rc1-openeuler/v0.7.1rc1-openeuler/v0.7.1rc1.dev1-openeuler/v0.7.1.post1-openeuler, no latest
         #      which follow the rule from vLLM with prefix v
         # TODO(yikun): the post release might be considered as latest release
         tags: |
             type=ref,event=branch
             type=ref,event=pr
-            type=pep440,pattern={{raw}}-oe
+            type=pep440,pattern={{raw}}-openeuler
 
     - name: Free up disk space
       uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
