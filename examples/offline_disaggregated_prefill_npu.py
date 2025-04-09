@@ -61,7 +61,7 @@ def run_prefill(prefill_done, process_close):
     print("Prefill node is finished.")
     prefill_done.set()
 
-    # To keep the prefill node running in case the decode node is not done;
+    # To keep the prefill node running in case the decode node is not done
     # otherwise, the script might exit prematurely, causing incomplete decoding.
     try:
         while not process_close.is_set():
