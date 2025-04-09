@@ -202,6 +202,7 @@ jobs:
         run: |
           pytest -sv -m 'multinpu' tests
 
+  # Please also update README.md and versioning_policy.md if you change this
   test-singlenpu-v0_8_3:
     name: vLLM Ascend test v0.8.3(single-npu)
     runs-on: linux-arm64-npu-1  # actionlint-ignore: runner-label
@@ -284,6 +285,7 @@ jobs:
         run: |
           pytest -sv
 
+  # Please also update README.md and versioning_policy.md if you change this
   test-multinpu-v0_8_3:
     name: vLLM Ascend test v0.8.3(multi-npu)
     runs-on: linux-arm64-npu-4
