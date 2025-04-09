@@ -62,6 +62,7 @@ class VllmRunner:
         enable_chunked_prefill: bool = False,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = False,
+        trust_remote_code: Optional[bool] = True,
         **kwargs,
     ) -> None:
         self.model = LLM(
@@ -69,7 +70,7 @@ class VllmRunner:
             task=task,
             tokenizer=tokenizer_name,
             tokenizer_mode=tokenizer_mode,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
             dtype=dtype,
             swap_space=swap_space,
             enforce_eager=enforce_eager,
