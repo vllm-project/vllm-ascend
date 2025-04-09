@@ -19,9 +19,6 @@ FROM quay.io/ascend/cann:8.0.0-910b-openeuler22.03-py3.10
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 
-# Define environments
-ENV DEBIAN_FRONTEND=noninteractive
-
 RUN yum update -y && \
     yum install -y python3-pip git vim wget net-tools && \
     rm -rf /var/cache/yum &&\
