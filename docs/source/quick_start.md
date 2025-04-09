@@ -43,7 +43,7 @@ docker run --rm \
 # Update DEVICE according to your device (/dev/davinci[0-7])
 export DEVICE=/dev/davinci0
 # Update the vllm-ascend image
-export IMAGE=docker.io/openeuler/vllm-ascend:latest
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-openeuler
 docker run --rm \
 --name vllm-ascend \
 --device $DEVICE \
