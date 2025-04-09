@@ -50,8 +50,7 @@ def run_prefill(prefill_done, process_close):
         '{"kv_connector":"AscendHcclConnector","kv_buffer_device":"npu","kv_role":"kv_producer", "kv_parallel_size":2}'
     )
 
-    # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
-    # memory. You may need to adjust the value to fit your GPU.
+    # Set NPU memory utilization to 0.8
     llm = LLM(model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
               kv_transfer_config=ktc,
               max_model_len=2000,
