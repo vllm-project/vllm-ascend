@@ -35,7 +35,7 @@ docker run --rm \
 ```
 ::::
 
-::::{tab-item} OpenEuler OS
+::::{tab-item} openEuler OS
 
 ```{code-block} bash
    :substitutions:
@@ -59,6 +59,7 @@ docker run --rm \
 -p 8000:8000 \
 -it $IMAGE bash
 ```
+::::
 
 ## Usage
 
