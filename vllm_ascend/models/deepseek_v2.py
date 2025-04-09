@@ -39,6 +39,7 @@ from vllm.attention import Attention, AttentionMetadata
 import vllm.envs as envs
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.distributed import (get_pp_group,
                               get_dp_group,
                               get_tp_group,
@@ -145,7 +146,7 @@ class CustomDeepseekV2MoE(nn.Module):
         vllm_config = get_current_vllm_config()
         self.dp_size = get_dp_group().world_size
         batch_size = vllm_config.scheduler_config.max_num_seqs
-        self.enable_mc2 = int(os.environ.get("VLLM_ENABLE_MC2")) == 1
+        self.enable_mc2 = int(os.environ.get("VLLM_ENABLE_MC2", 0)) == 1
 
         params_dtype = torch.get_default_dtype()
         self.final_hidden_states = torch.zeros([batch_size, config.hidden_size],
@@ -153,8 +154,12 @@ class CustomDeepseekV2MoE(nn.Module):
         self.tp_group = get_tp_group().device_group
 
     def forward(
-        self, hidden_states: torch.Tensor, attn_metadata: AttentionMetadata
+        self, hidden_states: torch.Tensor
     ) -> torch.Tensor:
+        attn_metadata = get_forward_context().attn_metadata
+        if attn_metadata is None:
+            # for profile run
+            return hidden_states
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -174,7 +179,7 @@ class CustomDeepseekV2MoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        is_prefill = True if attn_metadata.prefill_metadata is not None else False
+        is_prefill = True if attn_metadata.is_only_prefill else False
         # is_prefill = attn_metadata.num_prefills > 0
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
@@ -184,7 +189,7 @@ class CustomDeepseekV2MoE(nn.Module):
         ) * self.routed_scaling_factor
 
         if self.tp_size > 1:
-            if self.enable_mc2 and attn_metadata.num_prefills == 0:
+            if self.enable_mc2 and not is_prefill:
                 dist.all_gather_into_tensor(
                     self.final_hidden_states, final_hidden_states, self.tp_group
                 )

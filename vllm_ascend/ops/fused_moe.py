@@ -574,7 +574,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             layer.w2_weight.data),
                                              requires_grad=False)
 
-    def forward_oot(
+    def apply(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
