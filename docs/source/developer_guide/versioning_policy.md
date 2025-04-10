@@ -42,7 +42,7 @@ Usually, each minor version of vLLM (such as 0.7) will correspond to a vllm-asce
 
 | Branch     | Status       | Note                                 |
 |------------|--------------|--------------------------------------|
-| main       | Maintained   | CI commitment for vLLM main branch   |
+| main       | Maintained   | CI commitment for vLLM main and vLLM 0.8.x branch   |
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version |
 | v0.7.1-dev | Unmaintained | Replaced by v0.7.3-dev               |
 
