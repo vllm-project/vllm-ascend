@@ -63,7 +63,6 @@ jobs:
           type=ref,event=branch,suffix=-openeuler
           type=ref,event=pr,suffix=-openeuler
           type=pep440,pattern={{raw}}-openeuler
-          type=raw,value=latest-openeuler
 
     - name: Free up disk space
       uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
