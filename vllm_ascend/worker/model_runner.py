@@ -1189,6 +1189,12 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                     device=previous_hidden_states.device)
                 ])
         else:
+            for name, params in self.model.named_parameters():
+                if ".weight" in name:
+                    if ("mlp" in name or "self_attn" in name) and ('gate.weight' not in name) and ('.weight_scale' not in name) and ('.weight_offset' not in name):
+                        params.data = torch_npu.npu_format_cast(params.data, 29)
+                        if torch.distributed.get_rank() == 0:
+                            print("NZ parameter %s; size: %s, dtype: %s torch_npu.get_npu_format %s", name, params.size(), params.dtype, torch_npu.get_npu_format(params.data))
             model_executable = self.model
 
         # Receive KV cache in distributed KV cache transfer setting
