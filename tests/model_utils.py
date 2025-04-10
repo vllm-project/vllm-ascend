@@ -18,8 +18,7 @@
 #
 
 import warnings
-from typing import (Callable, Dict, List, Optional, Sequence,
-                    Tuple, Union)
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import torch
 from vllm.config import ModelConfig, TaskOption
