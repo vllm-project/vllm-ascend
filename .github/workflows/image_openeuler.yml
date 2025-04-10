@@ -72,9 +72,6 @@ jobs:
 
     - name: Build - Set up QEMU
       uses: docker/setup-qemu-action@v3
-      # TODO(yikun): remove this after https://github.com/docker/setup-qemu-action/issues/198 resolved
-      with:
-        image: tonistiigi/binfmt:qemu-v7.0.0-28
 
     - name: Build - Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -98,3 +95,7 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         tags: ${{ steps.meta.outputs.tags }}
         file: Dockerfile.openEuler
+        # TODO: support and enable custom ops build for openEuler
+        build-args: |
+          PIP_INDEX_URL=https://pypi.org/simple
+          COMPILE_CUSTOM_KERNELS=0
