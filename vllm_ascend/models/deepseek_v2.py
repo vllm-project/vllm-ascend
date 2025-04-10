@@ -1,6 +1,6 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# Adapted from vllm/model_executor/models/qwen2_vl.py
+# Adapted from vllm/model_executor/models/deepseek_v2.py
 # Copyright 2023 The vLLM team.
 #
 # This file is a part of the vllm-ascend project.
