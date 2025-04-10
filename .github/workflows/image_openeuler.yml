@@ -59,11 +59,11 @@ jobs:
         #    - pre/post/dev: v0.7.1rc1-openeuler/v0.7.1rc1-openeuler/v0.7.1rc1.dev1-openeuler/v0.7.1.post1-openeuler, no latest
         #      which follow the rule from vLLM with prefix v
         # TODO(yikun): the post release might be considered as latest release
-      tags: |
-        type=ref,event=branch,suffix=-openeuler
-        type=ref,event=pr,suffix=-openeuler
-        type=pep440,pattern={{raw}}-openeuler
-        type=raw,value=latest-openeuler
+        tags: |
+          type=ref,event=branch,suffix=-openeuler
+          type=ref,event=pr,suffix=-openeuler
+          type=pep440,pattern={{raw}}-openeuler
+          type=raw,value=latest-openeuler
 
     - name: Free up disk space
       uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
