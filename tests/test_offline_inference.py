@@ -21,7 +21,6 @@
 Run `pytest tests/test_offline_inference.py`.
 """
 import os
-from typing import List
 
 import pytest
 import vllm  # noqa: F401

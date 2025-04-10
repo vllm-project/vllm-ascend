@@ -18,11 +18,10 @@
 #
 
 import warnings
-from typing import (Callable, Dict, List, NamedTuple, Optional, Sequence,
+from typing import (Callable, Dict, List, Optional, Sequence,
                     Tuple, Union)
 
 import torch
-from vllm import LLM, EngineArgs, SamplingParams
 from vllm.config import ModelConfig, TaskOption
 from vllm.inputs import InputContext
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
