@@ -114,7 +114,7 @@ run_latency_tests() {
     # run the benchmark
     eval "$latency_command"
     # echo model_name to result file
-    model_name = $(echo "$latency_params" | jq -r '.model')
+    model_name=$(echo "$latency_params" | jq -r '.model')
     update_json_field "$RESULTS_FOLDER/${test_name}.json" "model_name" "$model_name"
     kill_npu_processes
 
@@ -157,7 +157,7 @@ run_throughput_tests() {
     # run the benchmark
     eval "$throughput_command"
     # echo model_name to result file
-    model_name = $(echo "$throughput_params" | jq -r '.model')
+    model_name=$(echo "$throughput_params" | jq -r '.model')
     update_json_field "$RESULTS_FOLDER/${test_name}.json" "model_name" "$model_name"
     kill_npu_processes
 
