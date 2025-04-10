@@ -311,6 +311,6 @@ def qwen_prompt(questions: List[str]) -> List[str]:
 
 
 # Map of prompt templates for different models.
-PROMPT_TEMPLATES: dict[str, Callable[[List[str], str], List[str]]] = {
+PROMPT_TEMPLATES: dict[str, Callable] = {
     "qwen2.5vl": qwen_prompt,
 }

@@ -30,7 +30,7 @@ from vllm.assets.image import ImageAsset
 
 import vllm_ascend  # noqa: F401
 
-MODELS = ["Qwen/Qwen2.5-0.5B-Instruct"]
+MODELS = ["Qwen/Qwen2.5-7B-Instruct"]
 MULTIMODALITY_MODELS = ["Qwen/Qwen2.5-VL-3B-Instruct"]
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
