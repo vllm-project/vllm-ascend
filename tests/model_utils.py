@@ -18,9 +18,11 @@
 #
 
 import warnings
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import (Callable, Dict, List, NamedTuple, Optional, Sequence,
+                    Tuple, Union)
 
 import torch
+from vllm import LLM, EngineArgs, SamplingParams
 from vllm.config import ModelConfig, TaskOption
 from vllm.inputs import InputContext
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
@@ -301,3 +303,16 @@ def build_model_context(model_name: str,
         limit_mm_per_prompt=limit_mm_per_prompt,
     )
     return InputContext(model_config)
+
+
+def qwen_prompt(questions: List[str]) -> List[str]:
+    placeholder = "<|image_pad|>"
+    return [("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+             f"<|im_start|>user\n<|vision_start|>{placeholder}<|vision_end|>"
+             f"{q}<|im_end|>\n<|im_start|>assistant\n") for q in questions]
+
+
+# Map of prompt templates for different models.
+PROMPT_TEMPLATES: dict[str, Callable[[List[str], str], List[str]]] = {
+    "qwen2.5vl": qwen_prompt,
+}
