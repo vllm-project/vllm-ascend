@@ -30,8 +30,8 @@ on:
       - '.github/workflows/image_openeuler.yml'
       - 'Dockerfile.openEuler'
       - 'vllm_ascend/**'
-jobs:
 
+jobs:
   build:
     name: vllm-ascend openEuler image
     runs-on: ubuntu-latest
