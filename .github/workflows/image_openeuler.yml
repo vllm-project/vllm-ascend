@@ -33,7 +33,7 @@ on:
 jobs:
 
   build:
-    name: vllm-ascend image
+    name: vllm-ascend openEuler image
     runs-on: ubuntu-latest
 
     steps:
