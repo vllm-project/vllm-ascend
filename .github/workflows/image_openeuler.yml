@@ -17,7 +17,7 @@ on:
       - '*-dev'
     paths:
       - '.github/workflows/image_openeuler.yml'
-      - 'Dockerfile.openeuler'
+      - 'Dockerfile.openEuler'
       - 'vllm_ascend/**'
   push:
     # Publish image when tagging, the Dockerfile in tag will be build as tag image
@@ -28,7 +28,7 @@ on:
       - 'v*'
     paths:
       - '.github/workflows/image_openeuler.yml'
-      - 'Dockerfile.openeuler'
+      - 'Dockerfile.openEuler'
       - 'vllm_ascend/**'
 jobs:
 
