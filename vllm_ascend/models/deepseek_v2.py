@@ -21,7 +21,6 @@ import os
 from typing import Iterable, List, Optional, Set, Tuple, Union, Dict, Any
 
 import torch
-import torch_npu
 from torch import nn
 import torch.distributed as dist
 from transformers import PretrainedConfig
@@ -63,13 +62,9 @@ from vllm.model_executor.models.deepseek_v2 import (DeepseekV2Attention,
 from vllm.model_executor.models.utils import (
     PPMissingLayer, make_empty_intermediate_tensors_factory, make_layers,
     maybe_prefix)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.utils import VLLM_ENABLE_GRAPH_MODE
-
-
-PREFETCH_SIZE = 141557760  # 135MB
 
 
 class CustomDeepseekV2MoE(nn.Module):
@@ -191,60 +186,6 @@ class CustomDeepseekV2MoE(nn.Module):
             final_hidden_states = final_hidden_states + shared_output
 
         return final_hidden_states.view(num_tokens, hidden_dim)
-
-
-class CustomDeepseekV2Attention(DeepseekV2Attention):
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
-    ) -> torch.Tensor:
-        if self.q_lora_rank is not None:
-            q = self.q_a_proj(hidden_states)[0]
-            q = self.q_a_layernorm(q)
-            q = self.q_b_proj(q)[0].view(-1, self.num_local_heads,
-                                         self.qk_head_dim)
-        else:
-            q = self.q_proj(hidden_states)[0].view(-1, self.num_local_heads,
-                                                   self.qk_head_dim)
-        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
-                               dim=-1)
-        latent_cache = self.kv_a_proj_with_mqa(hidden_states)[0]
-        kv_a, _ = latent_cache.split(
-            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        latent_cache = latent_cache.unsqueeze(1)
-        kv_a = self.kv_a_layernorm(kv_a.contiguous())
-        kv = self.kv_b_proj(kv_a)[0]
-        kv = kv.view(-1, self.num_local_heads,
-                     self.qk_nope_head_dim + self.v_head_dim)
-        k_nope, v = kv.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k_pe = latent_cache[:, :, self.kv_lora_rank:]
-
-        q_pe, k_pe = self.rotary_emb(positions, q_pe, k_pe)
-
-        q[..., self.qk_nope_head_dim:] = q_pe
-        k = torch.empty_like(q)
-        k[..., :self.qk_nope_head_dim] = k_nope
-        k[..., self.qk_nope_head_dim:] = k_pe
-        # padding value to qk_head_dim for alignment
-        v = torch.nn.functional.pad(
-            v, [0, self.qk_head_dim - self.v_head_dim],
-            value=0).view(-1, self.num_local_heads * self.qk_head_dim)
-
-        is_decode = attn_metadata.num_prefills == 0
-        if is_decode and VLLM_ENABLE_GRAPH_MODE == '1':
-            torch_npu.npu_prefetch(self.o_proj.weight.data, hidden_states,
-                                   PREFETCH_SIZE, 0)
-
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
-        attn_output = attn_output.view(
-            -1, self.num_local_heads,
-            self.qk_head_dim)[..., :self.v_head_dim].reshape(
-                -1, self.num_local_heads * self.v_head_dim)
-        output, _ = self.o_proj(attn_output)
-        return output
 
 
 class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
@@ -386,11 +327,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             hidden_states_or_q_c = self.q_a_layernorm(ckq)
         else:
             hidden_states_or_q_c = hidden_states
-
         if VLLM_ENABLE_GRAPH_MODE == '1':
-            if attn_metadata.num_prefills == 0:  # decode
-                torch_npu.npu_prefetch(self.o_proj.weight.data, hidden_states,
-                                       PREFETCH_SIZE, 0)
             return self.mla_attn(hidden_states_or_q_c, hidden_states, None,
                                  kv_cache, attn_metadata)
         else:
@@ -423,7 +360,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         if model_config.use_mla:
             attn_cls = CustomDeepseekV2MLAAttention
         else:
-            attn_cls = CustomDeepseekV2Attention
+            attn_cls = DeepseekV2Attention
         self.self_attn = attn_cls(
             config=config,
             hidden_size=self.hidden_size,
@@ -462,61 +399,6 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
-
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        kv_cache: torch.Tensor,
-        attn_metadata: AttentionMetadata,
-        residual: Optional[torch.Tensor],
-    ) -> torch.Tensor:
-        # Self Attention
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-        )
-
-        is_decode = attn_metadata.num_prefills == 0
-        if is_decode and VLLM_ENABLE_GRAPH_MODE == '1':
-            if isinstance(self.mlp, CustomDeepseekV2MoE):
-                torch_npu.npu_prefetch(self.mlp.gate.weight, hidden_states,
-                                       PREFETCH_SIZE, 0)
-                torch_npu.npu_prefetch(self.mlp.experts.w13_weight.data,
-                                       hidden_states, PREFETCH_SIZE, 0)
-                torch_npu.npu_prefetch(self.mlp.experts.w2_weight.data,
-                                       hidden_states, PREFETCH_SIZE, 0)
-                torch_npu.npu_prefetch(
-                    self.mlp.shared_experts.gate_up_proj.weight.data,
-                    hidden_states,
-                    PREFETCH_SIZE,
-                    0
-                )
-                torch_npu.npu_prefetch(
-                    self.mlp.shared_experts.down_proj.weight.data,
-                    hidden_states,
-                    PREFETCH_SIZE,
-                    0
-                )
-            else:
-                torch_npu.npu_prefetch(self.mlp.gate_up_proj.weight.data,
-                                       hidden_states, PREFETCH_SIZE, 0)
-                torch_npu.npu_prefetch(self.mlp.down_proj.weight.data,
-                                       hidden_states, PREFETCH_SIZE, 0)
-
-        # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
-        hidden_states = self.mlp(hidden_states, attn_metadata)
-        return hidden_states, residual
 
 
 class CustomDeepseekV2Model(nn.Module):
@@ -625,18 +507,6 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[torch.Tensor]:
-        if VLLM_ENABLE_GRAPH_MODE == '1':
-            torch_npu.npu_prefetch(self.lm_head.weight.data, hidden_states,
-                                   self.lm_head.weight.numel() * 2, 0)
-        logits = self.logits_processor(self.lm_head, hidden_states,
-                                       sampling_metadata)
-        return logits
 
 
 class CustomDeepseekV3ForCausalLM(CustomDeepseekV2ForCausalLM):

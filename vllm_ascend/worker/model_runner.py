@@ -17,6 +17,7 @@
 # limitations under the License.
 #
 
+import os
 import dataclasses
 import time
 import weakref
@@ -64,8 +65,11 @@ from vllm.worker.model_runner_base import (
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
-
+from vllm_ascend.utils import profiling_this
+from vllm.global_timer import timer
 from vllm_ascend.utils import VLLM_ENABLE_GRAPH_MODE, profiling_this
+
+
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
@@ -1235,9 +1239,13 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
             model_forward_end = torch_npu.npu.Event(enable_timing=True)
             model_forward_start.record()
 
-        # torch.npu.synchronize()
-        # is_prefill = model_input.attn_metadata.num_prefills > 0
-        # start_time = time.time()
+        if os.getenv("VLLM_PROF", "False").lower() == "true":
+
+            # timer.set_infer_info(is_prefill, len(model_input.attn_metadata.seq_lens))
+            torch_npu.npu.synchronize()
+            if torch.distributed.get_rank() == 0:
+                timer.end("prepare_model_input")
+                timer.start("model_inference+sample_tokens")
 
         global ENCODER_NUM
         is_prefill = model_input.attn_metadata.num_prefills > 0
@@ -1298,7 +1306,6 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                         torch.tensor(model_forward_time + orig_model_forward_time))
                 return hidden_or_intermediate_states
             # TODO: remove the synchronize here
-            torch.npu.synchronize()
             logits = self.model.compute_logits(hidden_or_intermediate_states,
                                             model_input.sampling_metadata)
 

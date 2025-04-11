@@ -43,7 +43,7 @@ def try_register_lib(lib_name: str, lib_info: str = ""):
 
 @contextmanager
 def profiling_this(encoder_count, is_prefill):
-    profiling_path = os.environ.get("VLLM_ENABLE_PROFILING_PATH", "/home/w00613869/vllm_ws/profiling/")
+    profiling_path = os.environ.get("VLLM_ENABLE_PROFILING_PATH", "/tmp")
     torch.npu.synchronize()
     start_time = time.time()
     if int(os.environ.get("VLLM_ENABLE_PROFILING", "0")) == 0:
@@ -52,7 +52,7 @@ def profiling_this(encoder_count, is_prefill):
         if encoder_count == 50:
             experimental_config = torch_npu.profiler._ExperimentalConfig(
                 aic_metrics=torch_npu.profiler.AiCMetrics.PipeUtilization,
-                profiler_level=torch_npu.profiler.ProfilerLevel.Level0,
+                profiler_level=torch_npu.profiler.ProfilerLevel.Level1,
                 data_simplification=False
             )
             with torch_npu.profiler.profile(
@@ -60,8 +60,8 @@ def profiling_this(encoder_count, is_prefill):
                     torch_npu.profiler.ProfilerActivity.CPU,
                     torch_npu.profiler.ProfilerActivity.NPU],
                 with_stack=False,
-                record_shapes=False,
-                profile_memory=False,
+                record_shapes=True,
+                profile_memory=True,
                 schedule=torch_npu.profiler.schedule(wait=0, warmup=0, active=1, repeat=1, skip_first=0),
                 on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(profiling_path),
                 experimental_config=experimental_config

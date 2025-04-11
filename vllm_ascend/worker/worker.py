@@ -17,6 +17,7 @@
 # limitations under the License.
 #
 
+import os
 import gc
 from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
@@ -225,7 +226,8 @@ class NPUWorker(LocalOrDistributedWorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        self.model_runner.profile_run()
+        if int(os.environ.get("PERFORMANCE_TESTING", "0")) == 0:
+            self.model_runner.profile_run()
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
@@ -245,8 +247,14 @@ class NPUWorker(LocalOrDistributedWorkerBase):
              peak_memory) // cache_block_size)
         num_cpu_blocks = int(self.cache_config.swap_space_bytes //
                              cache_block_size)
-        num_npu_blocks = max(num_npu_blocks, 0)
-        num_cpu_blocks = max(num_cpu_blocks, 0)
+
+        if int(os.environ.get("PERFORMANCE_TESTING", "0")) == 0:
+            num_npu_blocks = max(num_npu_blocks, 0)
+            num_cpu_blocks = max(num_cpu_blocks, 0)
+        else:
+            num_npu_blocks = 2000
+            num_cpu_blocks = 400
+        
         gc.collect()
         # TODO: don`t need impl this func after empty_cache in
         # Worker.determine_num_available_blocks() unified`
