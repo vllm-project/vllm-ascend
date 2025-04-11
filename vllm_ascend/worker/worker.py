@@ -226,7 +226,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        if int(os.environ.get("PERFORMANCE_TESTING", "0")) == 0:
+        if int(os.environ.get("CLOSED_PROFILE_RUN", "0")) == 0:
             self.model_runner.profile_run()
 
         # Calculate the number of blocks that can be allocated with the
@@ -248,7 +248,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         num_cpu_blocks = int(self.cache_config.swap_space_bytes //
                              cache_block_size)
 
-        if int(os.environ.get("PERFORMANCE_TESTING", "0")) == 0:
+        if int(os.environ.get("CLOSED_PROFILE_RUN", "0")) == 0:
             num_npu_blocks = max(num_npu_blocks, 0)
             num_cpu_blocks = max(num_cpu_blocks, 0)
         else:
