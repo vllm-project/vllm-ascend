@@ -104,7 +104,7 @@ jobs:
           VLLM_USE_V1: 0
           HF_ENDPOINT: https://hf-mirror.com
         run: |
-          VLLM_USE_V1=0 pytest -sv -m 'not multinpu' tests
+          VLLM_USE_V1=0 pytest -sv -m 'not multinpu' tests/test_offline_inference.py tests/ops
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         env:
@@ -112,7 +112,27 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           HF_ENDPOINT: https://hf-mirror.com
         run: |
-          pytest -sv -m 'not multinpu' tests
+          pytest -sv -m 'not multinpu' tests/test_offline_inference.py tests/ops
+
+      - name: Check for changes in Speculative Decode
+        id: filter_spec_decode
+        uses: dorny/paths-filter@v2
+        with:
+          filters: |
+            speculative_tests_changed:
+              - "tests/spec_decode/**"
+              - "vllm_ascend/worker/multi_step_runner.py"
+              - "vllm_ascend/worker/multi_step_worker.py"
+              - "vllm_ascend/patch/patch_rejection_sampler.py"
+              - "vllm_ascend/patch/patch_spec_decode_worker.py"
+              - "vllm_ascend/patch/patch_multi_step_worker.py"
+
+      - name: Run vllm-project/vllm-ascend key feature test
+        env:
+          HF_ENDPOINT: https://hf-mirror.com
+        if: steps.filter_spec_decode.outputs.speculative_tests_changed
+        run: |
+          pytest -sv tests/spec_decode
 
       - name: Run vllm-project/vllm test for V0 Engine
         env:
@@ -266,7 +286,7 @@ jobs:
           VLLM_USE_V1: 0
           HF_ENDPOINT: https://hf-mirror.com
         run: |
-          VLLM_USE_V1=0 pytest -sv -m 'not multinpu' tests
+          VLLM_USE_V1=0 pytest -sv -m 'not multinpu' tests/test_offline_inference.py tests/ops
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         env:
@@ -274,7 +294,27 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           HF_ENDPOINT: https://hf-mirror.com
         run: |
-          pytest -sv -m 'not multinpu' tests
+          pytest -sv -m 'not multinpu' tests/test_offline_inference.py tests/ops
+
+      - name: Check for changes in Speculative Decode
+        id: filter_spec_decode_v083
+        uses: dorny/paths-filter@v2
+        with:
+          filters: |
+            speculative_tests_changed:
+              - "tests/spec_decode/**"
+              - "vllm_ascend/worker/multi_step_runner.py"
+              - "vllm_ascend/worker/multi_step_worker.py"
+              - "vllm_ascend/patch/patch_rejection_sampler.py"
+              - "vllm_ascend/patch/patch_spec_decode_worker.py"
+              - "vllm_ascend/patch/patch_multi_step_worker.py"
+
+      - name: Run vllm-project/vllm-ascend key feature test
+        env:
+          HF_ENDPOINT: https://hf-mirror.com
+        if: steps.filter_spec_decode_v083.outputs.speculative_tests_changed
+        run: |
+          pytest -sv tests/spec_decode
 
       - name: Run vllm-project/vllm test for V0 Engine
         env:
