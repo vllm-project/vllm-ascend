@@ -11,6 +11,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VERBOSE": lambda: bool(int(os.getenv('VERBOSE', '0'))),
     "ASCEND_HOME_PATH": lambda: os.getenv("ASCEND_HOME_PATH", None),
     "LD_LIBRARY_PATH": lambda: os.getenv("LD_LIBRARY_PATH", None),
+    "VLLM_HCCL_SO_PATH": lambda: os.environ.get("VLLM_HCCL_SO_PATH", None),
 }
 
 
