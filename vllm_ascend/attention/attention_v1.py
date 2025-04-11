@@ -24,6 +24,8 @@ import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
 
@@ -44,6 +46,10 @@ class AscendAttentionBackend(AttentionBackend):
     @staticmethod
     def get_state_cls() -> Type["CommonAttentionState"]:
         return CommonAttentionState
+
+    @staticmethod
+    def get_builder_cls() -> type["AscendAttentionMetadataBuilder"]:
+        return AscendAttentionMetadataBuilder
 
     @staticmethod
     def get_kv_cache_shape(
@@ -98,8 +104,8 @@ class AscendMetadata:
     block_tables: Optional[torch.Tensor]
     # (batch_size,). The sequence length per sequence. Sequence length means
     # the computed tokens + new tokens None if it is a decoding.
-    seq_lens: Optional[List[int]] = None
-    context_lens: Optional[List[int]] = None
+    seq_lens: Optional[torch.Tensor] = None
+    context_lens: Optional[torch.Tensor] = None
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int] = None
     # (num_tokens,). The indices of the token slots that input tokens will be
@@ -117,6 +123,32 @@ class AscendMetadata:
 
     attn_mask: Optional[torch.Tensor] = None
 
+
+class AscendAttentionMetadataBuilder:
+    def __init__(self, runner):
+        self.runner = runner
+
+    def reorder_batch(self, input_batch: "InputBatch",
+                      scheduler_output: "SchedulerOutput") -> bool:
+        return False
+
+    def build(self, num_reqs, num_actual_tokens, max_query_len, common_prefix_len):
+        block_table = (
+            self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
+        query_seq_lens = self.runner.query_start_loc_cpu[1:num_reqs + 1] - self.runner.query_start_loc_cpu[:num_reqs]
+        context_lens = self.runner.seq_lens_cpu[:num_reqs]
+        slot_mapping = self.runner.slot_mapping_cpu[:num_reqs].to(self.runner.device, non_blocking=True)
+        attn_mask = self.runner.attn_mask
+
+        attn_metadata = AscendMetadata(
+            block_tables=block_table,
+            seq_lens=query_seq_lens,
+            context_lens=context_lens,
+            max_query_len=max_query_len,
+            slot_mapping=slot_mapping,
+            attn_mask=attn_mask
+        )
+        return attn_metadata
 
 class AscendAttentionBackendImpl(AttentionImpl):
 

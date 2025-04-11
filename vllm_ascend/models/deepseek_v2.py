@@ -179,7 +179,7 @@ class CustomDeepseekV2MoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        is_prefill = True if attn_metadata.is_only_prefill else False
+        is_prefill = True if attn_metadata.num_prefills > 0 else False
         # is_prefill = attn_metadata.num_prefills > 0
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
@@ -198,7 +198,7 @@ class CustomDeepseekV2MoE(nn.Module):
                 final_hidden_states = tensor_model_parallel_all_reduce(
                     final_hidden_states
                 )
-        
+
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
 
@@ -331,28 +331,60 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
 
         self.prefix = prefix
         self.debug_layer_idx = int(self.prefix.split(".")[-2])
+        if VLLM_ENABLE_GRAPH_MODE == "1":
+            self.forward = self.forward_torchair
+        else:
+            self.forward = self.forward_eager
 
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        # torchair should pass below two parameters
-        kv_cache: torch.Tensor = None,
-        attn_metadata: AttentionMetadata = None,
-    ) -> torch.Tensor:
+    def forward_torchair(
+            self,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor,
+            kv_cache: torch.Tensor = None,
+            attn_metadata = None):
         if self.q_lora_rank is not None:
             ckq = self.q_a_proj(hidden_states)[0]
             hidden_states_or_q_c = self.q_a_layernorm(ckq)
         else:
             hidden_states_or_q_c = hidden_states
-        if VLLM_ENABLE_GRAPH_MODE == '1':
-            return self.mla_attn(hidden_states_or_q_c, hidden_states, None,
-                                 kv_cache, attn_metadata)
+        return self.mla_attn(hidden_states_or_q_c, hidden_states, None,
+                                kv_cache, attn_metadata)
+
+    def forward_eager(
+            self,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor):
+        if self.q_lora_rank is not None:
+            ckq = self.q_a_proj(hidden_states)[0]
+            hidden_states_or_q_c = self.q_a_layernorm(ckq)
         else:
-            kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
-                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-            kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
-            return self.mla_attn(hidden_states_or_q_c, kv_c_normed, k_pe, output_shape=hidden_states.shape)
+            hidden_states_or_q_c = hidden_states
+        kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
+            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+        return self.mla_attn(hidden_states_or_q_c, kv_c_normed, k_pe, output_shape=hidden_states.shape)
+
+    # def forward(
+    #     self,
+    #     positions: torch.Tensor,
+    #     hidden_states: torch.Tensor,
+    #     # torchair should pass below two parameters
+    #     kv_cache: torch.Tensor = None,
+    #     attn_metadata: AttentionMetadata = None,
+    # ) -> torch.Tensor:
+    #     if self.q_lora_rank is not None:
+    #         ckq = self.q_a_proj(hidden_states)[0]
+    #         hidden_states_or_q_c = self.q_a_layernorm(ckq)
+    #     else:
+    #         hidden_states_or_q_c = hidden_states
+    #     if VLLM_ENABLE_GRAPH_MODE == '1':
+    #         return self.mla_attn(hidden_states_or_q_c, hidden_states, None,
+    #                              kv_cache, attn_metadata)
+    #     else:
+    #         kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
+    #             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+    #         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+    #         return self.mla_attn(hidden_states_or_q_c, kv_c_normed, k_pe, output_shape=hidden_states.shape)
                                 #  kv_cache, attn_metadata)
 
 
@@ -376,6 +408,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         # with the layer's index.
         layer_idx = int(prefix.split(sep='.')[-1])
         self.layer_idx = layer_idx
+        # TODO: enable mla in vllm-ascend
         if model_config.use_mla:
             attn_cls = CustomDeepseekV2MLAAttention
         else:

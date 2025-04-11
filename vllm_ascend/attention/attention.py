@@ -1106,7 +1106,6 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                                                  slot_indices=slots)
         else:
             if kv_cache.numel() > 0:
-                print(kv_cache.shape)
                 key = torch.cat([
                     kv_c_normed.view(num_tokens, self.num_kv_heads, -1), k_pe
                 ],
@@ -1201,6 +1200,6 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                 attn_output_t = torch.bmm(attn_output_t, self.w_vc)
                 attn_output = torch.transpose(attn_output_t, 0, 1)
 
-        output, _ = self.o_proj(attn_output.reshape(num_tokens, -1), attn_metadata.num_prefills > 0)
+        output, _ = self.o_proj(attn_output.reshape(num_tokens, -1))
 
         return output

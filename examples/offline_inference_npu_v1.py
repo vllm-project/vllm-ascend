@@ -18,6 +18,10 @@
 #
 
 from vllm import LLM, SamplingParams
+import os
+
+os.environ["VLLM_USE_V1"] = "1"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 if __name__ == "__main__":
   prompts = [
@@ -31,8 +35,8 @@ if __name__ == "__main__":
   sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
   # Create an LLM.
   llm = LLM(
-     model="Qwen/Qwen2.5-0.5B-Instruct",
-     tensor_parallel_size=8,
+     model="/data/weights/deepseek-ai/deepseekv3-lite-base-lastest",
+     tensor_parallel_size=1,
      enforce_eager=True,
      trust_remote_code=True,
      max_model_len=1024)

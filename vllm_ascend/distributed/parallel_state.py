@@ -32,10 +32,8 @@ def init_ascend_model_parallel(
     world_size: int = torch.distributed.get_world_size()
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
-    num_expert_parallel_groups: int = (world_size //
-                                       (tensor_model_parallel_size // 
-                                        expert_tensor_parallel_size))
-    num_expert_tensor_parallel_groups: int = (tensor_model_parallel_size // 
+    num_expert_parallel_groups: int = expert_tensor_parallel_size
+    num_expert_tensor_parallel_groups: int = (world_size // 
                                               expert_tensor_parallel_size)
 
     global _EP
