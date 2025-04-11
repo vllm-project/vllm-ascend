@@ -53,8 +53,9 @@ class NPUWorker(WorkerBase):
                  rank: int,
                  distributed_init_method: str,
                  is_driver_worker: bool = False):
-        # Register ops when worker init.
+        # Register ops and patch when worker init.
         from vllm_ascend import ops  # noqa: F401
+        from vllm_ascend import patch  # noqa: F401
 
         super().__init__(vllm_config=vllm_config,
                          local_rank=local_rank,
