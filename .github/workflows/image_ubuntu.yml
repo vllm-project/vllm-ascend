@@ -16,7 +16,7 @@ on:
       - 'main'
       - '*-dev'
     paths:
-      - '.github/workflows/image.yml'
+      - '.github/workflows/image_ubuntu.yml'
       - 'Dockerfile'
       - 'vllm_ascend/**'
   push:
@@ -27,13 +27,13 @@ on:
     tags:
       - 'v*'
     paths:
-      - '.github/workflows/image.yml'
+      - '.github/workflows/image_ubuntu.yml'
       - 'Dockerfile'
       - 'vllm_ascend/**'
 jobs:
 
   build:
-    name: vllm-ascend image
+    name: vllm-ascend Ubuntu image
     runs-on: ubuntu-latest
 
     steps:
@@ -72,9 +72,6 @@ jobs:
 
     - name: Build - Set up QEMU
       uses: docker/setup-qemu-action@v3
-      # TODO(yikun): remove this after https://github.com/docker/setup-qemu-action/issues/198 resolved
-      with:
-        image: tonistiigi/binfmt:qemu-v7.0.0-28
 
     - name: Build - Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -98,4 +95,4 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         tags: ${{ steps.meta.outputs.tags }}
         build-args: |
-            PIP_INDEX_URL=https://pypi.org/simple
+          PIP_INDEX_URL=https://pypi.org/simple

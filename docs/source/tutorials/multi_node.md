@@ -166,7 +166,7 @@ python -m vllm.entrypoints.openai.api_server \
 ```
 
 :::{note}
-If you're running DeepSeek V3/R1, please remove `quantization_config` section in `config.json` file since it's not supported by vllm-ascend currentlly.
+If you're running DeepSeek V3/R1, please remove `quantization_config` section in `config.json` file since it's not supported by vllm-ascend currently.
 :::
 
 Once your server is started, you can query the model with input prompts:
