@@ -20,6 +20,7 @@ set(VLLM_ASCEND_INSTALL_PATH "${CMAKE_INSTALL_PREFIX}")
 find_package(Torch REQUIRED)
 
 set(RUN_MODE "npu" CACHE STRING "cpu/sim/npu")
+set(SOC_VERSION ${SOC_VERSION})
 message(STATUS "Detected SOC version: ${SOC_VERSION}")
 
 if (NOT CMAKE_BUILD_TYPE)
@@ -49,10 +50,6 @@ ascendc_library(vllm_ascend_kernels SHARED
     ${KERNEL_FILES}
 )
 
-execute_process(COMMAND python3 -c "import os; import torch_npu; print(os.path.dirname(torch_npu.__file__))"
-  OUTPUT_STRIP_TRAILING_WHITESPACE
-  OUTPUT_VARIABLE TORCH_NPU_PATH
-)
 message("TORCH_NPU_PATH is ${TORCH_NPU_PATH}")
 
 file(GLOB VLLM_ASCEND_SRC
