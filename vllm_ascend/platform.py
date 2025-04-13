@@ -144,6 +144,15 @@ class NPUPlatform(Platform):
             )
             cache_config.enable_prefix_caching = False
 
+        if envs.VLLM_USE_V1:
+            # Activate custom ops for v1.
+            vllm_config.compilation_config.custom_ops = ["all"]
+            additional_config = vllm_config.additional_config
+            if additional_config and additional_config.get("use_v0_style_scheduler", False):
+                from vllm.v1.engine.core import EngineCore
+                from vllm_ascend.core.v1_engine_core_init import engine_core_init_with_v0style_scheduler
+                EngineCore.__init__ = engine_core_init_with_v0style_scheduler
+
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla):
