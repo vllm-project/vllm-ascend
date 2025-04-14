@@ -55,7 +55,7 @@ After configuration, you can download our container from `m.daocloud.io/quay.io/
 
 ### 3. What models does vllm-ascend supports?
 
-Currently, we have already fully tested and supported `Qwen` / `Deepseek` (V0 only) / `Llama` models, other models we have tested are shown [<u>here</u>](https://vllm-ascend.readthedocs.io/en/latest/user_guide/supported_models.html). Plus, accoding to users' feedback, `gemma3` and `glm4` are not supported yet. Besides, more models need test.
+Currently, we have already fully tested and supported `Qwen` / `Deepseek` (V0 only) / `Llama` models, other models we have tested are shown [<u>here</u>](https://vllm-ascend.readthedocs.io/en/latest/user_guide/supported_models.html). Plus, according to users' feedback, `gemma3` and `glm4` are not supported yet. Besides, more models need test.
 
 ### 4. How to get in touch with our community?
 
@@ -69,3 +69,22 @@ There are many channels that you can communicate with our community developers /
 ### 5. What features does vllm-ascend V1 supports?
 
 Find more details [<u>here</u>](https://github.com/vllm-project/vllm-ascend/issues/414).
+
+### 6. How to solve the problem of "Failed to infer device type" or "libatb.so: cannot open shared object file"?
+
+Basicly, the reason is that the NNAL environment is not sourced. Please try `source /usr/local/Ascend/nnal/atb/set_env.sh` to solve the problem.
+
+### 7. Does vllm-ascend support Atlas 300I Duo?
+
+No, vllm-ascend now only supports Atlas A2 series. We are working on it.
+
+### 8. How does vllm-ascend perform?
+
+Currently, only some models are imporved. Such as `Qwen2 VL`, `Deepseek  V3`. Others are not good enough. In the future, we will support graph mode and custom ops to improve the performance of vllm-ascend. And when the official release of vllm-ascend is released, you can install `mindie-turbo` with `vllm-ascend` to speed up the inference as well.
+
+### 9. How vllm-ascend work with vllm?
+vllm-ascend is a plugin for vllm. Basicly, the version of vllm-ascend is the same as the version of vllm. For example, if you use vllm 0.7.3, you should use vllm-ascend 0.7.3 as well. For main branch, we will make sure `vllm-ascend` and `vllm` are compatible by each commit.
+
+### 10. Does vllm-ascend support Prefill Disaggregation feature?
+
+Currently, only 1P1D is supported by vllm. For vllm-ascend, it'll be done by [this PR](https://github.com/vllm-project/vllm-ascend/pull/432). For NPND, vllm is not stable and fully supported yet. We will make it stable and supported by vllm-ascend in the future.
