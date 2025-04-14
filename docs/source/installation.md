@@ -123,10 +123,30 @@ First install system dependencies:
 
 ```bash
 apt update  -y
-apt install -y gcc g++ libnuma-dev
+apt install -y gcc g++ cmake libnuma-dev
 ```
 
-You can install `vllm` and `vllm-ascend` from **pre-built wheel**:
+Current version depends on a unreleased `torch-npu`, you need to install manually:
+
+```
+# Once the packages are installed, you need to install `torch-npu` manually,
+# because that vllm-ascend relies on an unreleased version of torch-npu.
+# This step will be removed in the next vllm-ascend release.
+# 
+# Here we take python 3.10 on aarch64 as an example. Feel free to install the correct version for your environment. See:
+#
+# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py39.tar.gz
+# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
+# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py311.tar.gz
+#
+mkdir pta
+cd pta
+wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
+tar -xvf pytorch_v2.5.1_py310.tar.gz
+pip install ./torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+```
+
+Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
 
 ```{code-block} bash
    :substitutions:
@@ -156,25 +176,10 @@ pip install -e . --extra-index https://download.pytorch.org/whl/cpu/
 ```
 :::
 
-Current version depends on a unreleased `torch-npu`, you need to install manually:
+```{note}
+vllm-ascend will build custom ops by default. If you don't want to build it, set `COMPILE_CUSTOM_KERNELS=0` environment to disable it.
+```
 
-```
-# Once the packages are installed, you need to install `torch-npu` manually,
-# because that vllm-ascend relies on an unreleased version of torch-npu.
-# This step will be removed in the next vllm-ascend release.
-# 
-# Here we take python 3.10 on aarch64 as an example. Feel free to install the correct version for your environment. See:
-#
-# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py39.tar.gz
-# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
-# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py311.tar.gz
-#
-mkdir pta
-cd pta
-wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
-tar -xvf pytorch_v2.5.1_py310.tar.gz
-pip install ./torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
-```
 ::::
 
 ::::{tab-item} Using docker

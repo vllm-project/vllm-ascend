@@ -28,6 +28,9 @@ cd ..
 # Clone vllm-ascend and install
 git clone https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
+# install system requirement
+apt install -y gcc g++ cmake libnuma-dev
+# install project requirement
 pip install -r requirements-dev.txt
 
 # Then you can run lint and mypy test
@@ -38,6 +41,8 @@ bash format.sh
 # pip install -e .
 # - build without deps for debugging in other OS
 # pip install -e . --no-deps
+# - build without custom ops
+# COMPILE_CUSTOM_KERNELS=0 pip install -e .
 
 # Commit changed files using `-s`
 git commit -sm "your commit info"
