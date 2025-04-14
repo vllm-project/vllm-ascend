@@ -26,17 +26,27 @@ From a technical view, vllm-ascend support would be possible if the torch-npu is
 
 You can get our containers at `Quay.io`, e.g., [<u>vllm-ascend</u>](https://quay.io/repository/ascend/vllm-ascend?tab=tags) and [<u>cann</u>](https://quay.io/repository/ascend/cann?tab=tags).
 
-Plus, if you are in China, you can config your docker proxy to accelerate downloading:
+If you are in China, you can use `daocloud` to accelerate your downloading:
+
+1) Open `daemon.json`:
 
 ```bash
-vim /etc/docker/daemon.json
-# Add `https://quay.io` to `registry-mirrors` and `insecure-mirrors`
+vi /etc/docker/daemon.json
+```
 
-vim /etc/systemd/system/docker.service.d/https-proxy.conf
-# Config proxy
-[Service]
-Environment="HTTP_PROXY=xxx"
+2) Add `https://docker.m.daocloud.io` to `registry-mirrors`:
 
+```json
+{
+  "registry-mirrors": [
+        "https://docker.m.daocloud.io"
+    ]
+}
+```
+
+3) Restart your docker service:
+
+```bash
 sudo systemctl daemon-reload
 sudo systemctl restart docker
 ```
