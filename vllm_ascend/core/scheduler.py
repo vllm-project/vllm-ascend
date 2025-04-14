@@ -1,8 +1,7 @@
 from collections import deque
-from dataclasses import dataclass
-from typing import List
 
 from vllm.logger import init_logger
+from vllm.utils import cdiv
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.core.scheduler_output import (NewRequestData,
                                        SchedulerOutput)
@@ -85,6 +84,11 @@ class AscendScheduler(Scheduler):
 
             if num_new_tokens > token_budget:
                 # Scheduling would exceed token_budget, skip.
+                skip_cur_request()
+                continue
+
+            if not self._check_watermark_for_prefill(num_new_tokens):
+                # Scheduling would exceed watermark, skip.
                 skip_cur_request()
                 continue
 
@@ -261,6 +265,14 @@ class AscendScheduler(Scheduler):
 
         self.finished_req_ids = set()
         return scheduler_output
+    
+
+    def _check_watermark_for_prefill(self, num_new_tokens, watermark = 0.01):
+        watermark_blocks = self.cache_config.num_gpu_blocks * watermark
+        num_required_blocks = cdiv(num_new_tokens, self.block_size)
+        if (self.kv_cache_manager.free_block_queue.num_free_blocks - num_required_blocks) < watermark_blocks:
+            return False
+        return True
 
 
     def _get_prompt_limit(self, request: Request) -> int:

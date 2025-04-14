@@ -41,6 +41,7 @@ from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.utils import try_register_lib
 
 logger = init_logger(__name__)
 
@@ -73,6 +74,12 @@ class NPUWorker(WorkerBase):
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+
+        # Try to import mindie_turbo to accelerate vLLM inference.
+        try_register_lib(
+            "mindie_turbo",
+            "MindIE Turbo is installed. vLLM inference will be accelerated with MindIE Turbo."
+        )
 
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
