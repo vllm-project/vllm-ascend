@@ -51,6 +51,8 @@ sudo systemctl daemon-reload
 sudo systemctl restart docker
 ```
 
+After configuration, you can download our container from `m.daocloud.io/quay.io/ascend/vllm-ascend:v0.7.3rc2`.
+
 ### 3. What models does vllm-ascend supports?
 
 Currently, we have already fully tested and supported `Qwen` / `Deepseek` (V0 only) / `Llama` models, other models we have tested are shown [<u>here</u>](https://vllm-ascend.readthedocs.io/en/latest/user_guide/supported_models.html). Plus, accoding to users' feedback, `gemma3` and `glm4` are not supported yet. Besides, more models need test.
