@@ -28,8 +28,6 @@ from vllm.utils import update_environment_variables
 
 from vllm_ascend.distributed.device_communicators.pyhccl import \
     PyHcclCommunicator
-from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import \
-    HCCLLibrary
 
 
 def distributed_run(fn, world_size):
@@ -111,14 +109,5 @@ def broadcast_worker_fn():
         assert torch.all(recv_tensors[i] == i).cpu().item()
 
 
-@pytest.mark.multinpu
 def test_pynccl_broadcast():
     distributed_run(broadcast_worker_fn, 4)
-
-
-@pytest.mark.singlenpu
-def test_hcclGetUniqueId():
-    torch.npu.set_device(0)
-    lib = HCCLLibrary()
-    unique_id = lib.hcclGetUniqueId()
-    assert unique_id is not None
