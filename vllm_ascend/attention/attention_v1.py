@@ -16,6 +16,7 @@
 #
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import numpy as np
@@ -85,19 +86,10 @@ class AscendAttentionBackend(AttentionBackend):
             value_caches[dst_indices] = value_caches[src_indices]
 
 
-# class AscendAttentionV0StyleBackend(AscendAttentionBackend):
-#     @staticmethod
-#     def get_impl_cls() -> Type["AscendAttentionBackendV0StyleImpl"]:
-#         return AscendAttentionBackendV0StyleImpl
-    
-#     @staticmethod
-#     def get_kv_cache_shape(
-#         num_blocks: int,
-#         block_size: int,
-#         num_kv_heads: int,
-#         head_size: int,
-#     ) -> Tuple[int, ...]:
-#         return (2, num_blocks, block_size, num_kv_heads, head_size)
+class AscendAttentionState(Enum):
+    PrefillOnly = 0
+    DecodeOnly = 1
+    ChunkedPrefill = 2
 
 
 @dataclass
@@ -121,11 +113,8 @@ class AscendMetadata:
     # FlashAttention has better performance than PageAtttention,
     # but it does not support decode requests.
     is_only_prefill: bool = False
-    # These two parameters indicates number of prefill and decode requests scheduled in this step.
-    # It is used by AscendAttentionBackendPrefillFirstImpl to determine 
-    # whether to perform prefill or decode in prefill first scheduling stragety. 
-    num_prefills: int = 0
-    num_decodes: int = 0
+    # Current state of this attention run.
+    attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
 
     attn_mask: Optional[torch.Tensor] = None
 
@@ -161,7 +150,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        self.seq_len_cpu_tensor = None
         self.key_cache = None
         self.value_cache = None
 
@@ -228,43 +216,32 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # TODO: Add attr (num_prefills, prefill_metadata, decode_metadata) to AscendMetadata
             pass
         # V0-Style scheduler situation.
-        elif attn_metadata.num_prefills is not None:
-            if attn_metadata.num_prefills > 0:
-                assert attn_metadata is not None
-                assert attn_metadata.attn_mask is not None
-                mask = attn_metadata.attn_mask
-                self.seq_lens_tensor_cpu = torch.from_numpy(
-                    np.array(attn_metadata.seq_lens).
-                    astype(np.int32))
-                torch_npu._npu_flash_attention(
-                    query=query,
-                    key=key,
-                    value=value,
-                    mask=mask,
-                    seq_len=self.seq_lens_tensor_cpu,
-                    scale_value=self.scale,
-                    num_heads=self.num_heads,
-                    num_kv_heads=self.num_kv_heads,
-                    out=output)
-            elif attn_metadata.num_decodes > 0:
-                # assert self.key_cache is not None
-                self.seq_lens_tensor_cpu = torch.from_numpy(
-                    np.array(attn_metadata.context_lens).astype(
-                        np.int32))
-                block_tables = attn_metadata.block_tables
-                torch_npu._npu_paged_attention(
-                    query=query,
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    num_kv_heads=self.num_kv_heads,
-                    num_heads=self.num_heads,
-                    scale_value=self.scale,
-                    block_table=block_tables,
-                    context_lens=self.seq_lens_tensor_cpu,
-                    out=output)
-            else:
-                raise ValueError("At least one of num_prefills and num_decodes should be greater that 0 "
-                                    "in v0-style scheduling situation.")
+        elif attn_metadata.attn_state == AscendAttentionState.PrefillOnly:
+            assert attn_metadata is not None
+            assert attn_metadata.attn_mask is not None
+            mask = attn_metadata.attn_mask
+            torch_npu._npu_flash_attention(
+                query=query,
+                key=key,
+                value=value,
+                mask=mask,
+                seq_len=attn_metadata.seq_lens,
+                scale_value=self.scale,
+                num_heads=self.num_heads,
+                num_kv_heads=self.num_kv_heads,
+                out=output)
+        elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            block_tables = attn_metadata.block_tables
+            torch_npu._npu_paged_attention(
+                query=query,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                num_kv_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale_value=self.scale,
+                block_table=block_tables,
+                context_lens=attn_metadata.context_lens,
+                out=output)
         # Normal V1 situation.
         else:
             # use paged attention

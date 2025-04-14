@@ -13,20 +13,13 @@ from vllm.v1.request import Request, RequestStatus
 logger = init_logger(__name__)
 
 
-@dataclass
-class SchedulerOutputPrefillFirst(SchedulerOutput):
-    num_prefills: int
-    num_decodes: int
-
-
-
-class AscendSchedulerV0Style(Scheduler):
+class AscendScheduler(Scheduler):
     """ This Scheduler extends vllm's original v1 scheduler 
         with prefill first scheduling strategy. """
 
-    def schedule(self) -> SchedulerOutputPrefillFirst:
-        # if self.scheduler_config.chunked_prefill_enabled:
-        #     return super().schedule()
+    def schedule(self) -> SchedulerOutput:
+        if self.scheduler_config.chunked_prefill_enabled:
+            return super().schedule()
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
@@ -238,7 +231,7 @@ class AscendSchedulerV0Style(Scheduler):
                 resumed_from_preemption=False,
             ) for req in scheduled_running_reqs
         ]
-        scheduler_output = SchedulerOutputPrefillFirst(
+        scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_cached_reqs=resumed_reqs_data + running_reqs_data,
             num_scheduled_tokens=num_scheduled_tokens,
@@ -252,8 +245,6 @@ class AscendSchedulerV0Style(Scheduler):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
-            num_prefills=len(scheduled_new_reqs) + len(scheduled_resumed_reqs),
-            num_decodes=len(scheduled_running_reqs),
         )
 
         # Advance the number of computed tokens for the request AFTER
@@ -295,6 +286,8 @@ class AscendSchedulerV0Style(Scheduler):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> EngineCoreOutputs:
+        if self.scheduler_config.chunked_prefill_enabled:
+            return super().update_from_output(scheduler_output, model_runner_output)
         sampled_token_ids = model_runner_output.sampled_token_ids
         spec_token_ids = model_runner_output.spec_token_ids
         logprobs = model_runner_output.logprobs

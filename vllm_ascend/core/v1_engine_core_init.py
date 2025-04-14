@@ -11,12 +11,12 @@ from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.version import __version__ as VLLM_VERSION
 
-from vllm_ascend.core.scheduler import AscendSchedulerV0Style
+from vllm_ascend.core.scheduler import AscendScheduler
 
 logger = init_logger(__name__)
 
 
-def engine_core_init_with_v0style_scheduler(
+def engine_core_init_with_ascend_scheduler(
     self,
     vllm_config: VllmConfig,
     executor_class: Type[Executor],
@@ -39,7 +39,7 @@ def engine_core_init_with_v0style_scheduler(
     vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
     # Setup scheduler.
-    self.scheduler = AscendSchedulerV0Style(
+    self.scheduler = AscendScheduler(
         scheduler_config=vllm_config.scheduler_config,
         model_config=vllm_config.model_config,
         cache_config=vllm_config.cache_config,

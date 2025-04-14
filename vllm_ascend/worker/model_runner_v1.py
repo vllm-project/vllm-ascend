@@ -50,7 +50,7 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
-from vllm_ascend.attention.attention_v1 import AscendMetadata
+from vllm_ascend.attention.attention_v1 import AscendMetadata, AscendAttentionState
 from vllm_ascend.attention.attention import AttentionMaskBuilder
 
 if TYPE_CHECKING:
@@ -256,12 +256,9 @@ class NPUModelRunner:
         # leading to performance degradation.
         # Therefore, an environment variable is added here to dynamically set
         # the size of the pre-constructed mask matrix based on requirements.
-        additional_config = vllm_config.additional_config
-        if additional_config and additional_config.get("use_v0_style_scheduler", False):
-            mask_value = None
-        else:
-            mask_value = -10000
-        self.attn_mask_builder = AttentionMaskBuilder.initialize_from_len(self.attn_mask_len, self.dtype, mask_value)
+        mask_len = os.getenv("PAGED_ATTENTION_MASK_LEN", 10000)
+        self.attn_mask_len = min(self.max_model_len, int(mask_len))
+        self.attn_mask_builder = AttentionMaskBuilder.initialize_from_len(self.attn_mask_len, self.dtype)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -419,12 +416,12 @@ class NPUModelRunner:
         return self.model
 
     def make_attention_mask(self, seq_lens, query_lens,
-                            position, num_prefills, num_decodes) -> torch.Tensor:
+                            position, attn_state) -> torch.Tensor:
         # Chunk Prefill situation.
-        if num_prefills is None or (num_prefills > 0 and num_decodes > 0):
+        if attn_state == AscendAttentionState.ChunkedPrefill:
             return self.attn_mask_builder.get_splitfuse_attn_mask(seq_lens, query_lens, position, self.dtype, self.device)
         # Prefill-only situation.
-        elif num_prefills > 0:
+        elif attn_state == AscendAttentionState.PrefillOnly:
             max_seq_len = max(seq_lens, default=0)
             return self.attn_mask_builder.get_attn_mask(max_seq_len, self.dtype, self.device)
         # Decode-only situation.
@@ -494,14 +491,18 @@ class NPUModelRunner:
         slot_mapping = self.slot_mapping_cpu[:total_num_scheduled_tokens].to(
             self.device, non_blocking=True)
         
-        num_prefills = getattr(scheduler_output, "num_prefills", None)
-        num_decodes = getattr(scheduler_output, "num_decodes", None)
+        attn_state = -1
+        if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
+            attn_state = AscendAttentionState.PrefillOnly
+        elif np.all(num_scheduled_tokens == 1):
+            attn_state = AscendAttentionState.DecodeOnly
+        else:
+            attn_state = AscendAttentionState.ChunkedPrefill
 
         attn_mask = self.make_attention_mask(seq_lens=seq_lens,
                                              query_lens=num_scheduled_tokens,
                                              position=positions,
-                                             num_prefills=num_prefills,
-                                             num_decodes=num_decodes)
+                                             attn_state=attn_state)
 
         attn_metadata = AscendMetadata(
             seq_lens=query_lens,
@@ -510,8 +511,7 @@ class NPUModelRunner:
             block_tables=(
                 self.input_batch.block_table.get_device_tensor()[:num_reqs]),
             attn_mask=attn_mask,
-            num_prefills=num_prefills,
-            num_decodes=num_decodes,
+            attn_state=attn_state,
         )
 
         # Prepare input_ids

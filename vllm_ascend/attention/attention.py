@@ -111,7 +111,15 @@ class AttentionMaskBuilder:
         max_seq_len = max(seq_lens, default=0)
         if max_seq_len <= self._seq_len_cached:
             self.update_attn_cache(max_seq_len, dtype, device)
-            return torch.index_select(self.attn_mask_cache,
+            # FIXME: Currently the mask value of chunked-prefill situation and Prefill-Only situation
+            # is not the same. Fix this in the future when kernel is ready.
+            if self.attn_mask_cache[0][1] > 0:
+                attn_mask = self.get_attn_mask(  # type: ignore
+                        max_seq_len, dtype, device)
+                attn_mask *= -10000
+            else:
+                attn_mask = self.attn_mask_cache
+            return torch.index_select(attn_mask,
                                         dim=0,
                                         index=position)[:, :max_seq_len]
         total_q_len = sum(query_lens)
