@@ -77,10 +77,10 @@ class MTAdaptedQuantizer:
                     "vllm.model_executor.layers.layernorm.RMSNorm", "__init__",
                     [wrapper_rmsnorm_init])
                 MTAdaptedQuantizer.apply_patch(
-                    "vllm.model_executor.layers.layernorm.RMSNorm.forward_oot",
+                    "vllm.model_executor.layers.layernorm.RMSNorm", "forward_oot",
                     [wrapper_rmsnorm_forward_oot])
                 MTAdaptedQuantizer.apply_patch(
-                    "vllm_ascend.worker.model_runner.NPUModelRunnerBase.load_model",
+                    "vllm_ascend.worker.model_runner.NPUModelRunnerBase", "load_model",
                     [wrapper_load_model])
                 break
     
