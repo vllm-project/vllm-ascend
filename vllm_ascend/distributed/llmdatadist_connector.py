@@ -24,15 +24,15 @@ import torch_npu
 import torchair  # type: ignore
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
+
+import vllm_ascend.envs as envs
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 import llm_datadist  # type: ignore
-
-logger = init_logger(__name__)
 
 TORCH_DTYPE_TO_NPU_DTYPE = {
     torch.half: llm_datadist.DataType.DT_FLOAT16,
@@ -46,9 +46,7 @@ TORCH_DTYPE_TO_NPU_DTYPE = {
 }
 
 # Get all device ips using hccn_tool
-HCCN_TOOL_PATH = os.environ.get("HCCN_PATH",
-                                "/usr/local/Ascend/driver/tools/hccn_tool")
-
+HCCN_TOOL_PATH = envs.HCCN_PATH
 
 def get_device_ips():
     world_size = 8
@@ -74,7 +72,7 @@ def get_device_ips():
     return device_ip_list
 
 
-class KVTransferEng:
+class KVTransferEngine:
 
     def __init__(self, world_size, n_layer, role, local_rank):
         self.world_size = world_size
@@ -85,8 +83,8 @@ class KVTransferEng:
         self.cluster_id = local_rank
         self.data_dist = llm_datadist.LLMDataDist(self.role, self.cluster_id)
 
-        prompt_device_ids = os.environ.get('PROMPT_DEVICE_ID', None)
-        decode_device_ids = os.environ.get('DECODE_DEVICE_ID', None)
+        prompt_device_ids = envs.PROMPT_DEVICE_ID
+        decode_device_ids = envs.DECODE_DEVICE_ID
         if prompt_device_ids is None or decode_device_ids is None:
             raise ValueError(
                 "Please specify env PROMPT_DEVICE_ID or DECODE_DEVICE_ID")
@@ -103,14 +101,13 @@ class KVTransferEng:
 
     def prepare_data_dist(self):
         options = {
-            "llm.SyncKvCacheWaitTime": "5000",
+            "llm.SyncKvCacheWaitTime": envs.LLMDATADIST_SYNC_CACHE_WAIT_TIME,
         }
         if self.role == llm_datadist.LLMRole.PROMPT:
             options["ge.exec.deviceId"] = str(self.local_rank)
             options[
-                "llm.listenIpInfo"] = f"{self.prompt_ip_list[self.local_rank]}:26000"
+                "llm.listenIpInfo"] = f"{self.prompt_ip_list[self.local_rank]}:{envs.LLMDATADIST_COMM_PORT}"
         else:
-            # options["ge.exec.deviceId"] = str(self.local_rank)
             options["ge.exec.deviceId"] = str(self.local_rank)
         self.data_dist.init(options)
         self.kv_transfer = self.data_dist.kv_cache_manager
@@ -152,7 +149,7 @@ class LLMDataDistConnector(KVConnectorBase):
         self.n_layer = self.config.model_config.get_num_layers(
             self.config.parallel_config)
 
-        self.llm_datadist_engine = KVTransferEng(self.world_size, self.n_layer,
+        self.llm_datadist_engine = KVTransferEngine(self.world_size, self.n_layer,
                                                  self.role, self.local_rank)
         if self.role == llm_datadist.LLMRole.PROMPT:
             self.llm_datadist_engine.prepare_data_dist()
@@ -185,7 +182,7 @@ class LLMDataDistConnector(KVConnectorBase):
 
         num_layer = end_layer - start_layer
 
-        # 此处需要拿到input_shape的shape与hiddenState的shape
+        # Get shape of input_tokens_tensor and kv_cache
         input_shape = (1, input_tokens_tensor.shape[0], 1, 1)
         hidden_shape = (1, input_tokens_tensor.shape[0], 1, hidden_size)
         kv_shape = (1, input_tokens_tensor.shape[0], num_heads, head_size)
