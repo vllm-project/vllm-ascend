@@ -22,14 +22,12 @@ import torch.distributed as dist
 import torch_npu  # noqa: F401
 from torch.distributed import ProcessGroup, ReduceOp
 from vllm.distributed.utils import StatelessProcessGroup
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import (
     HCCLLibrary, aclrtStream_t, buffer_type, hcclComm_t, hcclDataTypeEnum,
     hcclRedOpTypeEnum, hcclUniqueId)
 from vllm_ascend.utils import current_stream
-
-logger = init_logger(__name__)
 
 
 class PyHcclCommunicator:

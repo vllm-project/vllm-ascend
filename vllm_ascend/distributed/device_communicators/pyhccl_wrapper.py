@@ -22,11 +22,9 @@ from typing import Any, Dict, List, Optional
 
 import torch
 from torch.distributed import ReduceOp
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 from vllm_ascend.utils import find_hccl_library
-
-logger = init_logger(__name__)
 
 # export types and functions from hccl to Python ===
 # for the original hccl definition, please check

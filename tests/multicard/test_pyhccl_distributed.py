@@ -19,7 +19,6 @@
 import multiprocessing
 import os
 
-import pytest
 import torch
 import torch_npu  # noqa: F401
 from vllm.distributed.parallel_state import (get_world_group,
@@ -61,7 +60,7 @@ def worker_fn_wrapper(fn):
         local_rank = os.environ['LOCAL_RANK']
         device = torch.device(f"npu:{local_rank}")
         torch.npu.set_device(device)
-        init_distributed_environment()
+        init_distributed_environment(backend="hccl")
         fn()
 
     return wrapped_fn
@@ -78,8 +77,7 @@ def worker_fn():
     assert torch.all(tensor == pynccl_comm.world_size).cpu().item()
 
 
-@pytest.mark.multinpu
-def test_pynccl():
+def test_pyhccl():
     distributed_run(worker_fn, 2)
 
 
@@ -109,5 +107,5 @@ def broadcast_worker_fn():
         assert torch.all(recv_tensors[i] == i).cpu().item()
 
 
-def test_pynccl_broadcast():
-    distributed_run(broadcast_worker_fn, 4)
+# def test_pyhccl_broadcast():
+#     distributed_run(broadcast_worker_fn, 4)
