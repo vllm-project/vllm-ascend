@@ -40,8 +40,8 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_ascend.device_allocator.camem import CaMemAllocator
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.utils import try_register_lib
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 logger = init_logger(__name__)
 

@@ -1,13 +1,31 @@
-# SPDX-License-Identifier: Apache-2.0
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+# Adapted from vllm-project/vllm/blob/main/tests/models/utils.py
+# Copyright 2023 The vLLM team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
 from typing import List, Optional
 
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
-from vllm_ascend.core.scheduler import AscendScheduler
 from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+
+from vllm_ascend.core.scheduler import AscendScheduler
 
 EOS_TOKEN_ID = 50256
 
@@ -39,11 +57,11 @@ def create_scheduler(
     )
     cache_config.num_gpu_blocks = 10000
     return AscendScheduler(scheduler_config,
-                     model_config,
-                     cache_config,
-                     speculative_config=None,
-                     lora_config=None,
-                     log_stats=True)
+                           model_config,
+                           cache_config,
+                           speculative_config=None,
+                           lora_config=None,
+                           log_stats=True)
 
 
 def create_requests(
@@ -136,7 +154,6 @@ def test_schedule():
         assert scheduler.running[i] == request
 
 
-
 def test_stop_via_update_from_output():
     """Test stopping behavior through update_from_output"""
     scheduler = create_scheduler()
@@ -167,10 +184,8 @@ def test_stop_via_update_from_output():
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
-        req_id_to_index={
-            req.request_id: i
-            for i, req in enumerate(requests)
-        },
+        req_id_to_index={req.request_id: i
+                         for i, req in enumerate(requests)},
         sampled_token_ids=[[EOS_TOKEN_ID],
                            [10,
                             11]],  # First request hits EOS, second continues
@@ -217,10 +232,8 @@ def test_stop_via_update_from_output():
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
-        req_id_to_index={
-            req.request_id: i
-            for i, req in enumerate(requests)
-        },
+        req_id_to_index={req.request_id: i
+                         for i, req in enumerate(requests)},
         sampled_token_ids=[[10, 42, 12],
                            [13, 14]],  # First request hits stop token
         spec_token_ids=None,
@@ -265,10 +278,8 @@ def test_stop_via_update_from_output():
 
     model_output = ModelRunnerOutput(
         req_ids=[req.request_id for req in requests],
-        req_id_to_index={
-            req.request_id: i
-            for i, req in enumerate(requests)
-        },
+        req_id_to_index={req.request_id: i
+                         for i, req in enumerate(requests)},
         sampled_token_ids=[[10, 11, 12],
                            [13]],  # First request exceeds max_tokens
         spec_token_ids=None,

@@ -99,7 +99,7 @@ class AttentionMaskBuilder:
         self.update_attn_cache(max_s, dtype, device)
         return (self.attn_mask_cache.index_select(
             0, input_lengths)[:, :max_s].view(-1, 1, max_s).contiguous())
-    
+
     def get_splitfuse_attn_mask(
         self,
         seq_lens,
@@ -115,16 +115,15 @@ class AttentionMaskBuilder:
             # is not the same. Fix this in the future when kernel is ready.
             if self.attn_mask_cache[0][1] > 0:
                 attn_mask = self.get_attn_mask(  # type: ignore
-                        max_seq_len, dtype, device)
+                    max_seq_len, dtype, device)
                 attn_mask *= -10000
             else:
                 attn_mask = self.attn_mask_cache
-            return torch.index_select(attn_mask,
-                                        dim=0,
-                                        index=position)[:, :max_seq_len]
+            return torch.index_select(attn_mask, dim=0,
+                                      index=position)[:, :max_seq_len]
         total_q_len = sum(query_lens)
         attn_mask = torch.zeros((total_q_len, max_seq_len),
-                                dtype=self.vllm_config.model_config.dtype,
+                                dtype=dtype,
                                 device="cpu")
 
         current_row = 0
@@ -142,7 +141,7 @@ class AttentionMaskBuilder:
                 right_tensor.tril() == self.splitfuse_mask_value, 0)
             current_row += q_len
 
-        return attn_mask.to(self.device, non_blocking=True)
+        return attn_mask.to(device, non_blocking=True)
 
 
 class AscendAttentionBackend(AttentionBackend):

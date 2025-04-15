@@ -19,8 +19,6 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type
 
-import numpy as np
-
 import torch
 import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -220,16 +218,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
             assert attn_metadata is not None
             assert attn_metadata.attn_mask is not None
             mask = attn_metadata.attn_mask
-            torch_npu._npu_flash_attention(
-                query=query,
-                key=key,
-                value=value,
-                mask=mask,
-                seq_len=attn_metadata.seq_lens,
-                scale_value=self.scale,
-                num_heads=self.num_heads,
-                num_kv_heads=self.num_kv_heads,
-                out=output)
+            torch_npu._npu_flash_attention(query=query,
+                                           key=key,
+                                           value=value,
+                                           mask=mask,
+                                           seq_len=attn_metadata.seq_lens,
+                                           scale_value=self.scale,
+                                           num_heads=self.num_heads,
+                                           num_kv_heads=self.num_kv_heads,
+                                           out=output)
         elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
             block_tables = attn_metadata.block_tables
             torch_npu._npu_paged_attention(

@@ -25,7 +25,7 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
-from vllm.attention import AttentionType
+from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
@@ -40,7 +40,6 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LayerBlockType, cdiv, is_pin_memory_available)
-from vllm.attention import get_attn_backend
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
@@ -50,12 +49,12 @@ from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
-from vllm_ascend.attention.attention_v1 import AscendMetadata, AscendAttentionState
 from vllm_ascend.attention.attention import AttentionMaskBuilder
+from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
+                                                AscendMetadata)
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler_output import SchedulerOutput
-
 
 logger = init_logger(__name__)
 
@@ -258,7 +257,8 @@ class NPUModelRunner:
         # the size of the pre-constructed mask matrix based on requirements.
         mask_len = os.getenv("PAGED_ATTENTION_MASK_LEN", 10000)
         self.attn_mask_len = min(self.max_model_len, int(mask_len))
-        self.attn_mask_builder = AttentionMaskBuilder.initialize_from_len(self.attn_mask_len, self.dtype)
+        self.attn_mask_builder = AttentionMaskBuilder.initialize_from_len(
+            self.attn_mask_len, self.dtype)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -415,15 +415,17 @@ class NPUModelRunner:
     def get_model(self) -> nn.Module:
         return self.model
 
-    def make_attention_mask(self, seq_lens, query_lens,
-                            position, attn_state) -> torch.Tensor:
+    def make_attention_mask(self, seq_lens, query_lens, position,
+                            attn_state) -> torch.Tensor:
         # Chunk Prefill situation.
         if attn_state == AscendAttentionState.ChunkedPrefill:
-            return self.attn_mask_builder.get_splitfuse_attn_mask(seq_lens, query_lens, position, self.dtype, self.device)
+            return self.attn_mask_builder.get_splitfuse_attn_mask(
+                seq_lens, query_lens, position, self.dtype, self.device)
         # Prefill-only situation.
         elif attn_state == AscendAttentionState.PrefillOnly:
             max_seq_len = max(seq_lens, default=0)
-            return self.attn_mask_builder.get_attn_mask(max_seq_len, self.dtype, self.device)
+            return self.attn_mask_builder.get_attn_mask(
+                max_seq_len, self.dtype, self.device)
         # Decode-only situation.
         else:
             return None
@@ -461,7 +463,8 @@ class NPUModelRunner:
         cumsums_offsets = np.repeat(cu_num_tokens - num_scheduled_tokens,
                                     num_scheduled_tokens)
         sample_indices = cu_num_tokens - 1
-        sample_indices = torch.from_numpy(sample_indices).to(self.device, non_blocking=True)
+        sample_indices = torch.from_numpy(sample_indices).to(self.device,
+                                                             non_blocking=True)
         arange = self.arange_np[:total_num_scheduled_tokens] - cumsums_offsets
 
         positions_np = self.positions_np[:total_num_scheduled_tokens]
@@ -490,8 +493,8 @@ class NPUModelRunner:
                out=self.slot_mapping_np[:total_num_scheduled_tokens])
         slot_mapping = self.slot_mapping_cpu[:total_num_scheduled_tokens].to(
             self.device, non_blocking=True)
-        
-        attn_state = -1
+
+        attn_state = AscendAttentionState.ChunkedPrefill
         if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillOnly
         elif np.all(num_scheduled_tokens == 1):
