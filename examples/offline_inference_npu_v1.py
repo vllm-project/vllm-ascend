@@ -35,11 +35,14 @@ if __name__ == "__main__":
   sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
   # Create an LLM.
   llm = LLM(
-     model="/data/weights/deepseek-ai/deepseekv3-lite-base-lastest",
+     model="/data/weights/deepseek-ai/deepseekv3-lite-base-latest",
      tensor_parallel_size=1,
      enforce_eager=True,
      trust_remote_code=True,
-     max_model_len=1024)
+     max_model_len=1024,
+     additional_config={
+        "expert_tensor_parallel_size": 2
+     })
 
   # Generate texts from the prompts.
   outputs = llm.generate(prompts, sampling_params)

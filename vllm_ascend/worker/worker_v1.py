@@ -220,8 +220,8 @@ class NPUWorker(WorkerBase):
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
         expert_tensor_parallel_size = 1
-        if self.additional_config is not None and hasattr(self.additional_config, "expert_tensor_parallel_size"):
-            expert_tensor_parallel_size = getattr(self.additional_config, "expert_tensor_parallel_size")
+        if self.additional_config is not None and "expert_tensor_parallel_size" in self.additional_config:
+            expert_tensor_parallel_size = int(self.additional_config["expert_tensor_parallel_size"])
         # initailize the EP group and ETP group in vllm_ascend
         init_ascend_model_parallel(self.parallel_config.tensor_parallel_size,
                                 self.parallel_config.pipeline_parallel_size,
