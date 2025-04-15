@@ -25,7 +25,8 @@ import torch.nn as nn
 import torch_npu
 from vllm import envs
 from vllm.config import VllmConfig
-from vllm.distributed import (ensure_model_parallel_initialized,
+from vllm.distributed import (ensure_kv_transfer_initialized,
+                              ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.logger import logger
@@ -197,6 +198,7 @@ class NPUWorker(WorkerBase):
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
+        ensure_kv_transfer_initialized(self.vllm_config)
 
     def _init_profiler(self):
         # Torch profiler. Enabled and configured through env vars:
