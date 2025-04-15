@@ -48,6 +48,7 @@ TORCH_DTYPE_TO_NPU_DTYPE = {
 # Get all device ips using hccn_tool
 HCCN_TOOL_PATH = envs.HCCN_PATH
 
+
 def get_device_ips():
     world_size = 8
     npu_info = subprocess.run(['npu-smi', 'info', '-m'],
@@ -149,8 +150,9 @@ class LLMDataDistConnector(KVConnectorBase):
         self.n_layer = self.config.model_config.get_num_layers(
             self.config.parallel_config)
 
-        self.llm_datadist_engine = KVTransferEngine(self.world_size, self.n_layer,
-                                                 self.role, self.local_rank)
+        self.llm_datadist_engine = KVTransferEngine(self.world_size,
+                                                    self.n_layer, self.role,
+                                                    self.local_rank)
         if self.role == llm_datadist.LLMRole.PROMPT:
             self.llm_datadist_engine.prepare_data_dist()
         else:
