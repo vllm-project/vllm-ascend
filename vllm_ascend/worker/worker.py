@@ -28,7 +28,7 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -47,8 +47,6 @@ from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import try_register_lib
 from vllm_ascend.worker.model_runner import NPUModelRunner
 from vllm_ascend.worker.pooling_model_runner import NPUPoolingModelRunner
-
-logger = init_logger(__name__)
 
 
 class NPUWorker(LocalOrDistributedWorkerBase):

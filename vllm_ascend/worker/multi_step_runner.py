@@ -7,7 +7,6 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
 import torch
 from torch import nn
 from vllm.distributed import get_pp_group
-from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import (PromptLogprobs, SampleLogprobs,
                                                 SamplerOutput,
                                                 SamplingMetadata, get_logprobs,
@@ -29,8 +28,6 @@ from vllm_ascend.worker.model_runner import (
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
-
-logger = init_logger(__name__)
 
 
 @dataclass(frozen=False)

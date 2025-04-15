@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 import torch
 import torch_npu  # noqa: F401
 import vllm.envs as envs
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 try:
     # register custom ops into torch_library here
@@ -47,8 +47,6 @@ else:
     FlexibleArgumentParser = None
 
 os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
-
-logger = init_logger(__name__)
 
 
 class NPUPlatform(Platform):
