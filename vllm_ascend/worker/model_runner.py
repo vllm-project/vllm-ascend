@@ -35,7 +35,7 @@ from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import get_kv_transfer_group, get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.lora.layers import LoRAMapping
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import SamplingMetadata, SamplingMetadataCache
@@ -62,8 +62,6 @@ from vllm.worker.model_runner_base import (
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
-
-logger = init_logger(__name__)
 
 TModelInputForNPU = TypeVar('TModelInputForNPU', bound="ModelInputForNPU")
 
