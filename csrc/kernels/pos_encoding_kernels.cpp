@@ -28,9 +28,9 @@
 using vllm_ascend::AccType;
 using vllm_ascend::local_mem_copy;
 template <typename scalar_t, bool isNeox> class RotaryEmbedding {
-    // NOTE(ganyi): we use 32K as load stride for pipe, need to find another way to
+    // NOTE(ganyi): we use 512B as load stride for pipe, need to find another way to
     // retrive this size from runtime for more Soc support
-    static int constexpr loadSize = 1024 * 4;
+    static int constexpr loadSize = 512;
     using dst_t = scalar_t;
     using acc_t = typename AccType<scalar_t>::type;
     // only half tensor have cast instruct to int8, hardcode acc_dst_t as half

@@ -181,11 +181,8 @@ def test_rotary_embedding_quant_with_leading_dim(
         dim=-1,
     )
 
-    # because the custom kernel is in-place.
-    rope.cos_sin_cache = rope.cos_sin_cache.float()
-    ref_query, ref_key = rope.forward_native(positions, query.float(),
-                                             key.float())
-    torch.ops._C.rotary_embedding(
+    ref_query, ref_key = rope.forward_native(positions, query, key)
+    query, key = torch.ops._C.rotary_embedding(
         positions,
         query,
         key,
@@ -195,11 +192,11 @@ def test_rotary_embedding_quant_with_leading_dim(
     )
 
     # Compare the results.
-    torch.testing.assert_close(query,
+    torch.testing.assert_close(query.view(ref_query.size()),
                                ref_query,
                                atol=DEFAULT_ATOL,
                                rtol=DEFAULT_RTOL)
-    torch.testing.assert_close(key,
+    torch.testing.assert_close(key.view(ref_key.size()),
                                ref_key,
                                atol=DEFAULT_ATOL,
                                rtol=DEFAULT_RTOL)

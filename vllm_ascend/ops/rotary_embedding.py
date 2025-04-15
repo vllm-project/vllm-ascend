@@ -21,6 +21,8 @@ import torch
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 
+from vllm_ascend import envs
+
 
 def rope_forward_oot(
     self,
@@ -35,8 +37,19 @@ def rope_forward_oot(
         self.cos_sin_cache = self.cos_sin_cache.to(query.device)
     if self.cos_sin_cache.dtype != query.dtype:
         self.cos_sin_cache = self.cos_sin_cache.to(query.dtype)
-    if offsets is not None or self.cos_sin_cache.shape[-1] != self.head_size:
-        return self.forward_native(positions, query, key, offsets)
+    # adopt custom kernel path for rotary_embedding
+    if envs.COMPILE_CUSTOM_KERNELS and self.is_neox_style:
+        return torch.ops._C.rotary_embedding(
+            positions,
+            query,
+            key,
+            self.head_size,
+            self.cos_sin_cache,
+            self.is_neox_style,
+        )
+    if offsets is not None:
+        raise NotImplementedError(
+            "Batched rotary embedding is currently not supported on NPU.")
     else:
         # TODO: Remove the contiguous in the future.
         query = query.contiguous()
