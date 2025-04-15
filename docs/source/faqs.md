@@ -88,3 +88,15 @@ vllm-ascend is a plugin for vllm. Basicly, the version of vllm-ascend is the sam
 ### 10. Does vllm-ascend support Prefill Disaggregation feature?
 
 Currently, only 1P1D is supported by vllm. For vllm-ascend, it'll be done by [this PR](https://github.com/vllm-project/vllm-ascend/pull/432). For NPND, vllm is not stable and fully supported yet. We will make it stable and supported by vllm-ascend in the future.
+
+### 11. Does vllm-ascend support quantization method?
+
+Currently, there is no quantization method supported in vllm-ascend originally. And the quantization supported is working in process, w8a8 will firstly be supported.
+
+### 12. How to run w8a8 DeepSeek model?
+
+Currently, we should run w8a8 with vllm + vllm-ascend + mindie-turbo. After installing the above packages, you can follow the steps below to run w8a8 DeepSeek:
+
+1. Quantize bf16 DeepSeek, e.g. [unsloth/DeepSeek-R1-BF16](https://modelscope.cn/models/unsloth/DeepSeek-R1-BF16), with msModelSlim to get w8a8 DeepSeek. Find more details in [msModelSlim doc](https://gitee.com/ascend/msit/tree/master/msmodelslim/msmodelslim/pytorch/llm_ptq)
+2. Copy the content of `quant_model_description_w8a8_dynamic.json` into the `quantization_config` of `config.json` of the quantized model files.
+3. Reference with the quantized DeepSeek model.
