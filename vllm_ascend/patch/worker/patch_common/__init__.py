@@ -14,17 +14,3 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-
-
-def register():
-    """Register the NPU platform."""
-    # Adapt the global patch here.
-    from vllm_ascend.utils import adapt_patch
-    adapt_patch(is_global_patch=True)
-
-    return "vllm_ascend.platform.NPUPlatform"
-
-
-def register_model():
-    from .models import register_model
-    register_model()

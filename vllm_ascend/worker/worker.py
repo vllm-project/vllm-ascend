@@ -63,6 +63,9 @@ class NPUWorker(LocalOrDistributedWorkerBase):
                  distributed_init_method: str,
                  is_driver_worker: bool = False,
                  model_runner_cls: Optional[Type[ModelRunnerBase]] = None):
+        # register patch for vllm
+        from vllm_ascend.utils import adapt_patch
+        adapt_patch()
         # Register ops when worker init.
         from vllm_ascend import ops  # noqa: F401
 
