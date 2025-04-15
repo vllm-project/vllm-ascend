@@ -77,8 +77,8 @@ Following is the Release Compatibility Matrix for vLLM Ascend Plugin:
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
-| 2025.04.15 | Release candidates, v0.8.Xrc1             |
-| 2025.04.15 | Final release, v0.7.3                     |
+| 2025.04.30 | Final release, v0.7.3(The official release rely on the release of torch-npu and CANN8.1, so it's delayed)|
+| 2025.04.17 | Release candidates, v0.8.4rc1             |
 | 2025.03.28 | Release candidates, v0.7.3rc2             |
 | 2025.03.14 | Release candidates, v0.7.3rc1             |
 | 2025.02.19 | Release candidates, v0.7.1rc1             |
