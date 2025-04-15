@@ -15,15 +15,10 @@
 # limitations under the License.
 #
 
-
-def register():
-    """Register the NPU platform."""
-    # TODO: revert the patch when triton import is fixed
-    # To ensure that the module is correctly replaced, add it at the beginning
-    import vllm_ascend.patch_module  # noqa: F401
-    return "vllm_ascend.platform.NPUPlatform"
-
-
-def register_model():
-    from .models import register_model
-    register_model()
+import vllm_ascend.patch.patch_minicpm  # noqa
+# TODO: remove the patch on spec decode when
+# https://github.com/vllm-project/vllm/pull/15195 and
+# https://github.com/vllm-project/vllm-ascend/pull/395
+# is merged
+import vllm_ascend.patch.patch_multi_step_worker  # noqa
+import vllm_ascend.patch.patch_spec_decode_worker  # noqa
