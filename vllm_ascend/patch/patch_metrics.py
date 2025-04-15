@@ -23,6 +23,8 @@ from vllm.spec_decode.metrics import (AsyncMetricsCollector,
                                       SpecDecodeWorkerMetrics)
 
 
+# NOTE: This function in vllm use cuda.Stream() directly.
+# To use npu stream, we patch this function.
 def init_tensors(self,
                  rank: int,
                  device_type: Union[torch.device, str] = 'npu') -> None:
@@ -33,6 +35,8 @@ def init_tensors(self,
         self._copy_stream = torch_npu.npu.Stream()
 
 
+# NOTE: This function in vllm directly returns None in non-cuda platform.
+# So we patch this function to make it work on NPU platform.
 def maybe_collect_rejsample_metrics(
         self, k: int) -> Optional[SpecDecodeWorkerMetrics]:
 
