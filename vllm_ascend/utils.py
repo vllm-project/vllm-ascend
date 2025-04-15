@@ -17,9 +17,7 @@
 # limitations under the License.
 #
 import torch
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
+from vllm.logger import logger
 
 
 def try_register_lib(lib_name: str, lib_info: str = ""):

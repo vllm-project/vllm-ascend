@@ -29,15 +29,12 @@ from vllm.config import TaskOption
 from vllm.distributed.parallel_state import (destroy_distributed_environment,
                                              destroy_model_parallel)
 from vllm.inputs import ExplicitEncoderDecoderPrompt, TextPrompt, TokensPrompt
-from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import is_list_of
 
 from tests.model_utils import (TokensTextLogprobs,
                                TokensTextLogprobsPromptLogprobs)
-
-logger = init_logger(__name__)
 
 _M = TypeVar("_M")
 
