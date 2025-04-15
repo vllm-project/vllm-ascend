@@ -3,15 +3,13 @@
 from typing import Optional
 
 import torch
-from vllm.model_executor.layers.sampler import (Sampler, 
-                                                SamplerOutput, 
-                                                _apply_min_tokens_penalty, 
-                                                _apply_min_p, 
-                                                _sample, 
-                                                SampleResultArgsType, 
-                                                get_logprobs, 
-                                                _build_sampler_output)
+from vllm.model_executor.layers.sampler import (Sampler, SampleResultArgsType,
+                                                SamplerOutput, _apply_min_p,
+                                                _apply_min_tokens_penalty,
+                                                _build_sampler_output, _sample,
+                                                get_logprobs)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+
 from vllm_ascend.sample.ops.penalties import apply_penalties
 
 
@@ -61,7 +59,7 @@ class AscendSampler(Sampler):
 
         if do_top_p_top_k:
             logits = _apply_top_k_top_p_npu(logits, sampling_tensors.top_ps,
-                                        sampling_tensors.top_ks)
+                                            sampling_tensors.top_ks)
 
         if do_min_p:
             logits = _apply_min_p(logits, sampling_tensors.min_ps)
@@ -83,21 +81,15 @@ class AscendSampler(Sampler):
         )
 
         if self.include_gpu_probs_tensor:
-            # Since we will defer sampler result Pythonization,
-            # preserve GPU-side tensors in support of later
-            # deferred pythonization of logprobs
             assert maybe_sampled_tokens_tensor is not None
             on_device_tensors = (probs, logprobs, maybe_sampled_tokens_tensor)
         else:
-            # Since Pythonization has already happened, don't preserve
-            # GPU-side tensors.
             on_device_tensors = None
 
         # Get the logprobs query results.
         prompt_logprobs = None
         sample_logprobs = None
         if not sampling_metadata.skip_sampler_cpu_output:
-            # Pythonize logprobs now (GPU -> CPU); do not defer.
             assert not isinstance(maybe_deferred_sample_results,
                                   SampleResultArgsType)
             prompt_logprobs, sample_logprobs = get_logprobs(
@@ -121,10 +113,9 @@ def _apply_top_k_top_p_npu(
 
     This algorithm avoids using torch.scatter which is time-consuming on NPU.
     """
-    # TODO(linfeng): consider the case taht either p or k is applied
     batch_size, vocab_size = logits.shape
     logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
-    
+
     boundary = logits_sort.gather(1, (vocab_size - k).unsqueeze(dim=1))
     top_k_mask = logits_sort < boundary
     logits_sort.masked_fill_(top_k_mask, -float("inf"))
@@ -133,7 +124,10 @@ def _apply_top_k_top_p_npu(
     probs_sum = probs_sort.cumsum(dim=-1)
     top_p_mask = probs_sum > 1 - p.unsqueeze(dim=1)
     top_p_mask[:, -1] = True
-    strides = torch.arange(0, batch_size*vocab_size, vocab_size, device=logits.device)
+    strides = torch.arange(0,
+                           batch_size * vocab_size,
+                           vocab_size,
+                           device=logits.device)
     flatten_idx = logits_idx[:, cutoff:] + strides.unsqueeze(dim=1)
     valid_idx = torch.masked_select(flatten_idx, top_p_mask)
     logits_flatten = logits.flatten()

@@ -1,13 +1,11 @@
 import torch
-from vllm.v1.sample.sampler import Sampler
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.penalties import apply_min_token_penalties
-from vllm.logger import init_logger
-from vllm_ascend.sample.ops.ascend_topk_topp_sampler import AscendTopKTopPSampler
+from vllm.v1.sample.sampler import Sampler
+
+from vllm_ascend.sample.ops.ascend_topk_topp_sampler import \
+    AscendTopKTopPSampler
 from vllm_ascend.sample.ops.penalties import apply_all_penalties
-
-
-logger = init_logger(__name__)
 
 
 class AscendSampler(Sampler):

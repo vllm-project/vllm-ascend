@@ -33,9 +33,7 @@ from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.sampler import sampler_output
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingType
@@ -813,11 +811,7 @@ class NPUModelRunner:
 
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
-            # option 1 
-            if hasattr(self.model, "sampler"):
-                self.model.sampler = AscendSampler()
-            # option 2
-            # self.model = NPUModelWrapperV1(model)
+            self.model.sampler = AscendSampler()
 
             if self.lora_config:
                 raise ValueError("LoRA model is not supported on NPU now.")
@@ -898,25 +892,3 @@ class NPUModelRunner:
                     f"Unknown attention type: {attn_module.attn_type}")
 
         return kv_cache_spec
-
-# class NPUModelWrapperV1(nn.Module):
-
-#     def __init__(self, model: nn.Module):
-#         super().__init__()
-#         self._model = model
-#         self.sampler = AscendSampler()
-    
-#     def __getattr__(self, name):
-#         return getattr(self._model, name)
-
-#     def sample(
-#         self,
-#         logits: Optional[torch.Tensor],
-#         sampling_metadata: SamplingMetadata,
-#     ) -> Optional[SamplerOutput]:
-#         next_tokens = self.sampler(logits, sampling_metadata)
-#         return next_tokens
-    
-#     def forward():
-#         # necessary if using wrapper class
-#         pass
