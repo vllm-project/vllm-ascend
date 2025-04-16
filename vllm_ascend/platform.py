@@ -162,7 +162,3 @@ class NPUPlatform(Platform):
         model configuration.
         """
         return True
-
-    @classmethod
-    def supports_structured_output(cls) -> bool:
-        return True
