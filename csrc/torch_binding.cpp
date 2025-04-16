@@ -66,14 +66,15 @@ std::tuple<at::Tensor, at::Tensor> rotary_embedding(at::Tensor &positions, at::T
     at::Tensor key_dst = at::empty({num_tokens, num_kv_heads, head_size}, key.options());
 
     int rot_dim = cos_sin_cache.size(1);
+    int seq_dim_idx = positions_ndim - 1;
     int64_t *position_ids_ptr = positions.data_ptr<int64_t>();
     void *query_dst_ptr = query_dst.data_ptr();
     void *key_dst_ptr = key_dst.data_ptr();
     void *query_ptr = query.data_ptr();
     void *key_ptr = key.data_ptr();
     void *cos_sin_cache_ptr = cos_sin_cache.data_ptr();
-    int64_t query_stride = query.stride(-2);
-    int64_t key_stride = key.stride(-2);
+    int64_t query_stride = query.stride(seq_dim_idx);
+    int64_t key_stride = key.stride(seq_dim_idx);
     int64_t dst_query_stride = query_dst.stride(0);
     int64_t dst_key_stride = key_dst.stride(0);
     at::ScalarType scalar_type = query.scalar_type();
