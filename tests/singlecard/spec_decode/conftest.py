@@ -1,6 +1,8 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
+# Adapted from vllm-project/vllm/tests/spec_decode/conftest.py
+# Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -14,11 +16,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import pytest
 
-import vllm_ascend.patch.worker.patch_common.patch_metrics  # noqa
-# TODO: remove the patch on spec decode when
-# https://github.com/vllm-project/vllm/pull/15195 and
-# https://github.com/vllm-project/vllm-ascend/pull/395
-# is merged
-import vllm_ascend.patch.worker.patch_common.patch_multi_step_worker  # noqa
-import vllm_ascend.patch.worker.patch_common.patch_spec_decode_worker  # noqa
+
+@pytest.fixture(scope="function", autouse=True)
+def use_v0_only(monkeypatch):
+    """
+    Since this module is V0 only, set VLLM_USE_V1=0 for
+    all tests in the module.
+    """
+    monkeypatch.setenv('VLLM_USE_V1', '0')
