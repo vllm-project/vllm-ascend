@@ -31,7 +31,7 @@ from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
@@ -55,8 +55,6 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler_output import SchedulerOutput
-
-logger = init_logger(__name__)
 
 
 class NPUModelRunner:

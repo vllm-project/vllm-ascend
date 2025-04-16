@@ -29,7 +29,7 @@ from vllm.distributed import (ensure_kv_transfer_initialized,
                               ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
@@ -43,8 +43,6 @@ from vllm.v1.worker.worker_base import WorkerBase
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.utils import try_register_lib
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-
-logger = init_logger(__name__)
 
 
 class NPUWorker(WorkerBase):

@@ -23,7 +23,7 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 from acl.rt import memcpy  # type: ignore # noqa: F401
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 try:
     import torch_npu  # noqa: F401
@@ -31,8 +31,6 @@ except ImportError:
     print("Failed to import torch_npu.")
 
 from vllm.utils import is_pin_memory_available
-
-logger = init_logger(__name__)
 
 
 def find_loaded_library(lib_name) -> Optional[str]:

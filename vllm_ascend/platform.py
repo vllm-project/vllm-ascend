@@ -23,7 +23,7 @@ import torch
 import torch_npu  # noqa: F401
 import vllm.envs as envs
 from vllm.config import CompilationLevel, VllmConfig
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 try:
     # register custom ops into torch_library here
@@ -45,8 +45,6 @@ else:
     FlexibleArgumentParser = None
 
 os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
-
-logger = init_logger(__name__)
 
 
 class NPUPlatform(Platform):

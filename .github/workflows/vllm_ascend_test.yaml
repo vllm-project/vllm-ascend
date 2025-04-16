@@ -148,7 +148,8 @@ jobs:
       - name: Run vllm-project/vllm-ascend key feature test
         if: steps.filter.outputs.speculative_tests_changed
         run: |
-          pytest -sv tests/spec_decode
+          pytest -sv tests/spec_decode/e2e/test_mtp_correctness.py
+          pytest -sv tests/spec_decode --ignore=tests/spec_decode/e2e/test_mtp_correctness.py 
 
       - name: Run vllm-project/vllm test
         run: |
