@@ -33,7 +33,8 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer, BatchEncoding,
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 from vllm import LLM, SamplingParams
 from vllm.config import TaskOption
-from vllm.distributed import destroy_model_parallel, destroy_distributed_environment
+from vllm.distributed import (destroy_distributed_environment,
+                              destroy_model_parallel)
 from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
                          TokensPrompt, to_enc_dec_tuple_list)
 from vllm.logger import init_logger
@@ -72,6 +73,7 @@ def example_prompts() -> List[str]:
         prompts += _read_prompts(filename)
     return prompts
 
+
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     destroy_model_parallel()
     destroy_distributed_environment()
@@ -89,6 +91,7 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     except AttributeError:
         logger.warning(
             "torch._C._host_emptyCache() only available in Pytorch >=2.5")
+
 
 class HfRunner:
 
