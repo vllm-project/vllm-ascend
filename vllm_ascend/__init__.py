@@ -19,7 +19,6 @@
 def register():
     """Register the NPU platform."""
     # To ensure that the module is correctly replaced, add it at the beginning
-    import vllm_ascend.patch_config  # noqa: F401
     import vllm_ascend.patch_module  # noqa: F401
     return "vllm_ascend.platform.NPUPlatform"
 

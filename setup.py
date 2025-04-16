@@ -123,6 +123,10 @@ class cmake_build_ext(build_ext):
         cmake_args += [f"-DCMAKE_BUILD_TYPE={envs.CMAKE_BUILD_TYPE}"]
         # Default dump the compile commands for lsp
         cmake_args += ["-DCMAKE_EXPORT_COMPILE_COMMANDS=1"]
+        if envs.CXX_COMPILER is not None:
+            cmake_args += [f"-DCMAKE_CXX_COMPILER={envs.CXX_COMPILER}"]
+        if envs.C_COMPILER is not None:
+            cmake_args += [f"-DCMAKE_C_COMPILER={envs.C_COMPILER}"]
         if envs.VERBOSE:
             cmake_args += ["-DCMAKE_VERBOSE_MAKEFILE=ON"]
 
