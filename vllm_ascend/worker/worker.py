@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 import torch.distributed
+import torch_npu
 from torch import nn
 from vllm import envs
 from vllm.config import VllmConfig
@@ -37,7 +38,7 @@ from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
-from vllm.utils import bind_kv_cache
+from vllm.utils import GiB_bytes, bind_kv_cache
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner_base import ModelRunnerBase
@@ -45,7 +46,8 @@ from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import try_register_lib
+from vllm_ascend.utils import (MemorySnapshot, memory_profiling,
+                               try_register_lib)
 from vllm_ascend.worker.model_runner import NPUModelRunner
 from vllm_ascend.worker.pooling_model_runner import NPUPoolingModelRunner
 
@@ -124,7 +126,6 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
             # lazy import so that torch_npu is not required for normal use.
-            import torch_npu
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)
@@ -159,8 +160,10 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         if self.device_config.device.type == "npu":
             self.device = torch.device(f"npu:{self.local_rank}")
             NPUPlatform.set_device(self.device)
-            NPUPlatform.empty_cache()
-            self.init_npu_memory = NPUPlatform.mem_get_info()[0]
+            gc.collect()
+            torch.npu.empty_cache()
+            torch.npu.reset_peak_memory_stats()
+            self.baseline_snapshot = MemorySnapshot()
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
@@ -203,6 +206,18 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         self.model_runner.save_tensorized_model(
             tensorizer_config=tensorizer_config, )
 
+    def _assert_memory_footprint_increased_during_profiling(self):
+        # NOTE(woosuk): Here we assume that the other processes using the same
+        # NPU did not change their memory usage during the profiling.
+        free_npu_memory, total = torch.npu.mem_get_info()
+        npu_memory = total - free_npu_memory
+        assert self.baseline_snapshot.npu_memory < npu_memory, (
+            "Error in memory profiling. "
+            f"Initial used memory {self.baseline_snapshot.npu_memory}, "
+            f"currently used memory {npu_memory}. "
+            f"This happens when the NPU memory was "
+            "not properly cleaned up before initializing the vLLM instance.")
+
     @NPUPlatform.inference_mode()
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Profiles the peak memory usage of the model to determine how many
@@ -217,35 +232,56 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         NPUPlatform.empty_cache()
+        torch.npu.reset_peak_memory_stats()
 
+        free_memory_pre_profile, total_npu_memory = torch.npu.mem_get_info()
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
-        self.model_runner.profile_run()
+        with memory_profiling(
+                self.baseline_snapshot,
+                weights_memory=self.model_runner.model_memory_usage) as result:
+            self.model_runner.profile_run()
+
+        self._assert_memory_footprint_increased_during_profiling()
+
+        memory_for_current_instance = total_npu_memory * \
+            self.cache_config.gpu_memory_utilization
+        available_kv_cache_memory = (memory_for_current_instance -
+                                     result.non_kv_cache_memory)
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
-        free_npu_memory, total_npu_memory = NPUPlatform.mem_get_info()
-        # NOTE(woosuk): Here we assume that the other processes using the same
-        # GPU did not change their memory usage during the profiling.
-        peak_memory = self.init_npu_memory - free_npu_memory
-        assert peak_memory > 0, (
-            "Error in memory profiling. "
-            f"Initial free memory {self.init_npu_memory}, current free memory"
-            f" {free_npu_memory}. This happens when the NPU memory was "
-            "not properly cleaned up before initializing the vLLM instance.")
-
         cache_block_size = self.get_cache_block_size_bytes()
-        num_npu_blocks = int(
-            (total_npu_memory * self.cache_config.gpu_memory_utilization -
-             peak_memory) // cache_block_size)
-        num_cpu_blocks = int(self.cache_config.swap_space_bytes //
-                             cache_block_size)
+        if cache_block_size == 0:
+            num_npu_blocks = 0
+            num_cpu_blocks = 0
+        else:
+            num_npu_blocks = int(available_kv_cache_memory // cache_block_size)
+            num_cpu_blocks = int(self.cache_config.swap_space_bytes //
+                                 cache_block_size)
         num_npu_blocks = max(num_npu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
+
+        msg = (f"Memory profiling takes {result.profile_time:.2f} seconds\n"
+               "the current vLLM instance can use "
+               "total_npu_memory "
+               f"({(total_npu_memory / GiB_bytes):.2f}GiB)"
+               " x npu_memory_utilization "
+               f"({self.cache_config.gpu_memory_utilization:.2f})"
+               f" = {(memory_for_current_instance / GiB_bytes):.2f}GiB\n"
+               "model weights take "
+               f"{(result.weights_memory / GiB_bytes):.2f}GiB;"
+               " non_torch_memory takes "
+               f"{(result.non_torch_increase / GiB_bytes):.2f}GiB;"
+               " PyTorch activation peak memory takes "
+               f"{(result.torch_peak_increase / GiB_bytes):.2f}GiB;"
+               " the rest of the memory reserved for KV Cache is "
+               f"{(available_kv_cache_memory / GiB_bytes):.2f}GiB.")
+
+        logger.info(msg)
+        # Final cleanup
         gc.collect()
-        # TODO: don`t need impl this func after empty_cache in
-        # Worker.determine_num_available_blocks() unified`
-        NPUPlatform.empty_cache()
+
         return num_npu_blocks, num_cpu_blocks
 
     def initialize_cache(self, num_gpu_blocks: int,
@@ -270,7 +306,6 @@ class NPUWorker(LocalOrDistributedWorkerBase):
                         self.parallel_config, self.device_config)
             for _ in range(self.parallel_config.pipeline_parallel_size)
         ]
-        import torch_npu
         for ve in range(self.parallel_config.pipeline_parallel_size):
             num_layers = len(self.cache_engine[ve].gpu_cache)
             for i in range(num_layers):
