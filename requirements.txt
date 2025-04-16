@@ -2,6 +2,7 @@
 cmake>=3.26
 decorator
 numpy<2.0.0
+packaging
 pybind11
 pyyaml
 scipy

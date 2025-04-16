@@ -72,7 +72,20 @@ Find more details [<u>here</u>](https://github.com/vllm-project/vllm-ascend/issu
 
 ### 6. How to solve the problem of "Failed to infer device type" or "libatb.so: cannot open shared object file"?
 
-Basicly, the reason is that the NNAL environment is not sourced. Please try `source /usr/local/Ascend/nnal/atb/set_env.sh` to solve the problem.
+Basically, the reason is that the NPU environment is not configured correctly. You can:
+1. try `source /usr/local/Ascend/nnal/atb/set_env.sh` to enable NNAL package.
+2. try `source /usr/local/Ascend/ascend-toolkit/set_env.sh` to enable CANN package.
+3. try `npu-smi info` to check whether the NPU is working.
+
+If all above steps are not working, you can try the following code with python to check whether there is any error:
+
+```
+import torch
+import torch_npu
+import vllm
+```
+
+If all above steps are not working, feel free to submit a GitHub issue.
 
 ### 7. Does vllm-ascend support Atlas 300I Duo?
 
@@ -80,10 +93,10 @@ No, vllm-ascend now only supports Atlas A2 series. We are working on it.
 
 ### 8. How does vllm-ascend perform?
 
-Currently, only some models are imporved. Such as `Qwen2 VL`, `Deepseek  V3`. Others are not good enough. In the future, we will support graph mode and custom ops to improve the performance of vllm-ascend. And when the official release of vllm-ascend is released, you can install `mindie-turbo` with `vllm-ascend` to speed up the inference as well.
+Currently, only some models are improved. Such as `Qwen2 VL`, `Deepseek  V3`. Others are not good enough. In the future, we will support graph mode and custom ops to improve the performance of vllm-ascend. And when the official release of vllm-ascend is released, you can install `mindie-turbo` with `vllm-ascend` to speed up the inference as well.
 
 ### 9. How vllm-ascend work with vllm?
-vllm-ascend is a plugin for vllm. Basicly, the version of vllm-ascend is the same as the version of vllm. For example, if you use vllm 0.7.3, you should use vllm-ascend 0.7.3 as well. For main branch, we will make sure `vllm-ascend` and `vllm` are compatible by each commit.
+vllm-ascend is a plugin for vllm. Basically, the version of vllm-ascend is the same as the version of vllm. For example, if you use vllm 0.7.3, you should use vllm-ascend 0.7.3 as well. For main branch, we will make sure `vllm-ascend` and `vllm` are compatible by each commit.
 
 ### 10. Does vllm-ascend support Prefill Disaggregation feature?
 
