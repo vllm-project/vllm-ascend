@@ -27,8 +27,7 @@ from vllm.worker.model_runner_base import (ModelRunnerBase,
                                            ModelRunnerInputBase,
                                            ModelRunnerWrapperBase)
 
-from vllm_ascend.attention.attention import \
-    AscendMetadata as FlashAttentionMetadata
+from vllm_ascend.attention.attention import AscendMetadata
 
 logger = init_logger(__name__)
 
@@ -96,7 +95,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
 
         # Update attn_metadata
         attn_metadata = model_input.attn_metadata
-        assert isinstance(attn_metadata, FlashAttentionMetadata)
+        assert isinstance(attn_metadata, AscendMetadata)
 
         attn_metadata.advance_step(model_input, sampled_token_ids,
                                    self.block_size, num_seqs, num_queries)
