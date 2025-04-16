@@ -91,11 +91,11 @@ Currently, only 1P1D is supported by vllm. For vllm-ascend, it'll be done by [th
 
 ### 11. Does vllm-ascend support quantization method?
 
-Currently, there is no quantization method supported in vllm-ascend originally. And the quantization supported is working in process, w8a8 will firstly be supported.
+Currently, there is no quantization method supported in vllm-ascend originally. And the quantization supported is working in progress, w8a8 will firstly be supported.
 
 ### 12. How to run w8a8 DeepSeek model?
 
-Currently, we should run w8a8 with vllm + vllm-ascend + mindie-turbo. After installing the above packages, you can follow the steps below to run w8a8 DeepSeek:
+Currently, running on v0.7.3, we should run w8a8 with vllm + vllm-ascend + mindie-turbo. And we only need vllm + vllm-ascend when v0.8.X is released. After installing the above packages, you can follow the steps below to run w8a8 DeepSeek:
 
 1. Quantize bf16 DeepSeek, e.g. [unsloth/DeepSeek-R1-BF16](https://modelscope.cn/models/unsloth/DeepSeek-R1-BF16), with msModelSlim to get w8a8 DeepSeek. Find more details in [msModelSlim doc](https://gitee.com/ascend/msit/tree/master/msmodelslim/msmodelslim/pytorch/llm_ptq)
 2. Copy the content of `quant_model_description_w8a8_dynamic.json` into the `quantization_config` of `config.json` of the quantized model files.
