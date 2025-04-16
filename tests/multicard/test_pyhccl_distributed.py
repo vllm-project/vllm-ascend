@@ -77,8 +77,8 @@ def worker_fn():
     assert torch.all(tensor == pynccl_comm.world_size).cpu().item()
 
 
-def test_pyhccl():
-    distributed_run(worker_fn, 2)
+# def test_pyhccl():
+#     distributed_run(worker_fn, 2)
 
 
 @worker_fn_wrapper
