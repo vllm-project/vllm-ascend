@@ -13,18 +13,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
 
+import vllm
+from packaging.version import Version
 
-def register():
-    """Register the NPU platform."""
-    # Adapt the global patch here.
-    from vllm_ascend.utils import adapt_patch
-    adapt_patch(is_global_patch=True)
+# Import common patches for all versions
+from vllm_ascend.patch.platform import patch_common  # noqa: F401
 
-    return "vllm_ascend.platform.NPUPlatform"
-
-
-def register_model():
-    from .models import register_model
-    register_model()
+# Import specific patches for different versions
+if Version(vllm.__version__) == Version("0.8.4"):
+    from vllm_ascend.patch.platform import patch_0_8_4  # noqa: F401
+else:
+    from vllm_ascend.patch.platform import patch_main  # noqa: F401

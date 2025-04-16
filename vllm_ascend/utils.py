@@ -51,3 +51,10 @@ def current_stream() -> torch.npu.Stream:
         # we return the default stream.
         _current_stream = torch.npu.current_stream()
     return _current_stream
+
+
+def adapt_patch(is_global_patch: bool = False):
+    if is_global_patch:
+        from vllm_ascend.patch import platform  # noqa: F401
+    else:
+        from vllm_ascend.patch import worker  # noqa: F401
