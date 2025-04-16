@@ -46,7 +46,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-arm64-npu-1, linux-arm64-npu-4]
-        vllm_verison: [main, v0.8.3]
+        vllm_verison: [main, v0.8.4]
     concurrency:
       group: |
         ${{ matrix.os == 'linux-arm64-npu-4' && 'limit-npu-4' || format('job-{0}-{1}', matrix.os, matrix.vllm_verison) }}
