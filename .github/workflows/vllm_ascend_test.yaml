@@ -115,7 +115,7 @@ jobs:
       - name: Install vllm-project/vllm-ascend
         run: |
           pip install -r requirements-dev.txt
-          pip install -e .
+          pip install -v --no-build-isolation -e .
 
       - name: Run vllm-project/vllm-ascend test on V0 engine
         env:
