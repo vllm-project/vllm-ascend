@@ -3,11 +3,12 @@ cmake>=3.26
 decorator
 numpy<2.0.0
 packaging
+pip
 pybind11
 pyyaml
 scipy
 setuptools>=64
 setuptools-scm>=8
-torch_npu
 torch >= 2.5.1
 torchvision<0.21.0
+wheel
