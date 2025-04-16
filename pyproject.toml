@@ -4,6 +4,7 @@ requires = [
     "cmake>=3.26",
     "decorator",
     "numpy<2.0.0",
+    "packaging",
     "pip",
     "pybind11",
     "pyyaml",
