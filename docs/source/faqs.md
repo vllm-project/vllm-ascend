@@ -117,3 +117,15 @@ Currently, running on v0.7.3, we should run w8a8 with vllm + vllm-ascend + mindi
 ### 13. There is not output in log when loading models using vllm-ascend, How to solve it?
 
 If you're using vllm 0.7.3 version, this is a known progress bar display issue in VLLM, which has been resolved in [this PR](https://github.com/vllm-project/vllm/pull/12428), please cherry-pick it locally by yourself. Otherwise, please fill up an issue.
+
+### 14. How vllm-ascend is tested
+
+vllm-ascend is tested by functionnal test, performance test and accuracy test.
+
+- **Functionnal test**: we added CI, includes portion of vllm's native unit tests and vllm-ascend's own unit tests，on vllm-ascend's test, we test basic functional usability for popular models, include `Qwen2.5-7B-Instruct`、 `Qwen2.5-VL-7B-Instruct`、`Qwen2.5-VL-32B-Instruct`、`QwQ-32B`.
+
+- **Performance test**: we provide [benchmark](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks) tools for end-to-end performance benchmark which can easily to re-route locally, we'll publish a perf website like [vllm](https://simon-mo-workspace.observablehq.cloud/vllm-dashboard-v0/perf) does to show the performance test results for each pull request
+
+- **Accuracy test**: we're working on adding accuracy test to CI as well.
+
+Finnall, for each release, we'll publish the performance test and accuracy test report in the future.
