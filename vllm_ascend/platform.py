@@ -24,6 +24,7 @@ import torch_npu  # noqa: F401
 import vllm.envs as envs
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import Platform, PlatformEnum
 
 CUSTOM_OP_ENABLED = False
 try:
@@ -39,9 +40,6 @@ except ImportError as e:
         )
     else:
         CUSTOM_OP_ENABLED = True
-
-
-from vllm.platforms import Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.utils import FlexibleArgumentParser
