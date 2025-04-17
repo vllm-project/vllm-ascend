@@ -511,9 +511,6 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
                 self.num_prefill_tokens += token_len
                 self.prefill_seq_lens.append(seq_len)
             else:
-                assert query_len == 1, (
-                    "seq_len: {}, context_len: {}, query_len: {}".format(
-                        seq_len, context_len, query_len))
                 self.num_decode_tokens += query_len
                 self.curr_seq_lens.append(curr_seq_len)
 
