@@ -1,8 +1,8 @@
-# Adapted from
-# https://github.com/vllm-project/vllm/blob/main/vllm/tests/kernels/test_rotary_embedding.py
 # Copyright 2023 The vLLM team.
 
 # Copyright (c) Huawei Technologies Co., Ltd. 2024-2025. All rights reserved.
+# Adapted from
+# https://github.com/vllm-project/vllm/blob/main/vllm/tests/kernels/test_rotary_embedding.py
 
 from typing import Optional, Tuple, Union
 
