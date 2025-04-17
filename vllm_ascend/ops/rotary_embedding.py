@@ -65,5 +65,6 @@ def rope_forward_oot(
         )
     return query.view(query_shape), key.view(key_shape)
 
+
 RotaryEmbedding.forward_oot = rope_forward_oot
 DeepseekScalingRotaryEmbedding.forward = rope_forward_oot
