@@ -17,7 +17,10 @@
 # limitations under the License.
 #
 import torch
+import torch_npu  # noqa: F401
 from vllm.logger import logger
+
+import vllm_ascend.envs as envs
 
 
 def try_register_lib(lib_name: str, lib_info: str = ""):
@@ -31,6 +34,28 @@ def try_register_lib(lib_name: str, lib_info: str = ""):
                 logger.info(lib_info)
     except Exception:
         pass
+
+
+def find_hccl_library() -> str:
+    """
+    We either use the library file specified by the `HCCL_SO_PATH`
+    environment variable, or we find the library file brought by PyTorch.
+    After importing `torch`, `libhccl.so` can be
+    found by `ctypes` automatically.
+    """
+    so_file = envs.HCCL_SO_PATH
+
+    # manually load the hccl library
+    if so_file:
+        logger.info("Found hccl from environment variable HCCL_SO_PATH=%s",
+                    so_file)
+    else:
+        if torch.version.cann is not None:
+            so_file = "libhccl.so"
+        else:
+            raise ValueError("HCCL only supports Ascend NPU backends.")
+        logger.info("Found hccl from library %s", so_file)
+    return so_file
 
 
 _current_stream = None
