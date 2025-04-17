@@ -1,9 +1,7 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# Adapted from vllm/model_executor/models/qwen2_vl.py
 # Copyright 2023 The vLLM team.
 #
-# This file is a part of the vllm-ascend project.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,6 +14,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Adapted from vllm/model_executor/models/qwen2_vl.py
+# This file is a part of the vllm-ascend project.
 
 from functools import partial
 from typing import Callable, Optional, Type
