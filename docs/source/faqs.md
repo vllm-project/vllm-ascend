@@ -55,7 +55,7 @@ After configuration, you can download our container from `m.daocloud.io/quay.io/
 
 ### 3. What models does vllm-ascend supports?
 
-Currently, we have already fully tested and supported `Qwen` / `Deepseek` (V0 only) / `Llama` models, other models we have tested are shown [<u>here</u>](https://vllm-ascend.readthedocs.io/en/latest/user_guide/supported_models.html). Plus, accoding to users' feedback, `gemma3` and `glm4` are not supported yet. Besides, more models need test.
+Currently, we have already fully tested and supported `Qwen` / `Deepseek` (V0 only) / `Llama` models, other models we have tested are shown [<u>here</u>](https://vllm-ascend.readthedocs.io/en/latest/user_guide/supported_models.html). Plus, according to users' feedback, `gemma3` and `glm4` are not supported yet. Besides, more models need test.
 
 ### 4. How to get in touch with our community?
 
@@ -69,3 +69,51 @@ There are many channels that you can communicate with our community developers /
 ### 5. What features does vllm-ascend V1 supports?
 
 Find more details [<u>here</u>](https://github.com/vllm-project/vllm-ascend/issues/414).
+
+### 6. How to solve the problem of "Failed to infer device type" or "libatb.so: cannot open shared object file"?
+
+Basically, the reason is that the NPU environment is not configured correctly. You can:
+1. try `source /usr/local/Ascend/nnal/atb/set_env.sh` to enable NNAL package.
+2. try `source /usr/local/Ascend/ascend-toolkit/set_env.sh` to enable CANN package.
+3. try `npu-smi info` to check whether the NPU is working.
+
+If all above steps are not working, you can try the following code with python to check whether there is any error:
+
+```
+import torch
+import torch_npu
+import vllm
+```
+
+If all above steps are not working, feel free to submit a GitHub issue.
+
+### 7. Does vllm-ascend support Atlas 300I Duo?
+
+No, vllm-ascend now only supports Atlas A2 series. We are working on it.
+
+### 8. How does vllm-ascend perform?
+
+Currently, only some models are improved. Such as `Qwen2 VL`, `Deepseek  V3`. Others are not good enough. In the future, we will support graph mode and custom ops to improve the performance of vllm-ascend. And when the official release of vllm-ascend is released, you can install `mindie-turbo` with `vllm-ascend` to speed up the inference as well.
+
+### 9. How vllm-ascend work with vllm?
+vllm-ascend is a plugin for vllm. Basically, the version of vllm-ascend is the same as the version of vllm. For example, if you use vllm 0.7.3, you should use vllm-ascend 0.7.3 as well. For main branch, we will make sure `vllm-ascend` and `vllm` are compatible by each commit.
+
+### 10. Does vllm-ascend support Prefill Disaggregation feature?
+
+Currently, only 1P1D is supported by vllm. For vllm-ascend, it'll be done by [this PR](https://github.com/vllm-project/vllm-ascend/pull/432). For NPND, vllm is not stable and fully supported yet. We will make it stable and supported by vllm-ascend in the future.
+
+### 11. Does vllm-ascend support quantization method?
+
+Currently, there is no quantization method supported in vllm-ascend originally. And the quantization supported is working in progress, w8a8 will firstly be supported.
+
+### 12. How to run w8a8 DeepSeek model?
+
+Currently, running on v0.7.3, we should run w8a8 with vllm + vllm-ascend + mindie-turbo. And we only need vllm + vllm-ascend when v0.8.X is released. After installing the above packages, you can follow the steps below to run w8a8 DeepSeek:
+
+1. Quantize bf16 DeepSeek, e.g. [unsloth/DeepSeek-R1-BF16](https://modelscope.cn/models/unsloth/DeepSeek-R1-BF16), with msModelSlim to get w8a8 DeepSeek. Find more details in [msModelSlim doc](https://gitee.com/ascend/msit/tree/master/msmodelslim/msmodelslim/pytorch/llm_ptq)
+2. Copy the content of `quant_model_description_w8a8_dynamic.json` into the `quantization_config` of `config.json` of the quantized model files.
+3. Reference with the quantized DeepSeek model.
+
+### 13. There is not output in log when loading models using vllm-ascend, How to solve it?
+
+If you're using vllm 0.7.3 version, this is a known progress bar display issue in VLLM, which has been resolved in [this PR](https://github.com/vllm-project/vllm/pull/12428), please cherry-pick it locally by yourself. Otherwise, please fill up an issue.

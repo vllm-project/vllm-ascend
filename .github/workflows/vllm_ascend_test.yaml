@@ -46,11 +46,23 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-arm64-npu-1, linux-arm64-npu-4]
-        vllm_verison: [main, v0.8.3]
+        vllm_verison: [main, v0.8.4]
+    concurrency:
+      group: >
+        ${{ 
+        matrix.os == 'linux-arm64-npu-4' 
+          && github.event.pull_request.number 
+          && format('pr-{0}-limit-npu-4', github.event.pull_request.number) 
+        || format('job-{0}-{1}-{2}', matrix.os, matrix.vllm_verison, github.event.pull_request.number) 
+        }}
+      cancel-in-progress: false
     name: vLLM Ascend test
     runs-on: ${{ matrix.os }}
     container:
       image: quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10
+      env:
+        HF_ENDPOINT: https://hf-mirror.com
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - name: Check npu and CANN info
         run: |
@@ -108,7 +120,6 @@ jobs:
       - name: Run vllm-project/vllm-ascend test on V0 engine
         env:
           VLLM_USE_V1: 0
-          HF_ENDPOINT: https://hf-mirror.com
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
             pytest -sv tests/singlecard
@@ -122,7 +133,6 @@ jobs:
         env:
           VLLM_USE_V1: 1
           VLLM_WORKER_MULTIPROC_METHOD: spawn
-          HF_ENDPOINT: https://hf-mirror.com
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
             pytest -sv tests/singlecard
@@ -136,6 +146,5 @@ jobs:
         env:
           VLLM_USE_V1: 0
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
-          HF_ENDPOINT: https://hf-mirror.com
         run: |
           pytest -sv

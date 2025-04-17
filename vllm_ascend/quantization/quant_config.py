@@ -21,7 +21,6 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 import torch
 import torch_npu  # noqa: F401
 from vllm.distributed import get_tensor_model_parallel_rank
-from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.fused_moe.layer import \
@@ -40,8 +39,6 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
 from vllm.model_executor.utils import set_weight_attrs
 
 from .quantizer import AscendQuantizer
-
-logger = init_logger(__name__)
 
 
 @register_quantization_config("ascend")
