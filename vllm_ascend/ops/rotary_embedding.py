@@ -21,7 +21,6 @@ import torch
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 
-from vllm_ascend import envs
 from vllm_ascend.platform import CUSTOM_OP_ENABLED
 
 
