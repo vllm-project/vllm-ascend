@@ -5,6 +5,9 @@
 # egg-info
 vllm_ascend.egg-info/
 
+# fusion_result
+fusion_result*
+
 # DS Store
 .DS_Store
 
