@@ -37,8 +37,8 @@ from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LayerBlockType, cdiv, LazyLoader)
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
+                        LayerBlockType, LazyLoader, cdiv
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
@@ -52,7 +52,7 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
 from vllm_ascend.platform import NPUPlatform
 
 if TYPE_CHECKING:
-    import xgrammar as xgr
+    import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import SchedulerOutput
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
