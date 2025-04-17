@@ -441,20 +441,16 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        raise NotImplementedError(
-            "LoRA is not implemented for NPU backend currently.")
+        return self.model_runner.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
-        raise NotImplementedError(
-            "LoRA is not implemented for NPU backend currently.")
+        return self.model_runner.remove_lora(lora_id)
 
     def pin_lora(self, lora_id: int) -> bool:
-        raise NotImplementedError(
-            "LoRA is not implemented for NPU backend currently.")
+        return self.model_runner.pin_lora(lora_id)
 
     def list_loras(self) -> Set[int]:
-        raise NotImplementedError(
-            "LoRA is not implemented for NPU backend currently.")
+        return self.model_runner.list_loras()
 
     def add_prompt_adapter(
             self, prompt_adapter_request: PromptAdapterRequest) -> bool:
