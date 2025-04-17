@@ -22,6 +22,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 
 from vllm_ascend import envs
+from vllm_ascend.platform import CUSTOM_OP_ENABLED
 
 
 def rope_forward_oot(
@@ -38,7 +39,7 @@ def rope_forward_oot(
     if self.cos_sin_cache.dtype != query.dtype:
         self.cos_sin_cache = self.cos_sin_cache.to(query.dtype)
     # adopt custom kernel path for rotary_embedding
-    if envs.COMPILE_CUSTOM_KERNELS and self.is_neox_style:
+    if CUSTOM_OP_ENABLED and self.is_neox_style:
         return torch.ops._C.rotary_embedding(
             positions,
             query,
