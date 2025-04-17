@@ -16,6 +16,7 @@
 #
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
@@ -50,7 +51,7 @@ class AscendAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return (2, num_blocks, block_size, num_kv_heads * head_size)
+        return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def swap_blocks(
@@ -83,6 +84,12 @@ class AscendAttentionBackend(AttentionBackend):
             value_caches[dst_indices] = value_caches[src_indices]
 
 
+class AscendAttentionState(Enum):
+    PrefillOnly = 0
+    DecodeOnly = 1
+    ChunkedPrefill = 2
+
+
 @dataclass
 class AscendMetadata:
     # (batch_size, max_blocks_per_seq).
@@ -104,6 +111,8 @@ class AscendMetadata:
     # FlashAttention has better performance than PageAtttention,
     # but it does not support decode requests.
     is_only_prefill: bool = False
+    # Current state of this attention run.
+    attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
 
     attn_mask: Optional[torch.Tensor] = None
 
@@ -139,7 +148,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        self.seq_len_cpu_tensor = None
+        self.key_cache = None
+        self.value_cache = None
 
     def forward(
         self,
@@ -190,30 +200,52 @@ class AscendAttentionBackendImpl(AttentionImpl):
         # TODO: Remove this contiguous in the future.
         value = value.contiguous()
 
+        if kv_cache.numel() > 0:
+            if self.key_cache is None:
+                self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
+            slots = attn_metadata.slot_mapping
+            torch_npu._npu_reshape_and_cache(key=key,
+                                             value=value,
+                                             key_cache=self.key_cache,
+                                             value_cache=self.value_cache,
+                                             slot_indices=slots)
+
         if hasattr(layer, 'quant_method'):
             # TODO: Add attr (num_prefills, prefill_metadata, decode_metadata) to AscendMetadata
             pass
+        # V0-Style scheduler situation.
+        elif attn_metadata.attn_state == AscendAttentionState.PrefillOnly:
+            assert attn_metadata is not None
+            assert attn_metadata.attn_mask is not None
+            mask = attn_metadata.attn_mask
+            torch_npu._npu_flash_attention(query=query,
+                                           key=key,
+                                           value=value,
+                                           mask=mask,
+                                           seq_len=attn_metadata.seq_lens,
+                                           scale_value=self.scale,
+                                           num_heads=self.num_heads,
+                                           num_kv_heads=self.num_kv_heads,
+                                           out=output)
+        elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            block_tables = attn_metadata.block_tables
+            torch_npu._npu_paged_attention(
+                query=query,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                num_kv_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale_value=self.scale,
+                block_table=block_tables,
+                context_lens=attn_metadata.context_lens,
+                out=output)
+        # Normal V1 situation.
         else:
-            if kv_cache.numel() > 0:
-                key_cache, value_cache = kv_cache[0], kv_cache[1]
-                num_blocks, block_size, _ = key_cache.shape
-                key_cache = key_cache.view(num_blocks, block_size,
-                                           self.num_kv_heads, self.head_size)
-                value_cache = value_cache.view(num_blocks, block_size,
-                                               self.num_kv_heads,
-                                               self.head_size)
-                slots = attn_metadata.slot_mapping
-                torch_npu._npu_reshape_and_cache(key=key,
-                                                 value=value,
-                                                 key_cache=key_cache,
-                                                 value_cache=value_cache,
-                                                 slot_indices=slots)
-
             # use paged attention
             torch_npu._npu_paged_attention_splitfuse(
                 query=query,
-                key_cache=key_cache,
-                value_cache=value_cache,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
                 mask=attn_metadata.attn_mask,
                 block_table=attn_metadata.block_tables,
                 seq_len=attn_metadata.seq_lens,

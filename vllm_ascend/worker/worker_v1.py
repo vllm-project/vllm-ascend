@@ -40,6 +40,7 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_ascend.platform import NPUPlatform
+from vllm_ascend.utils import try_register_lib
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -66,6 +67,11 @@ class NPUWorker(WorkerBase):
                          rank=rank,
                          distributed_init_method=distributed_init_method,
                          is_driver_worker=is_driver_worker)
+        # Try to import mindie_turbo to accelerate vLLM inference.
+        try_register_lib(
+            "mindie_turbo",
+            "MindIE Turbo is installed. vLLM inference will be accelerated with MindIE Turbo."
+        )
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
