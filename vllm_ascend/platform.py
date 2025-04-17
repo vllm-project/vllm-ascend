@@ -140,9 +140,9 @@ class NPUPlatform(Platform):
 
         if envs.VLLM_USE_V1 and cache_config and cache_config.enable_prefix_caching:
             logger.warning(
-                "Prefix caching is not supported for V1 now, disable prefix caching"
+                "Prefix caching is now supported for V1 on NPU, "
+                "but it is still experimental and there may be issues with accuracy."
             )
-            cache_config.enable_prefix_caching = False
 
         if envs.VLLM_USE_V1:
             # Activate custom ops for v1.
