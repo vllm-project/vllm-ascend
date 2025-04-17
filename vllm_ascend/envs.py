@@ -46,6 +46,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Used for disaggregated prefilling
     "HCCN_PATH":
     lambda: os.getenv("HCCN_PATH", "/usr/local/Ascend/driver/tools/hccn_tool"),
+    "HCCL_SO_PATH":
+    lambda: os.environ.get("HCCL_SO_PATH", None),
     "PROMPT_DEVICE_ID":
     lambda: os.getenv("PROMPT_DEVICE_ID", None),
     "DECODE_DEVICE_ID":
@@ -53,7 +55,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "LLMDATADIST_COMM_PORT":
     lambda: os.getenv("LLMDATADIST_COMM_PORT", "26000"),
     "LLMDATADIST_SYNC_CACHE_WAIT_TIME":
-    lambda: os.getenv("LLMDATADIST_SYNC_CACHE_WAIT_TIME", "5000")
+    lambda: os.getenv("LLMDATADIST_SYNC_CACHE_WAIT_TIME", "5000"),
 }
 
 # end-env-vars-definition
