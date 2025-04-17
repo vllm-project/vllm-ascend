@@ -23,6 +23,7 @@ import torch
 import torch_npu  # noqa: F401
 import vllm.envs as envs
 from vllm.logger import logger
+from vllm.platforms import Platform, PlatformEnum
 
 CUSTOM_OP_ENABLED = False
 try:
