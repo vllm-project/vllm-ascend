@@ -73,6 +73,7 @@ class NPUModelRunner:
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+        self.chunked_prefill_enabled = vllm_config.scheduler_config.chunked_prefill_enabled
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -421,11 +422,15 @@ class NPUModelRunner:
         if attn_state == AscendAttentionState.ChunkedPrefill:
             return self.attn_mask_builder.get_splitfuse_attn_mask(
                 seq_lens, query_lens, position, self.dtype, self.device)
-        # Prefill-only situation.
-        elif attn_state == AscendAttentionState.PrefillOnly:
+        # Prefill without cache situation.
+        elif attn_state == AscendAttentionState.PrefillNoCache:
             max_seq_len = max(seq_lens, default=0)
             return self.attn_mask_builder.get_attn_mask(
                 max_seq_len, self.dtype, self.device)
+        # Prefill with cache hit.
+        elif attn_state == AscendAttentionState.PrefillCacheHit:
+            return self.attn_mask_builder.get_attn_mask(
+                128, self.dtype, self.device)
         # Decode-only situation.
         else:
             return None
@@ -494,13 +499,15 @@ class NPUModelRunner:
         slot_mapping = self.slot_mapping_cpu[:total_num_scheduled_tokens].to(
             self.device, non_blocking=True)
 
-        attn_state = AscendAttentionState.ChunkedPrefill
-        if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
-            attn_state = AscendAttentionState.PrefillOnly
+        if self.chunked_prefill_enabled:
+            attn_state = AscendAttentionState.ChunkedPrefill
+        elif np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
+            attn_state = AscendAttentionState.PrefillNoCache
+        # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
             attn_state = AscendAttentionState.DecodeOnly
         else:
-            attn_state = AscendAttentionState.ChunkedPrefill
+            attn_state = AscendAttentionState.PrefillCacheHit
 
         attn_mask = self.make_attention_mask(seq_lens=seq_lens,
                                              query_lens=num_scheduled_tokens,
