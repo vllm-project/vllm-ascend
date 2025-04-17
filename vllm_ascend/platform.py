@@ -144,7 +144,7 @@ class NPUPlatform(Platform):
     @classmethod
     def get_punica_wrapper(cls) -> str:
         return "vllm_ascend.lora.punica_wrapper.punica_npu.PunicaWrapperNPU"
-    
+
     @classmethod
     def get_current_memory_usage(cls,
                                  device: Optional[torch.types.Device] = None
