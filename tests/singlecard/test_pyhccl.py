@@ -1,7 +1,7 @@
-#!/bin/bash
-
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+# Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 # Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,18 +15,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# This file is a part of the vllm-ascend project.
-# Adapted from https://github.com/vllm-project/vllm/tree/main/tools
 #
+import torch
+import torch_npu  # noqa: F401
 
-if command -v actionlint &> /dev/null; then
-    actionlint .github/workflows/*.yml .github/workflows/*.yaml
-    exit 0
-elif [ -x ./actionlint ]; then
-    ./actionlint .github/workflows/*.yml .github/workflows/*.yaml
-    exit 0
-fi
+from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import \
+    HCCLLibrary
 
-# download a binary to the current directory - v1.7.3
-bash <(curl https://raw.githubusercontent.com/rhysd/actionlint/aa0a7be8e566b096e64a5df8ff290ec24fa58fbc/scripts/download-actionlint.bash)
-./actionlint  .github/workflows/*.yml .github/workflows/*.yaml
+
+def test_hcclGetUniqueId():
+    torch.npu.set_device(0)
+    lib = HCCLLibrary()
+    unique_id = lib.hcclGetUniqueId()
+    assert unique_id is not None

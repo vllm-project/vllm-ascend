@@ -2,4 +2,5 @@
 modelscope
 pytest >= 6.0
 pytest-asyncio
+lm-eval
 ray

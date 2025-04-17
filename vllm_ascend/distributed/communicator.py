@@ -1,6 +1,5 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# This file is a part of the vllm-ascend project.
 #
 from typing import Optional
 
@@ -30,5 +30,6 @@ class NPUCommunicator(DeviceCommunicatorBase):
                  device_group: Optional[ProcessGroup] = None,
                  unique_name: str = ""):
         super().__init__(cpu_group, device, device_group, unique_name)
+        # TODO(hz): Refer to CudaCommunicator's implementation to integrate PyHcclCommunicator
         # init device according to rank
         self.device = torch.npu.current_device()

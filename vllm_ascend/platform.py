@@ -1,6 +1,5 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# This file is a part of the vllm-ascend project.
 #
 
 import logging
@@ -132,6 +132,22 @@ class NPUPlatform(Platform):
                 )
                 cache_config.enable_prefix_caching = False
 
+        if envs.VLLM_USE_V1:
+            # Activate custom ops for v1.
+            vllm_config.compilation_config.custom_ops = ["all"]
+            additional_config = vllm_config.additional_config
+            # If ascend_scheduler_config exists in additional_config,
+            # extents original scheduler_config to use AscendScheduler.
+            if additional_config and additional_config.get(
+                    "ascend_scheduler_config", None) is not None:
+                additional_scheduler_config = additional_config.get(
+                    "ascend_scheduler_config")
+                from vllm_ascend.core.schedule_config import \
+                    AscendSchedulerConfig
+                ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
+                    vllm_config.scheduler_config, additional_scheduler_config)
+                vllm_config.scheduler_config = ascend_scheduler_config
+
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla):
@@ -140,6 +156,10 @@ class NPUPlatform(Platform):
         if use_mla:
             return "vllm_ascend.attention.attention.AscendMLAAttentionBackend"
         return "vllm_ascend.attention.attention.AscendAttentionBackend"
+
+    @classmethod
+    def get_punica_wrapper(cls) -> str:
+        return "vllm_ascend.lora.punica_wrapper.punica_npu.PunicaWrapperNPU"
 
     @classmethod
     def get_current_memory_usage(cls,

@@ -1,7 +1,5 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
-# Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py
 # Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# This file is a part of the vllm-ascend project.
+# Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py
 #
 
 import gc
@@ -40,6 +40,7 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_ascend.platform import NPUPlatform
+from vllm_ascend.utils import try_register_lib
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -66,6 +67,11 @@ class NPUWorker(WorkerBase):
                          rank=rank,
                          distributed_init_method=distributed_init_method,
                          is_driver_worker=is_driver_worker)
+        # Try to import mindie_turbo to accelerate vLLM inference.
+        try_register_lib(
+            "mindie_turbo",
+            "MindIE Turbo is installed. vLLM inference will be accelerated with MindIE Turbo."
+        )
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:

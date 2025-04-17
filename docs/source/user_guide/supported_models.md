@@ -12,19 +12,23 @@
 | QwQ-32B | ✅ ||
 | MiniCPM |✅| |
 | LLama3.1/3.2 | ✅ ||
-| Mistral |  | Need test |
-| DeepSeek v2.5 | |Need test |
-| Gemma-2 |  |Need test|
-| Baichuan |  |Need test|
 | Internlm | ✅ ||
-| ChatGLM | ❌ | Plan in Q2|
+| InternVL2 | ✅ ||
 | InternVL2.5 | ✅ ||
-| GLM-4v |  |Need test|
 | Molomo | ✅ ||
-| LLaVA1.5 | ✅ ||
-| LLaVA 1.6 | ✅ |Modify the default value of `max_position_embeddings` in the weight file `config.json` to `5120` to run LLaVA 1.6 on Ascend NPU|
+| LLaVA 1.5 | ✅ ||
+| LLaVA 1.6 | ✅ |[#553](https://github.com/vllm-project/vllm-ascend/issues/553)|
+| Baichuan | ✅ ||
+| Phi-4-mini | ✅ ||
+| Gemma-3 | ❌ |[#496](https://github.com/vllm-project/vllm-ascend/issues/496)|
+| ChatGLM | ❌ | [#554](https://github.com/vllm-project/vllm-ascend/issues/554)|
+| LLama4 | ❌ |[#471](https://github.com/vllm-project/vllm-ascend/issues/471)|
 | Mllama |  |Need test|
 | LLaVA-Next |  |Need test|
 | LLaVA-Next-Video |  |Need test|
 | Phi-3-Vison/Phi-3.5-Vison |  |Need test|
 | Ultravox |  |Need test|
+| Mistral |  | Need test |
+| DeepSeek v2.5 | |Need test |
+| Gemma-2 |  |Need test|
+| GLM-4v |  |Need test|

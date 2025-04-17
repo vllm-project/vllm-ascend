@@ -1,7 +1,5 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
-# Adapted from vllm-project/vllm/vllm/worker/worker.py
 # Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# This file is a part of the vllm-ascend project.
+# Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 
 import gc
@@ -404,20 +404,16 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         return output
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
-        raise NotImplementedError(
-            "LoRA is not implemented for NPU backend currently.")
+        return self.model_runner.add_lora(lora_request)
 
     def remove_lora(self, lora_id: int) -> bool:
-        raise NotImplementedError(
-            "LoRA is not implemented for NPU backend currently.")
+        return self.model_runner.remove_lora(lora_id)
 
     def pin_lora(self, lora_id: int) -> bool:
-        raise NotImplementedError(
-            "LoRA is not implemented for NPU backend currently.")
+        return self.model_runner.pin_lora(lora_id)
 
     def list_loras(self) -> Set[int]:
-        raise NotImplementedError(
-            "LoRA is not implemented for NPU backend currently.")
+        return self.model_runner.list_loras()
 
     def add_prompt_adapter(
             self, prompt_adapter_request: PromptAdapterRequest) -> bool:
