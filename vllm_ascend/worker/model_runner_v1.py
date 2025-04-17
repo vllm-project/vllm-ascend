@@ -37,8 +37,8 @@ from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
-from vllm.utils import (DeviceMemoryProfiler, LayerBlockType, cdiv,
-                        STR_DTYPE_TO_TORCH_DTYPE)
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
+                        LayerBlockType, cdiv)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
@@ -82,8 +82,9 @@ class NPUModelRunner:
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
 
+        self.head_size = self.model_config.get_head_size()
         self.attn_backend = get_attn_backend(
-            self.model_config.get_head_size(),
+            self.head_size,
             self.dtype,
             self.kv_cache_dtype,
             self.block_size,
@@ -366,8 +367,8 @@ class NPUModelRunner:
     def get_model(self) -> nn.Module:
         return self.model
 
-    def _make_attention_mask(self, seq_lens, query_lens,
-                             position, attn_state) -> torch.Tensor:
+    def _make_attention_mask(self, seq_lens, query_lens, position,
+                             attn_state) -> torch.Tensor:
         # Chunk Prefill situation.
         if attn_state == AscendAttentionState.ChunkedPrefill:
             return self.attn_mask_builder.get_splitfuse_attn_mask(
@@ -444,7 +445,7 @@ class NPUModelRunner:
                out=self.slot_mapping_np[:total_num_scheduled_tokens])
         slot_mapping = self.slot_mapping_cpu[:total_num_scheduled_tokens].to(
             self.device, non_blocking=True)
-        
+
         attn_state = AscendAttentionState.ChunkedPrefill
         if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillOnly

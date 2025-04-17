@@ -27,8 +27,7 @@ class AscendSchedulerConfig(SchedulerConfig):
     policy: str = "fcfs"
     num_scheduler_steps: int = 1
     scheduler_cls: Union[str, Type[object]] = (
-        "vllm_ascend.core.scheduler.AscendScheduler"
-    )
+        "vllm_ascend.core.scheduler.AscendScheduler")
 
     @classmethod
     def initialize_from_config(
@@ -38,16 +37,14 @@ class AscendSchedulerConfig(SchedulerConfig):
     ):
         scheduler_config = {
             field.name: getattr(vllm_scheduler_config, field.name)
-            for field in fields(vllm_scheduler_config)
-            if field.init
+            for field in fields(vllm_scheduler_config) if field.init
         }
         # Override default values into original SchedulerConfig
         scheduler_config["enable_chunked_prefill"] = False
         scheduler_config["policy"] = "fcfs"
         scheduler_config["num_scheduler_steps"] = 1
         scheduler_config["scheduler_cls"] = (
-            "vllm_ascend.core.scheduler.AscendScheduler"
-        )
+            "vllm_ascend.core.scheduler.AscendScheduler")
         # Override params in original SchedulerConfig with params in additional_config.ascend_scheduler_config
         for k, v in ascend_scheduler_config.items():
             scheduler_config[k] = v
@@ -63,16 +60,13 @@ class AscendSchedulerConfig(SchedulerConfig):
             )
         if self.is_multimodal_model:
             raise NotImplementedError(
-                "currently AscendScheduler only supports LLM modles."
-            )
+                "currently AscendScheduler only supports LLM modles.")
         if self.num_scheduler_steps > 1:
             raise NotImplementedError(
-                "currently AscendScheduler doesn't support multi-step."
-            )
+                "currently AscendScheduler doesn't support multi-step.")
         if self.send_delta_data:
             raise NotImplementedError(
-                "currently AscendScheduler doesn't support send_delta_data."
-            )
+                "currently AscendScheduler doesn't support send_delta_data.")
         if self.delay_factor > 0:
             raise NotImplementedError(
                 "currently AscendScheduler doesn't support scheduler_delay_factor."
