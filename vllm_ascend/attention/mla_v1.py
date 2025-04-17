@@ -59,7 +59,6 @@ class AscendMLABackend(AttentionBackend):
 @dataclass
 class AscendMLAPrefillMetadata:
     """ Prefill Specific Metadata for Ascend"""
-    attn_mask: torch.Tensor
     query_lens: list[int]
     context_lens: torch.Tensor
     input_positions: torch.Tensor
@@ -234,7 +233,6 @@ class AscendMLAMetadataBuilder:
             tokens_start = self._num_decode_tokens
 
             prefill_metadata = AscendMLAPrefillMetadata(
-                attn_mask=self.runner.attn_mask,
                 query_lens=query_lens[tokens_start:],
                 context_lens=seq_lens[tokens_start:],
                 input_positions=input_positions[tokens_start:],

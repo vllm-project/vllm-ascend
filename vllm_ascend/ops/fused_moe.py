@@ -19,6 +19,7 @@ import os
 from typing import Callable, Optional
 
 import torch
+import torch.distributed as dist
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import tensor_model_parallel_all_reduce
@@ -476,21 +477,21 @@ def select_experts(
     """
     # assert hidden_states.shape[0] == router_logits.shape[0], (
     #     "Number of tokens mismatch")
-    if os.environ.get("VLLM_ENABLE_GRAPH_MODE") == "1" and not is_prefill:
-        topk_weight, topk_idx, _ = torch.ops.npu_inference.npu_moe_gating_top_k(
-            router_logits, 
-            k=top_k, # topk当前写8
-            bias=e_score_correction_bias, 
-            k_group=topk_group, # fix: 4 
-            group_count=num_expert_group, # fix 8
-            group_select_mode=1, # 0: group中的最大; 1: topk2.sum(fix)
-            renorm=0, # 0: softmax->topk(fix); 1: topk->softmax
-            norm_type=1, # 0: softmax; 1: sigmoid(fix) 
-            # out_flag=False, # todo new api; 第三个输出是否输出 
-            # y2_flag=False, # old api; 第三个输出是否输出
-            routed_scaling_factor=1,
-            eps=float(1e-20))
-        return topk_weight, topk_idx
+    # if os.environ.get("VLLM_ENABLE_GRAPH_MODE") == "1" and not is_prefill:
+    #     topk_weight, topk_idx, _ = torch.ops.npu_inference.npu_moe_gating_top_k(
+    #         router_logits, 
+    #         k=top_k, # topk当前写8
+    #         bias=e_score_correction_bias, 
+    #         k_group=topk_group, # fix: 4 
+    #         group_count=num_expert_group, # fix 8
+    #         group_select_mode=1, # 0: group中的最大; 1: topk2.sum(fix)
+    #         renorm=0, # 0: softmax->topk(fix); 1: topk->softmax
+    #         norm_type=1, # 0: softmax; 1: sigmoid(fix) 
+    #         # out_flag=False, # todo new api; 第三个输出是否输出 
+    #         # y2_flag=False, # old api; 第三个输出是否输出
+    #         routed_scaling_factor=1,
+    #         eps=float(1e-20))
+    #     return topk_weight, topk_idx
 
     if custom_routing_function is not None:
         raise NotImplementedError(
@@ -738,12 +739,14 @@ class AscendFusedMoE(FusedMoE):
             real_top_k = self.top_k
 
         if self.dp_size > 1:
-            cu_tokens_across_dp_cpu = get_forward_context(
-            ).dp_metadata.cu_tokens_across_dp_cpu
-            hidden_states = self.naive_multicast(hidden_states,
-                                                 cu_tokens_across_dp_cpu)
-            router_logits = self.naive_multicast(router_logits,
-                                                 cu_tokens_across_dp_cpu)
+            if int(os.environ.get("VLLM_ENABLE_MC2")) == 1 and not is_prefill:
+                ...
+            elif int(os.environ.get("USING_LCCL_COM")) == 1:
+                hidden_states = get_dp_group().all_gather(hidden_states, 0, False)
+                router_logits = get_dp_group().all_gather(router_logits, 0, False)
+            else:
+                hidden_states = get_dp_group().all_gather(hidden_states, 0)
+                router_logits = get_dp_group().all_gather(router_logits, 0)
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
@@ -763,12 +766,15 @@ class AscendFusedMoE(FusedMoE):
             is_prefill=is_prefill)
 
         if self.dp_size > 1:
-            start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
-                self.dp_rank - 1]
-            end = cu_tokens_across_dp_cpu[self.dp_rank]
-
-            all_hidden_states = get_dp_group().all_reduce(final_hidden_states)
-            final_hidden_states = all_hidden_states[start:end, :]
+            if int(os.environ.get("VLLM_ENABLE_MC2")) == 1 and not is_prefill:
+                ...
+            else:
+                final_hidden_states = dist._functional_collectives.reduce_scatter_tensor(
+                    final_hidden_states,
+                    "sum",
+                    scatter_dim=0,
+                    group=get_dp_group().device_group
+                )
 
         # if self.reduce_results and self.tp_size > 1:
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):

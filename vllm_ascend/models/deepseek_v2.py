@@ -331,12 +331,9 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
 
         self.prefix = prefix
         self.debug_layer_idx = int(self.prefix.split(".")[-2])
-        if VLLM_ENABLE_GRAPH_MODE == "1":
-            self.forward = self.forward_torchair
-        else:
-            self.forward = self.forward_eager
+        self.is_graph_mode = VLLM_ENABLE_GRAPH_MODE == '1'
 
-    def forward_torchair(
+    def forward(
             self,
             positions: torch.Tensor,
             hidden_states: torch.Tensor,
@@ -347,45 +344,14 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             hidden_states_or_q_c = self.q_a_layernorm(ckq)
         else:
             hidden_states_or_q_c = hidden_states
-        return self.mla_attn(hidden_states_or_q_c, hidden_states, None,
+        if self.is_graph_mode:
+            return self.mla_attn.impl.forward(self.mla_attn, hidden_states_or_q_c, hidden_states, None,
                                 kv_cache, attn_metadata)
-
-    def forward_eager(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor):
-        if self.q_lora_rank is not None:
-            ckq = self.q_a_proj(hidden_states)[0]
-            hidden_states_or_q_c = self.q_a_layernorm(ckq)
         else:
-            hidden_states_or_q_c = hidden_states
-        kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
-            [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-        kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
-        return self.mla_attn(hidden_states_or_q_c, kv_c_normed, k_pe, output_shape=hidden_states.shape)
-
-    # def forward(
-    #     self,
-    #     positions: torch.Tensor,
-    #     hidden_states: torch.Tensor,
-    #     # torchair should pass below two parameters
-    #     kv_cache: torch.Tensor = None,
-    #     attn_metadata: AttentionMetadata = None,
-    # ) -> torch.Tensor:
-    #     if self.q_lora_rank is not None:
-    #         ckq = self.q_a_proj(hidden_states)[0]
-    #         hidden_states_or_q_c = self.q_a_layernorm(ckq)
-    #     else:
-    #         hidden_states_or_q_c = hidden_states
-    #     if VLLM_ENABLE_GRAPH_MODE == '1':
-    #         return self.mla_attn(hidden_states_or_q_c, hidden_states, None,
-    #                              kv_cache, attn_metadata)
-    #     else:
-    #         kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
-    #             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-    #         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
-    #         return self.mla_attn(hidden_states_or_q_c, kv_c_normed, k_pe, output_shape=hidden_states.shape)
-                                #  kv_cache, attn_metadata)
+            kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
+                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+            kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+            return self.mla_attn(hidden_states_or_q_c, kv_c_normed, k_pe, output_shape=hidden_states.shape)
 
 
 class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
@@ -453,6 +419,54 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                                                 eps=config.rms_norm_eps)
         self.routed_scaling_factor = config.routed_scaling_factor
 
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: Optional[torch.Tensor],
+        kv_cache: torch.Tensor = None,
+        attn_metadata: AttentionMetadata = None,
+    ) -> torch.Tensor:
+        # Self Attention
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(
+                hidden_states, residual)
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+        )
+
+        if hidden_states.dtype == torch.float16:
+            # Fix FP16 overflow
+            # We scale both hidden_states and residual before
+            # rmsnorm, and rmsnorm result would not affect by scale.
+            hidden_states *= 1. / self.routed_scaling_factor
+            if self.layer_idx == 0:
+                # The residual is shared by all layers, we only scale it on
+                # first layer.
+                residual *= 1. / self.routed_scaling_factor
+
+        # Fully Connected
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual)
+        hidden_states = self.mlp(hidden_states)
+
+        if isinstance(self.mlp,
+                      DeepseekV2MLP) and hidden_states.dtype == torch.float16:
+            # Fix FP16 overflow
+            # Scaling the DeepseekV2MLP output, it is the input of
+            # input_layernorm of next decoder layer.
+            # The scaling of DeepseekV2MOE output would be done in the forward
+            # of DeepseekV2MOE
+            hidden_states *= 1. / self.routed_scaling_factor
+
+        return hidden_states, residual
+
 
 class CustomDeepseekV2Model(nn.Module):
 
@@ -504,7 +518,9 @@ class CustomDeepseekV2Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors],
+        kv_caches: List[torch.Tensor] = None,
+        attn_metadata: AttentionMetadata = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
@@ -518,8 +534,11 @@ class CustomDeepseekV2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in self.layers[self.start_layer:self.end_layer]:
-            hidden_states, residual = layer(positions, hidden_states, residual)
+        for i in range(self.start_layer, self.end_layer):
+            layer = self.layers[i]
+            hidden_states, residual = layer(positions, hidden_states, residual,
+                                            kv_caches[i - self.start_layer] if kv_caches is not None else None,
+                                            attn_metadata)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -558,6 +577,20 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+    
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor] = None,
+        attn_metadata: AttentionMetadata = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   attn_metadata, intermediate_tensors,
+                                   inputs_embeds)
+        return hidden_states
 
 class CustomDeepseekV3ForCausalLM(CustomDeepseekV2ForCausalLM):
     pass

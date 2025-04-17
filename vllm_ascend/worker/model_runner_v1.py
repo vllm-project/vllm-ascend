@@ -75,32 +75,12 @@ class NPUModelRunner:
         self.num_attn_layers = self.model_config.get_num_layers_by_block_type(
             vllm_config.parallel_config, LayerBlockType.attention)
         self.hidden_size = self.model_config.get_hidden_size()
-        self.dtype = self.model_config.dtype
-        cache_config = vllm_config.cache_config
-        if cache_config.cache_dtype == "auto":
-            self.kv_cache_dtype = self.dtype
-        else:
-            self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
-                cache_config.cache_dtype]
-
         self.head_size = self.model_config.get_head_size()
-        self.attn_backend = get_attn_backend(
-            self.head_size,
-            self.dtype,
-            self.kv_cache_dtype,
-            self.block_size,
-            self.model_config.is_attention_free,
-            use_mla=self.model_config.use_mla,
-        )
-        if self.attn_backend is None:
-            error_msg = (
-                f"Error with get_att_backend: {self.head_size=}, "
-                f"{self.dtype=}, {self.kv_cache_dtype=}, {self.block_size=}, "
-                f"{self.model_config.is_attention_free=}, "
-                f"{self.model_config.use_mla=}")
-            logger.error(error_msg)
-            raise NotImplementedError(
-                "Non-Attention backend is not supported by V1 NPUModelRunner.")
+        self.dtype = self.model_config.dtype
+        if vllm_config.cache_config.cache_dtype == "auto":
+            self.kv_caches_dtype = self.dtype
+        else:
+            self.kv_caches_dtype = STR_DTYPE_TO_TORCH_DTYPE[vllm_config.cache_config.cache_dtype]
 
 
         self.attn_backend = get_attn_backend(
@@ -220,7 +200,6 @@ class NPUModelRunner:
         self.input_positions_cpu = torch.arange(0,
                                                 self.max_num_tokens,
                                                 device="cpu")
-        self.attn_mask = None
 
         # NOTE: Pre-construct a mask matrix to improve the efficiency of
         # attention mask construction during inference.
@@ -474,10 +453,6 @@ class NPUModelRunner:
                out=self.slot_mapping_np[:total_num_scheduled_tokens])
         slot_mapping = self.slot_mapping_cpu[:total_num_scheduled_tokens].to(
             self.device, non_blocking=True)
-
-        self.attn_mask = self.make_attention_mask(
-            self.vllm_config.model_config.dtype, self.device,
-            max(seq_lens, default=0), seq_lens, num_scheduled_tokens)
 
         attn_metadata = self.attn_metadata_builder.build(
             num_reqs=num_reqs,
