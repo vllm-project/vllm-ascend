@@ -500,7 +500,7 @@ class NPUModelRunner:
         self,
         scheduler_output: "SchedulerOutput",
         logits: torch.Tensor,
-    ):
+    ) -> torch.Tensor:
         # Serialization of np.ndarray is much more efficient than a tensor,
         # so we receive it in that format.
         grammar_bitmask = scheduler_output.grammar_bitmask
@@ -538,8 +538,9 @@ class NPUModelRunner:
 
         # TODO: compatibility with spec decode.
         # NOTE:
-        # 1. The logits and bitmask should be on the same device.
-        # 2. XGrammar on cpu only supports float32 logits.
+        # 1. XGrammar bitmask applying only supports CPU and GPU.
+        # 2. The logits and bitmask should be on the same device.
+        # 3. XGrammar logits on CPU only supports float32 dtype.
         logits_dtype = logits.dtype
         logits = logits.to("cpu").float()
         xgr.apply_token_bitmask_inplace(
@@ -547,7 +548,7 @@ class NPUModelRunner:
             grammar_bitmask,
             indices=list(struct_out_req_batch_indices.values()),
         )
-        logits = logits.to(self.device).to(logits_dtype)
+        return logits.to(self.device).to(logits_dtype)
 
     @torch.inference_mode()
     def execute_model(
@@ -565,7 +566,7 @@ class NPUModelRunner:
 
         # Apply structured output bitmasks if present
         if scheduler_output.grammar_bitmask is not None:
-            self.apply_grammar_bitmask(scheduler_output, logits)
+            logits = self.apply_grammar_bitmask(scheduler_output, logits)
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
