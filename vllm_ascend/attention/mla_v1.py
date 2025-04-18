@@ -1,12 +1,8 @@
-import functools
-from abc import abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, Optional, TypeVar, Type
+from typing import TYPE_CHECKING, Any, Optional, TypeVar, Type
 
 import torch
 import torch_npu
-import numpy as np
-from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
@@ -16,7 +12,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla, vanilla_decode_mla
+from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
 from vllm_ascend.ops.cache import concat_and_cache_mla
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
@@ -420,12 +416,13 @@ class AscendMLAImpl(MLAAttentionImpl):
     ) -> torch.Tensor:
         assert attn_metadata.prefill is not None
 
-        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(\
-            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        key = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
-        v_padded = torch.nn.functional.pad(v, [0, query.shape[-1] - v.shape[-1]],
-                                           value=0)
+        # TODO: enable  this compute for flash attention computation
+        # kv_nope = self.kv_b_proj(kv_c_normed)[0].view(\
+        #     -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
+        # k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        # key = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
+        # v_padded = torch.nn.functional.pad(v, [0, query.shape[-1] - v.shape[-1]],
+        #                                    value=0)
         num_tokens = query.size(0)
         attn_output = torch.empty(num_tokens,
                                     self.num_heads,

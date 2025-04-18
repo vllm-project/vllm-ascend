@@ -16,7 +16,6 @@
 # limitations under the License.
 
 import torch
-import torch_npu
 
 def concat_and_cache_mla(
     kv_c_normed: torch.Tensor,  # [num_tokens, num_kv_head, nope]

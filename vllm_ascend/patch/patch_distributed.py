@@ -1,8 +1,7 @@
 import torch
-from torch.distributed import ProcessGroup, TCPStore
+from torch.distributed import ProcessGroup
 from torch.distributed.distributed_c10d import (Backend, PrefixStore,
                                                 _get_default_timeout,
-                                                _unregister_process_group,
                                                 is_nccl_available)
 from torch.distributed.rendezvous import rendezvous
 import vllm

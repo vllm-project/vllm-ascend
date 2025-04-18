@@ -17,13 +17,13 @@
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 import os
-import time
 import torch
 import torch_npu  # noqa: F401
 from packaging.version import Version
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs
+
 VLLM_ENABLE_GRAPH_MODE = os.environ.get('VLLM_ENABLE_GRAPH_MODE', '0')
 
 
@@ -92,6 +92,7 @@ def adapt_patch(is_global_patch: bool = False):
 def vllm_version_is(version: str):
     import vllm
     return Version(vllm.__version__) == Version(version)
+
 
 def vllm_version_less_equal(version: str):
     import vllm

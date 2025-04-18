@@ -596,7 +596,6 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
                                 self.input_builder.chunked_prefill_enabled)
 
         device = self.runner.device
-        dtype = self.runner.model_config.dtype
         use_torchair_graph = graph_pad_size != -1
 
         max_query_len = max(query_lens)

@@ -48,8 +48,7 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend.attention.attention import AttentionMaskBuilder
-from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
-                                                AscendMetadata)
+from vllm_ascend.attention.attention_v1 import (AscendAttentionState)
 from vllm_ascend.platform import NPUPlatform
 
 if TYPE_CHECKING:
@@ -463,8 +462,6 @@ class NPUModelRunner:
             num_scheduled_tokens)
         seq_lens = self.seq_lens_cpu[:num_reqs]
 
-        query_lens = torch.from_numpy(num_scheduled_tokens)
-
         block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                positions_np // self.block_size)
         block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
@@ -473,8 +470,6 @@ class NPUModelRunner:
         np.add(block_numbers * self.block_size,
                block_offsets,
                out=self.slot_mapping_np[:total_num_scheduled_tokens])
-        slot_mapping = self.slot_mapping_cpu[:total_num_scheduled_tokens].to(
-            self.device, non_blocking=True)
 
         attn_state = AscendAttentionState.ChunkedPrefill
         if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):

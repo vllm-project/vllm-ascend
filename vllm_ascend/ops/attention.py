@@ -39,7 +39,6 @@ def vanilla_chunked_prefill(
     num_kv_heads = value_cache.shape[2]
     block_size = value_cache.shape[1]
     num_batch = cu_seqlen_q.shape[0] - 1
-    num_tokens = query.shape[0]
     max_num_blocks_per_seq = block_tables.shape[1]
 
     key = key_cache[block_tables].view(
@@ -155,9 +154,7 @@ def vanilla_chunked_prefill_mla(
 ) -> None:
     batch_size = block_tables.size(0)
     assert query_lens.size(0) == batch_size
-    num_tokens = query.size(0)
     num_heads = query.size(1)
-    num_blocks = kv_cache.size(0)
     block_size = kv_cache.size(1)
     latent_kv_dim = kv_cache.size(3) - rope_dim
     max_num_blocks_per_seq = block_tables.size(1)
@@ -266,8 +263,6 @@ def vanilla_decode_mla(
     reduce_dim = key_cache.size()[-1]
     block_size = key_cache.size()[1]
     latent_dim = reduce_dim - rope_dim
-    num_tokens = query.size()[0]
-    head_ratio = num_heads // num_kv_heads
     kv_c_and_pe = key_cache[block_table].view([batch_size, max_block_size * block_size, num_kv_heads, reduce_dim])
     max_context_len = max(context_lens)
     context_lens = torch.tensor(context_lens, device="npu").view(batch_size, 1)

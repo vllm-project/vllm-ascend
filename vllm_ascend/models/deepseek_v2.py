@@ -47,24 +47,21 @@
 # =======
 
 import os
-from typing import Iterable, List, Optional, Set, Tuple, Union, Dict, Any
+from typing import Optional, Union, Dict, Any
 
 import torch
 from torch import nn
 import torch.distributed as dist
 from transformers import PretrainedConfig
 
-from vllm.attention import Attention, AttentionMetadata
-import vllm.envs as envs
-from vllm.compilation.decorators import support_torch_compile
+from vllm.attention import Attention
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import get_forward_context
 from vllm.distributed import (get_pp_group,
                               get_dp_group,
                               get_tp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
@@ -75,12 +72,9 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, maybe_remap_kv_scale_name)
 
 from vllm.model_executor.models.utils import (
-    PPMissingLayer, is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
+    PPMissingLayer, make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.model_executor.models.deepseek_v2 import \
     DeepseekV2ForCausalLM  # ruff: noqa: E501
 from vllm.model_executor.models.deepseek_v2 import \
@@ -88,12 +82,8 @@ from vllm.model_executor.models.deepseek_v2 import \
 from vllm.model_executor.models.deepseek_v2 import (DeepseekV2Attention,
                                                     DeepseekV2DecoderLayer,
                                                     DeepseekV2MLAAttention,
-                                                    DeepseekV2MLP,
-                                                    DeepseekV2MoE)
+                                                    DeepseekV2MLP)
 # >>>>>>> dcd5c73 (Feat: Graph mode for deepseek v2/v3.)
-from vllm.model_executor.models.utils import (
-    PPMissingLayer, make_empty_intermediate_tensors_factory, make_layers,
-    maybe_prefix)
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.utils import VLLM_ENABLE_GRAPH_MODE

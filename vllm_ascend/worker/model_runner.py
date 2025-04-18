@@ -24,7 +24,6 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
                     Type, TypeVar, Union)
-import time
 import torch
 import torch.nn as nn
 import torch_npu
@@ -56,7 +55,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import (DeviceMemoryProfiler, PyObjectCache, flatten_2d_lists,
-                        is_pin_memory_available, supports_dynamo, async_tensor_h2d)
+                        is_pin_memory_available, supports_dynamo)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -64,7 +63,7 @@ from vllm.worker.model_runner_base import (
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
 
-from vllm_ascend.utils import vllm_version_is, vllm_version_less_equal
+from vllm_ascend.utils import vllm_version_less_equal
 
 if vllm_version_less_equal("0.8.4"):
     from vllm.distributed import get_kv_transfer_group
@@ -76,6 +75,7 @@ if TYPE_CHECKING:
 
 TModelInputForNPU = TypeVar('TModelInputForNPU', bound="ModelInputForNPU")
 ENCODER_NUM = 0
+
 
 @dataclass(frozen=True)
 class ModelInputForNPU(ModelRunnerInputBase):
@@ -547,10 +547,11 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
         # Add graph_pad_size here
         if self.runner.vllm_config.compilation_config.level ==\
            CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
-            graph_pad_size = self.runner.scheduler_config.max_num_seqs - len(seq_lens)
+            graph_pad_size = self.runner.scheduler_config.max_num_seqs - len(
+                seq_lens)
         else:
             graph_pad_size = -1
-        
+
         #print(f"before tensor input_tokens: {input_tokens}")
         #print(f"before tensor input_positions: {input_positions}")
         #print(f"before list seq_lens: {seq_lens}")
@@ -569,16 +570,16 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
                                                   dtype=torch.long,
                                                   device=self.runner.device)
         else:
-            input_positions_tensor = torch.tensor(
-                input_positions,
-                dtype=torch.long,
-                device=self.runner.device)
+            input_positions_tensor = torch.tensor(input_positions,
+                                                  dtype=torch.long,
+                                                  device=self.runner.device)
         #print(f"after tensor input_tokens_tensor: {input_tokens_tensor}")
         #print(f"after tensor input_positions_tensor: {input_positions_tensor}")
         #print(f"after list seq_lens: {seq_lens}")
 
         # Attention metadata.
-        attn_metadata = self.attn_metadata_builder.build(seq_lens, query_lens, graph_pad_size)
+        attn_metadata = self.attn_metadata_builder.build(
+            seq_lens, query_lens, graph_pad_size)
 
         # LoRA data.
         lora_requests = set()
@@ -871,9 +872,11 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         self.has_inner_state = model_config.has_inner_state
 
         self.in_profile_run = False
-        
+
         self.graph_block_tables = np.zeros(
-            (self.vllm_config.scheduler_config.max_num_seqs, (model_config.max_model_len + self.block_size - 1) // self.block_size),
+            (self.vllm_config.scheduler_config.max_num_seqs,
+             (model_config.max_model_len + self.block_size - 1) //
+             self.block_size),
             dtype=np.int32)
 
         # Attention-free but stateful models like Mamba need a placeholder attn
@@ -939,7 +942,6 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
 
-
         if self.lora_config:
             assert supports_lora(
                 self.model
@@ -978,17 +980,11 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
             config.experimental_config.frozen_parameter = True
             config.experimental_config.tiling_schedule_optimize = True
             torch.npu.set_compile_mode(jit_compile=False)
-            npu_backend = torchair.get_npu_backend(compiler_config=config)
-            #self.compile_model = torch.compile(
-            #    self.model,
-            #    dynamic=True,
-            #    fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-            #    backend=npu_backend)
             self.compile_model = torchair.inference.cache_compile(
                 self.model.forward,
                 dynamic=True,
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                config=config, 
+                config=config,
                 ge_cache=False)
 
     def save_sharded_state(
@@ -1286,7 +1282,8 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
             torch._dynamo.mark_static(model_input.input_positions)
             torch._dynamo.mark_static(model_input.attn_metadata.block_tables)
             torch._dynamo.mark_static(model_input.attn_metadata.slot_mapping)
-            torch._dynamo.mark_static(model_input.attn_metadata.query_start_loc)
+            torch._dynamo.mark_static(
+                model_input.attn_metadata.query_start_loc)
             torch._dynamo.mark_static(model_input.attn_metadata.seq_start_loc)
             for kv in kv_caches:
                 if isinstance(kv, tuple):
@@ -1310,8 +1307,8 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                         graph_batch_size - previous_hidden_states.shape[0],
                         *previous_hidden_states.shape[1:]
                     ],
-                    dtype=previous_hidden_states.dtype,
-                    device=previous_hidden_states.device)
+                                dtype=previous_hidden_states.dtype,
+                                device=previous_hidden_states.device)
                 ])
         else:
             model_executable = self.model
@@ -1373,9 +1370,9 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                 if (self.is_driver_worker
                         and hidden_or_intermediate_states is not None
                         and isinstance(hidden_or_intermediate_states,
-                                    IntermediateTensors)
-                        and self.observability_config is not None
-                        and self.observability_config.collect_model_forward_time):
+                                       IntermediateTensors)
+                        and self.observability_config is not None and
+                        self.observability_config.collect_model_forward_time):
                     model_forward_end.synchronize()
                     model_forward_time = model_forward_start.elapsed_time(
                         model_forward_end)
@@ -1383,13 +1380,15 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                     if intermediate_tensors is not None:
                         orig_model_forward_time = intermediate_tensors.tensors.get(
                             "model_forward_time", torch.tensor(0.0)).item()
-                    hidden_or_intermediate_states.tensors["model_forward_time"] = (
-                        torch.tensor(model_forward_time + orig_model_forward_time))
+                    hidden_or_intermediate_states.tensors[
+                        "model_forward_time"] = (
+                            torch.tensor(model_forward_time +
+                                         orig_model_forward_time))
                 return hidden_or_intermediate_states
             # TODO: remove the synchronize here
             torch.npu.synchronize()
             logits = self.model.compute_logits(hidden_or_intermediate_states,
-                                            model_input.sampling_metadata)
+                                               model_input.sampling_metadata)
 
         if not self.is_driver_worker:
             return []

@@ -33,9 +33,7 @@ from vllm.model_executor.layers.quantization import \
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
-                                           ModelWeightParameter,
-                                           PerTensorScaleParameter)
+from vllm.model_executor.parameter import (PerTensorScaleParameter)
 from vllm.model_executor.utils import set_weight_attrs
 
 from .quantizer import AscendQuantizer

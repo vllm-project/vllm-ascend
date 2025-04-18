@@ -18,13 +18,13 @@
 #
 
 import gc
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
 import torch_npu
 from vllm import envs
-from vllm.config import VllmConfig, ParallelConfig 
+from vllm.config import VllmConfig
 from vllm.distributed import (ensure_kv_transfer_initialized,
                               ensure_model_parallel_initialized,
                               init_distributed_environment,
@@ -40,7 +40,7 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import try_register_lib, vllm_version_is, vllm_version_less_equal
+from vllm_ascend.utils import try_register_lib, vllm_version_less_equal
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 
@@ -223,7 +223,8 @@ class NPUWorker(WorkerBase):
             self.parallel_config.pipeline_parallel_size)
         expert_tensor_parallel_size = 1
         if additional_config is not None and "expert_tensor_parallel_size" in additional_config:
-            expert_tensor_parallel_size = int(additional_config["expert_tensor_parallel_size"])
+            expert_tensor_parallel_size = int(
+                additional_config["expert_tensor_parallel_size"])
         init_ascend_model_parallel(parallel_config.tensor_parallel_size,
                                    parallel_config.pipeline_parallel_size,
                                    expert_tensor_parallel_size)

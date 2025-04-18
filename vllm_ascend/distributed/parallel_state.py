@@ -1,12 +1,6 @@
 from typing import Optional
 import torch
-from torch.distributed import ProcessGroup, TCPStore, is_hccl_available
-from torch.distributed.distributed_c10d import (Backend, PrefixStore,
-                                                _get_default_timeout,
-                                                is_nccl_available)
 from vllm.distributed.parallel_state import GroupCoordinator, get_world_group, init_model_parallel_group
-from vllm.config import ParallelConfig
-from torch.distributed.rendezvous import rendezvous
 
 # vllm-ascend will maintain its own EP GroupCoordinator and ETP GroupCoordinator for 
 # customize parallel solution
