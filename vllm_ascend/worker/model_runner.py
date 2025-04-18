@@ -560,8 +560,8 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
         input_positions = flatten_2d_lists(input_positions)
         if graph_pad_size != -1 and not is_prompt:
             input_tokens.extend(itertools.repeat(0, graph_pad_size))
-            input_positions.extend(
-                itertools.repeat(  # type: ignore
+            input_positions.extend(  # type: ignore
+                itertools.repeat(
                     0, graph_pad_size))
             seq_lens.extend(itertools.repeat(1, graph_pad_size))
             query_lens.extend(itertools.repeat(1, graph_pad_size))

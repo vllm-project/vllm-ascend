@@ -25,8 +25,7 @@ import torch.distributed
 from torch import nn
 from vllm import envs
 from vllm.config import VllmConfig
-from vllm.distributed import (ensure_kv_transfer_initialized,
-                              ensure_model_parallel_initialized,
+from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.logger import logger
