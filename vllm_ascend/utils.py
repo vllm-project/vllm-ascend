@@ -94,7 +94,3 @@ def vllm_version_is(version: str):
     import vllm
     return Version(vllm.__version__) == Version(version)
 
-
-def vllm_version_less_equal(version: str):
-    import vllm
-    return Version(vllm.__version__) <= Version(version)
