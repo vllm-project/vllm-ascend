@@ -680,8 +680,7 @@ class NPUModelRunner:
                         dtype=self.dtype,
                         device=self.device))
             intermediate_tensors = IntermediateTensors({
-                k:
-                v[:self.max_num_tokens]
+                k: v[:self.max_num_tokens]
                 for k, v in self.intermediate_tensors.items()
             })
 
