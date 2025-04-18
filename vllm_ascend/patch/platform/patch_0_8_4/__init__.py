@@ -16,4 +16,4 @@
 #
 
 import vllm_ascend.patch.platform.patch_0_8_4.patch_config  # noqa
-import vllm_ascend.patch.platform.patch_0_8_4.patch_distributed
+import vllm_ascend.patch.platform.patch_0_8_4.patch_distributed  # noqa
