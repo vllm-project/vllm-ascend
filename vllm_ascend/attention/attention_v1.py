@@ -29,6 +29,7 @@ from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
 
+
 class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
@@ -125,6 +126,7 @@ class AscendMetadata:
 
 
 class AscendAttentionMetadataBuilder:
+
     def __init__(self, runner):
         self.runner = runner
 
@@ -132,25 +134,27 @@ class AscendAttentionMetadataBuilder:
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
 
-    def build(self, num_reqs, num_actual_tokens, max_query_len, common_prefix_len):
+    def build(self, num_reqs, num_actual_tokens, max_query_len,
+              common_prefix_len):
         block_table = (
             self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
-        query_seq_lens = self.runner.query_start_loc_cpu[1:num_reqs + 1] - self.runner.query_start_loc_cpu[:num_reqs]
+        query_seq_lens = self.runner.query_start_loc_cpu[
+            1:num_reqs + 1] - self.runner.query_start_loc_cpu[:num_reqs]
         context_lens = self.runner.seq_lens_cpu[:num_reqs]
-        slot_mapping = self.runner.slot_mapping_cpu[:num_reqs].to(self.runner.device, non_blocking=True)
+        slot_mapping = self.runner.slot_mapping_cpu[:num_reqs].to(
+            self.runner.device, non_blocking=True)
         attn_mask = self.runner.attn_mask
         attn_state = self.runner.attn_state
 
-        attn_metadata = AscendMetadata(
-            block_tables=block_table,
-            seq_lens=query_seq_lens,
-            context_lens=context_lens,
-            max_query_len=max_query_len,
-            slot_mapping=slot_mapping,
-            attn_mask=attn_mask,
-            attn_state=attn_state
-        )
+        attn_metadata = AscendMetadata(block_tables=block_table,
+                                       seq_lens=query_seq_lens,
+                                       context_lens=context_lens,
+                                       max_query_len=max_query_len,
+                                       slot_mapping=slot_mapping,
+                                       attn_mask=attn_mask,
+                                       attn_state=attn_state)
         return attn_metadata
+
 
 class AscendAttentionBackendImpl(AttentionImpl):
 
@@ -288,20 +292,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 max_seqlen_q = torch.max(attn_metadata.seq_lens)
                 max_seqlen_k = torch.max(attn_metadata.context_lens)
                 num_queries_per_kv = self.num_heads / self.num_kv_heads
-                vanilla_chunked_prefill(
-                    output,
-                    query,
-                    num_queries_per_kv,
-                    self.key_cache,
-                    self.value_cache,
-                    attn_metadata.block_tables,
-                    cu_seqlen_q,
-                    cu_seqlen_k,
-                    max_seqlen_q,
-                    max_seqlen_k,
-                    self.scale,
-                    None,
-                    True)
+                vanilla_chunked_prefill(output, query, num_queries_per_kv,
+                                        self.key_cache, self.value_cache,
+                                        attn_metadata.block_tables,
+                                        cu_seqlen_q, cu_seqlen_k, max_seqlen_q,
+                                        max_seqlen_k, self.scale, None, True)
             else:
                 torch_npu._npu_paged_attention_splitfuse(
                     query=query,

@@ -33,7 +33,7 @@ from vllm.model_executor.layers.quantization import \
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.parameter import (PerTensorScaleParameter)
+from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
 from .quantizer import AscendQuantizer
@@ -321,8 +321,9 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
     ) -> torch.Tensor:
         return self.quant_method.apply(layer, x, use_grouped_topk, top_k,
                                        router_logits, renormalize, topk_group,
-                                       num_expert_group, global_num_experts, expert_map,
-                                       is_prefill, custom_routing_function, scoring_func,
+                                       num_expert_group, global_num_experts,
+                                       expert_map, is_prefill,
+                                       custom_routing_function, scoring_func,
                                        e_score_correction_bias)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

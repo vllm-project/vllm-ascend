@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, TypeVar, Type
+from typing import TYPE_CHECKING, Any, Optional, Type, TypeVar
 
 import torch
 import torch_npu
@@ -11,10 +11,11 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
 from vllm_ascend.ops.cache import concat_and_cache_mla
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -40,12 +41,8 @@ class AscendMLABackend(AttentionBackend):
         return AscendMLAMetadataBuilder
 
     @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int
-    ) -> tuple[int, ...]:
+    def get_kv_cache_shape(num_blocks: int, block_size: int, num_kv_heads: int,
+                           head_size: int) -> tuple[int, ...]:
         return (num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -65,7 +62,6 @@ class AscendMLAPrefillMetadata:
     max_context_len: int
 
 
-
 @dataclass
 class AscendMLADecodeMetadata:
     # Input positions for rotrary embeddings since for MLA the rotary
@@ -73,7 +69,6 @@ class AscendMLADecodeMetadata:
     input_positions: torch.Tensor
     block_table: torch.Tensor
     seq_lens: torch.Tensor
-
 
 
 @dataclass
@@ -130,6 +125,7 @@ class AscendMLAMetadataBuilder:
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
     # _attn_mask_builder = None
     def __init__(self,
                  runner: "NPUModelRunner",
@@ -207,7 +203,10 @@ class AscendMLAMetadataBuilder:
 
         return modified_batch
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
+    def build(self,
+              num_reqs: int,
+              num_actual_tokens: int,
+              max_query_len: int,
               common_prefix_len: Optional[int] = None) -> AscendMLAMetadata:
         assert self._num_decodes + self._num_prefills == num_reqs
 
@@ -223,7 +222,8 @@ class AscendMLAMetadataBuilder:
             device, non_blocking=True).long()
 
         seq_lens_cpu = self.runner.seq_lens_cpu[:num_reqs]
-        query_lens = seq_lens_cpu - self.runner.input_batch.num_computed_tokens_cpu_tensor[:num_reqs]
+        query_lens = seq_lens_cpu - self.runner.input_batch.num_computed_tokens_cpu_tensor[:
+                                                                                           num_reqs]
         seq_lens = seq_lens_cpu
         max_query_len = query_lens.max().item()
         max_context_len = seq_lens.max().item()
@@ -248,8 +248,7 @@ class AscendMLAMetadataBuilder:
             decode_metadata = AscendMLADecodeMetadata(
                 input_positions=input_positions[:self._num_decode_tokens],
                 block_table=block_table[:self._num_decode_tokens, ...],
-                seq_lens=seq_lens[:self._num_decode_tokens]
-            )
+                seq_lens=seq_lens[:self._num_decode_tokens])
 
         return self.metadata_cls(
             num_actual_tokens=num_actual_tokens,
@@ -404,8 +403,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         # Convert from (L, N, P) to (N, P, L)
         self.W_UK_T = W_UK.permute(1, 2, 0)
 
-
-
     def _forward_prefill(
         self,
         query: torch.Tensor,
@@ -425,10 +422,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         #                                    value=0)
         num_tokens = query.size(0)
         attn_output = torch.empty(num_tokens,
-                                    self.num_heads,
-                                    self.v_head_dim,
-                                    dtype=query.dtype,
-                                    device=query.device)
+                                  self.num_heads,
+                                  self.v_head_dim,
+                                  dtype=query.dtype,
+                                  device=query.device)
         # current requests is chunked in prefill, disable flash attention with chunked prefill
         vanilla_chunked_prefill_mla(
             output=attn_output,
@@ -446,7 +443,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             scale=self.scale,
             alibi_slopes=None,
             causal=True)
-        attn_output = attn_output.view([num_tokens, self.num_heads * self.v_head_dim])
+        attn_output = attn_output.view(
+            [num_tokens, self.num_heads * self.v_head_dim])
         return self.o_proj(attn_output)[0]
 
     def _forward_decode(
@@ -476,10 +474,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             block_table=attn_metadata.decode.block_table,
             context_lens=attn_metadata.decode.seq_lens,
             mla_vheadsize=self.kv_lora_rank,
-            out=attn_output
-        )
+            out=attn_output)
         return self._v_up_proj_and_o_proj(attn_output)
-
 
     def forward(
         self,
@@ -544,12 +540,13 @@ class AscendMLAImpl(MLAAttentionImpl):
                 prefill_q_pe.contiguous(), prefill_k_pe)
 
         if kv_cache.numel() > 0:
-            concat_and_cache_mla(k_c_normed, k_pe, kv_cache, attn_metadata.slot_mapping.flatten())
+            concat_and_cache_mla(k_c_normed, k_pe, kv_cache,
+                                 attn_metadata.slot_mapping.flatten())
             # TODO: replaced back to ascend ops
             # key = torch.cat([k_c_normed.view([num_actual_toks, self.num_kv_heads, -1]), k_pe], dim=2)
             # torch_npu._npu_reshape_and_cache_siso(
-            #     key=key, 
-            #     key_cache=kv_cache, 
+            #     key=key,
+            #     key_cache=kv_cache,
             #     slot_indices=attn_metadata.slot_mapping.flatten())
 
         if has_prefill:

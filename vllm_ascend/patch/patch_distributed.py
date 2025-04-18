@@ -1,11 +1,11 @@
 import torch
+import vllm
+import vllm.distributed
 from torch.distributed import ProcessGroup
 from torch.distributed.distributed_c10d import (Backend, PrefixStore,
                                                 _get_default_timeout,
                                                 is_nccl_available)
 from torch.distributed.rendezvous import rendezvous
-import vllm
-import vllm.distributed
 from vllm.config import ParallelConfig
 
 
@@ -116,6 +116,7 @@ def ascend_stateless_init_torch_distributed_process_group(
 
     return pg
 
+
 def parallel_config_get_dp_port(self) -> int:
     """
     We might need to initialize process groups in multiple
@@ -128,9 +129,11 @@ def parallel_config_get_dp_port(self) -> int:
     answer = self.data_parallel_master_port
     self.data_parallel_master_port += 1
     import os
+
     # NOTE: Get port from envs directly when using torchrun
     port = os.environ.get("MASTER_PORT", answer)
     return port
+
 
 vllm.distributed.parallel_state.destroy_model_parallel = ascend_destroy_model_parallel
 vllm.distributed.stateless_init_torch_distributed_process_group = ascend_stateless_init_torch_distributed_process_group

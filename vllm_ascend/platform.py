@@ -210,8 +210,9 @@ class NPUPlatform(Platform):
         return True
 
     @classmethod
-    def platform_register_backend(cls, pg, prefix_store, group_rank, group_size,
-                                         backend_options, timeout) -> None:
+    def platform_register_backend(cls, pg, prefix_store, group_rank,
+                                  group_size, backend_options,
+                                  timeout) -> None:
         from torch.distributed import ProcessGroup, is_hccl_available
         assert is_hccl_available()
         import torch_npu  # noqa

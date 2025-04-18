@@ -18,16 +18,17 @@
 #
 
 import dataclasses
-import weakref
 import itertools
+import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
                     Type, TypeVar, Union)
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch_npu
-import numpy as np
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.utils import CommonAttentionState
@@ -973,6 +974,7 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
             CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
             import torchair
             from torchair import patch_for_hcom
+
             # 通信算子成图
             patch_for_hcom()
             # 设置npu的config，如果不设置config，可以使用默认的，那可以设置npu_backend="npu"

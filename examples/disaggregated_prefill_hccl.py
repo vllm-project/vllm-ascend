@@ -3,18 +3,18 @@
  We will launch 2 vllm instances (NPU 0,1 for prefill and NPU 2,3 for decode),
  and then transfer the KV cache between them.
  """
+import multiprocessing as mp
 import os
 import time
-
 from multiprocessing import Event, Process
-import multiprocessing as mp
 
 
 def clean_up():
-    import torch
     import gc
-    from vllm.distributed.parallel_state import (destroy_distributed_environment,
-                                                 destroy_model_parallel)
+
+    import torch
+    from vllm.distributed.parallel_state import (
+        destroy_distributed_environment, destroy_model_parallel)
     destroy_model_parallel()
     destroy_distributed_environment()
     gc.collect()
@@ -28,10 +28,8 @@ def run_prefill(prefill_done, process_close):
     from vllm.config import KVTransferConfig
 
     prompts = [
-        "Hello, how are you today?",
-        "Hi, what is your name?",
-        "Tell me a very long story.",
-        "what is your favourite book?"
+        "Hello, how are you today?", "Hi, what is your name?",
+        "Tell me a very long story.", "what is your favourite book?"
     ]
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
 
@@ -71,10 +69,8 @@ def run_decode(prefill_done):
     from vllm.config import KVTransferConfig
 
     prompts = [
-        "Hello, how are you today?",
-        "Hi, what is your name?",
-        "Tell me a very long story.",
-        "what is your favourite book?"
+        "Hello, how are you today?", "Hi, what is your name?",
+        "Tell me a very long story.", "what is your favourite book?"
     ]
     sampling_params = SamplingParams(temperature=0, top_p=0.95)
 
@@ -109,8 +105,12 @@ if __name__ == "__main__":
 
     prefill_done = Event()
     process_close = Event()
-    prefill_process = Process(target=run_prefill, args=(prefill_done, process_close,))
-    decode_process = Process(target=run_decode, args=(prefill_done,))
+    prefill_process = Process(target=run_prefill,
+                              args=(
+                                  prefill_done,
+                                  process_close,
+                              ))
+    decode_process = Process(target=run_decode, args=(prefill_done, ))
 
     # Start prefill node
     prefill_process.start()

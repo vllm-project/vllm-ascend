@@ -1,4 +1,3 @@
-
 # SPDX-License-Identifier: Apache-2.0
 
 # Copyright 2023 The vLLM team.
@@ -47,21 +46,19 @@
 # =======
 
 import os
-from typing import Optional, Union, Dict, Any
+from typing import Any, Dict, Optional, Union
 
 import torch
-from torch import nn
 import torch.distributed as dist
+from torch import nn
 from transformers import PretrainedConfig
-
 from vllm.attention import Attention
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
-from vllm.forward_context import get_forward_context
-from vllm.distributed import (get_pp_group,
-                              get_dp_group,
-                              get_tp_group,
+from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
+                         get_current_vllm_config)
+from vllm.distributed import (get_dp_group, get_pp_group,
                               get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce)
+                              get_tp_group, tensor_model_parallel_all_reduce)
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
@@ -72,9 +69,6 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-
-from vllm.model_executor.models.utils import (
-    PPMissingLayer, make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.model_executor.models.deepseek_v2 import \
     DeepseekV2ForCausalLM  # ruff: noqa: E501
 from vllm.model_executor.models.deepseek_v2 import \
@@ -83,11 +77,14 @@ from vllm.model_executor.models.deepseek_v2 import (DeepseekV2Attention,
                                                     DeepseekV2DecoderLayer,
                                                     DeepseekV2MLAAttention,
                                                     DeepseekV2MLP)
+from vllm.model_executor.models.utils import (
+    PPMissingLayer, make_empty_intermediate_tensors_factory, make_layers,
+    maybe_prefix)
 # >>>>>>> dcd5c73 (Feat: Graph mode for deepseek v2/v3.)
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.utils import VLLM_ENABLE_GRAPH_MODE
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
+from vllm_ascend.utils import VLLM_ENABLE_GRAPH_MODE
 
 
 class CustomDeepseekV2MoE(nn.Module):
@@ -159,13 +156,11 @@ class CustomDeepseekV2MoE(nn.Module):
         self.enable_mc2 = int(os.environ.get("VLLM_ENABLE_MC2", 0)) == 1
 
         params_dtype = torch.get_default_dtype()
-        self.final_hidden_states = torch.zeros([batch_size, config.hidden_size],
-                                                dtype=params_dtype, device="npu")
+        self.final_hidden_states = torch.zeros(
+            [batch_size, config.hidden_size], dtype=params_dtype, device="npu")
         self.tp_group = get_tp_group().device_group
 
-    def forward(
-        self, hidden_states: torch.Tensor
-    ) -> torch.Tensor:
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
         if attn_metadata is None:
             # for profile run
@@ -176,15 +171,14 @@ class CustomDeepseekV2MoE(nn.Module):
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
 
-        if (
-            self.tp_size > 1
-            and self.enable_mc2
-            and attn_metadata.num_prefills == 0
-        ):
+        if (self.tp_size > 1 and self.enable_mc2
+                and attn_metadata.num_prefills == 0):
             # hidden_states = dist._functional_collectives.reduce_scatter_tensor(
             #     hidden_states, "sum", scatter_dim=0, group=self.tp_group
             # )
-            chunks = torch.chunk(hidden_states, get_tp_group().world_size, dim=0)
+            chunks = torch.chunk(hidden_states,
+                                 get_tp_group().world_size,
+                                 dim=0)
             hidden_states = chunks[get_tp_group().rank_in_group]
 
         # router_logits: (num_tokens, n_experts)
@@ -195,19 +189,16 @@ class CustomDeepseekV2MoE(nn.Module):
             hidden_states=hidden_states,
             router_logits=router_logits,
             is_prefill=is_prefill,
-            top_k=CustomDeepseekV2MoE.top_k
-        ) * self.routed_scaling_factor
+            top_k=CustomDeepseekV2MoE.top_k) * self.routed_scaling_factor
 
         if self.tp_size > 1:
             if self.enable_mc2 and not is_prefill:
-                dist.all_gather_into_tensor(
-                    self.final_hidden_states, final_hidden_states, self.tp_group
-                )
+                dist.all_gather_into_tensor(self.final_hidden_states,
+                                            final_hidden_states, self.tp_group)
                 final_hidden_states = self.final_hidden_states
             else:
                 final_hidden_states = tensor_model_parallel_all_reduce(
-                    final_hidden_states
-                )
+                    final_hidden_states)
 
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
@@ -346,24 +337,21 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         else:
             self.forward = self.forward_eager
 
-    def forward_torchair(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor,
-            kv_cache: torch.Tensor = None,
-            attn_metadata = None):
+    def forward_torchair(self,
+                         positions: torch.Tensor,
+                         hidden_states: torch.Tensor,
+                         kv_cache: torch.Tensor = None,
+                         attn_metadata=None):
         if self.q_lora_rank is not None:
             ckq = self.q_a_proj(hidden_states)[0]
             hidden_states_or_q_c = self.q_a_layernorm(ckq)
         else:
             hidden_states_or_q_c = hidden_states
         return self.mla_attn(hidden_states_or_q_c, hidden_states, None,
-                                kv_cache, attn_metadata)
+                             kv_cache, attn_metadata)
 
-    def forward_eager(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor):
+    def forward_eager(self, positions: torch.Tensor,
+                      hidden_states: torch.Tensor):
         if self.q_lora_rank is not None:
             ckq = self.q_a_proj(hidden_states)[0]
             hidden_states_or_q_c = self.q_a_layernorm(ckq)
@@ -372,7 +360,10 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
-        return self.mla_attn(hidden_states_or_q_c, kv_c_normed, k_pe, output_shape=hidden_states.shape)
+        return self.mla_attn(hidden_states_or_q_c,
+                             kv_c_normed,
+                             k_pe,
+                             output_shape=hidden_states.shape)
 
     # def forward(
     #     self,
@@ -395,7 +386,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
     #             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
     #         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
     #         return self.mla_attn(hidden_states_or_q_c, kv_c_normed, k_pe, output_shape=hidden_states.shape)
-                                #  kv_cache, attn_metadata)
+    #  kv_cache, attn_metadata)
 
 
 class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
@@ -568,6 +559,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+
 
 class CustomDeepseekV3ForCausalLM(CustomDeepseekV2ForCausalLM):
     pass

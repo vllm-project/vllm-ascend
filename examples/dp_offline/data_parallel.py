@@ -8,9 +8,8 @@
 # we need to have a launcher to create multiple data parallel
 # ranks. And each rank will create a vLLM instance to process its own prompts.
 
-import os
 import gc
-
+import os
 
 VLLM_ENABLE_GRAPGH_MODE = os.environ.get("VLLM_ENABLE_GRAPH_MODE") == "1"
 
@@ -29,12 +28,14 @@ def main():
     os.environ["VLLM_DP_MASTER_IP"] = master_addr
     os.environ["VLLM_DP_MASTER_PORT"] = master_port
     os.environ["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(
-        str(i) for i in range(local_rank * tp_size , (local_rank + 1) * tp_size))
+        str(i)
+        for i in range(local_rank * tp_size, (local_rank + 1) * tp_size))
 
     import torch
-    import torch_npu #noqa
+    import torch_npu  # noqa
     from vllm import LLM, SamplingParams
-    from vllm.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
+    from vllm.distributed.parallel_state import (
+        destroy_distributed_environment, destroy_model_parallel)
 
     prompts = [
         "Hello, my name is",
@@ -42,7 +43,6 @@ def main():
         "The capital of France is",
         "The future of AI is",
     ] * 4
-
 
     promts_per_rank = len(prompts) // dp_size
     start = dp_rank * promts_per_rank
@@ -55,8 +55,8 @@ def main():
 
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
-                                     max_tokens= 4,
-                                     min_tokens = 4)
+                                     max_tokens=4,
+                                     min_tokens=4)
     # Create an LLM.
     llm = LLM(
         model="deepseek-ai/DeepSeek-V2-Lite-Chat",

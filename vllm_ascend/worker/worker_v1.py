@@ -39,10 +39,10 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.worker_base import WorkerBase
 
+from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import try_register_lib, vllm_version_less_equal
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 
 if vllm_version_less_equal("0.8.4"):
     from vllm.distributed import ensure_kv_transfer_initialized

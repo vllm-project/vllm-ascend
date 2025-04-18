@@ -22,20 +22,18 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
-
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import get_sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-     VocabParallelEmbedding)
+from vllm.model_executor.layers.vocab_parallel_embedding import \
+    VocabParallelEmbedding
+from vllm.model_executor.models.deepseek_mtp import (
+    DeepSeekMTP, DeepSeekMultiTokenPredictor, DeepSeekMultiTokenPredictorLayer,
+    SharedHead)
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.model_executor.models.deepseek_mtp import (SharedHead,
-                                                     DeepSeekMultiTokenPredictorLayer,
-                                                     DeepSeekMultiTokenPredictor,
-                                                     DeepSeekMTP)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 from .deepseek_v2 import CustomDeepseekV2DecoderLayer
@@ -63,8 +61,10 @@ class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
                                  config.hidden_size,
                                  bias=False)
         self.shared_head = SharedHead(config=config, quant_config=quant_config)
-        self.mtp_block = CustomDeepseekV2DecoderLayer(config, prefix, model_config,
-                                                cache_config, quant_config)
+        self.mtp_block = CustomDeepseekV2DecoderLayer(config, prefix,
+                                                      model_config,
+                                                      cache_config,
+                                                      quant_config)
 
     def forward(
         self,
@@ -81,7 +81,8 @@ class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
         inputs_embeds = torch.where((positions == 0).unsqueeze(-1),
-                                    torch.zeros_like(inputs_embeds), inputs_embeds)
+                                    torch.zeros_like(inputs_embeds),
+                                    inputs_embeds)
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
@@ -119,8 +120,11 @@ class CustomDeepSeekMultiTokenPredictor(DeepSeekMultiTokenPredictor):
         })
 
         # Note: torch._dynamo.exc.Unsupported: builtin: str
-        self.layers_list = [self.layers[str(idx)] for idx in range(self.mtp_start_layer_idx,
-                            self.mtp_start_layer_idx + self.num_mtp_layers)]
+        self.layers_list = [
+            self.layers[str(idx)]
+            for idx in range(self.mtp_start_layer_idx,
+                             self.mtp_start_layer_idx + self.num_mtp_layers)
+        ]
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def forward(
@@ -153,7 +157,7 @@ class CustomDeepSeekMultiTokenPredictor(DeepSeekMultiTokenPredictor):
         current_step_idx = (spec_step_idx % self.num_mtp_layers)
         mtp_layer = self.layers_list[current_step_idx]
         logits = self.logits_processor(mtp_layer.shared_head.head,
-                                       mtp_layer.shared_head(hidden_states), 
+                                       mtp_layer.shared_head(hidden_states),
                                        sampling_metadata)
         return logits
 
@@ -164,7 +168,7 @@ class CustomDeepSeekMTP(DeepSeekMTP):
         nn.Module.__init__(self)
         self.config = vllm_config.model_config.hf_config
         self.model = CustomDeepSeekMultiTokenPredictor(vllm_config=vllm_config,
-                                                 prefix=maybe_prefix(
-                                                     prefix, "model"))
+                                                       prefix=maybe_prefix(
+                                                           prefix, "model"))
 
         self.sampler = get_sampler()

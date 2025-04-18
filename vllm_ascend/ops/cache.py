@@ -17,16 +17,19 @@
 
 import torch
 
-def concat_and_cache_mla(
-    kv_c_normed: torch.Tensor,  # [num_tokens, num_kv_head, nope]
-    k_pe: torch.Tensor,         # [num_tokens, num_kv_head, rope]
-    kv_cache: torch.Tensor,     # [num_blocks, block_size, num_kv_head, nope + rope]
-    slot_mapping,               # [num_tokens]
-):
-  num_blocks = kv_cache.size()[0]
-  block_size = kv_cache.size()[1]
-  num_kv_head = k_pe.size()[1]
 
-  idx_for_copy = slot_mapping // block_size * block_size + slot_mapping % block_size
-  kv_cache = kv_cache.view(num_blocks * block_size, num_kv_head, -1)
-  kv_cache[idx_for_copy] = torch.cat([kv_c_normed.unsqueeze(1), k_pe], dim=-1)
+def concat_and_cache_mla(
+        kv_c_normed: torch.Tensor,  # [num_tokens, num_kv_head, nope]
+        k_pe: torch.Tensor,  # [num_tokens, num_kv_head, rope]
+        kv_cache: torch.
+    Tensor,  # [num_blocks, block_size, num_kv_head, nope + rope]
+        slot_mapping,  # [num_tokens]
+):
+    num_blocks = kv_cache.size()[0]
+    block_size = kv_cache.size()[1]
+    num_kv_head = k_pe.size()[1]
+
+    idx_for_copy = slot_mapping // block_size * block_size + slot_mapping % block_size
+    kv_cache = kv_cache.view(num_blocks * block_size, num_kv_head, -1)
+    kv_cache[idx_for_copy] = torch.cat([kv_c_normed.unsqueeze(1), k_pe],
+                                       dim=-1)

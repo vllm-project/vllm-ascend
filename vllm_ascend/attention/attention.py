@@ -32,19 +32,16 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata, AttentionType,
                                               MLAAttentionImpl)
-from vllm.attention.backends.utils import (CommonAttentionState,
+from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
                                            CommonMetadataBuilder,
                                            compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
-                                           is_block_tables_empty,
-                                           PAD_SLOT_ID)
-
+                                           is_block_tables_empty)
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
+from vllm_ascend.utils import VLLM_ENABLE_GRAPH_MODE
 from vllm_ascend.worker.model_runner import (
     ModelInputForNPUBuilder, ModelInputForNPUWithSamplingMetadata)
-from vllm_ascend.utils import VLLM_ENABLE_GRAPH_MODE
-
 
 
 def generate_attn_mask(max_seq_len: int, dtype=torch.float16, mask_value=None):
@@ -558,15 +555,15 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
             )
 
     def _get_graph_runner_block_tables(
-        self, num_seqs: int,
-        block_tables: List[List[int]]) -> torch.Tensor:
+            self, num_seqs: int,
+            block_tables: List[List[int]]) -> torch.Tensor:
         # The shape of graph_block_tables is
         # [max batch size, max context len // block size].
-        
+
         max_batch_size, max_blocks = self.runner.graph_block_tables.shape
         assert max_batch_size >= num_seqs
 
-        graph_block_tables = self.runner.graph_block_tables # [:num_seqs]
+        graph_block_tables = self.runner.graph_block_tables  # [:num_seqs]
         for i, block_table in enumerate(block_tables):
             if block_table:
                 num_blocks = len(block_table)
@@ -578,7 +575,7 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
 
         return torch.from_numpy(graph_block_tables).to(
             device=self.runner.device, non_blocking=True)
-    
+
     def build(
         self,
         seq_lens: List[int],
@@ -862,6 +859,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         return output.view(num_tokens, self.hidden_size)
 
+
 class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
 
     def __init__(
@@ -984,7 +982,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         x = x.view(B, N, S, D)
         x = torch.ops.npu_inference.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
-    
+
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if self.w_kc is None or self.w_vc is None:
             kv_b_proj_weight = self.kv_b_proj.weight.reshape(

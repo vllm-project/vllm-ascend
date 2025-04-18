@@ -48,7 +48,7 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend.attention.attention import AttentionMaskBuilder
-from vllm_ascend.attention.attention_v1 import (AscendAttentionState)
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.platform import NPUPlatform
 
 if TYPE_CHECKING:
@@ -100,7 +100,6 @@ class NPUModelRunner:
             logger.error(error_msg)
             raise NotImplementedError(
                 "Non-Attention backend is not supported by V1 NPUModelRunner.")
-
 
         self.attn_backend = get_attn_backend(
             self.head_size,
@@ -417,7 +416,6 @@ class NPUModelRunner:
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
-
         modified_batch = self.attn_metadata_builder.reorder_batch(
             self.input_batch, scheduler_output)
         if modified_batch:
@@ -489,7 +487,7 @@ class NPUModelRunner:
         attn_metadata = self.attn_metadata_builder.build(
             num_reqs=num_reqs,
             num_actual_tokens=total_num_scheduled_tokens,
-            max_query_len = max_num_scheduled_tokens,
+            max_query_len=max_num_scheduled_tokens,
             common_prefix_len=None,
         )
 
@@ -682,7 +680,8 @@ class NPUModelRunner:
                         dtype=self.dtype,
                         device=self.device))
             intermediate_tensors = IntermediateTensors({
-                k: v[:self.max_num_tokens]
+                k:
+                v[:self.max_num_tokens]
                 for k, v in self.intermediate_tensors.items()
             })
 
@@ -767,7 +766,7 @@ class NPUModelRunner:
                 # different GPUs, and `kv_cache_config.num_blocks` is set to
                 # the min of all `num_blocks`. Verify it here.
                 assert num_blocks >= kv_cache_config.num_blocks
-                # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may 
+                # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
                 num_blocks = num_blocks // 4
                 if isinstance(kv_cache_spec, FullAttentionSpec):

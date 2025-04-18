@@ -15,8 +15,9 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from typing import Optional, Tuple
 import math
+from typing import Optional, Tuple
+
 import torch
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
@@ -65,6 +66,7 @@ def rope_forward_oot(
         )
     return query.view(query_shape), key.view(key_shape)
 
+
 def native_rope_deepseek_forward(
     self,
     positions: torch.Tensor,
@@ -78,7 +80,9 @@ def native_rope_deepseek_forward(
     # x: [bs, num_attention_heads, seq_len, head_size]
     # if self.max_seq_len_cached is None or seq_len > self.max_seq_len_cached:
     #     self._set_cos_sin_cache(seq_len=seq_len, device=query.device, dtype=query.dtype)
-    self._set_cos_sin_cache(seq_len=seq_len, device=query.device, dtype=query.dtype)
+    self._set_cos_sin_cache(seq_len=seq_len,
+                            device=query.device,
+                            dtype=query.dtype)
 
     cos = self.cos_cached[:seq_len].to(dtype=query.dtype)
     sin = self.sin_cached[:seq_len].to(dtype=query.dtype)
@@ -87,47 +91,55 @@ def native_rope_deepseek_forward(
 
     return q_pe, k_pe
 
+
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
+    x1 = x[..., :x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2:]
     return torch.cat((-x2, x1), dim=-1)
 
+
 # Inverse dim formula to find dim based on number of rotations
-def yarn_find_correction_dim(
-    num_rotations, dim, base=10000, max_position_embeddings=2048
-):
+def yarn_find_correction_dim(num_rotations,
+                             dim,
+                             base=10000,
+                             max_position_embeddings=2048):
     # Note: use torch instead of math to solve MTP compilation error.
-    return (dim * torch.log(torch.tensor(max_position_embeddings) / 
-                            (num_rotations * 2 * torch.pi))) / (
-                                2 * torch.log(torch.tensor(base)))
+    return (dim * torch.log(
+        torch.tensor(max_position_embeddings) /
+        (num_rotations * 2 * torch.pi))) / (2 * torch.log(torch.tensor(base)))
+
 
 def yarn_get_mscale(scale: float = 1, mscale: float = 1) -> float:
     if scale <= 1:
         return 1.0
     return 0.1 * mscale * math.log(scale) + 1.0
 
+
 # Find dim range bounds based on rotations
-def yarn_find_correction_range(
-    low_rot, high_rot, dim, base=10000, max_position_embeddings=2048
-):
+def yarn_find_correction_range(low_rot,
+                               high_rot,
+                               dim,
+                               base=10000,
+                               max_position_embeddings=2048):
     # Note: use torch instead of math to solve MTP compilation error.
     low = torch.floor(
-        yarn_find_correction_dim(low_rot, dim, base, max_position_embeddings)
-    )
+        yarn_find_correction_dim(low_rot, dim, base, max_position_embeddings))
     high = torch.ceil(
-        yarn_find_correction_dim(high_rot, dim, base, max_position_embeddings)
-    )
+        yarn_find_correction_dim(high_rot, dim, base, max_position_embeddings))
     # Note: use torch instead of max/min to solve MTP compilation error.
-    return torch.clamp(low, min=0), torch.clamp(high, max=dim-1)
+    return torch.clamp(low, min=0), torch.clamp(high, max=dim - 1)
+
 
 def yarn_linear_ramp_mask(min_value, max_value, dim):
-    # Note: The if conditional branch is not used here 
+    # Note: The if conditional branch is not used here
     # to solve MTP compilation error.
     max_value += (min_value == max_value).float() * 0.001
-    linear_func = (torch.arange(dim, dtype=torch.float32) - min_value) / (max_value - min_value)
+    linear_func = (torch.arange(dim, dtype=torch.float32) -
+                   min_value) / (max_value - min_value)
     ramp_func = torch.clamp(linear_func, 0, 1)
     return ramp_func
+
 
 # Copied from transformers.models.llama.modeling_llama.apply_rotary_pos_emb
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
@@ -176,20 +188,16 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
 
     return q_embed, k_embed
 
+
 def _set_cos_sin_cache(self, seq_len, device, dtype):
     seq_len = self.max_position_embeddings
     self.max_seq_len_cached = seq_len
     dim = self.rotary_dim
 
-    freq_extra = 1.0 / (
-        self.base
-        ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim)
-    )
-    freq_inter = 1.0 / (
-        self.scaling_factor
-        * self.base
-        ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim)
-    )
+    freq_extra = 1.0 / (self.base**(
+        torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim))
+    freq_inter = 1.0 / (self.scaling_factor * self.base**(
+        torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim))
 
     low, high = yarn_find_correction_range(
         self.beta_fast,
@@ -199,8 +207,7 @@ def _set_cos_sin_cache(self, seq_len, device, dtype):
         self.max_position_embeddings,
     )
     inv_freq_mask = 1.0 - yarn_linear_ramp_mask(low, high, dim // 2).to(
-        device=device, dtype=torch.float32
-    )
+        device=device, dtype=torch.float32)
     inv_freq = freq_inter * (1 - inv_freq_mask) + freq_extra * inv_freq_mask
     self.register_buffer("inv_freq", inv_freq, persistent=False)
 
@@ -214,12 +221,10 @@ def _set_cos_sin_cache(self, seq_len, device, dtype):
     # )
 
     emb = torch.cat((freqs, freqs), dim=-1)
-    self.register_buffer(
-        "cos_cached", (emb.cos() * self.mscale).to(dtype), persistent=False
-    )
-    self.register_buffer(
-        "sin_cached", (emb.sin() * self.mscale).to(dtype), persistent=False
-    )
+    self.register_buffer("cos_cached", (emb.cos() * self.mscale).to(dtype),
+                         persistent=False)
+    self.register_buffer("sin_cached", (emb.sin() * self.mscale).to(dtype),
+                         persistent=False)
 
 
 # TODO: Patch when aclnn ops avaiable
