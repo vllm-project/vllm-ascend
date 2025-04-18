@@ -71,6 +71,8 @@ class NPUModelRunner:
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+        self.chunked_prefill_enabled = vllm_config.scheduler_config.chunked_prefill_enabled
+        self.enable_prefix_caching = vllm_config.cache_config.enable_prefix_caching
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -419,11 +421,15 @@ class NPUModelRunner:
         if attn_state == AscendAttentionState.ChunkedPrefill:
             return self.attn_mask_builder.get_splitfuse_attn_mask(
                 seq_lens, query_lens, position, self.dtype, self.device)
-        # Prefill-only situation.
-        elif attn_state == AscendAttentionState.PrefillOnly:
+        # Prefill without cache situation.
+        elif attn_state == AscendAttentionState.PrefillNoCache or attn_state == AscendAttentionState.PrefillCacheMissing:
             max_seq_len = max(seq_lens, default=0)
             return self.attn_mask_builder.get_attn_mask(
                 max_seq_len, self.dtype, self.device)
+        # Prefill with cache hit.
+        elif attn_state == AscendAttentionState.PrefillCacheHit:
+            return self.attn_mask_builder.get_attn_mask(
+                128, self.dtype, self.device)
         # Decode-only situation.
         else:
             return None
@@ -493,10 +499,30 @@ class NPUModelRunner:
             self.device, non_blocking=True)
 
         attn_state = AscendAttentionState.ChunkedPrefill
-        if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
-            attn_state = AscendAttentionState.PrefillOnly
-        elif np.all(num_scheduled_tokens == 1):
-            attn_state = AscendAttentionState.DecodeOnly
+        # no features
+        if not self.enable_prefix_caching and not self.chunked_prefill_enabled:
+            # the stage of prefill without cache
+            if len(scheduler_output.scheduled_new_reqs) != 0:
+                assert len(scheduler_output.scheduled_cached_reqs) == 0
+                attn_state = AscendAttentionState.PrefillNoCache
+            # the stage of decode
+            else:
+                assert len(scheduler_output.scheduled_new_reqs) == 0
+                attn_state = AscendAttentionState.DecodeOnly
+        # enable prefix caching
+        elif not self.chunked_prefill_enabled:
+            # the stage of decode
+            if len(scheduler_output.scheduled_cached_reqs) != 0:
+                assert len(scheduler_output.scheduled_new_reqs) == 0
+                attn_state = AscendAttentionState.DecodeOnly
+            # the stage of prefill with cache missing
+            elif np.array_equal(self.seq_lens_np[:num_reqs],
+                                num_scheduled_tokens):
+                attn_state = AscendAttentionState.PrefillCacheMissing
+            # the stage of prefill with cache hit
+            else:
+                attn_state = AscendAttentionState.PrefillCacheHit
+        # enable chunked prefill
         else:
             attn_state = AscendAttentionState.ChunkedPrefill
 
