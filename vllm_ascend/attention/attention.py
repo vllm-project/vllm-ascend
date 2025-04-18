@@ -614,7 +614,7 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
                 # chunk_mask for chunk prefill
                 attn_mask = AscendMetadataBuilder._attn_mask_builder.get_attn_mask(  # type: ignore
                     max_seq_len, dtype, device)
-                if attn_mask[0][1] > 0:
+                if attn_mask.numel() > 1 and attn_mask[0][1] > 0:
                     attn_mask *= -10000
                 chunk_mask_list = []
                 for i, seq_len in enumerate(seq_lens):
