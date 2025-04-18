@@ -65,7 +65,7 @@ try:
         init_module, python_create_and_map, python_unmap_and_release)
     lib_name = find_loaded_library("vllm_ascend_C")
     camem_available = True
-except ModuleNotFoundError as e:
+except ImportError as e:
     logger.error("Failed to import vllm_ascend_C:%s", e)
     init_module = None
     python_create_and_map = None
