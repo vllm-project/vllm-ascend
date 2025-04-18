@@ -178,6 +178,7 @@ pip install -e . --extra-index https://download.pytorch.org/whl/cpu/
 
 ```{note}
 vllm-ascend will build custom ops by default. If you don't want to build it, set `COMPILE_CUSTOM_KERNELS=0` environment to disable it.
+To build custom ops, gcc/g++ higher than 8 and c++ 17 or higher is required. If you encourage a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
 ```
 
 ::::
