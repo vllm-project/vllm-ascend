@@ -36,13 +36,14 @@ from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
-from vllm.utils import bind_kv_cache
+from vllm.utils import GiB_bytes, bind_kv_cache
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner_base import ModelRunnerBase
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
+from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import try_register_lib, vllm_version_is
 from vllm_ascend.worker.model_runner import NPUModelRunner
@@ -159,6 +160,24 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         else:
             self.profiler = None
 
+    def sleep(self, level: int = 1) -> None:
+        NPUPlatform.set_device(self.device)
+        free_bytes_before_sleep = NPUPlatform.mem_get_info()[0]
+        allocator = CaMemAllocator.get_instance()
+        allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
+        free_bytes_after_sleep, total = NPUPlatform.mem_get_info()
+        freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+        used_bytes = total - free_bytes_after_sleep
+        assert freed_bytes >= 0, "Memory usage increased after sleeping."
+        logger.info(
+            "Sleep mode freed %.2f GiB memory, "
+            "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
+            used_bytes / GiB_bytes)
+
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        allocator = CaMemAllocator.get_instance()
+        allocator.wake_up(tags=tags)
+
     def init_device(self) -> None:
         if self.device_config.device.type == "npu":
             self.device = torch.device(f"npu:{self.local_rank}")
@@ -176,7 +195,17 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         set_random_seed(self.model_config.seed)
 
     def load_model(self):
-        self.model_runner.load_model()
+        if self.vllm_config.model_config.enable_sleep_mode:
+            allocator = CaMemAllocator.get_instance()
+            assert allocator.get_current_usage() == 0, (
+                "Sleep mode can only be "
+                "used for one instance per process.")
+            context = allocator.use_memory_pool(tag="weights")
+        else:
+            from contextlib import nullcontext
+            context = nullcontext()  # type: ignore
+        with context:
+            self.model_runner.load_model()
 
     def start_profile(self):
         if self.profiler is None:
@@ -263,8 +292,14 @@ class NPUWorker(LocalOrDistributedWorkerBase):
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
-
-        self._init_cache_engine()
+        if self.vllm_config.model_config.enable_sleep_mode:
+            allocator = CaMemAllocator.get_instance()
+            context = allocator.use_memory_pool(tag="kv_cache")
+        else:
+            from contextlib import nullcontext
+            context = nullcontext()  # type: ignore
+        with context:
+            self._init_cache_engine()
         self._warm_up_model()
 
     def _init_cache_engine(self):
