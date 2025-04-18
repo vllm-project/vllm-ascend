@@ -25,14 +25,13 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
                     Type, TypeVar, Union)
 
 import torch
-import torch.distributed
 import torch.nn as nn
 import torch_npu
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
-from vllm.distributed import get_kv_transfer_group, get_pp_group
+from vllm.distributed import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import logger
@@ -61,6 +60,13 @@ from vllm.worker.model_runner_base import (
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
+
+from vllm_ascend.utils import vllm_version_is
+
+if vllm_version_is("0.8.4"):
+    from vllm.distributed import get_kv_transfer_group
+else:
+    from vllm.distributed.kv_transfer import get_kv_transfer_group
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend

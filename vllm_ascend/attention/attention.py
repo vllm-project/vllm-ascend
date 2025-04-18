@@ -16,7 +16,7 @@
 #
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import numpy as np
 import torch
@@ -38,9 +38,8 @@ from vllm.attention.backends.utils import (CommonAttentionState,
                                            is_block_tables_empty)
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
-if TYPE_CHECKING:
-    from vllm_ascend.worker.model_runner import (
-        ModelInputForNPUBuilder, ModelInputForNPUWithSamplingMetadata)
+from vllm_ascend.worker.model_runner import (
+    ModelInputForNPUBuilder, ModelInputForNPUWithSamplingMetadata)
 
 
 def generate_attn_mask(max_seq_len: int, dtype=torch.float16, mask_value=None):
@@ -489,7 +488,7 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
                 128, self.input_builder.runner.model_config.dtype)
 
     def _add_seq_group(
-            self, inter_data: "ModelInputForNPUBuilder.InterDataForSeqGroup",
+            self, inter_data: ModelInputForNPUBuilder.InterDataForSeqGroup,
             chunked_prefill_enabled: bool):
         """Add a sequence group to the metadata. Specifically update/append
         1. context length.
