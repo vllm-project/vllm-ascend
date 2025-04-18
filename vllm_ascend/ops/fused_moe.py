@@ -40,7 +40,7 @@ def fused_experts_with_mc2(
     topk_ids: torch.Tensor,
     top_k: int,
     expert_map: torch.Tensor = None,
-    moe_all_to_all_group_name: str = None,
+    moe_all_to_all_group_name: Optional[str] = None,
 ) -> torch.Tensor:
     global_bs = 0
     moe_expert_num = len(expert_map)
