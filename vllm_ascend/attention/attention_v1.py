@@ -139,6 +139,7 @@ class AscendAttentionMetadataBuilder:
         context_lens = self.runner.seq_lens_cpu[:num_reqs]
         slot_mapping = self.runner.slot_mapping_cpu[:num_reqs].to(self.runner.device, non_blocking=True)
         attn_mask = self.runner.attn_mask
+        attn_state = self.runner.attn_state
 
         attn_metadata = AscendMetadata(
             block_tables=block_table,
@@ -146,7 +147,8 @@ class AscendAttentionMetadataBuilder:
             context_lens=context_lens,
             max_query_len=max_query_len,
             slot_mapping=slot_mapping,
-            attn_mask=attn_mask
+            attn_mask=attn_mask,
+            attn_state=attn_state
         )
         return attn_metadata
 
@@ -274,22 +276,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 out=output)
         # Normal V1 situation.
         else:
-            if kv_cache.numel() > 0:
-                key_cache, value_cache = kv_cache[0], kv_cache[1]
-                num_blocks, block_size, _ = key_cache.shape
-                key_cache = key_cache.view(num_blocks, block_size,
-                                           self.num_kv_heads, self.head_size)
-                value_cache = value_cache.view(num_blocks, block_size,
-                                               self.num_kv_heads,
-                                               self.head_size)
-                slots = attn_metadata.slot_mapping
-                torch_npu._npu_reshape_and_cache(key=key,
-                                                 value=value,
-                                                 key_cache=key_cache,
-                                                 value_cache=value_cache,
-                                                 slot_indices=slots)
-
-            if self.head_size % 128 != 0:
+            # use chunked prefill for head size 192 scenario, like deepseek
+            # paged_attention_splitfuse maybe crash at such scenario
+            if self.head_size == 192:
                 cu_seqlen_q = [0] + attn_metadata.seq_lens.tolist()
                 cu_seqlen_k = [0] + attn_metadata.context_lens.tolist()
                 cu_seqlen_q = torch.tensor(cu_seqlen_q, device="npu")
@@ -303,8 +292,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     output,
                     query,
                     num_queries_per_kv,
-                    key_cache,
-                    value_cache,
+                    self.key_cache,
+                    self.value_cache,
                     attn_metadata.block_tables,
                     cu_seqlen_q,
                     cu_seqlen_k,
@@ -314,11 +303,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     None,
                     True)
             else:
-                # use paged attention
                 torch_npu._npu_paged_attention_splitfuse(
                     query=query,
-                    key_cache=key_cache,
-                    value_cache=value_cache,
+                    key_cache=self.key_cache,
+                    value_cache=self.value_cache,
                     mask=attn_metadata.attn_mask,
                     block_table=attn_metadata.block_tables,
                     seq_len=attn_metadata.seq_lens,

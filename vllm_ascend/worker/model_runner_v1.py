@@ -75,12 +75,32 @@ class NPUModelRunner:
         self.num_attn_layers = self.model_config.get_num_layers_by_block_type(
             vllm_config.parallel_config, LayerBlockType.attention)
         self.hidden_size = self.model_config.get_hidden_size()
-        self.head_size = self.model_config.get_head_size()
         self.dtype = self.model_config.dtype
-        if vllm_config.cache_config.cache_dtype == "auto":
-            self.kv_caches_dtype = self.dtype
+        cache_config = vllm_config.cache_config
+        if cache_config.cache_dtype == "auto":
+            self.kv_cache_dtype = self.dtype
         else:
-            self.kv_caches_dtype = STR_DTYPE_TO_TORCH_DTYPE[vllm_config.cache_config.cache_dtype]
+            self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
+                cache_config.cache_dtype]
+
+        self.head_size = self.model_config.get_head_size()
+        self.attn_backend = get_attn_backend(
+            self.head_size,
+            self.dtype,
+            self.kv_cache_dtype,
+            self.block_size,
+            self.model_config.is_attention_free,
+            use_mla=self.model_config.use_mla,
+        )
+        if self.attn_backend is None:
+            error_msg = (
+                f"Error with get_att_backend: {self.head_size=}, "
+                f"{self.dtype=}, {self.kv_cache_dtype=}, {self.block_size=}, "
+                f"{self.model_config.is_attention_free=}, "
+                f"{self.model_config.use_mla=}")
+            logger.error(error_msg)
+            raise NotImplementedError(
+                "Non-Attention backend is not supported by V1 NPUModelRunner.")
 
 
         self.attn_backend = get_attn_backend(
@@ -200,6 +220,8 @@ class NPUModelRunner:
         self.input_positions_cpu = torch.arange(0,
                                                 self.max_num_tokens,
                                                 device="cpu")
+        self.attn_mask = None
+        self.attn_state = None
 
         # NOTE: Pre-construct a mask matrix to improve the efficiency of
         # attention mask construction during inference.
@@ -453,6 +475,21 @@ class NPUModelRunner:
                out=self.slot_mapping_np[:total_num_scheduled_tokens])
         slot_mapping = self.slot_mapping_cpu[:total_num_scheduled_tokens].to(
             self.device, non_blocking=True)
+
+        attn_state = AscendAttentionState.ChunkedPrefill
+        if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
+            attn_state = AscendAttentionState.PrefillOnly
+        elif np.all(num_scheduled_tokens == 1):
+            attn_state = AscendAttentionState.DecodeOnly
+        else:
+            attn_state = AscendAttentionState.ChunkedPrefill
+
+        attn_mask = self._make_attention_mask(seq_lens=seq_lens,
+                                              query_lens=num_scheduled_tokens,
+                                              position=positions,
+                                              attn_state=attn_state)
+        self.attn_mask = attn_mask
+        self.attn_state = attn_state
 
         attn_metadata = self.attn_metadata_builder.build(
             num_reqs=num_reqs,

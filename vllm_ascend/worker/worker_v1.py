@@ -24,8 +24,9 @@ import torch
 import torch.nn as nn
 import torch_npu
 from vllm import envs
-from vllm.config import VllmConfig
-from vllm.distributed import (ensure_model_parallel_initialized,
+from vllm.config import VllmConfig, ParallelConfig 
+from vllm.distributed import (ensure_kv_transfer_initialized,
+                              ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.logger import logger
@@ -82,7 +83,6 @@ class NPUWorker(WorkerBase):
         else:
             self.cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype]
-        self.additional_config = vllm_config.additional_config
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
@@ -211,6 +211,8 @@ class NPUWorker(WorkerBase):
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
+        additional_config = self.vllm_config.additional_config
+        parallel_config = self.vllm_config.parallel_config
         set_custom_all_reduce(
             not self.parallel_config.disable_custom_all_reduce)
         init_distributed_environment(self.parallel_config.world_size,
@@ -220,12 +222,11 @@ class NPUWorker(WorkerBase):
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
         expert_tensor_parallel_size = 1
-        if self.additional_config is not None and "expert_tensor_parallel_size" in self.additional_config:
-            expert_tensor_parallel_size = int(self.additional_config["expert_tensor_parallel_size"])
-        # initailize the EP group and ETP group in vllm_ascend
-        init_ascend_model_parallel(self.parallel_config.tensor_parallel_size,
-                                self.parallel_config.pipeline_parallel_size,
-                                expert_tensor_parallel_size)
+        if additional_config is not None and "expert_tensor_parallel_size" in additional_config:
+            expert_tensor_parallel_size = int(additional_config["expert_tensor_parallel_size"])
+        init_ascend_model_parallel(parallel_config.tensor_parallel_size,
+                                   parallel_config.pipeline_parallel_size,
+                                   expert_tensor_parallel_size)
         ensure_kv_transfer_initialized(self.vllm_config)
 
     def _init_profiler(self):
@@ -235,17 +236,19 @@ class NPUWorker(WorkerBase):
             torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)
+
             experimental_config = torch_npu.profiler._ExperimentalConfig(
-                    export_type=torch_npu.profiler.ExportType.Text,
-                    profiler_level=torch_npu.profiler.ProfilerLevel.Level0,
-                    msprof_tx=False,
-                    aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
-                    l2_cache=False,
-                    op_attr=False,
-                    data_simplification=False,
-                    record_op_args=False,
-                    gc_detect_threshold=None,
-                )
+                export_type=torch_npu.profiler.ExportType.Text,
+                profiler_level=torch_npu.profiler.ProfilerLevel.Level0,
+                msprof_tx=False,
+                aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
+                l2_cache=False,
+                op_attr=False,
+                data_simplification=False,
+                record_op_args=False,
+                gc_detect_threshold=None,
+            )
+
             return torch_npu.profiler.profile(
                 activities=[
                     torch_npu.profiler.ProfilerActivity.CPU,

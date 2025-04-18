@@ -24,7 +24,7 @@ import torch
 import torch.distributed
 from torch import nn
 from vllm import envs
-from vllm.config import VllmConfig, ParallelConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_kv_transfer_initialized,
                               ensure_model_parallel_initialized,
                               init_distributed_environment,
@@ -190,8 +190,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        self._init_worker_distributed_environment(self.parallel_config,
-                                                  self.vllm_config.additional_config,
+        self._init_worker_distributed_environment(self.vllm_config,
                                                   self.rank,
                                                   self.distributed_init_method,
                                                   self.local_rank)
@@ -498,13 +497,14 @@ class NPUWorker(LocalOrDistributedWorkerBase):
 
     def _init_worker_distributed_environment(
             self,
-            parallel_config: ParallelConfig,
-            additional_config: Optional[Dict[str, Any]],
+            vllm_config: VllmConfig,
             rank: int,
             distributed_init_method: Optional[str] = None,
             local_rank: int = -1,
             backend: str = "hccl") -> None:
         """Initialize the distributed environment."""
+        parallel_config = self.parallel_config
+        additional_config = self.vllm_config.additional_config
         set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
         init_distributed_environment(parallel_config.world_size, rank,
                                      distributed_init_method, local_rank,

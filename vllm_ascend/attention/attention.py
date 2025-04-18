@@ -41,16 +41,10 @@ from vllm.attention.backends.utils import (CommonAttentionState,
 
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
-<<<<<<< HEAD
 from vllm_ascend.worker.model_runner import (
     ModelInputForNPUBuilder, ModelInputForNPUWithSamplingMetadata)
-=======
 from vllm_ascend.utils import VLLM_ENABLE_GRAPH_MODE
 
-if TYPE_CHECKING:
-    from vllm_ascend.worker.model_runner import (
-        ModelInputForNPUBuilder, ModelInputForNPUWithSamplingMetadata)
->>>>>>> 3989539 (ca5fix: resolved accuracy issue; a significant improvement.)
 
 
 def generate_attn_mask(max_seq_len: int, dtype=torch.float16, mask_value=None):

@@ -18,6 +18,7 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla, vanilla_decode_mla
 from vllm_ascend.ops.cache import concat_and_cache_mla
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -59,6 +60,7 @@ class AscendMLABackend(AttentionBackend):
 @dataclass
 class AscendMLAPrefillMetadata:
     """ Prefill Specific Metadata for Ascend"""
+    attn_mask: torch.Tensor
     query_lens: list[int]
     context_lens: torch.Tensor
     input_positions: torch.Tensor
@@ -107,6 +109,9 @@ class AscendMLAMetadata:
 
     # The dimension of the attention heads
     head_dim: Optional[int] = None
+    attn_mask: torch.Tensor = None
+    # chunked prefill by default if no attn_states passed
+    attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
 
     decode: Optional[AscendMLADecodeMetadata] = None
     prefill: Optional[AscendMLAPrefillMetadata] = None
@@ -233,6 +238,7 @@ class AscendMLAMetadataBuilder:
             tokens_start = self._num_decode_tokens
 
             prefill_metadata = AscendMLAPrefillMetadata(
+                attn_mask=self.runner.attn_mask,
                 query_lens=query_lens[tokens_start:],
                 context_lens=seq_lens[tokens_start:],
                 input_positions=input_positions[tokens_start:],
@@ -256,6 +262,8 @@ class AscendMLAMetadataBuilder:
             num_decodes=self._num_decodes,
             num_decode_tokens=self._num_decode_tokens,
             num_prefills=self._num_prefills,
+            attn_mask=self.runner.attn_mask,
+            attn_state=self.runner.attn_state,
             prefill=prefill_metadata,
             decode=decode_metadata,
         )
