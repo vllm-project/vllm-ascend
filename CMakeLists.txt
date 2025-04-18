@@ -12,6 +12,9 @@ set(ignoreMe "${VLLM_PYTHON_PATH}")
 
 set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
 
+# c++ 17 or higher is required by pytorch
+set(CMAKE_CXX_STANDARD 17)
+
 find_package(pybind11 REQUIRED)
 
 append_cmake_prefix_path("torch" "torch.utils.cmake_prefix_path")
