@@ -560,8 +560,8 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
         input_positions = flatten_2d_lists(input_positions)
         if graph_pad_size != -1 and not is_prompt:
             input_tokens.extend(itertools.repeat(0, graph_pad_size))
-            input_positions.extend(itertools.repeat(
-                0, graph_pad_size))  # type: ignore
+            input_positions.extend(itertools.repeat(    # type: ignore
+                0, graph_pad_size))
             seq_lens.extend(itertools.repeat(1, graph_pad_size))
             query_lens.extend(itertools.repeat(1, graph_pad_size))
         input_tokens_tensor = torch.tensor(input_tokens,
@@ -1301,7 +1301,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
         if prefill_meta is None and self.vllm_config.compilation_config.level > 0:
             model_executable = self.compile_model
             # Note: graph_batch_size value not same as GPU
-            graph_batch_size = model_input.input_tokens.shape[
+            graph_batch_size = model_input.input_tokens.shape[  # type: ignore
                 0]  # type: ignore
             # Note: previous_hidden_states maybe None not same as GPU
             if previous_hidden_states is not None:

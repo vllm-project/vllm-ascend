@@ -485,7 +485,7 @@ class NPUModelRunner:
         self.attn_state = attn_state
 
         attn_metadata = self.attn_metadata_builder.build(
-            num_reqs=num_reqs,
+            num_reqs=num_reqs,      # type-ignore
             num_actual_tokens=total_num_scheduled_tokens,
             max_query_len=max_num_scheduled_tokens,
             common_prefix_len=None,
