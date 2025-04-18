@@ -482,9 +482,9 @@ class NPUModelRunner:
                                               position=positions,
                                               attn_state=attn_state)
         self.attn_mask = attn_mask
-        self.attn_state = attn_state  # type-ignore
+        self.attn_state = attn_state  # type: ignore
 
-        attn_metadata = self.attn_metadata_builder.build(
+        attn_metadata = self.attn_metadata_builder.build(   # type: ignore
             num_reqs=num_reqs,
             num_actual_tokens=total_num_scheduled_tokens,
             max_query_len=max_num_scheduled_tokens,
