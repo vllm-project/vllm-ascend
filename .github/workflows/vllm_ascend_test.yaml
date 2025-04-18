@@ -142,9 +142,10 @@ jobs:
             pytest -sv tests/ops
           fi
 
+      # only run test on spec decode when the related code changed
       - name: Check for changes in Speculative Decode
         id: filter_spec_decode
-        uses: dorny/paths-filter@v2
+        uses: dorny/paths-filter@v3
         with:
           filters: |
             speculative_tests_changed:
@@ -155,10 +156,9 @@ jobs:
               - "vllm_ascend/patch/patch_rejection_sampler.py"
               - "vllm_ascend/patch/patch_spec_decode_worker.py"
               - "vllm_ascend/patch/patch_multi_step_worker.py"
+
       - name: Run vllm-project/vllm-ascend Speculative Decode test
-        env:
-          HF_ENDPOINT: https://hf-mirror.com
-        if: steps.filter_spec_decode.outputs.speculative_tests_changed
+        if: steps.filter_spec_decode.outputs.speculative_tests_changed == 'true'
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
             pytest -sv tests/singlecard/spec_decode

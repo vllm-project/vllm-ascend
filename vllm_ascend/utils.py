@@ -18,6 +18,7 @@
 #
 import torch
 import torch_npu  # noqa: F401
+from packaging.version import Version
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs
@@ -83,3 +84,8 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import platform  # noqa: F401
     else:
         from vllm_ascend.patch import worker  # noqa: F401
+
+
+def vllm_version_is(version: str):
+    import vllm
+    return Version(vllm.__version__) == Version(version)
