@@ -23,7 +23,9 @@ import torch
 import torch_npu  # noqa: F401
 import vllm.envs as envs
 from vllm.logger import logger
+from vllm.platforms import Platform, PlatformEnum
 
+CUSTOM_OP_ENABLED = False
 try:
     # register custom ops into torch_library here
     import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
@@ -35,8 +37,8 @@ except ImportError as e:
         logging.warning(
             "Warning: Failed to register custom ops, all custom ops will be disabled"
         )
-
-from vllm.platforms import Platform, PlatformEnum
+    else:
+        CUSTOM_OP_ENABLED = True
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
