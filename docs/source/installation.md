@@ -78,7 +78,7 @@ python -m venv vllm-ascend-env
 source vllm-ascend-env/bin/activate
 
 # Install required python packages.
-pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs numpy<2.0.0 decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
+pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs 'numpy<2.0.0' decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
 
 # Download and install the CANN package.
 wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.0.0/Ascend-cann-toolkit_8.0.0_linux-aarch64.run
