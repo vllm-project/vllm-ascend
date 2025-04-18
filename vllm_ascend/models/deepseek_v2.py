@@ -335,7 +335,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         if VLLM_ENABLE_GRAPH_MODE == "1":
             self.forward = self.forward_torchair
         else:
-            self.forward = self.forward_eager   # type: ignore
+            self.forward = self.forward_eager  # type: ignore
 
     def forward_torchair(self,
                          positions: torch.Tensor,

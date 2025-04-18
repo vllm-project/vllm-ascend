@@ -250,7 +250,7 @@ class AscendMLAMetadataBuilder:
                 block_table=block_table[:self._num_decode_tokens, ...],
                 seq_lens=seq_lens[:self._num_decode_tokens])
 
-        return self.metadata_cls(       # type: ignore
+        return self.metadata_cls(  # type: ignore
             num_actual_tokens=num_actual_tokens,
             slot_mapping=slot_mapping,
             head_dim=self.runner.model_config.get_head_size(),
@@ -471,8 +471,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             num_kv_heads=self.num_kv_heads,
             num_heads=self.num_heads,
             scale_value=self.scale,
-            block_table=attn_metadata.decode.block_table,   # type:ignore
-            context_lens=attn_metadata.decode.seq_lens,     # type:ignore
+            block_table=attn_metadata.decode.block_table,  # type:ignore
+            context_lens=attn_metadata.decode.seq_lens,  # type:ignore
             mla_vheadsize=self.kv_lora_rank,
             out=attn_output)
         return self._v_up_proj_and_o_proj(attn_output)

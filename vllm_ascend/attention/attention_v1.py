@@ -291,9 +291,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 cu_seqlen_k = torch.cumsum(cu_seqlen_k, dim=0)
                 max_seqlen_q = torch.max(attn_metadata.seq_lens)
                 max_seqlen_k = torch.max(attn_metadata.context_lens)
-                num_queries_per_kv = self.num_heads / self.num_kv_heads
-                vanilla_chunked_prefill(output, query, num_queries_per_kv,
-                                        self.key_cache, self.value_cache,
+                vanilla_chunked_prefill(output, query, self.key_cache,
+                                        self.value_cache,
                                         attn_metadata.block_tables,
                                         cu_seqlen_q, cu_seqlen_k, max_seqlen_q,
                                         max_seqlen_k, self.scale, None, True)

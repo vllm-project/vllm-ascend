@@ -130,7 +130,7 @@ class NPUModelRunner:
         self.max_num_encoder_input_tokens, self.encoder_cache_size = compute_encoder_budget(
             model_config=self.model_config,
             scheduler_config=self.scheduler_config,
-            mm_registry=self.mm_registry)   
+            mm_registry=self.mm_registry)
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
@@ -680,7 +680,8 @@ class NPUModelRunner:
                         dtype=self.dtype,
                         device=self.device))
             intermediate_tensors = IntermediateTensors({
-                k: v[:self.max_num_tokens]
+                k:
+                v[:self.max_num_tokens]
                 for k, v in self.intermediate_tensors.items()
             })
 

@@ -26,7 +26,7 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear
 def vanilla_chunked_prefill(
     output: torch.Tensor,
     query: torch.Tensor,  # (num_tokens, heads, head_size)
-    key_cache: torch.Tensor, # (num_blocks, block_size, kv_heads, head_size)
+    key_cache: torch.Tensor,  # (num_blocks, block_size, kv_heads, head_size)
     value_cache: torch.
     Tensor,  # (num_blocks, block_size, kv_heads, head_size,)
     block_tables: torch.Tensor,  # (num_seqs, max_num_blocks_per_seq)

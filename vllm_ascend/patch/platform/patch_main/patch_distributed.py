@@ -131,7 +131,7 @@ def parallel_config_get_dp_port(self) -> int:
     import os
 
     # NOTE: Get port from envs directly when using torchrun
-    port = int(os.environ.get("MASTER_PORT", answer))   # type: ignore
+    port = int(os.environ.get("MASTER_PORT", answer))  # type: ignore
     return port
 
 
