@@ -25,8 +25,7 @@ import torch.nn as nn
 import torch_npu
 from vllm import envs
 from vllm.config import VllmConfig
-from vllm.distributed import (ensure_kv_transfer_initialized,
-                              ensure_model_parallel_initialized,
+from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.logger import logger
@@ -40,8 +39,13 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import try_register_lib
+from vllm_ascend.utils import try_register_lib, vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+if vllm_version_is("0.8.4"):
+    from vllm.distributed import ensure_kv_transfer_initialized
+else:
+    from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 
 
 class NPUWorker(WorkerBase):
