@@ -42,7 +42,7 @@ Usually, each minor version of vLLM (such as 0.7) will correspond to a vllm-asce
 
 | Branch     | Status       | Note                                 |
 |------------|--------------|--------------------------------------|
-| main       | Maintained   | CI commitment for vLLM main branch   |
+| main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.8.x branch   |
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version |
 | v0.7.1-dev | Unmaintained | Replaced by v0.7.3-dev               |
 
@@ -67,6 +67,7 @@ Following is the Release Compatibility Matrix for vLLM Ascend Plugin:
 
 | vllm-ascend  | vLLM         | Python | Stable CANN | PyTorch/torch_npu |
 |--------------|--------------| --- | --- | --- |
+| v0.8.4rc1 | v0.8.4 | 3.9 - 3.12 | 8.0.0   |  2.5.1 / 2.5.1.dev20250320 |
 | v0.7.3rc2 | v0.7.3 | 3.9 - 3.12 | 8.0.0   |  2.5.1 / 2.5.1.dev20250320 |
 | v0.7.3rc1 | v0.7.3 | 3.9 - 3.12 | 8.0.0   |  2.5.1 / 2.5.1.dev20250308 |
 | v0.7.1rc1 | v0.7.1 | 3.9 - 3.12 | 8.0.0   |  2.5.1 / 2.5.1.dev20250218 |
@@ -77,8 +78,8 @@ Following is the Release Compatibility Matrix for vLLM Ascend Plugin:
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
-| 2025.04.15 | Release candidates, v0.8.Xrc1             |
-| 2025.04.15 | Final release, v0.7.3                     |
+| End of 2025.04 | v0.7.x Final release, v0.7.3          |
+| 2025.04.18 | Release candidates, v0.8.4rc1             |
 | 2025.03.28 | Release candidates, v0.7.3rc2             |
 | 2025.03.14 | Release candidates, v0.7.3rc1             |
 | 2025.02.19 | Release candidates, v0.7.1rc1             |
