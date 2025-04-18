@@ -209,6 +209,12 @@ class NPUModelRunner:
                                             pin_memory=True)
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
 
+        self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
+                                               dtype=torch.int32,
+                                               device="cpu",
+                                               pin_memory=True)
+        self.query_start_loc_np = self.query_start_loc_cpu.numpy()
+
         self.seq_lens_cpu = torch.zeros(self.max_num_reqs,
                                         dtype=torch.int32,
                                         device="cpu",
@@ -454,6 +460,7 @@ class NPUModelRunner:
         self.positions[:total_num_scheduled_tokens].copy_(
             self.positions_cpu[:total_num_scheduled_tokens], non_blocking=True)
         positions = self.positions[:total_num_scheduled_tokens]
+        self.query_lens = num_scheduled_tokens
 
         self.seq_lens_np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
@@ -484,7 +491,7 @@ class NPUModelRunner:
         self.attn_mask = attn_mask
         self.attn_state = attn_state  # type: ignore
 
-        attn_metadata = self.attn_metadata_builder.build(   # type: ignore
+        attn_metadata = self.attn_metadata_builder.build(  # type: ignore
             num_reqs=num_reqs,
             num_actual_tokens=total_num_scheduled_tokens,
             max_query_len=max_num_scheduled_tokens,
@@ -680,8 +687,7 @@ class NPUModelRunner:
                         dtype=self.dtype,
                         device=self.device))
             intermediate_tensors = IntermediateTensors({
-                k:
-                v[:self.max_num_tokens]
+                k: v[:self.max_num_tokens]
                 for k, v in self.intermediate_tensors.items()
             })
 
