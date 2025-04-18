@@ -102,11 +102,11 @@ class AscendAttentionState(Enum):
 class AscendMetadata:
     # (batch_size, max_blocks_per_seq).
     # Block addresses per sequence. (Seq id -> list of physical block)
-    block_tables: Optional[torch.Tensor]
+    block_tables: torch.Tensor
     # (batch_size,). The sequence length per sequence. Sequence length means
     # the computed tokens + new tokens None if it is a decoding.
-    seq_lens: Optional[torch.Tensor] = None
-    context_lens: Optional[torch.Tensor] = None
+    seq_lens: torch.Tensor
+    context_lens: torch.Tensor
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int] = None
     # (num_tokens,). The indices of the token slots that input tokens will be

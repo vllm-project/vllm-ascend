@@ -630,9 +630,9 @@ class AscendFusedMoE(FusedMoE):
             real_top_k = self.top_k
 
         if self.dp_size > 1:
-            if int(os.environ.get("VLLM_ENABLE_MC2")) == 1 and not is_prefill:
+            if int(os.environ.get("VLLM_ENABLE_MC2")) == 1 and not is_prefill:  # type: ignore
                 ...
-            elif int(os.environ.get("USING_LCCL_COM")) == 1:
+            elif int(os.environ.get("USING_LCCL_COM")) == 1:    # type: ignore
                 hidden_states = get_dp_group().all_gather(
                     hidden_states, 0, False)
                 router_logits = get_dp_group().all_gather(
@@ -659,7 +659,7 @@ class AscendFusedMoE(FusedMoE):
             is_prefill=is_prefill)
 
         if self.dp_size > 1:
-            if int(os.environ.get("VLLM_ENABLE_MC2")) == 1 and not is_prefill:
+            if int(os.environ.get("VLLM_ENABLE_MC2")) == 1 and not is_prefill:  # type: ignore
                 ...
             else:
                 final_hidden_states = dist._functional_collectives.reduce_scatter_tensor(

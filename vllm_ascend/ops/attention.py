@@ -25,11 +25,10 @@ from vllm.model_executor.layers.linear import ColumnParallelLinear
 # all the corner case
 def vanilla_chunked_prefill(
     output: torch.Tensor,
-    query: torch.Tensor,  # (num_tokens, num_heads, head_size)
-    key_cache: torch.
-    Tensor,  # (num_blocks, block_size, num_kv_heads, head_size)
+    query: torch.Tensor,  # (num_tokens, heads, head_size)
+    key_cache: torch.Tensor, # (num_blocks, block_size, kv_heads, head_size)
     value_cache: torch.
-    Tensor,  # (num_blocks, block_size, num_kv_heads, head_size,)
+    Tensor,  # (num_blocks, block_size, kv_heads, head_size,)
     block_tables: torch.Tensor,  # (num_seqs, max_num_blocks_per_seq)
     cu_seqlen_q: torch.Tensor,  # (num_seqs + 1,)
     cu_seqlen_k: torch.Tensor,  # (num_seqs + 1,)

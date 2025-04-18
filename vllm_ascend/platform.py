@@ -202,7 +202,8 @@ class NPUPlatform(Platform):
         _EP = None
 
         if _ETP:
-            _ETP.destroy()
+            for etp_group in _ETP:
+                etp_group.destroy()
         _ETP = None
 
     @classmethod

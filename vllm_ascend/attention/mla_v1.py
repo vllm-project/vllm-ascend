@@ -131,7 +131,7 @@ class AscendMLAMetadataBuilder:
                  runner: "NPUModelRunner",
                  metadata_cls: Optional[AscendMLAMetadata] = None):
         self.metadata_cls: Optional[AscendMLAMetadata] = metadata_cls \
-            if metadata_cls is not None else AscendMLAMetadata
+            if metadata_cls is not None else AscendMLAMetadata  # type: ignore
         self.runner = runner
         scheduler_config = runner.scheduler_config
         self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
@@ -250,7 +250,7 @@ class AscendMLAMetadataBuilder:
                 block_table=block_table[:self._num_decode_tokens, ...],
                 seq_lens=seq_lens[:self._num_decode_tokens])
 
-        return self.metadata_cls(
+        return self.metadata_cls(       # type: ignore
             num_actual_tokens=num_actual_tokens,
             slot_mapping=slot_mapping,
             head_dim=self.runner.model_config.get_head_size(),
@@ -471,8 +471,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             num_kv_heads=self.num_kv_heads,
             num_heads=self.num_heads,
             scale_value=self.scale,
-            block_table=attn_metadata.decode.block_table,
-            context_lens=attn_metadata.decode.seq_lens,
+            block_table=attn_metadata.decode.block_table,   # type:ignore
+            context_lens=attn_metadata.decode.seq_lens,     # type:ignore
             mla_vheadsize=self.kv_lora_rank,
             out=attn_output)
         return self._v_up_proj_and_o_proj(attn_output)
