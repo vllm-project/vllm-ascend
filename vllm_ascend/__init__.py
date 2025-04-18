@@ -18,9 +18,6 @@
 
 def register():
     """Register the NPU platform."""
-    # Adapt the global patch here.
-    from vllm_ascend.utils import adapt_patch
-    adapt_patch(is_global_patch=True)
 
     return "vllm_ascend.platform.NPUPlatform"
 
