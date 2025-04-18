@@ -89,6 +89,12 @@ class NPUWorker(WorkerBase):
 
         self.profiler = self._init_profiler()
 
+    def sleep(self, level: int = 1) -> None:
+        logger.error("Sleep mode is only supported on v0")
+
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        logger.error("Sleep mode is only supported on v0")
+
     def init_device(self):
         if self.device_config.device.type == "npu":
             self.device = torch.device(f"npu:{self.local_rank}")

@@ -56,6 +56,10 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("LLMDATADIST_COMM_PORT", "26000"),
     "LLMDATADIST_SYNC_CACHE_WAIT_TIME":
     lambda: os.getenv("LLMDATADIST_SYNC_CACHE_WAIT_TIME", "5000"),
+    "CXX_COMPILER":
+    lambda: os.getenv("CXX_COMPILER", None),
+    "C_COMPILER":
+    lambda: os.getenv("C_COMPILER", None)
 }
 
 # end-env-vars-definition

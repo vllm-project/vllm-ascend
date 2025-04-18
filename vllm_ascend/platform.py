@@ -63,10 +63,17 @@ class NPUPlatform(Platform):
 
     supported_quantization: list[str] = ["ascend"]
 
+    def is_sleep_mode_available(self) -> bool:
+        return True
+
     @classmethod
     def pre_register_and_update(cls,
                                 parser: Optional[FlexibleArgumentParser] = None
                                 ) -> None:
+        # Adapt the global patch here.
+        from vllm_ascend.utils import adapt_patch
+        adapt_patch(is_global_patch=True)
+
         from vllm_ascend.quantization.quant_config import \
             AscendQuantConfig  # noqa: F401
 
