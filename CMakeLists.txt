@@ -3,7 +3,7 @@ project(vllm_ascend_C)
 
 # include(CheckCXXcompilerFlag)
 # check_cxx_compiler_flag("-std=c++17", COMPILER_SUPPORTS_CXX17)
-
+set(CMAKE_CXX_STANDARD 17)
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 
