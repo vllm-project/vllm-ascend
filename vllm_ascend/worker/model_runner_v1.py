@@ -52,6 +52,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
+from vllm_ascend.sample.sampler_v1 import AscendSampler
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler_output import SchedulerOutput
@@ -803,6 +804,8 @@ class NPUModelRunner:
 
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
+            self.model.sampler = AscendSampler()
+
             if self.lora_config:
                 raise ValueError("LoRA model is not supported on NPU now.")
 

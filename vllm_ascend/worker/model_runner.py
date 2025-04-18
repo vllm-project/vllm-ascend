@@ -61,6 +61,8 @@ from vllm.worker.model_runner_base import (
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
 
+from vllm_ascend.sample.sampler import AscendSampler
+
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
@@ -820,7 +822,7 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:
             self.model = get_model(vllm_config=self.vllm_config)
-
+            self.model.sampler = AscendSampler()
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
