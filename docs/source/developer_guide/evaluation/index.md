@@ -2,7 +2,7 @@
 
 :::{toctree}
 :caption: Accuracy
-:maxdepth: 1
+:maxdepth: 2
 using_opencompass
 using_lm_eval
 :::

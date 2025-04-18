@@ -1,0 +1,409 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: 'accuracy test'
+
+on:
+  workflow_dispatch:
+    inputs:
+      models:
+        description: 'choose model(all/Qwen/Qwen2.5-7B-Instruct/meta-llama/Llama-3.1-8B-Instruct/Qwen/Qwen2.5-VL-7B-Instruct)'
+        required: true
+        type: choice
+        options:
+          - all
+          - Qwen/Qwen2.5-7B-Instruct
+          - meta-llama/Llama-3.1-8B-Instruct
+          - Qwen/Qwen2.5-VL-7B-Instruct
+        default: 'all'
+      runner:
+        required: true
+        type: choice
+        options: 
+          - linux-arm64-npu-2
+        default: 'linux-arm64-npu-2'
+        description: 'The runner selected to run on'
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  test_Qwen2_5_7B_Instruct:
+    if: ${{ contains('all,Qwen/Qwen2.5-7B-Instruct', github.event.inputs.models) }} 
+    name: vLLM Ascend accuracy test (self-host)
+    runs-on: ${{ github.event.inputs.runner || 'linux-arm64-npu-2' }}
+    timeout-minutes: 1000
+    container:
+      image: quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10
+      env:
+        HF_ENDPOINT: https://hf-mirror.com
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        DATASET_SOURCE: ModelScope
+    steps:
+      - name: Validate branch name
+        id: validate_branch
+        run: |
+          if [[ "${{ github.ref_name }}" =~ -dev$ ]]; then
+            echo "Branch name is valid."
+          else
+            echo "Error: The selected branch does not end with '-dev'."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+          apt-get update -y
+          apt install git -y
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          path: ./vllm-empty
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm-ascend
+          path: ./vllm-ascend
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Install vllm-project/vllm-ascend
+        working-directory: ./vllm-ascend
+        run: |
+          pip uninstall -y numpy
+          pip install -r requirements-dev.txt
+          pip install -e .
+
+      - name: Install pta
+        run: |
+          if [ ! -d /root/.cache/pta ]; then
+            mkdir -p /root/.cache/pta
+          fi
+
+          if [ ! -f /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl ]; then
+            cd /root/.cache/pta
+            rm -rf pytorch_v2.5.1_py310*
+            wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
+            tar -zxvf pytorch_v2.5.1_py310.tar.gz
+          fi
+
+          pip install /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+      
+      - name: Checkout EleutherAI/lm-evaluation-harness repo
+        uses: actions/checkout@v4
+        with:
+          repository: EleutherAI/lm-evaluation-harness
+          path: ./lm-eval
+          fetch-depth: 0
+
+      - name: Install EleutherAI/lm-evaluation-harness
+        working-directory: ./lm-eval
+        run: pip install -e .
+
+      - name: Copy gsm8k yaml to lm-eval directory
+        run: |
+          pip install ray
+          pip install datasets==2.16.0 transformers==4.50.3 huggingface-hub==0.29.3
+          cp ./accuracy/config/gsm8k.yaml ./lm-eval/lm_eval/tasks/gsm8k   
+
+      - name: Run vllm-project/vllm-ascend Qwen/Qwen2.5-7B-Instruct accuracy test for V0 Engine
+        working-directory: accuracy/scripts
+        if: ${{ contains('all,Qwen/Qwen2.5-7B-Instruct', github.event.inputs.models) }} 
+        env:
+          VLLM_USE_V1: 0
+        run: python ./run_accuracy.py --model Qwen/Qwen2.5-7B-Instruct --output "$GITHUB_WORKSPACE"/accuracy/Qwen2.5-7B-Instruct.md --vllm_ascend_version "${{ github.ref_name }}"
+
+      - name: Upload Qwen2.5-7B-Instruct Accuracy Reports
+        uses: actions/upload-artifact@v4
+        if: ${{ contains('all,Qwen/Qwen2.5-7B-Instruct', github.event.inputs.models) }} 
+        with:
+          name: ${{ github.ref_name }}-Qwen2.5-7B-Instruct-accuracy-report
+          path: $GITHUB_WORKSPACE/accuracy/Qwen2.5-7B-Instruct.md
+          if-no-files-found: warn
+          retention-days: 90
+          overwrite: true
+
+  test_Llama_3_1_8B_Instruct:
+    if: ${{ contains('all,meta-llama/Llama-3.1-8B-Instruct', github.event.inputs.models) }}
+    name: vLLM Ascend accuracy test (self-host)
+    runs-on: ${{ github.event.inputs.runner || 'linux-arm64-npu-2' }}
+    timeout-minutes: 1000
+    container:
+      image: quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10
+      env:
+        HF_ENDPOINT: https://hf-mirror.com
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        DATASET_SOURCE: ModelScope
+    steps:
+      - name: Validate branch name
+        id: validate_branch
+        run: |
+          if [[ "${{ github.ref_name }}" =~ -dev$ ]]; then
+            echo "Branch name is valid."
+          else
+            echo "Error: The selected branch does not end with '-dev'."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+          apt-get update -y
+          apt install git -y
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          path: ./vllm-empty
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm-ascend
+          path: ./vllm-ascend
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Install vllm-project/vllm-ascend
+        working-directory: ./vllm-ascend
+        run: |
+          pip uninstall -y numpy
+          pip install -r requirements-dev.txt
+          pip install -e .
+
+      - name: Install pta
+        run: |
+          if [ ! -d /root/.cache/pta ]; then
+            mkdir -p /root/.cache/pta
+          fi
+
+          if [ ! -f /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl ]; then
+            cd /root/.cache/pta
+            rm -rf pytorch_v2.5.1_py310*
+            wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
+            tar -zxvf pytorch_v2.5.1_py310.tar.gz
+          fi
+
+          pip install /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+      
+      - name: Checkout EleutherAI/lm-evaluation-harness repo
+        uses: actions/checkout@v4
+        with:
+          repository: EleutherAI/lm-evaluation-harness
+          path: ./lm-eval
+          fetch-depth: 0
+
+      - name: Install EleutherAI/lm-evaluation-harness
+        working-directory: ./lm-eval
+        run: pip install -e .
+
+      - name: Copy gsm8k yaml to lm-eval directory
+        run: |
+          pip install ray
+          pip install datasets==2.16.0 transformers==4.50.3 huggingface-hub==0.29.3
+          cp ./accuracy/config/gsm8k.yaml ./lm-eval/lm_eval/tasks/gsm8k   
+
+      - name: Run vllm-project/vllm-ascend meta-llama/Llama-3.1-8B-Instruct accuracy test for V0 Engine
+        working-directory: accuracy/scripts
+        env:
+          VLLM_USE_V1: 0
+        run: python ./run_accuracy.py --model meta-llama/Llama-3.1-8B-Instruct --output "$GITHUB_WORKSPACE"/accuracy/Llama-3.1-8B-Instruct.md --vllm_ascend_version "${{ github.ref_name }}"
+      
+      - name: Upload Llama-3.1-8B-Instruct Accuracy Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.ref_name }}-Llama-3.1-8B-Instruct-accuracy-report
+          path: $GITHUB_WORKSPACE/accuracy/Llama-3.1-8B-Instruct.md
+          if-no-files-found: warn
+          retention-days: 90
+          overwrite: true
+
+  test_Qwen2_5_VL_7B_Instruct:
+    if: ${{ contains('all,Qwen/Qwen2.5-VL-7B-Instruct', github.event.inputs.models) }}
+    name: vLLM Ascend accuracy test (self-host)
+    runs-on: ${{ github.event.inputs.runner || 'linux-arm64-npu-2' }}
+    timeout-minutes: 1000
+    container:
+      image: quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10
+      env:
+        HF_ENDPOINT: https://hf-mirror.com
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        DATASET_SOURCE: ModelScope
+    steps:
+      - name: Validate branch name
+        id: validate_branch
+        run: |
+          if [[ "${{ github.ref_name }}" =~ -dev$ ]]; then
+            echo "Branch name is valid."
+          else
+            echo "Error: The selected branch does not end with '-dev'."
+            exit 1
+          fi
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+          apt-get update -y
+          apt install git -y
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          path: ./vllm-empty
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm-ascend
+          path: ./vllm-ascend
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Install vllm-project/vllm-ascend
+        working-directory: ./vllm-ascend
+        run: |
+          pip uninstall -y numpy
+          pip install -r requirements-dev.txt
+          pip install -e .
+
+      - name: Install pta
+        run: |
+          if [ ! -d /root/.cache/pta ]; then
+            mkdir -p /root/.cache/pta
+          fi
+
+          if [ ! -f /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl ]; then
+            cd /root/.cache/pta
+            rm -rf pytorch_v2.5.1_py310*
+            wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
+            tar -zxvf pytorch_v2.5.1_py310.tar.gz
+          fi
+
+          pip install /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+      
+      - name: Checkout EleutherAI/lm-evaluation-harness repo
+        uses: actions/checkout@v4
+        with:
+          repository: EleutherAI/lm-evaluation-harness
+          path: ./lm-eval
+          fetch-depth: 0
+
+      - name: Install EleutherAI/lm-evaluation-harness
+        working-directory: ./lm-eval
+        run: pip install -e .
+
+      - name: Copy gsm8k yaml to lm-eval directory
+        run: |
+          pip install ray
+          pip install datasets==2.16.0 transformers==4.50.3 huggingface-hub==0.29.3
+          cp ./accuracy/config/gsm8k.yaml ./lm-eval/lm_eval/tasks/gsm8k   
+
+      - name: Run vllm-project/vllm-ascend Qwen/Qwen2.5-VL-7B-Instruct accuracy test for V0 Engine
+        working-directory: accuracy/scripts
+        env:
+          VLLM_USE_V1: 0
+        run: python ./run_accuracy.py --model Qwen/Qwen2.5-VL-7B-Instruct --output "$GITHUB_WORKSPACE"/accuracy/Qwen2.5-VL-7B-Instruct.md --vllm_ascend_version "${{ github.ref_name }}"
+          
+      - name: Upload Qwen2.5-VL-7B-Instruct Accuracy Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.ref_name }}-Qwen2.5-VL-7B-Instruct-accuracy-report
+          path: $GITHUB_WORKSPACE/accuracy/Qwen2.5-VL-7B-Instruct.md
+          if-no-files-found: warn
+          retention-days: 90
+          overwrite: true
