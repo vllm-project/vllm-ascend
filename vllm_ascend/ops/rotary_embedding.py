@@ -39,7 +39,7 @@ def rope_forward_oot(
     if self.cos_sin_cache.dtype != query.dtype:
         self.cos_sin_cache = self.cos_sin_cache.to(query.dtype)
     # adopt custom kernel path for rotary_embedding
-    if CUSTOM_OP_ENABLED and self.is_neox_style:
+    if CUSTOM_OP_ENABLED and self.is_neox_style and self.head_size % 32 == 0:
         return torch.ops._C.rotary_embedding(
             positions,
             query,

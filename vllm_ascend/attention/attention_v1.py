@@ -267,16 +267,15 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                            out=output)
         elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
             block_tables = attn_metadata.block_tables
-            torch_npu._npu_paged_attention(
-                query=query,
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
-                num_kv_heads=self.num_kv_heads,
-                num_heads=self.num_heads,
-                scale_value=self.scale,
-                block_table=block_tables,
-                context_lens=attn_metadata.seq_lens,
-                out=output)
+            torch_npu._npu_paged_attention(query=query,
+                                           key_cache=self.key_cache,
+                                           value_cache=self.value_cache,
+                                           num_kv_heads=self.num_kv_heads,
+                                           num_heads=self.num_heads,
+                                           scale_value=self.scale,
+                                           block_table=block_tables,
+                                           context_lens=attn_metadata.seq_lens,
+                                           out=output)
         # Normal V1 situation.
         else:
             # use chunked prefill for head size 192 scenario, like deepseek
