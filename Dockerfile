@@ -37,7 +37,7 @@ RUN pip config set global.index-url ${PIP_INDEX_URL}
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=main
+ARG VLLM_TAG=v0.8.4
 RUN git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /workspace/vllm
 RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install /workspace/vllm/ --extra-index https://download.pytorch.org/whl/cpu/
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
