@@ -38,6 +38,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.worker_base import WorkerBase
 
+from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import try_register_lib, vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -209,6 +210,8 @@ class NPUWorker(WorkerBase):
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
+        additional_config = self.vllm_config.additional_config
+        parallel_config = self.vllm_config.parallel_config
         set_custom_all_reduce(
             not self.parallel_config.disable_custom_all_reduce)
         init_distributed_environment(self.parallel_config.world_size,
@@ -217,6 +220,13 @@ class NPUWorker(WorkerBase):
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
+        expert_tensor_parallel_size = 1
+        if additional_config is not None and "expert_tensor_parallel_size" in additional_config:
+            expert_tensor_parallel_size = int(
+                additional_config["expert_tensor_parallel_size"])
+        init_ascend_model_parallel(parallel_config.tensor_parallel_size,
+                                   parallel_config.pipeline_parallel_size,
+                                   expert_tensor_parallel_size)
         ensure_kv_transfer_initialized(self.vllm_config)
 
     def _init_profiler(self):

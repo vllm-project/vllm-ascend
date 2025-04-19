@@ -44,6 +44,7 @@ from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
 from vllm_ascend.device_allocator.camem import CaMemAllocator
+from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import try_register_lib, vllm_version_is
 from vllm_ascend.worker.model_runner import NPUModelRunner
@@ -313,8 +314,14 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         for ve in range(self.parallel_config.pipeline_parallel_size):
             num_layers = len(self.cache_engine[ve].gpu_cache)
             for i in range(num_layers):
-                torch_npu.npu_format_cast(self.cache_engine[ve].gpu_cache[i],
-                                          2)
+                if torch.is_tensor(self.cache_engine[ve].gpu_cache[i]):
+                    torch_npu.npu_format_cast(
+                        self.cache_engine[ve].gpu_cache[i], 2)
+                else:
+                    torch_npu.npu_format_cast(
+                        self.cache_engine[ve].gpu_cache[i][0], 2)
+                    torch_npu.npu_format_cast(
+                        self.cache_engine[ve].gpu_cache[i][1], 2)
         self.gpu_cache = [
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
@@ -495,6 +502,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             backend: str = "hccl") -> None:
         """Initialize the distributed environment."""
         parallel_config = self.parallel_config
+        additional_config = self.vllm_config.additional_config
         set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
         init_distributed_environment(parallel_config.world_size, rank,
                                      distributed_init_method, local_rank,
@@ -502,6 +510,14 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size)
+        expert_tensor_parallel_size = 1
+        if additional_config is not None and hasattr(
+                additional_config, "expert_tensor_parallel_size"):
+            expert_tensor_parallel_size = getattr(
+                additional_config, "expert_tensor_parallel_size")
+        init_ascend_model_parallel(parallel_config.tensor_parallel_size,
+                                   parallel_config.pipeline_parallel_size,
+                                   expert_tensor_parallel_size)
         ensure_kv_transfer_initialized(vllm_config)
 
 

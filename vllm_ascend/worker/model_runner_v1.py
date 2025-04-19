@@ -19,6 +19,7 @@
 
 import gc
 import os
+import weakref
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 import numpy as np
@@ -47,8 +48,7 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend.attention.attention import AttentionMaskBuilder
-from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
-                                                AscendMetadata)
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.platform import NPUPlatform
 
 if TYPE_CHECKING:
@@ -103,6 +103,27 @@ class NPUModelRunner:
             logger.error(error_msg)
             raise NotImplementedError(
                 "Non-Attention backend is not supported by V1 NPUModelRunner.")
+
+        self.attn_backend = get_attn_backend(
+            self.head_size,
+            self.dtype,
+            self.kv_cache_dtype,
+            self.block_size,
+            self.model_config.is_attention_free,
+            use_mla=self.model_config.use_mla,
+        )
+        if self.attn_backend is None:
+            error_msg = (
+                f"Error with get_att_backend: {self.head_size=}, "
+                f"{self.dtype=}, {self.kv_cache_dtype=}, {self.block_size=}, "
+                f"{self.model_config.is_attention_free=}, "
+                f"{self.model_config.use_mla=}")
+            logger.error(error_msg)
+            raise NotImplementedError(
+                "Non-Attention backend is not supported by V1 GPUModelRunner.")
+
+        self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
+            weakref.proxy(self))
 
         # Multi-modal data support
         self.input_registry = INPUT_REGISTRY
@@ -191,6 +212,12 @@ class NPUModelRunner:
                                             pin_memory=True)
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
 
+        self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
+                                               dtype=torch.int32,
+                                               device="cpu",
+                                               pin_memory=True)
+        self.query_start_loc_np = self.query_start_loc_cpu.numpy()
+
         self.seq_lens_cpu = torch.zeros(self.max_num_reqs,
                                         dtype=torch.int32,
                                         device="cpu",
@@ -200,6 +227,8 @@ class NPUModelRunner:
         self.input_positions_cpu = torch.arange(0,
                                                 self.max_num_tokens,
                                                 device="cpu")
+        self.attn_mask = None
+        self.attn_state = None
 
         # NOTE: Pre-construct a mask matrix to improve the efficiency of
         # attention mask construction during inference.
@@ -396,7 +425,11 @@ class NPUModelRunner:
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
-        # Copy the blocks from CPU to NPU.
+        modified_batch = self.attn_metadata_builder.reorder_batch(
+            self.input_batch, scheduler_output)
+        if modified_batch:
+            self.input_batch.refresh_sampling_metadata()
+
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit(num_reqs)
@@ -430,13 +463,12 @@ class NPUModelRunner:
         self.positions[:total_num_scheduled_tokens].copy_(
             self.positions_cpu[:total_num_scheduled_tokens], non_blocking=True)
         positions = self.positions[:total_num_scheduled_tokens]
+        self.query_lens = torch.from_numpy(num_scheduled_tokens)
 
         self.seq_lens_np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens)
         seq_lens = self.seq_lens_cpu[:num_reqs]
-
-        query_lens = torch.from_numpy(num_scheduled_tokens)
 
         block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                positions_np // self.block_size)
@@ -446,8 +478,6 @@ class NPUModelRunner:
         np.add(block_numbers * self.block_size,
                block_offsets,
                out=self.slot_mapping_np[:total_num_scheduled_tokens])
-        slot_mapping = self.slot_mapping_cpu[:total_num_scheduled_tokens].to(
-            self.device, non_blocking=True)
 
         attn_state = AscendAttentionState.ChunkedPrefill
         if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
@@ -461,15 +491,14 @@ class NPUModelRunner:
                                               query_lens=num_scheduled_tokens,
                                               position=positions,
                                               attn_state=attn_state)
+        self.attn_mask = attn_mask
+        self.attn_state = attn_state  # type: ignore
 
-        attn_metadata = AscendMetadata(
-            seq_lens=query_lens,
-            context_lens=seq_lens,
-            slot_mapping=slot_mapping,
-            block_tables=(
-                self.input_batch.block_table.get_device_tensor()[:num_reqs]),
-            attn_mask=attn_mask,
-            attn_state=attn_state,
+        attn_metadata = self.attn_metadata_builder.build(  # type: ignore
+            num_reqs=num_reqs,
+            num_actual_tokens=total_num_scheduled_tokens,
+            max_query_len=max_num_scheduled_tokens,
+            common_prefix_len=None,
         )
 
         # Prepare input_ids
@@ -804,6 +833,9 @@ class NPUModelRunner:
                 # different GPUs, and `kv_cache_config.num_blocks` is set to
                 # the min of all `num_blocks`. Verify it here.
                 assert num_blocks >= kv_cache_config.num_blocks
+                # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
+                # encounter OOM issue
+                num_blocks = num_blocks // 4
                 if isinstance(kv_cache_spec, FullAttentionSpec):
                     kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,
