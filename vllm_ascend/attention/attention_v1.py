@@ -146,8 +146,8 @@ class AscendAttentionMetadataBuilder:
         attn_state = self.runner.attn_state
 
         attn_metadata = AscendMetadata(block_tables=block_table,
-                                       seq_lens=query_lens,
-                                       context_lens=seq_lens,
+                                       query_lens=query_lens,
+                                       seq_lens=seq_lens,
                                        max_query_len=max_query_len,
                                        slot_mapping=slot_mapping,
                                        attn_mask=attn_mask,
@@ -280,6 +280,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         else:
             # use chunked prefill for head size 192 scenario, like deepseek
             # paged_attention_splitfuse maybe crash at such scenario
+            # TODO: vanilla path will be removed after the kernel support
+            # head_size 192 scenario
             if self.head_size == 192:
                 cu_seqlen_q = [0] + attn_metadata.query_lens.tolist()
                 cu_seqlen_k = [0] + attn_metadata.seq_lens.tolist()

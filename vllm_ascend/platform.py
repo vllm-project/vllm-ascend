@@ -196,15 +196,9 @@ class NPUPlatform(Platform):
 
     @classmethod
     def destroy_platform_model_parallel(cls) -> None:
-        from vllm_ascend.distributed.parallel_state import _EP, _ETP
-        if _EP:
-            _EP.destroy()
-        _EP = None
-
-        if _ETP:
-            for etp_group in _ETP:
-                etp_group.destroy()
-        _ETP = None
+        from vllm_ascend.distributed.parallel_state import \
+            destory_ascend_model_parallel
+        destory_ascend_model_parallel()
 
     @classmethod
     def platform_has_backend_register(cls) -> bool:

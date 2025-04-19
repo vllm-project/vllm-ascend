@@ -61,3 +61,15 @@ def init_ascend_model_parallel(
                                      get_world_group().local_rank,
                                      backend,
                                      group_name="etp")
+
+
+def destory_ascend_model_parallel():
+    global _EP
+    if _EP:
+        _EP.destroy()
+    _EP = None
+
+    global _ETP
+    if _ETP:
+        _ETP.destory()
+    _ETP = None

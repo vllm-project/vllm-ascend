@@ -93,4 +93,3 @@ def adapt_patch(is_global_patch: bool = False):
 def vllm_version_is(version: str):
     import vllm
     return Version(vllm.__version__) == Version(version)
-
