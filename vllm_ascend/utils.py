@@ -16,12 +16,16 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
+import os
+
 import torch
 import torch_npu  # noqa: F401
 from packaging.version import Version
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs
+
+VLLM_ENABLE_GRAPH_MODE = os.environ.get('VLLM_ENABLE_GRAPH_MODE', '0')
 
 
 def try_register_lib(lib_name: str, lib_info: str = ""):

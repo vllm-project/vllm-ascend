@@ -160,6 +160,8 @@ class NPUPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla):
+        if use_v1 and use_mla:
+            return "vllm_ascend.attention.mla_v1.AscendMLABackend"
         if use_v1:
             return "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
         if use_mla:
@@ -191,3 +193,30 @@ class NPUPlatform(Platform):
         model configuration.
         """
         return True
+
+    @classmethod
+    def destroy_platform_model_parallel(cls) -> None:
+        from vllm_ascend.distributed.parallel_state import \
+            destory_ascend_model_parallel
+        destory_ascend_model_parallel()
+
+    @classmethod
+    def platform_has_backend_register(cls) -> bool:
+        return True
+
+    @classmethod
+    def platform_register_backend(cls, pg, prefix_store, group_rank,
+                                  group_size, backend_options,
+                                  timeout) -> None:
+        from torch.distributed import ProcessGroup, is_hccl_available
+        assert is_hccl_available()
+        import torch_npu  # noqa
+        from torch_npu._C._distributed_c10d import ProcessGroupHCCL
+        backend_options = ProcessGroupHCCL.Options()
+        backend_options._timeout = timeout
+        backend_class = ProcessGroupHCCL(prefix_store, group_rank, group_size,
+                                         backend_options)
+        device = torch.device("npu")
+        backend_class._set_sequence_number_for_group()
+        backend_type = ProcessGroup.BackendType.CUSTOM
+        pg._register_backend(device, backend_type, backend_class)
