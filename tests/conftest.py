@@ -26,8 +26,6 @@ import torch
 from PIL import Image
 from vllm import LLM, SamplingParams
 from vllm.config import TaskOption
-from vllm.distributed.parallel_state import (destroy_distributed_environment,
-                                             destroy_model_parallel)
 from vllm.inputs import ExplicitEncoderDecoderPrompt, TextPrompt, TokensPrompt
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
@@ -35,6 +33,15 @@ from vllm.utils import is_list_of
 
 from tests.model_utils import (TokensTextLogprobs,
                                TokensTextLogprobsPromptLogprobs)
+# TODO: remove this part after the patch merged into vllm, if
+# we not explicitly patch here, some of them might be effectiveless
+# in pytest scenario
+from vllm_ascend.utils import adapt_patch  # noqa E402
+
+adapt_patch(True)
+
+from vllm.distributed.parallel_state import (  # noqa E402
+    destroy_distributed_environment, destroy_model_parallel)
 
 _M = TypeVar("_M")
 
