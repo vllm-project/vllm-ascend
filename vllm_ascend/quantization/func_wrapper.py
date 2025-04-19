@@ -26,9 +26,8 @@ def wrapper_rmsnorm_forward_oot(func):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         if not self.ignore_anti:
             if residual is not None:
-                residual += x
                 out = torch_npu._npu_quant_rms_norm(
-                    residual,
+                    x + residual,
                     self.weight,
                     self.bias,
                     self.input_scale,

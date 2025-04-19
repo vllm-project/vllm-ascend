@@ -16,80 +16,90 @@ from typing import Callable, Optional, Dict, Any
 
 import torch
 import torch_npu
-from vllm_ascend.ops.fused_moe import select_experts
+
+
+def group_topk(hidden_states: torch.Tensor,
+               gating_output: torch.Tensor,
+               topk: int,
+               renormalize: bool,
+               num_expert_group: Optional[int] = 0,
+               topk_group: Optional[int] = 0,
+               scoring_func: str = "softmax",
+               e_score_correction_bias: Optional[torch.Tensor] = None):
+    if scoring_func == "softmax":
+        scores = torch.softmax(gating_output, dim=-1)
+    elif scoring_func == "sigmoid":
+        scores = gating_output.sigmoid()
+    else:
+        raise ValueError(f"Unsupported scoring function: {scoring_func}")
+
+    if e_score_correction_bias is not None:
+        # Store original scores before applying correction bias. We use biased
+        # scores for expert selection but original scores for routing weights
+        original_scores = scores
+        scores = scores + e_score_correction_bias.unsqueeze(0)
+
+    topk_group = 0 if topk_group is None else topk_group
+    num_expert_group = 0 if num_expert_group is None else num_expert_group
+
+    num_token = scores.shape[0]
+    group_scores = scores.view(num_token, num_expert_group,
+                               -1).max(dim=-1).values
+    group_idx = torch.topk(group_scores.to(torch.float32),
+                           k=topk_group,
+                           dim=-1,
+                           sorted=False)[1]
+    group_mask = torch.zeros_like(group_scores)
+    group_mask.scatter_(1, group_idx, 1)
+    score_mask = group_mask.unsqueeze(-1).expand(
+        num_token, num_expert_group,
+        scores.shape[-1] // num_expert_group).reshape(num_token, -1)
+    scores = scores.masked_fill(~score_mask.bool(), 0.0)
+
+    if e_score_correction_bias is not None:
+        topk_ids = torch.topk(scores, k=topk, dim=-1, sorted=False)[1]
+        # Use original unbiased scores for the routing weights
+        topk_weights = original_scores.gather(1, topk_ids)
+    else:
+        topk_weights, topk_ids = torch.topk(scores,
+                                            k=topk,
+                                            dim=-1,
+                                            sorted=False)
+
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+
+    return topk_weights, topk_ids.to(torch.int32)
 
 
 def fused_experts(hidden_states: torch.Tensor, w1: torch.Tensor, w1_scale: torch.Tensor,
                   w2: torch.Tensor, w2_scale: torch.Tensor, topk_weights: torch.Tensor,
-                  topk_ids: torch.Tensor, top_k: int, expert_map: torch.Tensor = None):
-    original_shape = hidden_states.shape
-    if len(original_shape) == 3:
+                  topk_ids: torch.Tensor, top_k: int):
+    ori_shape = hidden_states.shape
+    if len(ori_shape) == 3:
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
     num_tokens, _ = hidden_states.shape
-    num_experts = w1.shape[0]
-    dtype = hidden_states.dtype
-    device = hidden_states.device
+    E, N, _ = w1.shape
 
-    if expert_map is not None:
-        # Generate token indices and flatten
-        token_indices = (torch.arange(num_tokens,
-                                      device=device,
-                                      dtype=torch.int64).unsqueeze(1).expand(
-                                          -1, top_k).reshape(-1))
+    row_idx_len = num_tokens * top_k
+    row_idx = torch.arange(0,
+                           row_idx_len,
+                           dtype=torch.int32,
+                           device=topk_weights.device).view(top_k, -1).permute(
+                               1, 0).contiguous()
+    expanded_x, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
+        hidden_states,
+        row_idx=row_idx,
+        expert_idx=topk_ids,
+        active_num=num_tokens)
+    del hidden_states
 
-        # Flatten token-to-expert mappings and map to local experts
-        weights_flat = topk_weights.view(-1)
-        experts_flat = topk_ids.view(-1)
-        local_experts_flat = expert_map[experts_flat]
+    expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
+        expanded_expert_idx, E)
+    expert_tokens = expert_tokens.to(torch.int64)
 
-        # Filter valid token-expert pairs
-        mask = local_experts_flat != -1
-        filtered_weights = torch.where(
-            mask, weights_flat, torch.zeros_like(weights_flat)).to(dtype)
-        filtered_experts = torch.where(
-            mask, local_experts_flat,
-            torch.full_like(local_experts_flat,
-                            num_experts)).to(topk_ids.dtype)
-
-        # Sort by local expert IDs
-        sort_indices = torch.argsort(filtered_experts)
-        sorted_token_indices = token_indices[sort_indices]
-        sorted_weights = filtered_weights[sort_indices]
-
-        # Compute token counts with minlength of num_experts
-        # This is equivalent to but faster than:
-        # >>> token_counts = torch.bincount(filtered_experts, minlength=num_experts)[:-1]
-        token_counts = torch.zeros(num_experts + 1,
-                                   device=device,
-                                   dtype=torch.int64)
-        ones = torch.ones_like(filtered_experts, dtype=torch.int64)
-        token_counts.scatter_add_(0, filtered_experts.to(torch.int64), ones)
-        token_counts = token_counts[:num_experts]
-        expert_tokens = torch.cumsum(token_counts, dim=0, dtype=torch.int64)
-
-        # Rearrange hidden_states
-        sorted_hidden_states = hidden_states[sorted_token_indices]
-    else:
-        row_idx_len = num_tokens * top_k
-        row_idx = torch.arange(0,
-                            row_idx_len,
-                            dtype=torch.int32,
-                            device=topk_weights.device).view(top_k, -1).permute(
-                                1, 0).contiguous()
-        sorted_hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
-            hidden_states,
-            row_idx=row_idx,
-            expert_idx=topk_ids,
-            active_num=num_tokens)
-        del hidden_states
-
-        expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
-            expanded_expert_idx, num_experts)
-        expert_tokens = expert_tokens.to(torch.int64)
-
-    quant_x, x_dynamic_scale = torch_npu.npu_dynamic_quant(sorted_hidden_states)
-    del sorted_hidden_states
+    quant_x, x_dynamic_scale = torch_npu.npu_dynamic_quant(expanded_x)
     output_dtype = torch.bfloat16 if w1_scale.dtype == torch.bfloat16 else torch.float16
 
     gate_up_out_list = torch_npu.npu_grouped_matmul(x=[quant_x],
@@ -103,13 +113,14 @@ def fused_experts(hidden_states: torch.Tensor, w1: torch.Tensor, w1_scale: torch
                                                     output_dtype=output_dtype)
     del quant_x
 
-    gate_up_out_list = gate_up_out_list[0] if len(gate_up_out_list) == 1 else torch.cat(gate_up_out_list, dim=0)
-    gate_up_out_list = torch_npu.npu_swiglu(gate_up_out_list)
-
-    quant_gate_up_out_list, gate_up_out_dynamic_scale = torch_npu.npu_dynamic_quant(gate_up_out_list)
+    gate_up_out = gate_up_out_list[0] if len(gate_up_out_list) == 1 else torch.cat(gate_up_out_list, dim=0)
     del gate_up_out_list
+    gate_up_out = torch_npu.npu_swiglu(gate_up_out)
 
-    down_out_list = torch_npu.npu_grouped_matmul(x=[quant_gate_up_out_list],
+    quant_gate_up_out, gate_up_out_dynamic_scale = torch_npu.npu_dynamic_quant(gate_up_out)
+    del gate_up_out
+
+    down_out_list = torch_npu.npu_grouped_matmul(x=[quant_gate_up_out],
                                                  weight=[w2],
                                                  scale=[w2_scale],
                                                  per_token_scale=[gate_up_out_dynamic_scale],
@@ -118,34 +129,22 @@ def fused_experts(hidden_states: torch.Tensor, w1: torch.Tensor, w1_scale: torch
                                                  group_type=0,
                                                  group_list=expert_tokens,
                                                  output_dtype=output_dtype)
-    del quant_gate_up_out_list
+    del quantized_gate_up_out
 
-    down_out_list = down_out_list[0] if len(down_out_list) == 1 else torch.cat(down_out_list, dim=0)
+    down_out = down_out_list[0] if len(down_out_list) == 1 else torch.cat(down_out_list, dim=0)
 
-    if expert_map is not None:
-        weighted_down_out = down_out_list * sorted_weights.unsqueeze(1)
-
-        final_hidden_states = torch.zeros(*original_shape,
-                                          device=hidden_states.device,
-                                          dtype=dtype)
-        final_hidden_states.index_add_(0, sorted_token_indices,
-                                       weighted_down_out)
-        # TODO: This should not happen! Look into it!
-        # fill nan with 0.0
-        final_hidden_states[torch.isnan(final_hidden_states)] = 0.0
-    else:
-        final_hidden_states = torch_npu.npu_moe_finalize_routing(
-            down_out_list,
-            skip1=None,
-            skip2=None,
-            bias=None,
-            scales=topk_weights,
-            expanded_src_to_dst_row=expanded_row_idx,
-            export_for_source_row=topk_ids)
-    del down_out_list
-    if len(original_shape) == 3:
-        final_hidden_states = final_hidden_states.view(original_shape)
-    return final_hidden_states
+    hidden_states = torch_npu.npu_moe_finalize_routing(
+        down_out,
+        skip1=None,
+        skip2=None,
+        bias=None,
+        scales=topk_weights,
+        expanded_src_to_dst_row=expanded_row_idx,
+        export_for_source_row=topk_ids)
+    del down_out
+    if len(ori_shape) == 3:
+        hidden_states = hidden_states.view(ori_shape)
+    return hidden_states
 
 
 class AscendW8A8DynamicLinearMethod:
@@ -236,34 +235,25 @@ class AscendW8A8DynamicFusedMoEMethod:
     def apply(
         layer: torch.nn.Module,
         x: torch.Tensor,
-        router_logits: torch.Tensor,
+        use_grouped_topk: bool,
         top_k: int,
+        router_logits: torch.Tensor,
         renormalize: bool,
-        use_grouped_topk: bool = False,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
-        global_num_experts: int = -1,
-        expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None,
-        **kwargs,
+        e_score_correction_bias: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
-        assert router_logits.shape[
-            1] == global_num_experts, "Number of global experts mismatch"
-
-        topk_weights, topk_ids = select_experts(
+        topk_weights, topk_ids = group_topk(
             hidden_states=x,
-            router_logits=router_logits,
-            top_k=top_k,
-            use_grouped_topk=use_grouped_topk,
+            gating_output=router_logits,
+            topk=top_k,
             renormalize=renormalize,
-            topk_group=topk_group,
             num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
+            topk_group=topk_group,
             scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-        )
+            e_score_correction_bias=e_score_correction_bias)
 
         return fused_experts(hidden_states=x,
                              w1=layer.w13_weight,
@@ -272,8 +262,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                              w2_scale=layer.w2_weight_scale,
                              topk_weights=topk_weights,
                              topk_ids=topk_ids,
-                             top_k=top_k,
-                             expert_map=expert_map)
+                             top_k=top_k)
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
