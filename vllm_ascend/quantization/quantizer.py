@@ -16,7 +16,16 @@
 #
 
 import importlib
+import sys
 from typing import Any, Dict, List, Optional
+import types
+from vllm.logger import init_logger
+
+from .w8a8 import AscendW8A8LinearMethod
+from .w8a8_dynamic import AscendW8A8DynamicLinearMethod, AscendW8A8DynamicFusedMoEMethod
+from .func_wrapper import wrapper_rmsnorm_init, wrapper_rmsnorm_forward_oot, wrapper_load_model
+
+logger = init_logger(__name__)
 
 CUSTOMIZED_QUANTIZER_TYPE: List[str] = []
 
@@ -39,12 +48,13 @@ class AscendQuantizer:
         try:
             module = importlib.import_module("mindie_turbo")
             MindIETurboQuantizer = module.MindIETurboQuantizer
+            return MindIETurboQuantizer.get_quantizer(quant_config, prefix,
+                                                      packed_modules_mapping)
         except ImportError:
-            raise NotImplementedError(
-                "There is no available ascend quantizer.")
-
-        return MindIETurboQuantizer.get_quantizer(quant_config, prefix,
-                                                  packed_modules_mapping)
+            logger.info(
+                "MindIE Turbo not available, using the adapted version now!")
+            return MTAdaptedQuantizer.get_quantizer(quant_config, prefix,
+                                                    packed_modules_mapping)
 
     def build_linear_method(self):
         raise NotImplementedError
@@ -54,3 +64,224 @@ class AscendQuantizer:
 
     def build_attention_method(self):
         raise NotImplementedError
+
+
+class MTAdaptedQuantizer:
+    _instance: Optional[object] = None
+    patched = False
+
+    def __init__(self, quant_description):
+        if MTAdaptedQuantizer.patched:
+            return
+        for name in quant_description.keys():
+            if "norm.bias" in name:
+                MTAdaptedQuantizer.apply_patch(
+                    "vllm.model_executor.layers.layernorm.RMSNorm", "__init__",
+                    [wrapper_rmsnorm_init])
+                MTAdaptedQuantizer.apply_patch(
+                    "vllm.model_executor.layers.layernorm.RMSNorm",
+                    "forward_oot", [wrapper_rmsnorm_forward_oot])
+                MTAdaptedQuantizer.apply_patch(
+                    "vllm_ascend.worker.model_runner.NPUModelRunnerBase",
+                    "load_model", [wrapper_load_model])
+                break
+        MTAdaptedQuantizer.patched = True
+
+    @staticmethod
+    def apply_patch(target_module, target_function, wrappers):
+
+        original_module, original_function = MTAdaptedQuantizer.parse_path(
+            target_module, target_function, False)
+
+        original_function_id = id(original_function)
+
+        candidate = original_function
+        for wrapper in wrappers:
+            candidate = wrapper(candidate)
+        if target_function is not None:
+            setattr(original_module, target_function, candidate)
+
+        for key, value in sys.modules.copy().items():
+            if (target_function is not None
+                    and hasattr(value, target_function)
+                    and id(getattr(value,
+                                   target_function)) == original_function_id):
+                setattr(value, target_function, candidate)
+
+    @staticmethod
+    def parse_path(module_path, function_name, create_dummy):
+        """
+        Parse module path and resolve/create modules as needed.
+
+        Args:
+            module_path: Dot-separated module path
+            function_name: Target function name (None for module only)
+            create_dummy: Create dummy modules/functions when missing
+
+        Returns:
+            Tuple of (resolved module, target function/none)
+
+        Raises:
+            ModuleNotFoundError: If module path is invalid and create_dummy=False
+            AttributeError: If function is missing and create_dummy=False
+        """
+        from importlib.machinery import ModuleSpec
+
+        def create_dummy_module(full_path, parent=None):
+            """Create and register a placeholder module"""
+            dummy = types.ModuleType(full_path)
+            dummy.__file__ = "vllm_ascend.dummy_module.py"
+            dummy.__spec__ = ModuleSpec(full_path, None)
+            sys.modules[full_path] = dummy
+            if parent:
+                setattr(parent, full_path.split(".")[-1], dummy)
+            return dummy
+
+        def create_placeholder_function(func_name):
+            """Create dummy function that raises when called"""
+
+            def placeholder(*args, **kwargs):
+                raise NotImplementedError(
+                    f"Function {func_name} is a placeholder")
+
+            placeholder.__name__ = func_name
+            return placeholder
+
+        modules = module_path.split(".")
+        current_module = None
+        processed_path = []
+
+        for idx, part in enumerate(modules):
+            current_path = ".".join(modules[:idx + 1])
+            parent_path = ".".join(modules[:idx]) if idx > 0 else None
+
+            try:
+                current_module = importlib.import_module(current_path)
+            except ModuleNotFoundError:
+                # Handle missing module
+                parent = importlib.import_module(
+                    parent_path) if parent_path else None
+                if parent and hasattr(parent, part):
+                    # Use existing attribute from parent
+                    current_module = getattr(parent, part)
+                    # Check for early function resolution
+                    if function_name and hasattr(current_module,
+                                                 function_name):
+                        return current_module, getattr(current_module,
+                                                       function_name)
+                    if function_name and create_dummy:
+                        ph_func = create_placeholder_function(function_name)
+                        setattr(current_module, function_name, ph_func)
+                        return current_module, ph_func
+                    if function_name:
+                        raise AttributeError(
+                            f"Function {function_name} missing in {current_path}"
+                        )
+                else:
+                    if not create_dummy:
+                        raise
+                    # Create and register dummy module
+                    current_module = create_dummy_module(
+                        current_path,
+                        parent=importlib.import_module(parent_path)
+                        if parent_path else None)
+
+            processed_path.append(part)
+
+        # Final function handling
+        final_module = sys.modules[module_path]
+        if function_name is not None:
+            if not hasattr(final_module, function_name):
+                if create_dummy:
+                    ph_func = create_placeholder_function(function_name)
+                    setattr(final_module, function_name, ph_func)
+                else:
+                    setattr(final_module, function_name, None)
+            return final_module, getattr(final_module, function_name)
+
+        return final_module, None
+
+    @staticmethod
+    def build_linear_method():
+        raise NotImplementedError(
+            "Linear method is not implemented for the current quant type.")
+
+    @staticmethod
+    def build_moe_method():
+        raise NotImplementedError(
+            "MoE method is not implemented for the current quant type.")
+
+    @staticmethod
+    def build_attention_method():
+        raise NotImplementedError(
+            "Attention method is not implemented for the current quant type.")
+
+    @staticmethod
+    def get_linear_quant_type(quant_description: Dict[str, Any], prefix: str,
+                              packed_modules_mapping: Dict[str, Any]):
+        proj_name = prefix.split(".")[-1]
+        if proj_name in packed_modules_mapping:
+            quant_type = None
+            shard_prefixes = [
+                prefix.replace(proj_name, shard_proj_name)
+                for shard_proj_name in packed_modules_mapping[proj_name]
+            ]
+            for shard_prefix in shard_prefixes:
+                shard_quant_type = quant_description[shard_prefix + '.weight']
+
+                if quant_type is None:
+                    quant_type = shard_quant_type
+                elif shard_quant_type != quant_type:
+                    raise ValueError(
+                        f"Not all shards of {prefix} are quantized with same quant type."
+                        f"Shard {proj_name} uses {shard_quant_type}, but another shard"
+                        f"use {quant_type}. Please check quantization config.")
+        else:
+            quant_type = quant_description[prefix + '.weight']
+        return quant_type
+
+    @classmethod
+    def get_quantizer(cls,
+                      quant_description: Dict[str, Any],
+                      prefix: str,
+                      packed_modules_mapping: Optional[Dict[str, Any]] = None):
+        if packed_modules_mapping is None:
+            packed_modules_mapping = dict()
+        # Attention
+        if '.attn' in prefix and 'fa_quant_type' in quant_description.keys():
+            quant_type = quant_description['fa_quant_type']
+        # Linear
+        else:
+            quant_type = cls.get_linear_quant_type(quant_description, prefix,
+                                                   packed_modules_mapping)
+        if quant_type in SUPPORT_ASCEND_QUANTIZER_TYPE.keys():
+            cls = SUPPORT_ASCEND_QUANTIZER_TYPE[quant_type]
+            if not cls._instance:
+                cls._instance = cls(quant_description)
+            return cls._instance
+        raise NotImplementedError("Currently, MindIE-Turbo only supports following quant types:" \
+                                  f"{list(SUPPORT_ASCEND_QUANTIZER_TYPE.keys())}")
+
+
+class W8A8Quantizer(MTAdaptedQuantizer):
+
+    @staticmethod
+    def build_linear_method():
+        return AscendW8A8LinearMethod()
+
+
+class W8A8DYNAMICQuantizer(MTAdaptedQuantizer):
+
+    @staticmethod
+    def build_linear_method():
+        return AscendW8A8DynamicLinearMethod()
+
+    @staticmethod
+    def build_moe_method():
+        return AscendW8A8DynamicFusedMoEMethod()
+
+
+SUPPORT_ASCEND_QUANTIZER_TYPE = {
+    "W8A8": W8A8Quantizer,
+    "W8A8_DYNAMIC": W8A8DYNAMICQuantizer,
+}
