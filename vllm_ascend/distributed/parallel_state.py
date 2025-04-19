@@ -71,5 +71,5 @@ def destory_ascend_model_parallel():
 
     global _ETP
     if _ETP:
-        _ETP.destory()
+        _ETP.destroy()
     _ETP = None
