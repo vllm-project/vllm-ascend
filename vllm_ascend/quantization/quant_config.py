@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional
 import torch
 import torch_npu  # noqa: F401
 from vllm.distributed import get_tensor_model_parallel_rank
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.fused_moe.layer import \
@@ -39,6 +40,8 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
 from vllm.model_executor.utils import set_weight_attrs
 
 from .quantizer import AscendQuantizer
+
+logger = init_logger(__name__)
 
 
 @register_quantization_config("ascend")
@@ -356,19 +359,22 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
-        use_grouped_topk: bool,
-        top_k: int,
         router_logits: torch.Tensor,
+        top_k: int,
         renormalize: bool,
+        use_grouped_topk: bool = False,
         topk_group: Optional[int] = None,
         num_expert_group: Optional[int] = None,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        **kwargs,
     ) -> torch.Tensor:
-        return self.quant_method.apply(layer, x, use_grouped_topk, top_k,
-                                       router_logits, renormalize, topk_group,
-                                       num_expert_group,
+        return self.quant_method.apply(layer, x, router_logits, top_k,
+                                       renormalize, use_grouped_topk, topk_group,
+                                       num_expert_group, global_num_experts, expert_map,
                                        custom_routing_function, scoring_func,
                                        e_score_correction_bias)
 
