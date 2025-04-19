@@ -12,10 +12,11 @@
 
 # Copyright (c) Huawei Technologies Co., Ltd. 2024-2025. All rights reserved.
 
-from typing import Callable, Optional, Dict, Any
+from typing import Any, Callable, Dict, Optional
 
 import torch
 import torch_npu
+
 from vllm_ascend.ops.fused_moe import select_experts
 
 

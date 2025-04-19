@@ -17,13 +17,16 @@
 
 import importlib
 import sys
-from typing import Any, Dict, List, Optional
 import types
+from typing import Any, Dict, List, Optional
+
 from vllm.logger import init_logger
 
+from .func_wrapper import (wrapper_load_model, wrapper_rmsnorm_forward_oot,
+                           wrapper_rmsnorm_init)
 from .w8a8 import AscendW8A8LinearMethod
-from .w8a8_dynamic import AscendW8A8DynamicLinearMethod, AscendW8A8DynamicFusedMoEMethod
-from .func_wrapper import wrapper_rmsnorm_init, wrapper_rmsnorm_forward_oot, wrapper_load_model
+from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
+                           AscendW8A8DynamicLinearMethod)
 
 logger = init_logger(__name__)
 

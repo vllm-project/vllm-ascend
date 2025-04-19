@@ -2,9 +2,9 @@ from typing import Optional, Tuple, Union
 
 import torch
 import torch_npu
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.logger import init_logger
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 
 logger = init_logger(__name__)
 
