@@ -183,6 +183,11 @@ class cmake_build_ext(build_ext):
         except subprocess.CalledProcessError as e:
             raise RuntimeError(f"Retrieve torch version version failed: {e}")
 
+        torch_npu_command_debug = "python3 -m pip show torch-npu"
+        torch_npu_info = subprocess.check_output(
+            torch_npu_command_debug, shell=True).decode().strip()
+        logger.info(f"=======torch-npu version: {torch_npu_info} =========")
+
         # add TORCH_NPU_PATH
         cmake_args += [f"-DTORCH_NPU_PATH={torch_npu_path}"]
 
