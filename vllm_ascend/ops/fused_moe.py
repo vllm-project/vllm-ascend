@@ -131,12 +131,12 @@ def fused_experts(
     )
 
     # TODO: Remove this in the future.
-    gate_up_out = torch.cat(gate_up_out_list, dim=0)
-    gate_up_out = torch_npu.npu_swiglu(gate_up_out)
+    gate_up_out_list = torch.cat(gate_up_out_list, dim=0)
+    gate_up_out_list = torch_npu.npu_swiglu(gate_up_out_list)
 
     w2 = w2.transpose(1, 2)
     down_out_list = torch_npu.npu_grouped_matmul(
-        x=[gate_up_out],
+        x=[gate_up_out_list],
         weight=[w2],
         split_item=2,
         group_list_type=0,
@@ -289,10 +289,10 @@ def forward_oot(
     self,
     layer: torch.nn.Module,
     x: torch.Tensor,
-    use_grouped_topk: bool,
-    top_k: int,
     router_logits: torch.Tensor,
+    top_k: int,
     renormalize: bool,
+    use_grouped_topk: bool = False,
     topk_group: Optional[int] = None,
     num_expert_group: Optional[int] = None,
     global_num_experts: int = -1,

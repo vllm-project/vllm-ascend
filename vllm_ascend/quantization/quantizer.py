@@ -69,8 +69,11 @@ class AscendQuantizer:
 
 class MTAdaptedQuantizer:
     _instance = None
+    patched = False
 
     def __init__(self, quant_description):
+        if MTAdaptedQuantizer.patched:
+            return
         for name in quant_description.keys():
             if "norm.bias" in name:
                 MTAdaptedQuantizer.apply_patch(
@@ -83,6 +86,7 @@ class MTAdaptedQuantizer:
                     "vllm_ascend.worker.model_runner.NPUModelRunnerBase", "load_model",
                     [wrapper_load_model])
                 break
+        MTAdaptedQuantizer.patched = True
     
     @staticmethod
     def apply_patch(target_module, target_function, wrappers):
