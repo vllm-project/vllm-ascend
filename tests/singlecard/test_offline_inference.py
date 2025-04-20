@@ -30,6 +30,7 @@ from tests.conftest import VllmRunner
 
 MODELS = [
     "Qwen/Qwen2.5-0.5B-Instruct",
+    "vllm-ascend/Qwen2.5-0.5B-Instruct-w8a8",
 ]
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
