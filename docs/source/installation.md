@@ -154,6 +154,8 @@ Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
    :substitutions:
 
 # Install vllm-project/vllm from pypi
+# There was a vLLM v0.8.4 installation bug, please use "Build from source code"
+# https://github.com/vllm-project/vllm-ascend/issues/581
 pip install vllm==|pip_vllm_version|
 
 # Install vllm-project/vllm-ascend from pypi.

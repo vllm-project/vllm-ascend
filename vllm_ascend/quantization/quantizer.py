@@ -52,10 +52,8 @@ class AscendQuantizer:
             return MindIETurboQuantizer.get_quantizer(quant_config, prefix,
                                                       packed_modules_mapping)
         except ImportError:
-            logger.info(
-                "MindIE Turbo not available, using the adapted version now!")
-            return MTAdaptedQuantizer.get_quantizer(quant_config, prefix,
-                                                    packed_modules_mapping)
+            return VLLMAscendQuantizer.get_quantizer(quant_config, prefix,
+                                                     packed_modules_mapping)
 
     def build_linear_method(self):
         raise NotImplementedError
@@ -67,31 +65,32 @@ class AscendQuantizer:
         raise NotImplementedError
 
 
-class MTAdaptedQuantizer:
+class VLLMAscendQuantizer:
     _instance: Optional[object] = None
     patched = False
 
     def __init__(self, quant_description):
-        if MTAdaptedQuantizer.patched:
+        if VLLMAscendQuantizer.patched:
             return
         for name in quant_description.keys():
             if "norm.bias" in name:
-                MTAdaptedQuantizer.apply_patch(
+                VLLMAscendQuantizer.apply_patch(
                     "vllm.model_executor.layers.layernorm.RMSNorm", "__init__",
                     [wrapper_rmsnorm_init])
-                MTAdaptedQuantizer.apply_patch(
+                VLLMAscendQuantizer.apply_patch(
                     "vllm.model_executor.layers.layernorm.RMSNorm",
                     "forward_oot", [wrapper_rmsnorm_forward_oot])
-                MTAdaptedQuantizer.apply_patch(
+                VLLMAscendQuantizer.apply_patch(
                     "vllm_ascend.worker.model_runner.NPUModelRunnerBase",
                     "load_model", [wrapper_load_model])
                 break
-        MTAdaptedQuantizer.patched = True
+        VLLMAscendQuantizer.patched = True
+        logger.info("Using the vLLM Ascend Quantizer version now!")
 
     @staticmethod
     def apply_patch(target_module, target_function, wrappers):
 
-        original_module, original_function = MTAdaptedQuantizer.parse_path(
+        original_module, original_function = VLLMAscendQuantizer.parse_path(
             target_module, target_function, False)
 
         original_function_id = id(original_function)
@@ -260,18 +259,18 @@ class MTAdaptedQuantizer:
             if not cls._instance:
                 cls._instance = cls(quant_description)
             return cls._instance
-        raise NotImplementedError("Currently, MindIE-Turbo only supports following quant types:" \
+        raise NotImplementedError("Currently, vLLM Ascend only supports following quant types:" \
                                   f"{list(SUPPORT_ASCEND_QUANTIZER_TYPE.keys())}")
 
 
-class W8A8Quantizer(MTAdaptedQuantizer):
+class W8A8Quantizer(VLLMAscendQuantizer):
 
     @staticmethod
     def build_linear_method():
         return AscendW8A8LinearMethod()
 
 
-class W8A8DYNAMICQuantizer(MTAdaptedQuantizer):
+class W8A8DYNAMICQuantizer(VLLMAscendQuantizer):
 
     @staticmethod
     def build_linear_method():
