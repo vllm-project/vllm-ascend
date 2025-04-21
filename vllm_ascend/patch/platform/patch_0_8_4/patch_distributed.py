@@ -27,7 +27,6 @@ from torch.distributed.distributed_c10d import (Backend, PrefixStore,
 from torch.distributed.rendezvous import rendezvous
 from vllm.config import ParallelConfig
 
-
 # What's Patched and how it works:
 # ** File: platform/patch_0_8_4/patch_distributed.py**
 #   1. `vllm.distributed.parallel_state.destroy_model_parallel()`
@@ -61,6 +60,7 @@ from vllm.config import ParallelConfig
 #    Future Plan:
 #       Its a workaround in vllm-ascend to enable multi-node dp inference, maybe removed if vllm have better plan
 #       on multi-node dp inference implementation
+
 
 def ascend_destroy_model_parallel():
     """Set the groups to none and destroy them."""
