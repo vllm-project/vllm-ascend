@@ -16,13 +16,11 @@
 #
 from collections import deque
 
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils import cdiv
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
-
-logger = init_logger(__name__)
 
 
 class AscendScheduler(Scheduler):

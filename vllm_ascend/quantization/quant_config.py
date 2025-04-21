@@ -23,8 +23,6 @@ import torch_npu  # noqa: F401
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
-from vllm.model_executor.layers.fused_moe.layer import \
-    UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                RowParallelLinear,
                                                UnquantizedLinearMethod)
@@ -35,6 +33,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
+
+from vllm_ascend.ops.fused_moe import AscendUnquantizedFusedMoEMethod
 
 from .quantizer import AscendQuantizer
 
@@ -97,7 +97,7 @@ class AscendQuantConfig(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
-                return UnquantizedFusedMoEMethod()
+                return AscendUnquantizedFusedMoEMethod()
             return AscendFusedMoEMethod(self, prefix,
                                         self.packed_modules_mapping)
         return None

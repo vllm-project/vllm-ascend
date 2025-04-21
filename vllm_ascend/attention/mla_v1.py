@@ -6,7 +6,6 @@ import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
-from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
                                                UnquantizedLinearMethod)
@@ -20,8 +19,6 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
-
-logger = init_logger(__name__)
 
 
 class AscendMLABackend(AttentionBackend):

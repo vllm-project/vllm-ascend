@@ -36,7 +36,6 @@ def init_ascend_model_parallel(
                                               expert_tensor_parallel_size)
 
     global _EP
-    assert _EP is None, ("expert parallel group is already initialized")
     group_ranks = []
     for i in range(num_expert_parallel_groups):
         ranks = list(range(i, world_size, num_expert_parallel_groups))
@@ -49,8 +48,6 @@ def init_ascend_model_parallel(
 
     group_ranks = []
     global _ETP
-    assert _ETP is None, (
-        "expert tensor parallel group is already initialized")
     for i in range(num_expert_tensor_parallel_groups):
         ranks = list(
             range(i * expert_tensor_parallel_size,

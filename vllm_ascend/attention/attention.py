@@ -113,7 +113,8 @@ class AttentionMaskBuilder:
             self.update_attn_cache(max_seq_len, dtype, device)
             # FIXME: Currently the mask value of chunked-prefill situation and Prefill-Only situation
             # is not the same. Fix this in the future when kernel is ready.
-            if self.attn_mask_cache[0][1] > 0:
+            if self.attn_mask_cache.numel(
+            ) > 1 and self.attn_mask_cache[0][1] > 0:
                 attn_mask = self.get_attn_mask(  # type: ignore
                     max_seq_len, dtype, device)
                 attn_mask *= -10000
