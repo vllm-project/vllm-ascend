@@ -39,7 +39,7 @@ MODELSCOPE_CACHE = "/root/.cache/modelscope/hub/models/"
     "model",
     [
         # [Encoder-only]
-        pytest.param("BAAI/bge-base-en-v1___5"),
+        pytest.param("BAAI/bge-base-en-v1.5"),
         pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
         pytest.param("intfloat/multilingual-e5-small"),
         pytest.param("iic/gte-Qwen2-7B-instruct"),
