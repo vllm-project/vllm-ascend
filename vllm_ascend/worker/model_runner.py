@@ -1285,9 +1285,6 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
             torch._dynamo.mark_static(model_input.input_positions)
             torch._dynamo.mark_static(model_input.attn_metadata.block_tables)
             torch._dynamo.mark_static(model_input.attn_metadata.slot_mapping)
-            torch._dynamo.mark_static(
-                model_input.attn_metadata.query_start_loc)
-            torch._dynamo.mark_static(model_input.attn_metadata.seq_start_loc)
             for kv in kv_caches:
                 if isinstance(kv, tuple):
                     torch._dynamo.mark_static(kv[0])
@@ -1360,6 +1357,9 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                                      self.vllm_config, virtual_engine):
                 if model_input.attn_metadata is not None:
                     model_input.attn_metadata.input_positions = model_input.input_positions
+                if self.vllm_config.compilation_config.level > 0:
+                    model_kwargs["kv_caches"] = kv_caches
+                    model_kwargs["attn_metadata"] = model_input.attn_metadata
                 hidden_or_intermediate_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,

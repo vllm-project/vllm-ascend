@@ -27,6 +27,7 @@ try:
 except ImportError:
     print("Failed to import torch_npu.")
 
+import torchair._contrib.custom_torch_ops  # noqa: F401
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata, AttentionType,

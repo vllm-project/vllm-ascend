@@ -111,13 +111,13 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        from vllm.config import CompilationLevel  # noqa: E402
-        compilation_config = vllm_config.compilation_config
-        if compilation_config and compilation_config.level != CompilationLevel.NO_COMPILATION:
-            logger.warning(
-                "Compilation level %s is not supported on NPU now, forcing compilation level to NO_COMPILATION",
-                compilation_config.level)
-            compilation_config.level = CompilationLevel.NO_COMPILATION
+        # from vllm.config import CompilationLevel  # noqa: E402
+        # compilation_config = vllm_config.compilation_config
+        # if compilation_config and compilation_config.level != CompilationLevel.NO_COMPILATION:
+        #     logger.warning(
+        #         "Compilation level %s is not supported on NPU now, forcing compilation level to NO_COMPILATION",
+        #         compilation_config.level)
+        #     compilation_config.level = CompilationLevel.NO_COMPILATION
 
         parallel_config = vllm_config.parallel_config
         if parallel_config and parallel_config.worker_cls == "auto":
