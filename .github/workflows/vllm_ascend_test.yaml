@@ -1,6 +1,5 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# This file is a part of the vllm-ascend project.
 #
 
 name: 'e2e test'
@@ -36,96 +36,72 @@ defaults:
   run:
     shell: bash -el {0}
 
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
-  dispatch:
-    name: vLLM Ascend test (dispatch)
-    runs-on: ascend-ci-arm64
-    outputs:
-      number: ${{ steps.dispatch-device.outputs.number }}
-    steps:
-      - name: vLLM Ascend test (dispatch)
-        id: dispatch-device
-        run: |
-          # Try to acquire lock to dispatch devices
-          lockfile /tmp/dispatch.lock
-
-          # Print npu info
-          npu-list /dev/null 2>&1
-
-          # Select first available device (Skip reserved davinci1 and davinci0)
-          NUMBER=$(npu-list /dev/null 2>&1 | grep None | grep -v davinci1 | grep -v davinci0 | head -1 | cut -b 15)
-          echo "Dispatch to /dev/davinci$NUMBER"
-          echo "number=$NUMBER" >> $GITHUB_OUTPUT
-
   test:
-    needs: [dispatch]
-    name: vLLM Ascend test (self-host)
-    runs-on: ascend-ci-arm64  # actionlint-ignore: runner-label
-
+    name: vLLM Ascend test v0.7.3-dev
+    runs-on: linux-arm64-npu-1
     container:
       image: quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10
-      volumes:
-        - /usr/local/dcmi:/usr/local/dcmi
-        - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
-        - /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/
-        # Use self-host cache speed up pip and model download
-        - /home/action/cache:/github/home/.cache/
-        # for dispatch lock
-        - /tmp/:/tmp/
-        # for vllm and vllm-ascend
-        - /data1/code:/code
-      options: >-
-        --device /dev/davinci${{ needs.dispatch.outputs.number }}
-        --device /dev/davinci_manager
-        --device /dev/devmm_svm
-        --device /dev/hisi_hdc
       env:
         HF_ENDPOINT: https://hf-mirror.com
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
     steps:
       - name: Check npu and CANN info
         run: |
           npu-smi info
           cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-          # unlock
-          rm -rf /tmp/dispatch.lock
 
       - name: Config mirrors
         run: |
           sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
           pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+          apt-get update -y
+          apt install git -y
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
 
       - name: Install system dependencies
         run: |
-          apt-get update -y
           apt-get -y install `cat packages.txt`
           apt-get -y install gcc g++ cmake libnuma-dev
 
-      - name: Install system dependencies
-        run: |
-          apt-get -y install `cat packages.txt`
-
-      - name: Clone vllm-project/vllm repo
-        run: |
-          git clone --depth 1 --branch v0.7.3 https://github.com/vllm-project/vllm.git ./vllm-empty
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          ref: v0.7.3
+          path: ./vllm-empty
 
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: |
           VLLM_TARGET_DEVICE=empty pip install -e .
 
-      - name: Install vllm-project/vllm-ascend
-        run: |
-          pip uninstall -y numpy
-          pip install -r requirements-dev.txt
-          pip install -e .
-
       - name: Install pta
         run: |
-          cd /code/pta/
-          pip install ./torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+          if [ ! -d /root/.cache/pta ]; then
+            mkdir -p /root/.cache/pta
+          fi
+
+          if [ ! -f /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl ]; then
+            cd /root/.cache/pta
+            rm -rf pytorch_v2.5.1_py310*
+            wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
+            tar -zxvf pytorch_v2.5.1_py310.tar.gz
+          fi
+
+          pip install /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+
+      - name: Install vllm-project/vllm-ascend
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -e .
 
       - name: Run vllm-project/vllm-ascend e2e test
         run: |
@@ -154,15 +130,3 @@ jobs:
       - name: Run vllm-project/vllm test
         run: |
           pytest -sv
-
-  post_cleanup:
-    name: vLLM Ascend test (post-cleanup)
-    needs: [test]
-    runs-on: ascend-ci-arm64  # actionlint-ignore: runner-label
-    if: always()
-    steps:
-      - name: Remove dispatch lock if exists
-        run: |
-          if [ -f "/tmp/dispatch.lock" ]; then
-            rm -f "/tmp/dispatch.lock"
-          fi
