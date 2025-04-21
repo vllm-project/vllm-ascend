@@ -1,7 +1,5 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
-# Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py
 # Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# This file is a part of the vllm-ascend project.
+# Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py
 #
 
 import gc
@@ -25,8 +25,7 @@ import torch.nn as nn
 import torch_npu
 from vllm import envs
 from vllm.config import VllmConfig
-from vllm.distributed import (ensure_kv_transfer_initialized,
-                              ensure_model_parallel_initialized,
+from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.logger import logger
@@ -39,8 +38,15 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.worker_base import WorkerBase
 
+from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
+from vllm_ascend.utils import try_register_lib, vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+if vllm_version_is("0.8.4"):
+    from vllm.distributed import ensure_kv_transfer_initialized
+else:
+    from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 
 
 class NPUWorker(WorkerBase):
@@ -66,6 +72,11 @@ class NPUWorker(WorkerBase):
                          rank=rank,
                          distributed_init_method=distributed_init_method,
                          is_driver_worker=is_driver_worker)
+        # Try to import mindie_turbo to accelerate vLLM inference.
+        try_register_lib(
+            "mindie_turbo",
+            "MindIE Turbo is installed. vLLM inference will be accelerated with MindIE Turbo."
+        )
         if self.cache_config.cache_dtype == "auto":
             self.cache_dtype = self.model_config.dtype
         else:
@@ -78,6 +89,12 @@ class NPUWorker(WorkerBase):
             init_cached_hf_modules()
 
         self.profiler = self._init_profiler()
+
+    def sleep(self, level: int = 1) -> None:
+        logger.error("Sleep mode is only supported on v0")
+
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        logger.error("Sleep mode is only supported on v0")
 
     def init_device(self):
         if self.device_config.device.type == "npu":
@@ -193,6 +210,8 @@ class NPUWorker(WorkerBase):
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
+        additional_config = self.vllm_config.additional_config
+        parallel_config = self.vllm_config.parallel_config
         set_custom_all_reduce(
             not self.parallel_config.disable_custom_all_reduce)
         init_distributed_environment(self.parallel_config.world_size,
@@ -201,6 +220,13 @@ class NPUWorker(WorkerBase):
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
+        expert_tensor_parallel_size = 1
+        if additional_config is not None and "expert_tensor_parallel_size" in additional_config:
+            expert_tensor_parallel_size = int(
+                additional_config["expert_tensor_parallel_size"])
+        init_ascend_model_parallel(parallel_config.tensor_parallel_size,
+                                   parallel_config.pipeline_parallel_size,
+                                   expert_tensor_parallel_size)
         ensure_kv_transfer_initialized(self.vllm_config)
 
     def _init_profiler(self):

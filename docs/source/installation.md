@@ -61,6 +61,7 @@ docker run --rm \
     -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
     -it $IMAGE bash
 ```
 
@@ -78,7 +79,7 @@ python -m venv vllm-ascend-env
 source vllm-ascend-env/bin/activate
 
 # Install required python packages.
-pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs numpy<2.0.0 decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
+pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs 'numpy<2.0.0' decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
 
 # Download and install the CANN package.
 wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.0.0/Ascend-cann-toolkit_8.0.0_linux-aarch64.run
@@ -123,7 +124,7 @@ First install system dependencies:
 
 ```bash
 apt update  -y
-apt install -y gcc g++ cmake libnuma-dev
+apt install -y gcc g++ cmake libnuma-dev wget
 ```
 
 Current version depends on a unreleased `torch-npu`, you need to install manually:
@@ -144,6 +145,7 @@ cd pta
 wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
 tar -xvf pytorch_v2.5.1_py310.tar.gz
 pip install ./torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+cd ..
 ```
 
 Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
@@ -152,6 +154,8 @@ Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
    :substitutions:
 
 # Install vllm-project/vllm from pypi
+# There was a vLLM v0.8.4 installation bug, please use "Build from source code"
+# https://github.com/vllm-project/vllm-ascend/issues/581
 pip install vllm==|pip_vllm_version|
 
 # Install vllm-project/vllm-ascend from pypi.
@@ -168,16 +172,19 @@ or build from **source code**:
 git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
 cd vllm
 VLLM_TARGET_DEVICE=empty pip install . --extra-index https://download.pytorch.org/whl/cpu/
+cd ..
 
 # Install vLLM Ascend
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 pip install -e . --extra-index https://download.pytorch.org/whl/cpu/
+cd ..
 ```
 :::
 
 ```{note}
 vllm-ascend will build custom ops by default. If you don't want to build it, set `COMPILE_CUSTOM_KERNELS=0` environment to disable it.
+To build custom ops, gcc/g++ higher than 8 and c++ 17 or higher is required. If you encourage a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
 ```
 
 ::::
@@ -215,6 +222,7 @@ docker run --rm \
     -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
     -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
     -v /etc/ascend_install.info:/etc/ascend_install.info \
+    -v /root/.cache:/root/.cache \
     -it $IMAGE bash
 ```
 

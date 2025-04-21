@@ -1,7 +1,5 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
-# Adapted from https://github.com/vllm-project/vllm/blob/main/setup.py
 # Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# This file is a part of the vllm-ascend project.
+# Adapted from https://github.com/vllm-project/vllm/blob/main/setup.py
 #
 
 import importlib.util
@@ -123,6 +123,10 @@ class cmake_build_ext(build_ext):
         cmake_args += [f"-DCMAKE_BUILD_TYPE={envs.CMAKE_BUILD_TYPE}"]
         # Default dump the compile commands for lsp
         cmake_args += ["-DCMAKE_EXPORT_COMPILE_COMMANDS=1"]
+        if envs.CXX_COMPILER is not None:
+            cmake_args += [f"-DCMAKE_CXX_COMPILER={envs.CXX_COMPILER}"]
+        if envs.C_COMPILER is not None:
+            cmake_args += [f"-DCMAKE_C_COMPILER={envs.C_COMPILER}"]
         if envs.VERBOSE:
             cmake_args += ["-DCMAKE_VERBOSE_MAKEFILE=ON"]
 

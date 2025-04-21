@@ -1,7 +1,5 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
-# Adapted from vllm-project/vllm/vllm/worker/worker.py
 # Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# This file is a part of the vllm-ascend project.
+# Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 
 import gc
@@ -25,8 +25,7 @@ import torch.distributed
 from torch import nn
 from vllm import envs
 from vllm.config import VllmConfig
-from vllm.distributed import (ensure_kv_transfer_initialized,
-                              ensure_model_parallel_initialized,
+from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.logger import logger
@@ -37,17 +36,24 @@ from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
-from vllm.utils import bind_kv_cache
+from vllm.utils import GiB_bytes, bind_kv_cache
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner_base import ModelRunnerBase
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
+from vllm_ascend.device_allocator.camem import CaMemAllocator
+from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import try_register_lib
+from vllm_ascend.utils import try_register_lib, vllm_version_is
 from vllm_ascend.worker.model_runner import NPUModelRunner
 from vllm_ascend.worker.pooling_model_runner import NPUPoolingModelRunner
+
+if vllm_version_is("0.8.4"):
+    from vllm.distributed import ensure_kv_transfer_initialized
+else:
+    from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 
 
 class NPUWorker(LocalOrDistributedWorkerBase):
@@ -155,6 +161,24 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         else:
             self.profiler = None
 
+    def sleep(self, level: int = 1) -> None:
+        NPUPlatform.set_device(self.device)
+        free_bytes_before_sleep = NPUPlatform.mem_get_info()[0]
+        allocator = CaMemAllocator.get_instance()
+        allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
+        free_bytes_after_sleep, total = NPUPlatform.mem_get_info()
+        freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+        used_bytes = total - free_bytes_after_sleep
+        assert freed_bytes >= 0, "Memory usage increased after sleeping."
+        logger.info(
+            "Sleep mode freed %.2f GiB memory, "
+            "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
+            used_bytes / GiB_bytes)
+
+    def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        allocator = CaMemAllocator.get_instance()
+        allocator.wake_up(tags=tags)
+
     def init_device(self) -> None:
         if self.device_config.device.type == "npu":
             self.device = torch.device(f"npu:{self.local_rank}")
@@ -172,7 +196,17 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         set_random_seed(self.model_config.seed)
 
     def load_model(self):
-        self.model_runner.load_model()
+        if self.vllm_config.model_config.enable_sleep_mode:
+            allocator = CaMemAllocator.get_instance()
+            assert allocator.get_current_usage() == 0, (
+                "Sleep mode can only be "
+                "used for one instance per process.")
+            context = allocator.use_memory_pool(tag="weights")
+        else:
+            from contextlib import nullcontext
+            context = nullcontext()  # type: ignore
+        with context:
+            self.model_runner.load_model()
 
     def start_profile(self):
         if self.profiler is None:
@@ -259,8 +293,14 @@ class NPUWorker(LocalOrDistributedWorkerBase):
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
-
-        self._init_cache_engine()
+        if self.vllm_config.model_config.enable_sleep_mode:
+            allocator = CaMemAllocator.get_instance()
+            context = allocator.use_memory_pool(tag="kv_cache")
+        else:
+            from contextlib import nullcontext
+            context = nullcontext()  # type: ignore
+        with context:
+            self._init_cache_engine()
         self._warm_up_model()
 
     def _init_cache_engine(self):
@@ -274,8 +314,14 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         for ve in range(self.parallel_config.pipeline_parallel_size):
             num_layers = len(self.cache_engine[ve].gpu_cache)
             for i in range(num_layers):
-                torch_npu.npu_format_cast(self.cache_engine[ve].gpu_cache[i],
-                                          2)
+                if torch.is_tensor(self.cache_engine[ve].gpu_cache[i]):
+                    torch_npu.npu_format_cast(
+                        self.cache_engine[ve].gpu_cache[i], 2)
+                else:
+                    torch_npu.npu_format_cast(
+                        self.cache_engine[ve].gpu_cache[i][0], 2)
+                    torch_npu.npu_format_cast(
+                        self.cache_engine[ve].gpu_cache[i][1], 2)
         self.gpu_cache = [
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)
@@ -456,6 +502,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             backend: str = "hccl") -> None:
         """Initialize the distributed environment."""
         parallel_config = self.parallel_config
+        additional_config = self.vllm_config.additional_config
         set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
         init_distributed_environment(parallel_config.world_size, rank,
                                      distributed_init_method, local_rank,
@@ -463,6 +510,14 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size)
+        expert_tensor_parallel_size = 1
+        if additional_config is not None and hasattr(
+                additional_config, "expert_tensor_parallel_size"):
+            expert_tensor_parallel_size = getattr(
+                additional_config, "expert_tensor_parallel_size")
+        init_ascend_model_parallel(parallel_config.tensor_parallel_size,
+                                   parallel_config.pipeline_parallel_size,
+                                   expert_tensor_parallel_size)
         ensure_kv_transfer_initialized(vllm_config)
 
 

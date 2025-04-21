@@ -1,7 +1,5 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
-# Adapted from vllm-project/vllm/docs/source/conf.py
 # Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# This file is a part of the vllm-ascend project.
+# Adapted from vllm-project/vllm/docs/source/conf.py
 #
 
 # -- Path setup --------------------------------------------------------------
@@ -63,15 +63,15 @@ myst_substitutions = {
     # the branch of vllm, used in vllm clone
     # - main branch: 'main'
     # - vX.Y.Z branch: 'vX.Y.Z'
-    'vllm_version': 'main',
+    'vllm_version': 'v0.8.4',
     # the branch of vllm-ascend, used in vllm-ascend clone and image tag
     # - main branch: 'main'
     # - vX.Y.Z branch: latest vllm-ascend release tag
-    'vllm_ascend_version': 'main',
+    'vllm_ascend_version': 'v0.8.4rc1',
     # the newest release version of vllm-ascend and matched vLLM, used in pip install.
     # This value should be updated when cut down release.
-    'pip_vllm_ascend_version': "0.7.3rc1",
-    'pip_vllm_version': "0.7.3",
+    'pip_vllm_ascend_version': "0.8.4rc1",
+    'pip_vllm_version': "0.8.4",
     # CANN image tag
     'cann_image_tag': "8.0.0-910b-ubuntu22.04-py3.10",
 }

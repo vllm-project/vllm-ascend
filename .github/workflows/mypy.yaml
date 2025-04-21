@@ -1,5 +1,4 @@
 #
-# Adapted from vllm-project/vllm/blob/main/.github
 # Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Adapted from vllm-project/vllm/blob/main/.github
 #
 
 name: mypy
@@ -47,7 +47,7 @@ jobs:
         python-version: ${{ matrix.python-version }}
     - name: Install dependencies
       run: |
-        pip install -r requirements-dev.txt 
+        pip install -r requirements-dev.txt
 
     - name: Checkout vllm-project/vllm repo
       uses: actions/checkout@v4

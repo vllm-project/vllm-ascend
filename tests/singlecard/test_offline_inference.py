@@ -1,7 +1,5 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
-# Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 # Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -15,6 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# This file is a part of the vllm-ascend project.
+# Adapted from vllm/tests/basic_correctness/test_basic_correctness.py
 #
 """Compare the short outputs of HF and vLLM when using greedy sampling.
 
@@ -24,13 +24,15 @@ import os
 
 import pytest
 import vllm  # noqa: F401
-from conftest import VllmRunner
 
 import vllm_ascend  # noqa: F401
+from tests.conftest import VllmRunner
 
 MODELS = [
     "Qwen/Qwen2.5-0.5B-Instruct",
+    "vllm-ascend/Qwen2.5-0.5B-Instruct-w8a8",
 ]
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 

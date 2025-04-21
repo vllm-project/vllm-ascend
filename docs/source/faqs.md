@@ -5,6 +5,7 @@
 - [[v0.7.1rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/19)
 - [[v0.7.3rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/267)
 - [[v0.7.3rc2] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/418)
+- [[v0.8.4rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/546)
 
 ## General FAQs
 
@@ -28,34 +29,13 @@ You can get our containers at `Quay.io`, e.g., [<u>vllm-ascend</u>](https://quay
 
 If you are in China, you can use `daocloud` to accelerate your downloading:
 
-1) Open `daemon.json`:
-
 ```bash
-vi /etc/docker/daemon.json
+docker pull m.daocloud.io/quay.io/ascend/vllm-ascend:v0.7.3rc2
 ```
-
-2) Add `https://docker.m.daocloud.io` to `registry-mirrors`:
-
-```json
-{
-  "registry-mirrors": [
-        "https://docker.m.daocloud.io"
-    ]
-}
-```
-
-3) Restart your docker service:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl restart docker
-```
-
-After configuration, you can download our container from `m.daocloud.io/quay.io/ascend/vllm-ascend:v0.7.3rc2`.
 
 ### 3. What models does vllm-ascend supports?
 
-Currently, we have already fully tested and supported `Qwen` / `Deepseek` (V0 only) / `Llama` models, other models we have tested are shown [<u>here</u>](https://vllm-ascend.readthedocs.io/en/latest/user_guide/supported_models.html). Plus, according to users' feedback, `gemma3` and `glm4` are not supported yet. Besides, more models need test.
+Find more details [<u>here</u>](https://vllm-ascend.readthedocs.io/en/latest/user_guide/supported_models.html).
 
 ### 4. How to get in touch with our community?
 
@@ -87,33 +67,39 @@ import vllm
 
 If all above steps are not working, feel free to submit a GitHub issue.
 
-### 7. Does vllm-ascend support Atlas 300I Duo?
-
-No, vllm-ascend now only supports Atlas A2 series. We are working on it.
-
-### 8. How does vllm-ascend perform?
+### 7. How does vllm-ascend perform?
 
 Currently, only some models are improved. Such as `Qwen2 VL`, `Deepseek  V3`. Others are not good enough. In the future, we will support graph mode and custom ops to improve the performance of vllm-ascend. And when the official release of vllm-ascend is released, you can install `mindie-turbo` with `vllm-ascend` to speed up the inference as well.
 
-### 9. How vllm-ascend work with vllm?
+### 8. How vllm-ascend work with vllm?
 vllm-ascend is a plugin for vllm. Basically, the version of vllm-ascend is the same as the version of vllm. For example, if you use vllm 0.7.3, you should use vllm-ascend 0.7.3 as well. For main branch, we will make sure `vllm-ascend` and `vllm` are compatible by each commit.
 
-### 10. Does vllm-ascend support Prefill Disaggregation feature?
+### 9. Does vllm-ascend support Prefill Disaggregation feature?
 
 Currently, only 1P1D is supported by vllm. For vllm-ascend, it'll be done by [this PR](https://github.com/vllm-project/vllm-ascend/pull/432). For NPND, vllm is not stable and fully supported yet. We will make it stable and supported by vllm-ascend in the future.
 
-### 11. Does vllm-ascend support quantization method?
+### 10. Does vllm-ascend support quantization method?
 
 Currently, there is no quantization method supported in vllm-ascend originally. And the quantization supported is working in progress, w8a8 will firstly be supported.
 
-### 12. How to run w8a8 DeepSeek model?
+### 11. How to run w8a8 DeepSeek model?
 
-Currently, running on v0.7.3, we should run w8a8 with vllm + vllm-ascend + mindie-turbo. And we only need vllm + vllm-ascend when v0.8.X is released. After installing the above packages, you can follow the steps below to run w8a8 DeepSeek:
+Currently, w8a8 DeepSeek is working in process: [support AscendW8A8 quantization](https://github.com/vllm-project/vllm-ascend/pull/511)
 
-1. Quantize bf16 DeepSeek, e.g. [unsloth/DeepSeek-R1-BF16](https://modelscope.cn/models/unsloth/DeepSeek-R1-BF16), with msModelSlim to get w8a8 DeepSeek. Find more details in [msModelSlim doc](https://gitee.com/ascend/msit/tree/master/msmodelslim/msmodelslim/pytorch/llm_ptq)
-2. Copy the content of `quant_model_description_w8a8_dynamic.json` into the `quantization_config` of `config.json` of the quantized model files.
-3. Reference with the quantized DeepSeek model.
+Please run DeepSeek with BF16 now, follwing the [Multi-Node DeepSeek inferencing tutorail](https://vllm-ascend.readthedocs.io/en/main/tutorials/multi_node.html)
 
-### 13. There is not output in log when loading models using vllm-ascend, How to solve it?
+### 12. There is not output in log when loading models using vllm-ascend, How to solve it?
 
 If you're using vllm 0.7.3 version, this is a known progress bar display issue in VLLM, which has been resolved in [this PR](https://github.com/vllm-project/vllm/pull/12428), please cherry-pick it locally by yourself. Otherwise, please fill up an issue.
+
+### 13. How vllm-ascend is tested
+
+vllm-ascend is tested by functional test, performance test and accuracy test.
+
+- **Functional test**: we added CI, includes portion of vllm's native unit tests and vllm-ascend's own unit tests，on vllm-ascend's test, we test basic functional usability for popular models, include `Qwen2.5-7B-Instruct`、 `Qwen2.5-VL-7B-Instruct`、`Qwen2.5-VL-32B-Instruct`、`QwQ-32B`.
+
+- **Performance test**: we provide [benchmark](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks) tools for end-to-end performance benchmark which can easily to re-route locally, we'll publish a perf website like [vllm](https://simon-mo-workspace.observablehq.cloud/vllm-dashboard-v0/perf) does to show the performance test results for each pull request
+
+- **Accuracy test**: we're working on adding accuracy test to CI as well.
+
+Finnall, for each release, we'll publish the performance test and accuracy test report in the future.
