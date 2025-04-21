@@ -32,7 +32,7 @@ env = os.environ.copy()
 # to be safe, we should use spawn method
 env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
 
-MODELSCOPE_CACHE = "/root/.cache/modelscope/models/"
+MODELSCOPE_CACHE = "/root/.cache/modelscope/hub/models/"
 
 
 @pytest.mark.parametrize(

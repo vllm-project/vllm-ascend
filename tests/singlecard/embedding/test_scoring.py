@@ -31,7 +31,7 @@ env = os.environ.copy()
 # the current process might initialize npu,
 # to be safe, we should use spawn method
 env['VLLM_WORKER_MULTIPROC_METHOD'] = 'spawn'
-MODELSCOPE_CACHE = "/root/.cache/modelscope/models/"
+MODELSCOPE_CACHE = "/root/.cache/modelscope/hub/models/"
 
 MODELS = [
     # "cross-encoder/ms-marco-MiniLM-L-6-v2",  # Bert
