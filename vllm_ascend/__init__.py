@@ -15,8 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from torch_npu.contrib import transfer_to_npu  # noqa: F401
-
 
 def register():
     """Register the NPU platform."""

@@ -24,8 +24,6 @@ import torch_npu  # noqa: F401
 import vllm.envs as envs
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
-from vllm_ascend.ops import register_dummy_fusion_op
-from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from vllm.utils import supports_dynamo
 
 CUSTOM_OP_ENABLED = False
@@ -116,7 +114,7 @@ class NPUPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm.config import CompilationLevel  # noqa: E402
         compilation_config = vllm_config.compilation_config
-        register_dummy_fusion_op()
+
         enforce_eager_flag = False
         # Check whether the eager mode is configured
         try:
@@ -140,7 +138,6 @@ class NPUPlatform(Platform):
             logger.info(
                 "Compilation level PIECEWISE is enable on NPU now, But use_inductor is no support, only use npu_graph now"
             )
-            _register_atb_extensions()
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(
                 ["vllm.unified_ascend_attention_with_output"])

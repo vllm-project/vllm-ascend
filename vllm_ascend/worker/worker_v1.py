@@ -23,6 +23,7 @@ from typing import Dict, List, Optional
 import torch
 import torch.nn as nn
 import torch_npu
+from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
@@ -65,7 +66,9 @@ class NPUWorker(WorkerBase):
         from vllm_ascend.utils import adapt_patch
         adapt_patch()
         # Register ops when worker init.
-        from vllm_ascend import ops  # noqa: F401
+        from vllm_ascend import ops
+        ops.register_dummy_fusion_op()
+        _register_atb_extensions()
 
         super().__init__(vllm_config=vllm_config,
                          local_rank=local_rank,

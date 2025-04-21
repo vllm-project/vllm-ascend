@@ -16,7 +16,7 @@
 #
 
 import torch
-import torch_npu
+import torch_npu  # noqa: F401
 
 import vllm_ascend.ops.activation  # noqa
 import vllm_ascend.ops.fused_moe  # noqa
@@ -46,7 +46,5 @@ def register_dummy_fusion_op() -> None:
         name="rms_norm_static_fp8_quant")
     torch.ops._C.fused_add_rms_norm_static_fp8_quant = dummyFusionOp(
         name="fused_add_rms_norm_static_fp8_quant")
-    torch.ops._C.rms_norm_dynamic_per_token_quant = dummyFusionOp(
-        name="rms_norm_dynamic_per_token_quant")
     torch.ops._C.rms_norm_dynamic_per_token_quant = dummyFusionOp(
         name="rms_norm_dynamic_per_token_quant")
