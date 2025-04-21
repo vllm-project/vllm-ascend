@@ -26,12 +26,14 @@ import pytest
 import vllm  # noqa: F401
 
 from tests.conftest import VllmRunner
+from vllm.assets.image import ImageAsset
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 
 @pytest.mark.parametrize("model, distributed_executor_backend", [
     ("Qwen/QwQ-32B", "mp"),
+    ("deepseek-ai/DeepSeek-V2-Lite", "mp"),
 ])
 def test_models_distributed(model: str,
                             distributed_executor_backend: str) -> None:
@@ -49,6 +51,34 @@ def test_models_distributed(model: str,
             distributed_executor_backend=distributed_executor_backend,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@pytest.mark.parametrize("model", ["Qwen/Qwen2.5-VL-32B-Instruct"])
+@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "1",
+                    reason="qwen2.5_vl is not supported on v1")
+def test_multimodal(model: str, prompt_template, vllm_runner):
+    image = ImageAsset("cherry_blossom") \
+        .pil_image.convert("RGB")
+    img_questions = [
+        "What is the content of this image?",
+        "Describe the content of this image in detail.",
+        "What's in the image?",
+        "Where is this image taken?",
+    ]
+    images = [image] * len(img_questions)
+    prompts = prompt_template(img_questions)
+    with vllm_runner(model,
+                     max_model_len=4096,
+                     tensor_parallel_size=4,
+                     distributed_executor_backend="mp",
+                     mm_processor_kwargs={
+                         "min_pixels": 28 * 28,
+                         "max_pixels": 1280 * 28 * 28,
+                         "fps": 1,
+                     }) as vllm_model:
+        vllm_model.generate_greedy(prompts=prompts,
+                                   images=images,
+                                   max_tokens=64)
 
 
 if __name__ == "__main__":

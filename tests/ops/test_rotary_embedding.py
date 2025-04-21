@@ -202,3 +202,4 @@ def test_rotary_embedding_quant_with_leading_dim(
                                ref_key,
                                atol=DEFAULT_ATOL,
                                rtol=DEFAULT_RTOL)
+    torch.npu.empty_cache()
