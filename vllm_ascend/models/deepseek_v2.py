@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # Copyright 2023 The vLLM team.
 # Copyright 2023 DeepSeek-AI and the HuggingFace Inc. team. All rights reserved.
 #
@@ -19,31 +19,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# <<<<<<< HEAD
 # # Adapted from
 # # vllm-project/vllm/blob/main/vllm/model_executor/models/deepseek_v2.py
 # # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # # vllm-project/vllm/vllm/model_executor/models/deepseek_v2.py
 # """Inference-only DeepseekV2/DeepseekV3 model."""
-# from typing import Optional, Union
-
-# import torch
-# from torch import nn
-# from transformers import PretrainedConfig
-# from vllm.config import CacheConfig, ModelConfig, VllmConfig
-# from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-# from vllm.model_executor.layers.fused_moe import FusedMoE
-# from vllm.model_executor.layers.layernorm import RMSNorm
-# from vllm.model_executor.layers.linear import ReplicatedLinear
-# from vllm.model_executor.layers.logits_processor import LogitsProcessor
-# from vllm.model_executor.layers.quantization import QuantizationConfig
-# from vllm.model_executor.layers.sampler import get_sampler
-# from vllm.model_executor.layers.vocab_parallel_embedding import (
-#     ParallelLMHead, VocabParallelEmbedding)
-# from vllm.model_executor.models.deepseek_v2 import (  # noqa
-#     DeepseekV2Attention, DeepseekV2DecoderLayer, DeepseekV2ForCausalLM,
-#     DeepseekV2MLAAttention, DeepseekV2MLP, DeepseekV2MoE)
-# =======
 
 import os
 from typing import Any, Dict, Optional, Union
@@ -173,9 +153,6 @@ class CustomDeepseekV2MoE(nn.Module):
 
         if (self.tp_size > 1 and self.enable_mc2
                 and attn_metadata.num_prefills == 0):
-            # hidden_states = dist._functional_collectives.reduce_scatter_tensor(
-            #     hidden_states, "sum", scatter_dim=0, group=self.tp_group
-            # )
             chunks = torch.chunk(hidden_states,
                                  get_tp_group().world_size,
                                  dim=0)
@@ -365,28 +342,6 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                              k_pe,
                              output_shape=hidden_states.shape)
 
-    # def forward(
-    #     self,
-    #     positions: torch.Tensor,
-    #     hidden_states: torch.Tensor,
-    #     # torchair should pass below two parameters
-    #     kv_cache: torch.Tensor = None,
-    #     attn_metadata: AttentionMetadata = None,
-    # ) -> torch.Tensor:
-    #     if self.q_lora_rank is not None:
-    #         ckq = self.q_a_proj(hidden_states)[0]
-    #         hidden_states_or_q_c = self.q_a_layernorm(ckq)
-    #     else:
-    #         hidden_states_or_q_c = hidden_states
-    #     if VLLM_ENABLE_GRAPH_MODE == '1':
-    #         return self.mla_attn(hidden_states_or_q_c, hidden_states, None,
-    #                              kv_cache, attn_metadata)
-    #     else:
-    #         kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
-    #             [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-    #         kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
-    #         return self.mla_attn(hidden_states_or_q_c, kv_c_normed, k_pe, output_shape=hidden_states.shape)
-    #  kv_cache, attn_metadata)
 
 
 class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
