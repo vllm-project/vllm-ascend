@@ -73,21 +73,11 @@ def native_rope_deepseek_forward(
     query: torch.Tensor,
     key: torch.Tensor,
     offsets: Optional[torch.Tensor] = None,
+    max_seq_len: int = None
 ):
-    # seq_len = positions.max() + 1
-    seq_len = self.max_position_embeddings
-
-    # x: [bs, num_attention_heads, seq_len, head_size]
-    # if self.max_seq_len_cached is None or seq_len > self.max_seq_len_cached:
-    #     self._set_cos_sin_cache(seq_len=seq_len, device=query.device, dtype=query.dtype)
-    self._set_cos_sin_cache(seq_len=seq_len,
-                            device=query.device,
-                            dtype=query.dtype)
-
-    cos = self.cos_cached[:seq_len].to(dtype=query.dtype)
-    sin = self.sin_cached[:seq_len].to(dtype=query.dtype)
-
-    q_pe, k_pe = apply_rotary_pos_emb(query, key, cos, sin, positions)
+    if max_seq_len is not None and max_seq_len > self.max_seq_len:
+        self._set_cos_sin_cache(max_seq_len, query.device, query.dtype)
+    q_pe, k_pe = apply_rotary_pos_emb(query, key, self.cos_cached, self.sin_cached, positions)
 
     return q_pe, k_pe
 
@@ -190,7 +180,6 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
 
 
 def _set_cos_sin_cache(self, seq_len, device, dtype):
-    seq_len = self.max_position_embeddings
     self.max_seq_len_cached = seq_len
     dim = self.rotary_dim
 
@@ -215,20 +204,50 @@ def _set_cos_sin_cache(self, seq_len, device, dtype):
 
     freqs = torch.outer(t, inv_freq)
 
-    # _mscale = float(
-    #     yarn_get_mscale(self.scaling_factor, self.mscale)
-    #     / yarn_get_mscale(self.scaling_factor, self.mscale_all_dim)
-    # )
-
     emb = torch.cat((freqs, freqs), dim=-1)
     self.register_buffer("cos_cached", (emb.cos() * self.mscale).to(dtype),
                          persistent=False)
     self.register_buffer("sin_cached", (emb.sin() * self.mscale).to(dtype),
                          persistent=False)
 
+def deepseek_rope_init_func(
+    self,
+    head_size: int,
+    rotary_dim: int,
+    max_position_embeddings: int,
+    base: int,
+    is_neox_style: bool,
+    scaling_factor: float,
+    dtype: torch.dtype,
+    *,
+    extrapolation_factor: float = 1,
+    attn_factor: float = 1,
+    beta_fast: int = 32,
+    beta_slow: int = 1,
+    mscale: float = 1,
+    mscale_all_dim: float = 0,
+) -> None:
+    self.scaling_factor = scaling_factor
+    self.extrapolation_factor = extrapolation_factor
+    self.attn_factor = attn_factor
+    self.beta_fast = beta_fast
+    self.beta_slow = beta_slow
+    # Get n-d magnitude scaling corrected for interpolation.
+    self.mscale = float(
+        yarn_get_mscale(self.scaling_factor, float(mscale)) /
+        yarn_get_mscale(self.scaling_factor, float(mscale_all_dim)) *
+        attn_factor)
+    super(DeepseekScalingRotaryEmbedding, self).__init__(head_size, rotary_dim, max_position_embeddings, base,
+                        is_neox_style, dtype)
+    # Note: Deepseekv3 in huggingface adopt neox_style rotary_embedding to implement deepseekv3
+    # which is the much compute friendly case compared with non neox_style one, we adopt this
+    # implement in vllm_ascend for performance boost, details can refer to 
+    # https://huggingface.co/deepseek-ai/DeepSeek-V3-0324/blob/main/modeling_deepseek.py
+    self.is_neox_style = True
+    self.max_seq_len = max_position_embeddings
+    _set_cos_sin_cache(self, max_position_embeddings, dtype=dtype, device="npu")
 
-# TODO: Patch when aclnn ops avaiable
+
 RotaryEmbedding.forward_oot = rope_forward_oot
+DeepseekScalingRotaryEmbedding.__init__ = deepseek_rope_init_func
 DeepseekScalingRotaryEmbedding.forward = native_rope_deepseek_forward
-DeepseekScalingRotaryEmbedding._set_cos_sin_cache = _set_cos_sin_cache
-DeepseekScalingRotaryEmbedding.max_seq_len_cached = None

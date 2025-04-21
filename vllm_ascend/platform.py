@@ -147,10 +147,16 @@ class NPUPlatform(Platform):
             additional_config = vllm_config.additional_config
             # If ascend_scheduler_config exists in additional_config,
             # extents original scheduler_config to use AscendScheduler.
+
             # if additional_config and additional_config.get(
             #         "ascend_scheduler_config", None) is not None:
-            additional_scheduler_config = additional_config.get(
-                "ascend_scheduler_config")
+            # additional_scheduler_config = additional_config.get(
+            #     "ascend_scheduler_config")
+
+            # Note: Open schedule v0 by default on engine v1 for chunked prefill
+            # kernel is not current very efficient yet
+            # TODO: Open chunked prefill when kernel's perf is good enough
+            additional_scheduler_config = {}
             from vllm_ascend.core.schedule_config import \
                 AscendSchedulerConfig
             ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(

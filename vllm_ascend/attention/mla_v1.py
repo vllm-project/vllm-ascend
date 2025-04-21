@@ -302,12 +302,16 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.qk_rope_head_dim = qk_rope_head_dim
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
+        # TODO: below padding should be removed after kernel is ready
+        # we found npu_flash_attention can only works on 128 divisible head_dim, we pad it to target size here 
+        # and slice the final result to guarantee its functionality.
+        self.padding_head_dim = ((self.qk_nope_head_dim + self.qk_rope_head_dim - 1) // 128 + 1) * 128
 
         # Hack for V1 for now to avoid torch library overhead (since we are
         # already inside an attention custom op), pull out the forward
         # method from the rotary embedding and call it directly
         # TODO(lucas): we should probably find a cleaner way to do this
-        self.rotary_emb = rotary_emb.forward_native
+        self.rotary_emb = rotary_emb
 
         self.q_proj = q_proj
         self.kv_b_proj = kv_b_proj
@@ -405,22 +409,15 @@ class AscendMLAImpl(MLAAttentionImpl):
     ) -> torch.Tensor:
         assert attn_metadata.prefill is not None
 
-        # TODO: enable  this compute for flash attention computation
-        # kv_nope = self.kv_b_proj(kv_c_normed)[0].view(\
-        #     -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-        # k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        # key = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
-        # v_padded = torch.nn.functional.pad(v, [0, query.shape[-1] - v.shape[-1]],
-        #                                    value=0)
         num_tokens = query.size(0)
-        attn_output = torch.empty(num_tokens,
-                                  self.num_heads,
-                                  self.v_head_dim,
-                                  dtype=query.dtype,
-                                  device=query.device)
+        attn_output = None
         # Here is only 2 possibility of input, ChunkedPrefill or PrefillOnly
         if attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
-        # current requests is chunked in prefill, disable flash attention with chunked prefill
+            attn_output = torch.empty(num_tokens,
+                            self.num_heads * self.v_head_dim,
+                            dtype=query.dtype,
+                            device=query.device)
+            # current requests is chunked in prefill, disable flash attention with chunked prefill
             vanilla_chunked_prefill_mla(
                 output=attn_output,
                 query=query,
@@ -437,27 +434,32 @@ class AscendMLAImpl(MLAAttentionImpl):
                 scale=self.scale,
                 alibi_slopes=None,
                 causal=True)
-            attn_output = attn_output.view(
-                [num_tokens, self.num_heads * self.v_head_dim])
         elif attn_metadata.attn_state == AscendAttentionState.PrefillOnly:
+            attn_output = torch.empty(num_tokens,
+                                      self.num_heads,
+                                      self.padding_head_dim,
+                                      dtype=query.dtype,
+                                      device=query.device)
             k_nope, value = self.kv_b_proj(kv_c_normed)[0].view(
                 -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim).split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-            key = torch.cat(k_nope, k_pe.expand((*k_nope.shape[:-1], -1)), dim=-1)
-            value = torch.nn.functional.pad(
-                value, [0, self.qk_rope_head_dim + self.qk_nope_head_dim - self.v_head_dim], value=0
-            )
-            toch_npu._npu_flash_attention(query=query,
-                                          key=key,
-                                          value=value,
+            key = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
+            pad_query = torch.nn.functional.pad(query, [0, self.padding_head_dim - self.qk_rope_head_dim - self.qk_nope_head_dim], value=0)
+            pad_key = torch.nn.functional.pad(key, [0, self.padding_head_dim - self.qk_rope_head_dim - self.qk_nope_head_dim], value=0)
+            pad_value = torch.nn.functional.pad(value, [0, self.padding_head_dim - self.v_head_dim], value=0)
+            torch_npu._npu_flash_attention(query=pad_query,
+                                          key=pad_key,
+                                          value=pad_query,
                                           mask=attn_metadata.attn_mask,
                                           seq_len=attn_metadata.prefill.context_lens,
                                           scale_value=self.scale,
                                           num_heads=self.num_heads,
-                                          num_kv_heads=self.num_kv_heads,
+                                          num_kv_heads=self.num_heads,
                                           out=attn_output)
+            attn_output = attn_output.view(-1, self.num_heads, self.padding_head_dim)[:, :, :self.v_head_dim]
         else:
             raise RuntimeError("Unexpected path reached, AscendMLAImpl should only have PrefillOnly and ChunkedPrefill scenario in forward prefill, please file a bug to vllm-ascend !")
-
+        attn_output = attn_output.reshape(
+            [num_tokens, self.num_heads * self.v_head_dim])
         return self.o_proj(attn_output)[0]
 
     def _forward_decode(
