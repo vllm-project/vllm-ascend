@@ -46,6 +46,9 @@ else:
     FlexibleArgumentParser = None
 
 os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
+# Fix the bug in torch 2.5.1 that raising segment fault when enable `pin_memory`
+# while creating a tensor using `torch.tensor`.
+os.environ["ACL_OP_INIT_MODE"] = "1"
 
 
 class NPUPlatform(Platform):
