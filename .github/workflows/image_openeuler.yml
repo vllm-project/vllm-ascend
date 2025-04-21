@@ -62,7 +62,7 @@ jobs:
         tags: |
           type=ref,event=branch,suffix=-openeuler
           type=ref,event=pr,suffix=-openeuler
-          type=pep440,pattern={{raw}}-openeuler
+          type=pep440,pattern={{raw}},suffix=-openeuler
 
     - name: Free up disk space
       uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
@@ -88,8 +88,6 @@ jobs:
       uses: docker/build-push-action@v6
       with:
         platforms: linux/amd64,linux/arm64
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
         # only trigger when tag, branch/main push
         push: ${{ github.event_name == 'push' && github.repository_owner == 'vllm-project' }}
         labels: ${{ steps.meta.outputs.labels }}
