@@ -23,9 +23,8 @@ import torch_npu
 
 def quant_per_tensor(in_tensor: torch.Tensor, input_scale: torch.Tensor,
                      input_offset: torch.Tensor):
-    return torch_npu.npu_quantize(
-        in_tensor, input_scale, input_offset, torch.qint8, -1, True
-    )
+    return torch_npu.npu_quantize(in_tensor, input_scale, input_offset,
+                                  torch.qint8, -1, True)
 
 
 class AscendW8A8LinearMethod:
@@ -88,7 +87,7 @@ class AscendW8A8LinearMethod:
         original_dtype = x.dtype
         if original_dtype != torch.int8:
             x = quant_per_tensor(
-                x, 
+                x,
                 layer.aclnn_input_scale,
                 layer.aclnn_input_offset,
             )
@@ -104,11 +103,11 @@ class AscendW8A8LinearMethod:
     def process_weights_after_loading(self, layer):
         expanding_factor = layer.weight.data.shape[1]
         layer.aclnn_input_scale = torch.nn.Parameter(
-            layer.input_scale.data.repeat(expanding_factor), requires_grad=False
-        )
+            layer.input_scale.data.repeat(expanding_factor),
+            requires_grad=False)
         layer.aclnn_input_offset = torch.nn.Parameter(
-            layer.input_offset.data.repeat(expanding_factor), requires_grad=False
-        )
+            layer.input_offset.data.repeat(expanding_factor),
+            requires_grad=False)
         if self.transpose_weight:
             layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)

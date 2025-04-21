@@ -332,28 +332,31 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
 
         self.prefix = prefix
         self.debug_layer_idx = int(self.prefix.split(".")[-2])
-        self.is_graph_mode = os.environ['VLLM_ENABLE_GRAPH_MODE'] == '1'
+        self.is_graph_mode = VLLM_ENABLE_GRAPH_MODE == '1'
 
     def forward(
             self,
             positions: torch.Tensor,
             hidden_states: torch.Tensor,
-            kv_cache: torch.Tensor = None,
-            attn_metadata: AttentionMetadata = None
-    ) -> torch.Tensor:
+            kv_cache: Optional[torch.Tensor] = None,
+            attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
         if self.q_lora_rank is not None:
             ckq = self.q_a_proj(hidden_states)[0]
             hidden_states_or_q_c = self.q_a_layernorm(ckq)
         else:
             hidden_states_or_q_c = hidden_states
         if self.is_graph_mode:
-            return self.mla_attn.impl.forward(self.mla_attn, hidden_states_or_q_c, hidden_states, None,
-                                              kv_cache, attn_metadata)
+            return self.mla_attn.impl.forward(self.mla_attn,
+                                              hidden_states_or_q_c,
+                                              hidden_states, None, kv_cache,
+                                              attn_metadata)
         else:
             kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
             kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
-            return self.mla_attn(hidden_states_or_q_c, kv_c_normed, k_pe,
+            return self.mla_attn(hidden_states_or_q_c,
+                                 kv_c_normed,
+                                 k_pe,
                                  output_shape=hidden_states.shape)
 
 
@@ -427,8 +430,8 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-        kv_cache: torch.Tensor = None,
-        attn_metadata: AttentionMetadata = None,
+        kv_cache: Optional[torch.Tensor] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
@@ -521,8 +524,8 @@ class CustomDeepseekV2Model(nn.Module):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches: List[torch.Tensor] = None,
-        attn_metadata: AttentionMetadata = None,
+        kv_caches: Optional[List[torch.Tensor]] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -539,9 +542,11 @@ class CustomDeepseekV2Model(nn.Module):
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            hidden_states, residual = layer(positions, hidden_states, residual,
-                                            kv_caches[i - self.start_layer] if kv_caches is not None else None,
-                                            attn_metadata)
+            hidden_states, residual = layer(
+                positions, hidden_states, residual,
+                kv_caches[i -
+                          self.start_layer] if kv_caches is not None else None,
+                attn_metadata)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -580,15 +585,15 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
-    
+
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            kv_caches: List[torch.Tensor] = None,
-            attn_metadata: AttentionMetadata = None,
-            intermediate_tensors: Optional[IntermediateTensors] = None,
-            inputs_embeds: Optional[torch.Tensor] = None,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: Optional[List[torch.Tensor]] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, intermediate_tensors,

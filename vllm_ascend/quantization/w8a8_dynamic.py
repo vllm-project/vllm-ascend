@@ -20,8 +20,8 @@ from typing import Any, Callable, Dict, Optional
 
 import torch
 import torch_npu
-from vllm_ascend.distributed.parallel_state import get_ep_group
 
+from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import select_experts
 
 
@@ -75,8 +75,7 @@ def apply_mlp(x: torch.Tensor,
         group_list_type=group_list_type,
         group_type=0,
         group_list=group_list,
-        output_dtype=output_dtype
-    )
+        output_dtype=output_dtype)
     gate_up_out = gate_up_out_list[0]
 
     # swiglu
@@ -93,27 +92,22 @@ def apply_mlp(x: torch.Tensor,
         group_list_type=group_list_type,
         group_type=0,
         group_list=group_list,
-        output_dtype=output_dtype
-    )
+        output_dtype=output_dtype)
     return down_out_list[0]
 
-def fused_experts_with_mc2(
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        w1_scale: torch.Tensor,
-        w2_scale: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        top_k: int,
-        expert_map: torch.Tensor = None,
-        moe_all_to_all_group_name: str = None,
-) -> torch.Tensor:
-    # Decoder Stage, seq = 1
-    # if torch.distributed.get_rank() == 0:
-    #     print(w1.shape)
-    #     print(hidden_states.shape)
 
+def fused_experts_with_mc2(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    top_k: int,
+    expert_map: torch.Tensor = None,
+    moe_all_to_all_group_name: str = "",
+) -> torch.Tensor:
     global_bs = 0
     moe_expert_num = len(expert_map)
     # hidden_states = hidden_states.bfloat16()
@@ -152,12 +146,19 @@ def fused_experts_with_mc2(
 
     output = torch_npu.npu_moe_distribute_dispatch(**kwargs)
     # comm_stream.wait_stream(torch.npu.current_stream())
-    expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[0:5]
+    expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[
+        0:5]
 
     if quant_mode == 0:
         dynamic_scale = None
 
-    down_out_list = apply_mlp(expand_x, w1, w1_scale, w2, w2_scale, expert_token_nums, dynamic_scale=dynamic_scale)
+    down_out_list = apply_mlp(expand_x,
+                              w1,
+                              w1_scale,
+                              w2,
+                              w2_scale,
+                              expert_token_nums,
+                              dynamic_scale=dynamic_scale)
 
     # moeCombine
     kwargs = {
@@ -170,7 +171,9 @@ def fused_experts_with_mc2(
         "moe_expert_num": moe_expert_num,
         "global_bs": 0,
     }
-    tp_recv_counts = torch.empty(1, dtype=torch.int32, device=hidden_states.device)
+    tp_recv_counts = torch.empty(1,
+                                 dtype=torch.int32,
+                                 device=hidden_states.device)
     stage3_kwargs = {
         "ep_send_counts": ep_recv_counts,
         "group_ep": moe_all_to_all_group_name,
@@ -187,6 +190,7 @@ def fused_experts_with_mc2(
     hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs)
 
     return hidden_states
+
 
 def fused_experts(hidden_states: torch.Tensor,
                   w1: torch.Tensor,
@@ -263,7 +267,13 @@ def fused_experts(hidden_states: torch.Tensor,
         expert_tokens = expert_tokens.to(torch.int64)
         group_list_type = 0
 
-    down_out_list = apply_mlp(sorted_hidden_states, w1, w1_scale, w2, w2_scale, expert_tokens, group_list_type=group_list_type)
+    down_out_list = apply_mlp(sorted_hidden_states,
+                              w1,
+                              w1_scale,
+                              w2,
+                              w2_scale,
+                              expert_tokens,
+                              group_list_type=group_list_type)
 
     if expert_map is not None:
         weighted_down_out = down_out_list * sorted_weights.unsqueeze(1)
@@ -273,8 +283,12 @@ def fused_experts(hidden_states: torch.Tensor,
                                           dtype=dtype)
 
         num_valid_tokens = mask.sum()
-        valid_token_mask = torch.arange(0, sorted_token_indices.shape[0], device=device).unsqueeze(1) < num_valid_tokens
-        valid_output = torch.where(valid_token_mask, weighted_down_out, torch.zeros_like(weighted_down_out)).to(dtype)
+        valid_token_mask = torch.arange(
+            0, sorted_token_indices.shape[0],
+            device=device).unsqueeze(1) < num_valid_tokens
+        valid_output = torch.where(
+            valid_token_mask, weighted_down_out,
+            torch.zeros_like(weighted_down_out)).to(dtype)
         final_hidden_states.index_add_(0, sorted_token_indices, valid_output)
     else:
         # TODO: Reorder device memory 2 times here, replace the current
@@ -367,9 +381,10 @@ class AscendW8A8DynamicFusedMoEMethod:
             # TODO: Try local_rank = ep_group.rank_in_group
             local_rank = torch.distributed.get_rank(group=device_group)
             backend = device_group._get_backend(torch.device("npu"))
-            self.moe_all_to_all_group_name = backend.get_hccl_comm_name(local_rank)
-        except AttributeError as e:
-            self.moe_all_to_all_group_name = None
+            self.moe_all_to_all_group_name = backend.get_hccl_comm_name(
+                local_rank)
+        except AttributeError:
+            self.moe_all_to_all_group_name = ""
 
     @staticmethod
     def get_weight(num_experts: int, intermediate_size_per_partition: int,
@@ -434,21 +449,21 @@ class AscendW8A8DynamicFusedMoEMethod:
         assert router_logits.shape[
             1] == global_num_experts, "Number of global experts mismatch"
 
+        # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
         if global_num_experts == 256:
             topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
                 router_logits,
-                k=top_k, # topk当前写8
+                k=top_k,  # topk当前写8
                 bias=e_score_correction_bias,
-                k_group=topk_group, # fix: 4
-                group_count=num_expert_group, # fix 8
-                group_select_mode=1, # 0: group中的最大; 1: topk2.sum(fix)
-                renorm=0, # 0: softmax->topk(fix); 1: topk->softmax
-                norm_type=1, # 0: softmax; 1: sigmoid(fix)
+                k_group=topk_group,  # fix: 4
+                group_count=num_expert_group,  # fix 8
+                group_select_mode=1,  # 0: group中的最大; 1: topk2.sum(fix)
+                renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
+                norm_type=1,  # 0: softmax; 1: sigmoid(fix)
                 # out_flag=False, # todo new api; 第三个输出是否输出
                 # y2_flag=False, # old api; 第三个输出是否输出
                 routed_scaling_factor=1,
-                eps=float(1e-20)
-            )
+                eps=float(1e-20))
         else:
             topk_weights, topk_ids = select_experts(
                 hidden_states=x,
@@ -474,18 +489,17 @@ class AscendW8A8DynamicFusedMoEMethod:
                 topk_ids=topk_ids,
                 top_k=top_k,
                 expert_map=expert_map,
-                moe_all_to_all_group_name=self.moe_all_to_all_group_name
-            )
+                moe_all_to_all_group_name=self.moe_all_to_all_group_name)
         else:
             return fused_experts(hidden_states=x,
-                                w1=layer.w13_weight,
-                                w1_scale=layer.w13_weight_scale,
-                                w2=layer.w2_weight,
-                                w2_scale=layer.w2_weight_scale,
-                                topk_weights=topk_weights,
-                                topk_ids=topk_ids,
-                                top_k=top_k,
-                                expert_map=expert_map)
+                                 w1=layer.w13_weight,
+                                 w1_scale=layer.w13_weight_scale,
+                                 w2=layer.w2_weight,
+                                 w2_scale=layer.w2_weight_scale,
+                                 topk_weights=topk_weights,
+                                 topk_ids=topk_ids,
+                                 top_k=top_k,
+                                 expert_map=expert_map)
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:

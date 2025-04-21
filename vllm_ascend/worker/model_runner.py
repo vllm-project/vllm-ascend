@@ -1340,7 +1340,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
 
         if self.vllm_config.compilation_config.level ==\
             CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
-            model_kwargs = {"inputs_embeds": None}
+            model_kwargs: Dict[str, Any] = {"inputs_embeds": None}
         else:
             model_kwargs = {}
         if previous_hidden_states is not None:

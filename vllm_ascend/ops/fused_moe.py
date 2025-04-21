@@ -330,16 +330,16 @@ def native_grouped_topk(
 
 
 def select_experts(
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        use_grouped_topk: bool,
-        renormalize: bool,
-        topk_group: Optional[int] = None,
-        num_expert_group: Optional[int] = None,
-        custom_routing_function: Optional[Callable] = None,
-        scoring_func: str = "softmax",
-        e_score_correction_bias: Optional[torch.Tensor] = None,
+    hidden_states: torch.Tensor,
+    router_logits: torch.Tensor,
+    top_k: int,
+    use_grouped_topk: bool,
+    renormalize: bool,
+    topk_group: Optional[int] = None,
+    num_expert_group: Optional[int] = None,
+    custom_routing_function: Optional[Callable] = None,
+    scoring_func: str = "softmax",
+    e_score_correction_bias: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Select top-k experts based on router logits.
@@ -467,24 +467,21 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         is_prefill=False,
         **kwargs,
     ):
-        # assert router_logits.shape[
-        #     1] == global_num_experts, "Number of global experts mismatch"
-        # set prefill as false always, should fix this
+        # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
         if global_num_experts == 256:
             topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
                 router_logits,
-                k=top_k, # topk当前写8
+                k=top_k,  # topk当前写8
                 bias=e_score_correction_bias,
-                k_group=topk_group, # fix: 4
-                group_count=num_expert_group, # fix 8
-                group_select_mode=1, # 0: group中的最大; 1: topk2.sum(fix)
-                renorm=0, # 0: softmax->topk(fix); 1: topk->softmax
-                norm_type=1, # 0: softmax; 1: sigmoid(fix)
+                k_group=topk_group,  # fix: 4
+                group_count=num_expert_group,  # fix 8
+                group_select_mode=1,  # 0: group中的最大; 1: topk2.sum(fix)
+                renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
+                norm_type=1,  # 0: softmax; 1: sigmoid(fix)
                 # out_flag=False, # todo new api; 第三个输出是否输出
                 # y2_flag=False, # old api; 第三个输出是否输出
                 routed_scaling_factor=1,
-                eps=float(1e-20)
-            )
+                eps=float(1e-20))
         else:
             topk_weights, topk_ids = select_experts(
                 hidden_states=x,
