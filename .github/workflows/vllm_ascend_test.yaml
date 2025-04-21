@@ -84,6 +84,11 @@ jobs:
         run: |
           VLLM_TARGET_DEVICE=empty pip install -e .
 
+      - name: Install vllm-project/vllm-ascend
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -e .
+
       - name: Install pta
         run: |
           if [ ! -d /root/.cache/pta ]; then
@@ -98,11 +103,6 @@ jobs:
           fi
 
           pip install /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
-
-      - name: Install vllm-project/vllm-ascend
-        run: |
-          pip install -r requirements-dev.txt
-          pip install -e .
 
       - name: Run vllm-project/vllm-ascend e2e test
         run: |
