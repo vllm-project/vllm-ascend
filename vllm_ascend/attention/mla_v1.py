@@ -56,7 +56,7 @@ class AscendMLAPrefillMetadata:
     input_positions: torch.Tensor
     block_table: torch.Tensor
     max_query_len: int
-    max_context_len: int
+    max_seq_lens: int
 
 
 @dataclass
@@ -66,6 +66,7 @@ class AscendMLADecodeMetadata:
     input_positions: torch.Tensor
     block_table: torch.Tensor
     seq_lens: torch.Tensor
+    max_seq_lens: int
 
 
 @dataclass
@@ -218,12 +219,14 @@ class AscendMLAMetadataBuilder:
                                                                                            num_reqs]
         seq_lens = seq_lens_cpu
         max_query_len = query_lens.max().item()
-        max_context_len = seq_lens.max().item()
+        max_seq_lens = seq_lens.max().item()
 
         prefill_metadata = None
         if self._num_prefills > 0:
             reqs_start = self._num_decodes  # prefill_start
             tokens_start = self._num_decode_tokens
+            max_query_len = query_lens[tokens_start:].max().item()
+            max_seq_lens = seq_lens[tokens_start:].max().item()
 
             prefill_metadata = AscendMLAPrefillMetadata(
                 attn_mask=self.runner.attn_mask,
@@ -232,15 +235,17 @@ class AscendMLAMetadataBuilder:
                 input_positions=input_positions[tokens_start:],
                 block_table=block_table[reqs_start:, ...],
                 max_query_len=max_query_len,
-                max_context_len=max_context_len,
+                max_seq_lens=max_seq_lens,
             )
 
         decode_metadata = None
         if self._num_decodes > 0:
+            max_seq_lens = seq_lens[:tokens_start].max().item()
             decode_metadata = AscendMLADecodeMetadata(
                 input_positions=input_positions[:self._num_decode_tokens],
                 block_table=block_table[:self._num_decode_tokens, ...],
-                seq_lens=seq_lens[:self._num_decode_tokens])
+                seq_lens=seq_lens[:self._num_decode_tokens],
+                max_seq_lens=max_seq_lens)
 
         return self.metadata_cls(  # type: ignore
             num_actual_tokens=num_actual_tokens,
@@ -427,7 +432,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 context_lens=attn_metadata.prefill.context_lens,
                 kv_b_proj=self.kv_b_proj,
                 max_query_len=attn_metadata.prefill.max_query_len,
-                max_context_len=attn_metadata.prefill.max_context_len,
+                max_context_len=attn_metadata.prefill.max_seq_lens,
                 nope_dim=self.qk_nope_head_dim,
                 rope_dim=self.qk_rope_head_dim,
                 v_head_dim=self.v_head_dim,
@@ -448,7 +453,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             pad_value = torch.nn.functional.pad(value, [0, self.padding_head_dim - self.v_head_dim], value=0)
             torch_npu._npu_flash_attention(query=pad_query,
                                           key=pad_key,
-                                          value=pad_query,
+                                          value=pad_value,
                                           mask=attn_metadata.attn_mask,
                                           seq_len=attn_metadata.prefill.context_lens,
                                           scale_value=self.scale,
@@ -476,7 +481,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         q = torch.cat([q_nope, q_pe], dim=-1)
         num_tokens = q.size(0)
-        attn_output = torch.randn(
+        attn_output = torch.empty(
             [num_tokens, self.num_heads, self.kv_lora_rank],
             dtype=q.dtype,
             device=q.device)
