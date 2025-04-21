@@ -144,10 +144,10 @@ class NPUPlatform(Platform):
         if envs.VLLM_USE_V1:
             # Activate custom ops for v1.
             vllm_config.compilation_config.custom_ops = ["all"]
-            additional_config = vllm_config.additional_config
             # If ascend_scheduler_config exists in additional_config,
             # extents original scheduler_config to use AscendScheduler.
 
+            # additional_config = vllm_config.additional_config
             # if additional_config and additional_config.get(
             #         "ascend_scheduler_config", None) is not None:
             # additional_scheduler_config = additional_config.get(
@@ -157,8 +157,7 @@ class NPUPlatform(Platform):
             # kernel is not current very efficient yet
             # TODO: Open chunked prefill when kernel's perf is good enough
             additional_scheduler_config = {}
-            from vllm_ascend.core.schedule_config import \
-                AscendSchedulerConfig
+            from vllm_ascend.core.schedule_config import AscendSchedulerConfig
             ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
                 vllm_config.scheduler_config, additional_scheduler_config)
             vllm_config.scheduler_config = ascend_scheduler_config
