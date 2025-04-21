@@ -24,9 +24,9 @@ import os
 
 import pytest
 import vllm  # noqa: F401
+from vllm.assets.image import ImageAsset
 
 from tests.conftest import VllmRunner
-from vllm.assets.image import ImageAsset
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 

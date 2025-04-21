@@ -28,7 +28,6 @@ from vllm.assets.image import ImageAsset
 
 import vllm_ascend  # noqa: F401
 from tests.conftest import VllmRunner
-from vllm.assets.image import ImageAsset
 
 MODELS = [
     "Qwen/Qwen2.5-0.5B-Instruct",
