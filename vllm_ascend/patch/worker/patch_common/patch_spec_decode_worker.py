@@ -18,7 +18,7 @@
 from typing import Any, Dict, Optional
 
 from vllm.config import ParallelConfig
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
 from vllm.model_executor.layers.spec_decode_base_sampler import \
     SpecDecodeBaseSampler
@@ -33,8 +33,6 @@ from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
 from vllm.worker.worker_base import WorkerBase
 
 from vllm_ascend.worker.draft_model_runner import TP1DraftModelRunner
-
-logger = init_logger(__name__)
 
 
 def create_worker(
