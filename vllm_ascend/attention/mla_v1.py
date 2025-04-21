@@ -132,11 +132,6 @@ class AscendMLAMetadataBuilder:
         self.runner = runner
         scheduler_config = runner.scheduler_config
         self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
-        # self.attn_mask = None
-        # if AscendMLAMetadataBuilder._attn_mask_builder is None:
-        #     AscendMLAMetadataBuilder._attn_mask_builder = AttentionMaskBuilder.initialize_from_len(
-        #         128, self.runner.model_config.dtype
-        #     )
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -423,25 +418,46 @@ class AscendMLAImpl(MLAAttentionImpl):
                                   self.v_head_dim,
                                   dtype=query.dtype,
                                   device=query.device)
+        # Here is only 2 possibility of input, ChunkedPrefill or PrefillOnly
+        if attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
         # current requests is chunked in prefill, disable flash attention with chunked prefill
-        vanilla_chunked_prefill_mla(
-            output=attn_output,
-            query=query,
-            kv_cache=kv_c_and_k_pe_cache,
-            block_tables=attn_metadata.prefill.block_table,
-            query_lens=attn_metadata.prefill.query_lens,
-            context_lens=attn_metadata.prefill.context_lens,
-            kv_b_proj=self.kv_b_proj,
-            max_query_len=attn_metadata.prefill.max_query_len,
-            max_context_len=attn_metadata.prefill.max_context_len,
-            nope_dim=self.qk_nope_head_dim,
-            rope_dim=self.qk_rope_head_dim,
-            v_head_dim=self.v_head_dim,
-            scale=self.scale,
-            alibi_slopes=None,
-            causal=True)
-        attn_output = attn_output.view(
-            [num_tokens, self.num_heads * self.v_head_dim])
+            vanilla_chunked_prefill_mla(
+                output=attn_output,
+                query=query,
+                kv_cache=kv_c_and_k_pe_cache,
+                block_tables=attn_metadata.prefill.block_table,
+                query_lens=attn_metadata.prefill.query_lens,
+                context_lens=attn_metadata.prefill.context_lens,
+                kv_b_proj=self.kv_b_proj,
+                max_query_len=attn_metadata.prefill.max_query_len,
+                max_context_len=attn_metadata.prefill.max_context_len,
+                nope_dim=self.qk_nope_head_dim,
+                rope_dim=self.qk_rope_head_dim,
+                v_head_dim=self.v_head_dim,
+                scale=self.scale,
+                alibi_slopes=None,
+                causal=True)
+            attn_output = attn_output.view(
+                [num_tokens, self.num_heads * self.v_head_dim])
+        elif attn_metadata.attn_state == AscendAttentionState.PrefillOnly:
+            k_nope, value = self.kv_b_proj(kv_c_normed)[0].view(
+                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim).split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            key = torch.cat(k_nope, k_pe.expand((*k_nope.shape[:-1], -1)), dim=-1)
+            value = torch.nn.functional.pad(
+                value, [0, self.qk_rope_head_dim + self.qk_nope_head_dim - self.v_head_dim], value=0
+            )
+            toch_npu._npu_flash_attention(query=query,
+                                          key=key,
+                                          value=value,
+                                          mask=attn_metadata.attn_mask,
+                                          seq_len=attn_metadata.prefill.context_lens,
+                                          scale_value=self.scale,
+                                          num_heads=self.num_heads,
+                                          num_kv_heads=self.num_kv_heads,
+                                          out=attn_output)
+        else:
+            raise RuntimeError("Unexpected path reached, AscendMLAImpl should only have PrefillOnly and ChunkedPrefill scenario in forward prefill, please file a bug to vllm-ascend !")
+
         return self.o_proj(attn_output)[0]
 
     def _forward_decode(
