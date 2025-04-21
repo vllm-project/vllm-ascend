@@ -6,6 +6,7 @@ requires = [
     "numpy<2.0.0",
     "packaging",
     "pip",
+    "poetry-core>=1.0.0“,
     "pybind11",
     "pyyaml",
     "scipy",
@@ -15,4 +16,9 @@ requires = [
     "torch >= 2.5.1",
     "torchvision<0.21.0",
 ]
-build-backend = "setuptools.build_meta"
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.dependencies]
+torch_npu = { url = "https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py39.tar.gz", python = ">=3.9, <3.10" }
+torch_npu = { url = "https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz", python = ">=3.10, <3.11" }
+torch_npu = { url = "https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py311.tar.gz", python = ">=3.11, <3.12" }

@@ -21,7 +21,6 @@ import gc
 from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
-import torch.distributed
 from torch import nn
 from vllm import envs
 from vllm.config import VllmConfig

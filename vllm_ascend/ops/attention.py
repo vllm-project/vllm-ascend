@@ -15,10 +15,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import torch
-from vllm.model_executor.layers.linear import ColumnParallelLinear
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.linear import ColumnParallelLinear
 
 
 # Implementation of vanilla chunked prefill, should be removed after the kernel is ready for
