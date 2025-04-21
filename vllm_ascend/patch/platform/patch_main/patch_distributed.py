@@ -20,7 +20,11 @@
 import vllm
 import vllm.distributed
 from vllm.config import ParallelConfig
-from vllm_ascend.patch.platform.patch_0_8_4.patch_distributed import ascend_destroy_model_parallel, ascend_stateless_init_torch_distributed_process_group, parallel_config_get_dp_port
+
+from vllm_ascend.patch.platform.patch_0_8_4.patch_distributed import (
+    ascend_destroy_model_parallel,
+    ascend_stateless_init_torch_distributed_process_group,
+    parallel_config_get_dp_port)
 
 # All details of those patch please refer to vllm_ascend/patch/platform/patch_0_8_4/patch_distributed.py
 vllm.distributed.parallel_state.destroy_model_parallel = ascend_destroy_model_parallel
