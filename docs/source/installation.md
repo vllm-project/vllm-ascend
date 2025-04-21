@@ -168,6 +168,10 @@ pip install vllm==|pip_vllm_version|
 pip install vllm-ascend==|pip_vllm_ascend_version|
 ```
 
+```{note}
+If you failed to install vllm due to no triton version could be installed, please build from source code.
+```
+
 :::{dropdown} Click here to see "Build from source code"
 or build from **source code**:
 
