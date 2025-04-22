@@ -27,40 +27,6 @@ from torch.distributed.distributed_c10d import (Backend, PrefixStore,
 from torch.distributed.rendezvous import rendezvous
 from vllm.config import ParallelConfig
 
-# What's Patched and how it works:
-# ** File: platform/patch_0_8_4/patch_distributed.py**
-#   1. `vllm.distributed.parallel_state.destroy_model_parallel()`
-#    Why:
-#       vllm dose not support outside platform maintain its own `CoordinatorGroup`, vllm-ascend maintain EP and ETP
-#       inside of the repo, and needs a common interface to destroy them, this patch add the interface of destroy
-#       platform owned `CoordinatorGroup` to make sure all the CoordinateGroup can be properly destroyed
-#    How：
-#       Call platform method `destroy_platform_model_parallel` to destroy all the `CoordinateGroup`
-#    Related PR (if no, explain why): no related PR, we want add this ability into vllm
-#    Future Plan:
-#       Remove those patch when vllm merged them
-#   2. `vllm.distributed.stateless_init_torch_distributed_process_group()`
-#    Why:
-#       The stateless process group can not be initialized except from gloo and nccl backend, vllm-ascend
-#       needs to initialize its own stateless process group for communication, so we add the platform related
-#       call to the `stateless_init_torch_distributed_process_group`, to enable other platform which may support
-#       stateless process group initialize method
-#    How：
-#       Call platform method `platform_has_backend_register` to judge if there is a stateless process group initialize
-#       method and call platform method `platform_register_backend` to initialize them
-#    Related PR (if no, explain why): no related PR, we want add this ability into vllm
-#    Future Plan:
-#       Remove those patch when vllm merged them
-#   3. `ParallelConfig.get_next_dp_init_port`
-#    Why:
-#       We want to get dp port from env variable, so the multi-node inference can be properly initialized and run.
-#    How：
-#       Get the dp port from env variable enable multi-mode dp inference
-#    Related PR (if no, explain why): no related PR, we want add this ability into vllm
-#    Future Plan:
-#       Its a workaround in vllm-ascend to enable multi-node dp inference, maybe removed if vllm have better plan
-#       on multi-node dp inference implementation
-
 
 def ascend_destroy_model_parallel():
     """Set the groups to none and destroy them."""
