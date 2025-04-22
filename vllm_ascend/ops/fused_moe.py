@@ -363,9 +363,6 @@ def select_experts(
     Raises:
         ValueError: If an unsupported scoring function is provided.
     """
-    # assert hidden_states.shape[0] == router_logits.shape[0], (
-    #     "Number of tokens mismatch")
-
     if custom_routing_function is not None:
         raise NotImplementedError(
             "Custom routing function is not supported now")
@@ -667,7 +664,6 @@ class AscendFusedMoE(FusedMoE):
                     scatter_dim=0,
                     group=get_dp_group().device_group)
 
-        # if self.reduce_results and self.tp_size > 1:
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)

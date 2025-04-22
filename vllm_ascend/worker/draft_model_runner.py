@@ -19,7 +19,7 @@ from typing import List, Optional
 
 import torch
 from vllm.forward_context import set_forward_context
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MultiModalKwargs
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
@@ -28,8 +28,6 @@ from vllm.worker.model_runner_base import (ModelRunnerBase,
                                            ModelRunnerWrapperBase)
 
 from vllm_ascend.attention.attention import AscendMetadata
-
-logger = init_logger(__name__)
 
 # A flag to enable debug prints for the updated input tensors
 # before each step.
