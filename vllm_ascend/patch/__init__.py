@@ -62,7 +62,7 @@
 #       inside of the repo, and needs a common interface to destroy them, this patch add the interface of destroy
 #       platform owned `CoordinatorGroup` to make sure all the CoordinateGroup can be properly destroyed
 #    How：
-#       Call platform method `destroy_platform_model_parallel` to destroy all the `CoordinateGroup`
+#       Call `vllm_ascend.distributed.parallel_state method `destroy_platform_model_parallel` to destroy all the `CoordinateGroup`
 #    Related PR (if no, explain why): no related PR, we want add this ability into vllm
 #    Future Plan:
 #       Remove those patch when vllm merged them
@@ -73,7 +73,7 @@
 #       call to the `stateless_init_torch_distributed_process_group`, to enable other platform which may support
 #       stateless process group initialize method
 #    How：
-#       Call platform method `platform_has_backend_register` to judge if there is a stateless process group initialize
+#       rewrite stateless_init_torch_distributed_process_group to judge if there is a stateless process group initialize
 #       method and call platform method `platform_register_backend` to initialize them
 #    Related PR (if no, explain why): no related PR, we want add this ability into vllm
 #    Future Plan:
