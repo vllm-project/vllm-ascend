@@ -24,6 +24,9 @@ from vllm.model_executor.layers.rotary_embedding import (
 
 from vllm_ascend.platform import CUSTOM_OP_ENABLED
 
+def custom_rotary_embedding_enabled(query, neox_style, head_size):
+    return query.dtype == torch.float16 and neox_style and head_size % 32 == 0 and CUSTOM_OP_ENABLED
+
 
 def rope_forward_oot(
     self,
@@ -43,7 +46,7 @@ def rope_forward_oot(
     if is_neox_style_override is not None:
         neox_style = is_neox_style_override
     # adopt custom kernel path for rotary_embedding
-    if CUSTOM_OP_ENABLED and neox_style and self.head_size % 32 == 0:
+    if custom_rotary_embedding_enabled(query, neox_style, self.head_size):
         return torch.ops._C.rotary_embedding(
             positions,
             query,
