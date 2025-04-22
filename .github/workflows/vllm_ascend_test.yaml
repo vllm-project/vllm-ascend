@@ -110,8 +110,8 @@ jobs:
 
       # only run test on spec decode when the related code changed
       - name: Check for changes in Speculative Decode
-        id: filter
-        uses: dorny/paths-filter@v2
+        id: filter_spec_deocde
+        uses: dorny/paths-filter@v3
         with:
           filters: |
             speculative_tests_changed:
@@ -122,12 +122,27 @@ jobs:
               - "vllm_ascend/patch/patch_spec_decode_worker.py"
               - "vllm_ascend/patch/patch_multi_step_worker.py"
 
-      - name: Run vllm-project/vllm-ascend key feature test
-        if: steps.filter.outputs.speculative_tests_changed == 'true'
+      - name: Run vllm-project/vllm-ascend spec decode test
+        if: steps.filter_spec_deocde.outputs.speculative_tests_changed == 'true'
         run: |
           pytest -sv tests/spec_decode/e2e/test_mtp_correctness.py  # it needs a clean process
           pytest -sv tests/spec_decode/e2e/test_multistep_correctness.py  # it needs a clean process
           pytest -sv tests/spec_decode --ignore=tests/spec_decode/e2e/test_mtp_correctness.py --ignore=tests/spec_decode/e2e/test_multistep_correctness.py
+
+      - name: Check for changes in Multi-Step
+        id: filter_multi_step
+        uses: dorny/paths-filter@v3
+        with:
+          filters: |
+            multi_step_tests_changed:
+              - "tests/multi_step/**"
+              - "vllm_ascend/worker/multi_step_runner.py"
+              - "vllm_ascend/worker/multi_step_worker.py"
+
+      - name: Run vllm-project/vllm-ascend multi-step test
+        if: steps.filter_multi_step.outputs.multi_step_tests_changed == 'true'
+        run: |
+          pytest -sv tests/multi_step
 
       - name: Run vllm-project/vllm test
         run: |
