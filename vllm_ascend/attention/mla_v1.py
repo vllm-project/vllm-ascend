@@ -240,7 +240,7 @@ class AscendMLAMetadataBuilder:
 
         decode_metadata = None
         if self._num_decodes > 0:
-            max_seq_lens = seq_lens[:tokens_start].max().item()
+            max_seq_lens = seq_lens[:self._num_decodes].max().item()
             decode_metadata = AscendMLADecodeMetadata(
                 input_positions=input_positions[:self._num_decode_tokens],
                 block_table=block_table[:self._num_decode_tokens, ...],

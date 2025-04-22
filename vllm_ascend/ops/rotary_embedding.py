@@ -31,6 +31,7 @@ def rope_forward_oot(
     query: torch.Tensor,
     key: torch.Tensor,
     offsets: Optional[torch.Tensor] = None,
+    is_neox_style_override: Optional[bool] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     import torch_npu
 
@@ -38,15 +39,18 @@ def rope_forward_oot(
         self.cos_sin_cache = self.cos_sin_cache.to(query.device)
     if self.cos_sin_cache.dtype != query.dtype:
         self.cos_sin_cache = self.cos_sin_cache.to(query.dtype)
+    neox_style = self.is_neox_style
+    if is_neox_style_override is not None:
+        neox_style = is_neox_style_override
     # adopt custom kernel path for rotary_embedding
-    if CUSTOM_OP_ENABLED and self.is_neox_style and self.head_size % 32 == 0:
+    if CUSTOM_OP_ENABLED and neox_style and self.head_size % 32 == 0:
         return torch.ops._C.rotary_embedding(
             positions,
             query,
             key,
             self.head_size,
             self.cos_sin_cache,
-            self.is_neox_style,
+            neox_style,
         )
     if offsets is not None:
         raise NotImplementedError(
@@ -62,22 +66,33 @@ def rope_forward_oot(
             key,
             self.head_size,
             self.cos_sin_cache,
-            self.is_neox_style,
+            neox_style,
         )
     return query.view(query_shape), key.view(key_shape)
 
 
-def native_rope_deepseek_forward(self,
-                                 positions: torch.Tensor,
-                                 query: torch.Tensor,
-                                 key: torch.Tensor,
-                                 offsets: Optional[torch.Tensor] = None,
-                                 max_seq_len: int = None):
+def native_rope_deepseek_forward(
+    self,
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    offsets: Optional[torch.Tensor] = None,
+    max_seq_len: int = None
+):
     if max_seq_len is not None and max_seq_len > self.max_seq_len:
         self._set_cos_sin_cache(max_seq_len, query.device, query.dtype)
-    q_pe, k_pe = apply_rotary_pos_emb(query, key, self.cos_cached,
-                                      self.sin_cached, positions)
-
+    if len(key.shape) == 2:
+        key = key[:, None, :]
+    # Note: we implement the non neox_style method with shuffle the last dim and neox style
+    # calculation method which is also more compute friendly to the ascend machine
+    # https://huggingface.co/deepseek-ai/DeepSeek-V3-0324/blob/main/modeling_deepseek.py
+    neox_style = True
+    if self.is_neox_style is False:
+        b, h_q, d = query.shape
+        query = query.view(b, h_q, d // 2, 2).transpose(3, 2).reshape(b, h_q, d)
+        b, h_k, d = key.shape
+        key = key.view(b, h_k, d // 2, 2).transpose(3, 2).reshape(b, h_k, d)
+    q_pe, k_pe = rope_forward_oot(self, positions, query, key, offsets, neox_style)
     return q_pe, k_pe
 
 
@@ -202,13 +217,8 @@ def _set_cos_sin_cache(self, seq_len, device, dtype):
     t = torch.arange(seq_len, device=device, dtype=torch.float32)
 
     freqs = torch.outer(t, inv_freq)
-
-    emb = torch.cat((freqs, freqs), dim=-1)
-    self.register_buffer("cos_cached", (emb.cos() * self.mscale).to(dtype),
-                         persistent=False)
-    self.register_buffer("sin_cached", (emb.sin() * self.mscale).to(dtype),
-                         persistent=False)
-
+    cache = torch.cat([freqs.cos() * self.mscale, freqs.sin() * self.mscale], dim=-1).to(dtype)
+    self.register_buffer("cos_sin_cache", cache, persistent=False)
 
 def deepseek_rope_init_func(
     self,
@@ -237,19 +247,10 @@ def deepseek_rope_init_func(
         yarn_get_mscale(self.scaling_factor, float(mscale)) /
         yarn_get_mscale(self.scaling_factor, float(mscale_all_dim)) *
         attn_factor)
-    super(DeepseekScalingRotaryEmbedding,
-          self).__init__(head_size, rotary_dim, max_position_embeddings, base,
-                         is_neox_style, dtype)
-    # Note: Deepseekv3 in huggingface adopt neox_style rotary_embedding to implement deepseekv3
-    # which is the much compute friendly case compared with non neox_style one, we adopt this
-    # implement in vllm_ascend for performance boost, details can refer to
-    # https://huggingface.co/deepseek-ai/DeepSeek-V3-0324/blob/main/modeling_deepseek.py
-    self.is_neox_style = True
+    super(DeepseekScalingRotaryEmbedding, self).__init__(head_size, rotary_dim, max_position_embeddings, base,
+                        is_neox_style, dtype)
     self.max_seq_len = max_position_embeddings
-    _set_cos_sin_cache(self,
-                       max_position_embeddings,
-                       dtype=dtype,
-                       device="npu")
+    _set_cos_sin_cache(self, max_position_embeddings, dtype=dtype, device="npu")
 
 
 RotaryEmbedding.forward_oot = rope_forward_oot
