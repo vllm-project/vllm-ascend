@@ -1,5 +1,7 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+# Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 # Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,18 +15,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# This file is a part of the vllm-ascend project.
-# Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
 import gc
-import os
 import weakref
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 import numpy as np
-import numpy.typing as npt
 import torch
+import torch.distributed
 import torch.nn as nn
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
@@ -32,77 +31,78 @@ from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
-from vllm.logger import logger
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LayerBlockType, LazyLoader, cdiv)
+                        LayerBlockType, cdiv, is_pin_memory_available)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors, ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
-from vllm_ascend.attention.attention import AttentionMaskBuilder
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.platform import NPUPlatform
+from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
+                                                AscendMetadata)
 
 if TYPE_CHECKING:
-    import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import SchedulerOutput
-else:
-    xgr = LazyLoader("xgr", globals(), "xgrammar")
+
+logger = init_logger(__name__)
 
 
 class NPUModelRunner:
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
+        self.load_config = vllm_config.load_config
+        self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
-        self.device = device
-        self.is_multimodal_model = self.model_config.is_multimodal_model
-        self.block_size = vllm_config.cache_config.block_size
-        self.max_num_blocks_per_req = cdiv(self.model_config.max_model_len,
-                                           self.block_size)
-        self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
-        self.max_num_reqs = self.scheduler_config.max_num_seqs
+        self.speculative_config = vllm_config.speculative_config
+        self.prompt_adapter_config = vllm_config.prompt_adapter_config
+        self.observability_config = vllm_config.observability_config
 
-        # Model-related.
-        self.num_attn_layers = self.model_config.get_num_layers_by_block_type(
-            vllm_config.parallel_config, LayerBlockType.attention)
-        self.hidden_size = self.model_config.get_hidden_size()
+        model_config = self.model_config
+        cache_config = self.cache_config
+        scheduler_config = self.scheduler_config
+        parallel_config = self.parallel_config
+
+        self.device = device
+        self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
-        cache_config = vllm_config.cache_config
+
         if cache_config.cache_dtype == "auto":
             self.kv_cache_dtype = self.dtype
         else:
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
 
-        self.head_size = self.model_config.get_head_size()
-        self.attn_backend = get_attn_backend(
-            self.head_size,
-            self.dtype,
-            self.kv_cache_dtype,
-            self.block_size,
-            self.model_config.is_attention_free,
-            use_mla=self.model_config.use_mla,
-        )
-        if self.attn_backend is None:
-            error_msg = (
-                f"Error with get_att_backend: {self.head_size=}, "
-                f"{self.dtype=}, {self.kv_cache_dtype=}, {self.block_size=}, "
-                f"{self.model_config.is_attention_free=}, "
-                f"{self.model_config.use_mla=}")
-            logger.error(error_msg)
-            raise NotImplementedError(
-                "Non-Attention backend is not supported by V1 NPUModelRunner.")
+        self.is_multimodal_model = model_config.is_multimodal_model
+        self.sliding_window = model_config.get_sliding_window()
+        self.block_size = cache_config.block_size
+        self.max_model_len = model_config.max_model_len
+        self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
+        self.max_num_tokens = scheduler_config.max_num_batched_tokens
+        self.max_num_reqs = scheduler_config.max_num_seqs
+
+        # Model-related.
+        self.num_attn_layers = model_config.get_num_layers_by_block_type(
+            parallel_config, LayerBlockType.attention)
+        self.num_query_heads = model_config.get_num_attention_heads(
+            parallel_config)
+        self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
+        self.head_size = model_config.get_head_size()
+        self.hidden_size = model_config.get_hidden_size()
+
 
         self.attn_backend = get_attn_backend(
             self.head_size,
@@ -124,16 +124,19 @@ class NPUModelRunner:
 
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
             weakref.proxy(self))
+        self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
 
         # Multi-modal data support
         self.input_registry = INPUT_REGISTRY
         self.mm_registry = MULTIMODAL_REGISTRY
-        self.uses_mrope = self.model_config.uses_mrope
+        self.uses_mrope = model_config.uses_mrope
 
-        self.max_num_encoder_input_tokens, self.encoder_cache_size = compute_encoder_budget(
-            model_config=self.model_config,
-            scheduler_config=self.scheduler_config,
+        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
+            model_config=model_config,
+            scheduler_config=scheduler_config,
             mm_registry=self.mm_registry)
+        self.max_num_encoder_input_tokens = encoder_compute_budget
+        self.encoder_cache_size = encoder_cache_size
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
@@ -141,16 +144,19 @@ class NPUModelRunner:
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
 
+        # Set up speculative decoding.
+        self.use_spec_decode = False
+
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}
         # Persistent batch.
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
-            max_model_len=self.model_config.max_model_len,
+            max_model_len=self.max_model_len,
             max_num_blocks_per_req=self.max_num_blocks_per_req,
             device=self.device,
-            pin_memory=True,
-            vocab_size=self.model_config.get_vocab_size(),
+            pin_memory=self.pin_memory,
+            vocab_size=model_config.get_vocab_size(),
         )
 
         self.input_ids = torch.zeros(self.max_num_tokens,
@@ -181,7 +187,7 @@ class NPUModelRunner:
                 (3, self.max_num_tokens + 1),
                 dtype=torch.int64,
                 device="cpu",
-                pin_memory=True)
+                pin_memory=self.pin_memory)
 
         self.inputs_embeds = torch.zeros(
             (self.max_num_tokens, self.hidden_size),
@@ -189,60 +195,45 @@ class NPUModelRunner:
             device=self.device)
 
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
-        self.arange_np: npt.NDArray[np.int32] = np.arange(max(
-            self.max_num_reqs + 1, self.model_config.max_model_len,
-            self.max_num_tokens),
-                                                          dtype=np.int32)
+        self.arange_np = np.arange(max(self.max_num_reqs + 1,
+                                       self.max_model_len,
+                                       self.max_num_tokens),
+                                   dtype=np.int32)
         # NOTE(woosuk): These tensors are "stateless", i.e., they are literally
         # a faster version of creating a new tensor every time. Thus, we should
         # not make any assumptions about the values in these tensors.
         self.input_ids_cpu = torch.zeros(self.max_num_tokens,
                                          dtype=torch.int32,
                                          device="cpu",
-                                         pin_memory=True)
+                                         pin_memory=self.pin_memory)
+        self.input_ids_np = self.input_ids_cpu.numpy()
         self.positions_cpu = torch.zeros(self.max_num_tokens,
                                          dtype=torch.int64,
                                          device="cpu",
-                                         pin_memory=True)
+                                         pin_memory=self.pin_memory)
         self.positions_np = self.positions_cpu.numpy()
 
         self.slot_mapping_cpu = torch.zeros(self.max_num_tokens,
                                             dtype=torch.int32,
                                             device="cpu",
-                                            pin_memory=True)
+                                            pin_memory=self.pin_memory)
         self.slot_mapping_np = self.slot_mapping_cpu.numpy()
 
         self.query_start_loc_cpu = torch.zeros(self.max_num_reqs + 1,
                                                dtype=torch.int32,
                                                device="cpu",
-                                               pin_memory=True)
+                                               pin_memory=self.pin_memory)
         self.query_start_loc_np = self.query_start_loc_cpu.numpy()
-
         self.seq_lens_cpu = torch.zeros(self.max_num_reqs,
                                         dtype=torch.int32,
                                         device="cpu",
-                                        pin_memory=True)
+                                        pin_memory=self.pin_memory)
         self.seq_lens_np = self.seq_lens_cpu.numpy()
 
         self.input_positions_cpu = torch.arange(0,
                                                 self.max_num_tokens,
                                                 device="cpu")
         self.attn_mask = None
-        self.attn_state = None
-
-        # NOTE: Pre-construct a mask matrix to improve the efficiency of
-        # attention mask construction during inference.
-        # Note that the length of the matrix needs to be carefully balanced: a
-        # matrix that is too large will consume excessive VRAM, while a matrix
-        # that is too small will require dynamic concatenation during inference,
-        # leading to performance degradation.
-        # Therefore, an environment variable is added here to dynamically set
-        # the size of the pre-constructed mask matrix based on requirements.
-        mask_len = os.getenv("PAGED_ATTENTION_MASK_LEN", 10000)
-        self.attn_mask_len = min(self.model_config.max_model_len,
-                                 int(mask_len))
-        self.attn_mask_builder = AttentionMaskBuilder.initialize_from_len(
-            self.attn_mask_len, self.dtype)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -399,60 +390,59 @@ class NPUModelRunner:
     def get_model(self) -> nn.Module:
         return self.model
 
-    def _make_attention_mask(self, seq_lens, query_lens, position,
-                             attn_state) -> torch.Tensor:
-        # Chunk Prefill situation.
-        if attn_state == AscendAttentionState.ChunkedPrefill:
-            return self.attn_mask_builder.get_splitfuse_attn_mask(
-                seq_lens, query_lens, position, self.dtype, self.device)
-        # Prefill-only situation.
-        elif attn_state == AscendAttentionState.PrefillOnly:
-            max_seq_len = max(seq_lens, default=0)
-            return self.attn_mask_builder.get_attn_mask(
-                max_seq_len, self.dtype, self.device)
-        # Decode-only situation.
-        else:
-            return None
+    @staticmethod
+    def make_attention_mask(kv_dtype, kv_device, max_seq_len, seq_lens,
+                            query_lens):
+        # for paged attention
+        atten_mask = np.zeros([0, max_seq_len])
+        for i, context_length in enumerate(seq_lens):
+            q_len = query_lens[i]
+            ones_len = context_length - q_len
+            ones = np.ones((q_len, ones_len), dtype=np.float16)
+            bias_cache = np.tril(
+                np.ones((q_len, max_seq_len - ones_len), dtype=np.float16))
+            bias_cache = np.concatenate((ones, bias_cache), axis=1)
+            mask_value = -10000
+            bias_cache[bias_cache == 0] = mask_value
+            bias_cache[bias_cache == 1] = 0
+
+            atten_mask = np.concatenate([atten_mask, bias_cache], axis=0)
+        atten_mask = torch.from_numpy(atten_mask).to(kv_dtype).to(kv_device)
+        return atten_mask
 
     def _process_reqs(
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
-        # Check input valid
+        # check input valid
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
+
 
         modified_batch = self.attn_metadata_builder.reorder_batch(
             self.input_batch, scheduler_output)
         if modified_batch:
             self.input_batch.refresh_sampling_metadata()
 
+
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit(num_reqs)
-
         # Get the number of scheduled tokens for each request.
-        # TODO: The Python loop can be slow. Optimize.
-        num_scheduled_tokens = np.empty(num_reqs, dtype=np.int32)
-        max_num_scheduled_tokens = 0
-        for i, req_id in enumerate(self.input_batch.req_ids):
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_scheduled_tokens[i] = num_tokens
-            max_num_scheduled_tokens = max(max_num_scheduled_tokens,
-                                           num_tokens)
+        req_ids = self.input_batch.req_ids
+        tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+        num_scheduled_tokens = np.array(tokens, dtype=np.int32)
+        max_num_scheduled_tokens = max(tokens)
 
-        # Prepare positions
+        # prepare positions
         req_indices = np.repeat(self.arange_np[:num_reqs],
                                 num_scheduled_tokens)
         cu_num_tokens = np.cumsum(num_scheduled_tokens)
         cumsums_offsets = np.repeat(cu_num_tokens - num_scheduled_tokens,
                                     num_scheduled_tokens)
-        sample_indices = cu_num_tokens - 1
-        sample_indices = torch.from_numpy(sample_indices).to(self.device,
-                                                             non_blocking=True)
         arange = self.arange_np[:total_num_scheduled_tokens] - cumsums_offsets
 
         positions_np = self.positions_np[:total_num_scheduled_tokens]
@@ -460,18 +450,38 @@ class NPUModelRunner:
                arange,
                out=positions_np)
 
-        self.positions[:total_num_scheduled_tokens].copy_(
-            self.positions_cpu[:total_num_scheduled_tokens], non_blocking=True)
-        positions = self.positions[:total_num_scheduled_tokens]
-        self.query_lens = torch.from_numpy(num_scheduled_tokens)
 
-        self.seq_lens_np[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs] +
-            num_scheduled_tokens)
-        seq_lens = self.seq_lens_cpu[:num_reqs]
+        # Calculate M-RoPE positions.
+        # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+        if self.uses_mrope:
+            self._calc_mrope_positions(scheduler_output)
 
+        # Get token indices.
+        # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
+        # where M is the max_model_len.
+        token_indices = (positions_np +
+                         req_indices * self.input_batch.token_ids_cpu.shape[1])
+
+        # NOTE(woosuk): We use torch.index_select instead of np.take here
+        # because torch.index_select is much faster than np.take for large
+        # tensors.
+        torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
+                           0,
+                           torch.from_numpy(token_indices),
+                           out=self.input_ids_cpu[:total_num_scheduled_tokens])
+
+        # Calculate the slot mapping.
+        # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        # -> [0, 0, K, K, K + 1, K + 1, K + 2, 2 * K, 2 * K, 2 * K + 1]
+        # where K is the max_num_blocks_per_req and the block size is 2.
+        # NOTE(woosuk): We can't simply use `token_indices // block_size` here
+        # because M (max_model_len) is not necessarily divisible by block_size.
         block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                positions_np // self.block_size)
+        # NOTE(woosuk): We use torch.index_select instead of np.take here
+        # because torch.index_select is much faster than np.take for large
+        # tensors.
         block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
         block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
         block_offsets = positions_np % self.block_size
@@ -479,105 +489,364 @@ class NPUModelRunner:
                block_offsets,
                out=self.slot_mapping_np[:total_num_scheduled_tokens])
 
-        attn_state = AscendAttentionState.ChunkedPrefill
-        if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
-            attn_state = AscendAttentionState.PrefillOnly
-        elif np.all(num_scheduled_tokens == 1):
-            attn_state = AscendAttentionState.DecodeOnly
+        # Prepare the attention metadata.
+        self.query_start_loc_np[0] = 0
+        self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
+
+        self.seq_lens_np[:num_reqs] = (
+            self.input_batch.num_computed_tokens_cpu[:num_reqs] +
+            num_scheduled_tokens)
+
+        # Copy the tensors to the GPU.
+        self.input_ids[:total_num_scheduled_tokens].copy_(
+            self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
+        if self.uses_mrope:
+            # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
+            self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
+                self.mrope_positions_cpu[:, :total_num_scheduled_tokens],
+                non_blocking=True)
         else:
-            attn_state = AscendAttentionState.ChunkedPrefill
+            # Common case (1D positions)
+            self.positions[:total_num_scheduled_tokens].copy_(
+                self.positions_cpu[:total_num_scheduled_tokens],
+                non_blocking=True)
 
-        attn_mask = self._make_attention_mask(seq_lens=seq_lens,
-                                              query_lens=num_scheduled_tokens,
-                                              position=positions,
-                                              attn_state=attn_state)
-        self.attn_mask = attn_mask
-        self.attn_state = attn_state  # type: ignore
-
-        attn_metadata = self.attn_metadata_builder.build(  # type: ignore
+        # Prepare for cascade attention if enabled & beneficial.
+        common_prefix_len = 0
+        '''
+        if self.cascade_attn_enabled:
+            common_prefix_len = self._compute_cascade_attn_prefix_len(
+                num_scheduled_tokens,
+                scheduler_output.num_common_prefix_blocks,
+            )
+        '''
+        attn_metadata = self.attn_metadata_builder.build(
             num_reqs=num_reqs,
             num_actual_tokens=total_num_scheduled_tokens,
             max_query_len=max_num_scheduled_tokens,
+            #common_prefix_len=common_prefix_len,
             common_prefix_len=None,
         )
 
-        # Prepare input_ids
-        token_indices = (positions_np +
-                         req_indices * self.input_batch.token_ids_cpu.shape[1])
-        torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
-                           0,
-                           torch.from_numpy(token_indices),
-                           out=self.input_ids_cpu[:total_num_scheduled_tokens])
-        # Copy the tensors to the NPU.
-        self.input_ids[:total_num_scheduled_tokens].copy_(
-            self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
-        input_ids = self.input_ids[:total_num_scheduled_tokens]
+        use_spec_decode = len(
+            scheduler_output.scheduled_spec_decode_tokens) > 0
+        if not use_spec_decode:
+            # NOTE(woosuk): Due to chunked prefills, the batch may contain
+            # partial requests. While we should not sample any token
+            # from these partial requests, we do so for simplicity.
+            # We will ignore the sampled tokens from the partial requests.
+            # TODO: Support prompt logprobs.
+            logits_indices = attn_metadata.query_start_loc[1:] - 1
+            spec_decode_metadata = None
+        else:
+            # Get the number of draft tokens for each request.
+            # Iterate over the dictionary rather than all requests since not all
+            # requests have draft tokens.
+            num_draft_tokens = np.zeros(num_reqs, dtype=np.int32)
+            for req_id, draft_token_ids in (
+                    scheduler_output.scheduled_spec_decode_tokens.items()):
+                req_idx = self.input_batch.req_id_to_index[req_id]
+                num_draft_tokens[req_idx] = len(draft_token_ids)
 
-        # Run forward pass
-        with set_forward_context(attn_metadata, self.vllm_config):
-            assert self.model is not None
-            hidden_states = self.model(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=None,
-            )
+            spec_decode_metadata = self._calc_spec_decode_metadata(
+                num_draft_tokens, cu_num_tokens)
+            logits_indices = spec_decode_metadata.logits_indices
 
-        return hidden_states[sample_indices]
+        # Hot-Swap lora model
+        if self.lora_config:
+            self.set_active_loras(self.input_batch, num_scheduled_tokens)
 
-    def apply_grammar_bitmask(
+        return attn_metadata, logits_indices, spec_decode_metadata
+
+
+    def _compute_cascade_attn_prefix_len(
         self,
-        scheduler_output: "SchedulerOutput",
-        logits: torch.Tensor,
-    ) -> torch.Tensor:
-        # Serialization of np.ndarray is much more efficient than a tensor,
-        # so we receive it in that format.
-        grammar_bitmask = scheduler_output.grammar_bitmask
-        if grammar_bitmask is None:
+        num_scheduled_tokens: np.ndarray,
+        num_common_prefix_blocks: int,
+    ) -> int:
+        """Compute the length of the common prefix for cascade attention.
+
+        NOTE(woosuk): The common prefix length returned by this function
+        represents the length used specifically for cascade attention, not the
+        actual number of tokens shared between requests. When cascade attention
+        is disabled (use_cascade=False), this function returns 0 even if
+        requests share common tokens. Additionally, the common prefix length is
+        truncated to a multiple of the block size and may be further truncated
+        due to implementation details explained below.
+
+        Args:
+            num_scheduled_tokens: Number of tokens scheduled per request.
+            num_common_prefix_blocks: Number of shared KV cache blocks.
+
+        Returns:
+            int: Length of common prefix in tokens.
+        """
+        common_prefix_len = num_common_prefix_blocks * self.block_size
+        if common_prefix_len == 0:
+            # Common case.
+            return 0
+
+        # NOTE(woosuk): Cascade attention uses two attention kernels: one
+        # for the common prefix and the other for the rest. For the first
+        # kernel, we concatenate all the query tokens (possibly from
+        # different requests) and treat them as if they are from the same
+        # request. Then, we use bi-directional attention to process the
+        # common prefix in the KV cache. Importantly, this means that the
+        # first kernel does not do any masking.
+
+        # Consider the following example:
+        # Request 1's input query: [D, E, X]
+        # Request 1's kv cache: [A, B, C, D, E, X]
+        # Request 1's num_computed_tokens: 3 (i.e., [A, B, C])
+        # Request 2's input query: [E, Y]
+        # Request 2's kv cache: [A, B, C, D, E, Y]
+        # Request 2's num_computed_tokens: 4 (i.e., [A, B, C, D])
+
+        # If we use [A, B, C, D, E] as the common prefix, then the
+        # first kernel will compute the bi-directional attention between
+        # input query [D, E, X, E, Y] and common prefix [A, B, C, D, E].
+        # However, this is wrong because D in Request 1 should not attend to
+        # E in the common prefix (i.e., we need masking).
+        # To avoid this, [A, B, C, D] should be the common prefix.
+        # That is, the common prefix should be capped by the minimum
+        # num_computed_tokens among the requests, and plus one to include
+        # the first token of the query.
+
+        # In practice, we use [A, B, C] as the common prefix, instead of
+        # [A, B, C, D] (i.e., the common prefix is capped by the minimum
+        # num_computed_tokens, without plus one).
+        # This is because of an implementation detail: We want to always
+        # use two kernels for cascade attention. Let's imagine:
+        # Request 3's input query: [D]
+        # Request 3's kv cache: [A, B, C, D]
+        # Request 3's num_computed_tokens: 3 (i.e., [A, B, C])
+        # If we use [A, B, C, D] as the common prefix for Request 1-3,
+        # then Request 3 will be processed only by the first kernel,
+        # and the second kernel will get an empty input. While this is not
+        # a fundamental problem, our current implementation does not support
+        # this case.
+        num_reqs = len(num_scheduled_tokens)
+        common_prefix_len = min(
+            common_prefix_len,
+            self.input_batch.num_computed_tokens_cpu[:num_reqs].min())
+        # common_prefix_len should be a multiple of the block size.
+        common_prefix_len = (common_prefix_len // self.block_size *
+                             self.block_size)
+        use_cascade = self.attn_backend.use_cascade_attention(
+            common_prefix_len=common_prefix_len,
+            query_lens=num_scheduled_tokens,
+            num_query_heads=self.num_query_heads,
+            num_kv_heads=self.num_kv_heads,
+            use_alibi=self.use_alibi,
+            use_sliding_window=self.window_size is not None,
+            num_sms=self.num_sms,
+        )
+        return common_prefix_len if use_cascade else 0
+
+    def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
+        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+        if not scheduled_encoder_inputs:
             return
 
-        # We receive the structured output bitmask from the scheduler, but the
-        # indices of the requests in the batch may not match the indices of
-        # the bitmask since the scheduler doesn't know how the gpu runner is
-        # ordering the requests in the batch. We need to sort the bitmask to
-        # match the order of the requests used here.
-        struct_out_req_batch_indices: dict[str, int] = {}
-        indices_match = True
+        # Batch the multi-modal inputs.
+        mm_inputs = list[MultiModalKwargs]()
+        req_ids_pos = list[tuple[str, int, PlaceholderRange]]()
+        for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
+            req_state = self.requests[req_id]
+
+            for mm_input_id in encoder_input_ids:
+                mm_inputs.append(req_state.mm_inputs[mm_input_id])
+                req_ids_pos.append(
+                    (req_id, mm_input_id, req_state.mm_positions[mm_input_id]))
+
+        # Batch mm inputs as much as we can: if a request in the batch has
+        # multiple modalities or a different modality than the previous one,
+        # we process it separately to preserve item order.
+        # FIXME(ywang96): This is a hacky way to deal with multiple modalities
+        # in the same batch while still being able to benefit from batching
+        # multimodal inputs. The proper solution should be reordering the
+        # encoder outputs.
+        grouped_mm_inputs_list = group_mm_inputs_by_modality(mm_inputs)
+
+        encoder_outputs = []
+        for grouped_mm_inputs in grouped_mm_inputs_list:
+            batched_mm_inputs = MultiModalKwargs.batch(grouped_mm_inputs)
+            batched_mm_inputs = MultiModalKwargs.as_kwargs(batched_mm_inputs,
+                                                           device=self.device)
+
+            # Run the encoder.
+            # `curr_group_outputs` is either of the following:
+            # 1. A tensor of shape (num_items, feature_size, hidden_size)
+            # in case feature_size is fixed across all multimodal items.
+            # 2. A list or tuple (length: num_items) of tensors, each of shape
+            # (feature_size, hidden_size) in case the feature size is dynamic
+            # depending on the input multimodal items.
+            curr_group_outputs = self.model.get_multimodal_embeddings(
+                **batched_mm_inputs)
+
+            sanity_check_mm_encoder_outputs(
+                curr_group_outputs,
+                expected_num_items=len(grouped_mm_inputs),
+            )
+
+            for output in curr_group_outputs:
+                encoder_outputs.append(output)
+
+        # Cache the encoder outputs.
+        for (req_id, input_id, pos_info), output in zip(
+                req_ids_pos,
+                encoder_outputs,
+        ):
+            if req_id not in self.encoder_cache:
+                self.encoder_cache[req_id] = {}
+
+            self.encoder_cache[req_id][input_id] = scatter_mm_placeholders(
+                output,
+                is_embed=pos_info.is_embed,
+            )
+
+    def _gather_mm_embeddings(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> list[torch.Tensor]:
+        mm_embeds: list[torch.Tensor] = []
         for req_id in self.input_batch.req_ids:
-            mask_index = scheduler_output.structured_output_request_ids.get(
-                req_id)
-            if mask_index is None:
-                # not a structured output request
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
+                req_id]
+            req_state = self.requests[req_id]
+            num_computed_tokens = req_state.num_computed_tokens
+            mm_positions = req_state.mm_positions
+            for i, pos_info in enumerate(mm_positions):
+                start_pos = pos_info.offset
+                num_encoder_tokens = pos_info.length
+
+                # The encoder output is needed if the two ranges overlap:
+                # [num_computed_tokens,
+                #  num_computed_tokens + num_scheduled_tokens) and
+                # [start_pos, start_pos + num_encoder_tokens)
+                if start_pos >= num_computed_tokens + num_scheduled_tokens:
+                    # The encoder output is not needed in this step.
+                    break
+                if start_pos + num_encoder_tokens <= num_computed_tokens:
+                    # The encoder output is already processed and stored
+                    # in the decoder's KV cache.
+                    continue
+
+                start_idx = max(num_computed_tokens - start_pos, 0)
+                end_idx = min(
+                    num_computed_tokens - start_pos + num_scheduled_tokens,
+                    num_encoder_tokens)
+                assert start_idx < end_idx
+                assert req_id in self.encoder_cache
+                assert i in self.encoder_cache[req_id]
+                encoder_output = self.encoder_cache[req_id][i]
+
+                if (is_embed := pos_info.is_embed) is not None:
+                    is_embed = is_embed[start_idx:end_idx]
+
+                mm_embeds_item = gather_mm_placeholders(
+                    encoder_output[start_idx:end_idx],
+                    is_embed=is_embed,
+                )
+                mm_embeds.append(mm_embeds_item)
+        return mm_embeds
+
+
+    def _get_prompt_logprobs_dict(
+        self,
+        hidden_states: torch.Tensor,
+        scheduler_output: "SchedulerOutput",
+    ) -> dict[str, Optional[LogprobsTensors]]:
+        num_prompt_logprobs_dict = self.input_batch.num_prompt_logprobs
+        if not num_prompt_logprobs_dict:
+            return {}
+
+        in_progress_dict = self.input_batch.in_progress_prompt_logprobs_cpu
+        prompt_logprobs_dict: dict[str, Optional[LogprobsTensors]] = {}
+
+        # Since prompt logprobs are a rare feature, prioritize simple,
+        # maintainable loop over optimal performance.
+        completed_prefill_reqs = []
+        for req_id, num_prompt_logprobs in num_prompt_logprobs_dict.items():
+
+            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+
+            # Get metadata for this request.
+            request = self.requests[req_id]
+            num_prompt_tokens = len(request.prompt_token_ids)
+            prompt_token_ids = torch.tensor(request.prompt_token_ids).to(
+                self.device, non_blocking=True)
+
+            # Set up target LogprobsTensors object.
+            logprobs_tensors = in_progress_dict.get(req_id)
+            if not logprobs_tensors:
+                # Create empty logprobs CPU tensors for the entire prompt.
+                # If chunked, we'll copy in slice by slice.
+                logprobs_tensors = LogprobsTensors.empty_cpu(
+                    num_prompt_tokens - 1, num_prompt_logprobs + 1)
+                in_progress_dict[req_id] = logprobs_tensors
+
+            # Determine number of logits to retrieve.
+            start_idx = request.num_computed_tokens
+            start_tok = start_idx + 1
+            num_remaining_tokens = num_prompt_tokens - start_tok
+            if num_tokens <= num_remaining_tokens:
+                # This is a chunk, more tokens remain.
+                # In the == case, there are no more prompt logprobs to produce
+                # but we want to defer returning them to the next step where we
+                # have new generated tokens to return.
+                num_logits = num_tokens
+            else:
+                # This is the last chunk of prompt tokens to return.
+                num_logits = num_remaining_tokens
+                completed_prefill_reqs.append(req_id)
+                prompt_logprobs_dict[req_id] = logprobs_tensors
+
+            if num_logits <= 0:
+                # This can happen for the final chunk if we prefilled exactly
+                # (num_prompt_tokens - 1) tokens for this request in the prior
+                # step. There are no more prompt logprobs to produce.
                 continue
-            batch_index = self.input_batch.req_id_to_index[req_id]
-            if batch_index != mask_index:
-                indices_match = False
-            struct_out_req_batch_indices[req_id] = batch_index
 
-        if not indices_match:
-            # Sort the bitmask to match the order of the requests
-            sorted_bitmask = np.zeros_like(grammar_bitmask)
-            for req_id, batch_index in struct_out_req_batch_indices.items():
-                orig_index = scheduler_output.structured_output_request_ids[
-                    req_id]
-                sorted_bitmask[batch_index] = grammar_bitmask[orig_index]
-            grammar_bitmask = sorted_bitmask
+            # Get the logits corresponding to this req's prompt tokens.
+            # If this is a partial request (i.e. chunked prefill),
+            # then there is prompt logprob generated for each index.
+            req_idx = self.input_batch.req_id_to_index[req_id]
+            offset = self.query_start_loc_np[req_idx].item()
+            prompt_hidden_states = hidden_states[offset:offset + num_logits]
+            logits = self.model.compute_logits(prompt_hidden_states, None)
 
-        grammar_bitmask = torch.from_numpy(grammar_bitmask)
+            # Get the "target" tokens for each index. For prompt at index i,
+            # the token at prompt index i+1 is the "sampled" token we want
+            # to gather the logprob for.
+            tgt_token_ids = prompt_token_ids[start_tok:start_tok + num_logits]
 
-        # TODO: compatibility with spec decode.
-        # NOTE:
-        # 1. XGrammar bitmask applying only supports CPU and GPU.
-        # 2. The logits and bitmask should be on the same device.
-        # 3. XGrammar logits on CPU only supports float32 dtype.
-        logits_dtype = logits.dtype
-        logits = logits.to("cpu").float()
-        xgr.apply_token_bitmask_inplace(
-            logits,
-            grammar_bitmask,
-            indices=list(struct_out_req_batch_indices.values()),
-        )
-        return logits.to(self.device).to(logits_dtype)
+            # Compute prompt logprobs.
+            logprobs = self.model.sampler.compute_logprobs(logits)
+            token_ids, logprobs, ranks = self.model.sampler.gather_logprobs(
+                logprobs, num_prompt_logprobs, tgt_token_ids)
+
+            # Transfer GPU->CPU async.
+            chunk_slice = slice(start_idx, start_idx + num_logits)
+            logprobs_tensors.logprob_token_ids[chunk_slice].copy_(
+                token_ids, non_blocking=True)
+            logprobs_tensors.logprobs[chunk_slice].copy_(logprobs,
+                                                         non_blocking=True)
+            logprobs_tensors.selected_token_ranks[chunk_slice].copy_(
+                ranks, non_blocking=True)
+
+        # Remove requests that have completed prefill from the batch
+        # num_prompt_logprobs_dict.
+        for req_id in completed_prefill_reqs:
+            del num_prompt_logprobs_dict[req_id]
+            del in_progress_dict[req_id]
+
+        # Must synchronize the non-blocking GPU->CPU transfers.
+        if prompt_logprobs_dict:
+            torch.cuda.synchronize()
+
+        return prompt_logprobs_dict
+
 
     @torch.inference_mode()
     def execute_model(
@@ -589,13 +858,80 @@ class NPUModelRunner:
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOuptut if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
-        hidden_states = self._process_reqs(scheduler_output,
-                                           intermediate_tensors)
-        logits = self.model.compute_logits(hidden_states, None)
+        attn_metadata, logits_indices, spec_decode_metadata = self._process_reqs(scheduler_output, intermediate_tensors)
 
-        # Apply structured output bitmasks if present
-        if scheduler_output.grammar_bitmask is not None:
-            logits = self.apply_grammar_bitmask(scheduler_output, logits)
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+        # Eager mode.
+        num_input_tokens = num_scheduled_tokens
+        attn_metadata.num_input_tokens = num_input_tokens
+
+        # _prepare_inputs may reorder the batch, so we must gather multi
+        # modal outputs after that to ensure the correct order
+        if self.is_multimodal_model:
+            # Run the multimodal encoder if any.
+            self._execute_mm_encoder(scheduler_output)
+            mm_embeds = self._gather_mm_embeddings(scheduler_output)
+        else:
+            mm_embeds = []
+
+        if self.is_multimodal_model:
+            # NOTE(woosuk): To unify token ids and soft tokens (vision
+            # embeddings), we always use embeddings (rather than token ids)
+            # as input to the multimodal model, even when the input is text.
+            input_ids = self.input_ids[:num_scheduled_tokens]
+            if mm_embeds:
+                inputs_embeds = self.model.get_input_embeddings(
+                    input_ids, mm_embeds)
+            else:
+                inputs_embeds = self.model.get_input_embeddings(input_ids)
+            # TODO(woosuk): Avoid the copy. Optimize.
+            self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
+            inputs_embeds = self.inputs_embeds[:num_input_tokens]
+            input_ids = None
+        else:
+            # For text-only models, we use token ids as input.
+            # While it is possible to use embeddings as input just like the
+            # multimodal models, it is not desirable for performance since
+            # then the embedding layer is not included in the CUDA graph.
+            input_ids = self.input_ids[:num_input_tokens]
+            inputs_embeds = None
+
+        if self.uses_mrope:
+            positions = self.mrope_positions[:, :num_input_tokens]
+        else:
+            positions = self.positions[:num_input_tokens]
+
+        if get_pp_group().is_first_rank:
+            intermediate_tensors = None
+        else:
+            assert intermediate_tensors is not None
+            assert self.intermediate_tensors is not None
+            for k, v in intermediate_tensors.items():
+                self.intermediate_tensors[k][:num_input_tokens].copy_(
+                    v[:num_input_tokens], non_blocking=True)
+            intermediate_tensors = IntermediateTensors({
+                k: v[:num_input_tokens]
+                for k, v in self.intermediate_tensors.items()
+            })
+
+        # Run the decoder.
+        with set_forward_context(attn_metadata, self.vllm_config):
+            hidden_states = self.model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+            )
+
+        if not get_pp_group().is_last_rank:
+            # For mid-pipeline stages, return the hidden states.
+            return hidden_states
+
+        #logits = self.model.compute_logits(hidden_states, None)
+        hidden_states = hidden_states[:num_scheduled_tokens]
+        sample_hidden_states = hidden_states[logits_indices]
+        logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
@@ -623,6 +959,12 @@ class NPUModelRunner:
         logprobs_lists = logprobs_tensors.tolists() \
             if logprobs_tensors is not None else None
 
+        # Compute prompt logprobs if needed.
+        prompt_logprobs_dict = self._get_prompt_logprobs_dict(
+            hidden_states,
+            scheduler_output,
+        )
+
         # Get the valid generated tokens.
         sampled_token_ids = sampler_output.sampled_token_ids
         max_gen_len = sampled_token_ids.shape[-1]
@@ -636,7 +978,7 @@ class NPUModelRunner:
             sampled_token_ids=valid_sampled_token_ids,
             spec_token_ids=None,
             logprobs=logprobs_lists,
-            prompt_logprobs_dict={},
+            prompt_logprobs_dict=prompt_logprobs_dict,
         )
         return model_runner_output
 
@@ -724,19 +1066,22 @@ class NPUModelRunner:
         self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
     @torch.inference_mode()
-    def _dummy_run(self) -> torch.Tensor:
+    def _dummy_run(
+        self,
+        num_tokens: int,
+    ) -> torch.Tensor:
         model = self.model
         if self.is_multimodal_model:
             input_ids = None
-            inputs_embeds = self.inputs_embeds[:self.max_num_tokens]
+            inputs_embeds = self.inputs_embeds[:num_tokens]
         else:
-            input_ids = self.input_ids[:self.max_num_tokens]
+            input_ids = self.input_ids[:num_tokens]
             inputs_embeds = None
 
         if self.uses_mrope:
-            positions = self.mrope_positions[:, :self.max_num_tokens]
+            positions = self.mrope_positions[:, :num_tokens]
         else:
-            positions = self.input_positions_cpu[:self.max_num_tokens]
+            positions = self.input_positions_cpu[:num_tokens]
 
         if get_pp_group().is_first_rank:
             intermediate_tensors = None
@@ -745,10 +1090,10 @@ class NPUModelRunner:
                 self.intermediate_tensors = (
                     self.model.make_empty_intermediate_tensors(
                         batch_size=self.max_num_tokens,
-                        dtype=self.dtype,
+                        dtype=self.model_config.dtype,
                         device=self.device))
             intermediate_tensors = IntermediateTensors({
-                k: v[:self.max_num_tokens]
+                k: v[:num_tokens]
                 for k, v in self.intermediate_tensors.items()
             })
 
@@ -787,7 +1132,7 @@ class NPUModelRunner:
         ]
 
         # Trigger compilation for general shape.
-        hidden_states = self._dummy_run()
+        hidden_states = self._dummy_run(self.max_num_tokens)
 
         if get_pp_group().is_last_rank:
             hidden_states = hidden_states[logit_indices]
@@ -795,7 +1140,7 @@ class NPUModelRunner:
         else:
             logits = None
 
-        NPUPlatform.synchronize()
+        current_platform.synchronize()
         del hidden_states, logits, dummy_kv_caches
         self.encoder_cache.clear()
         gc.collect()
@@ -807,8 +1152,10 @@ class NPUModelRunner:
             self.model = get_model(vllm_config=self.vllm_config)
             if self.lora_config:
                 raise ValueError("LoRA model is not supported on NPU now.")
+
+        self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
-                    m.consumed_memory / float(2**30))
+                    self.model_memory_usage / float(2**30))
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
@@ -817,7 +1164,6 @@ class NPUModelRunner:
             kv_cache_config: Configuration for the KV cache, including the KV
             cache size of each layer
         """
-        import torch_npu
         kv_caches: Dict[str, torch.Tensor] = {}
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
@@ -833,8 +1179,9 @@ class NPUModelRunner:
                 # different GPUs, and `kv_cache_config.num_blocks` is set to
                 # the min of all `num_blocks`. Verify it here.
                 assert num_blocks >= kv_cache_config.num_blocks
-                # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
+                # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may 
                 # encounter OOM issue
+                num_blocks = num_blocks // 4
                 if isinstance(kv_cache_spec, FullAttentionSpec):
                     kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,
@@ -843,7 +1190,6 @@ class NPUModelRunner:
                     kv_caches[layer_name] = torch.zeros(kv_cache_shape,
                                                         dtype=dtype,
                                                         device=self.device)
-                    torch_npu.npu_format_cast(kv_caches[layer_name], 2)
                 else:
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
