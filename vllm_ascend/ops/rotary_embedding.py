@@ -76,7 +76,7 @@ def native_rope_deepseek_forward(self,
                                  query: torch.Tensor,
                                  key: torch.Tensor,
                                  offsets: Optional[torch.Tensor] = None,
-                                 max_seq_len: int = None):
+                                 max_seq_len: Optional[int] = None):
     if max_seq_len is not None and max_seq_len > self.max_seq_len:
         self._set_cos_sin_cache(max_seq_len, query.device, query.dtype)
     if len(key.shape) == 2:
