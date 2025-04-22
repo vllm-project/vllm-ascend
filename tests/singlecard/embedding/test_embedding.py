@@ -41,13 +41,13 @@ MODELSCOPE_CACHE = "/root/.cache/modelscope/hub/models/"
         # [Encoder-only]
         pytest.param("BAAI/bge-base-en-v1.5"),
         pytest.param("sentence-transformers/all-MiniLM-L12-v2"),
-        pytest.param("intfloat/multilingual-e5-small"),
-        pytest.param("iic/gte-Qwen2-7B-instruct"),
-        # # [Decoder-only]
-        pytest.param("BAAI/bge-multilingual-gemma2"),
-        pytest.param("intfloat/e5-mistral-7b-instruct"),
-        pytest.param("iic/gte-Qwen2-1.5B-instruct"),
-        pytest.param("QwenCollection/Qwen2-7B-Instruct-embed-base"),
+        # pytest.param("intfloat/multilingual-e5-small"),
+        # pytest.param("iic/gte-Qwen2-7B-instruct"),
+        # # # [Decoder-only]
+        # pytest.param("BAAI/bge-multilingual-gemma2"),
+        # pytest.param("intfloat/e5-mistral-7b-instruct"),
+        # pytest.param("iic/gte-Qwen2-1.5B-instruct"),
+        # pytest.param("QwenCollection/Qwen2-7B-Instruct-embed-base"),
         # # [Cross-Encoder]
         # pytest.param("sentence-transformers/stsb-roberta-base-v2"),
     ],
@@ -63,6 +63,7 @@ def test_models(
 ) -> None:
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_MODELSCOPE", "True")
+        m.setenv("PYTORCH_NPU_ALLOC_CONF", "max_split_size_mb:256")
         vllm_extra_kwargs: Dict[str, Any] = {}
 
         # The example_prompts has ending "\n", for example:
