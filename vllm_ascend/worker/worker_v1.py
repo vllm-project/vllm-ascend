@@ -40,12 +40,12 @@ from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import try_register_lib, vllm_version_is
+from vllm_ascend.utils import try_register_lib
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
-if vllm_version_is("0.8.4"):
+try:
     from vllm.distributed import ensure_kv_transfer_initialized
-else:
+except ImportError:
     from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 
 

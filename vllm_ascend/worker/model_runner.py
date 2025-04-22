@@ -64,11 +64,10 @@ from vllm.worker.model_runner_base import (
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
 
-from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("0.8.4"):
+try:
     from vllm.distributed import get_kv_transfer_group
-else:
+except ImportError:
     from vllm.distributed.kv_transfer import get_kv_transfer_group
 
 if TYPE_CHECKING:
