@@ -2,7 +2,7 @@
 
 This document will guide you have model inference stress testing and accuracy testing using [EvalScope](https://github.com/modelscope/evalscope).
 
-## 1. Online Serving
+## 1. Online serving
 
 You can run docker container to start the vLLM server on a single NPU:
 
@@ -52,50 +52,55 @@ curl http://localhost:8000/v1/completions \
     }'
 ```
 
-## 2. Install EvalScope Using pip
+## 2. Install EvalScope using pip
 
-We recommend using conda to manage your environment and installing dependencies with pip:
+You can install EvalScope by using:
 
-​	1.Create a conda environment (optional)
-
-```shell
-# It is recommended to use Python 3.10
-conda create -n evalscope python=3.10
-# Activate the conda environment
-conda activate evalscope
+```bash
+python3 -m venv .venv-evalscope
+source .venv-evalscope/bin/activate
+pip install gradio plotly evalscope
 ```
 
-​	2.Install dependencies using pip
+## 3. Run gsm8k accuracy test using EvalScope
 
-```shell
-pip install evalscope                # Install Native backend (default)
-# Additional options
-pip install 'evalscope[opencompass]'   # Install OpenCompass backend
-pip install 'evalscope[vlmeval]'       # Install VLMEvalKit backend
-pip install 'evalscope[rag]'           # Install RAGEval backend
-pip install 'evalscope[perf]'          # Install dependencies for the model performance testing module
-pip install 'evalscope[app]'           # Install dependencies for visualization
-pip install 'evalscope[all]'           # Install all backends (Native, OpenCompass, VLMEvalKit, RAGEval)
+You can `evalscope eval` run gsm8k accuracy test:
+```
+evalscope eval \
+ --model Qwen/Qwen2.5-7B-Instruct \
+ --api-url http://localhost:8000/v1 \
+ --api-key EMPTY \
+ --eval-type service \
+ --datasets gsm8k \
+ --limit 10
 ```
 
-## 3. Run model inference stress testing using EvalScope
-
-### Environment Preparation
+After 1-2 mins, the output is as shown below:
 
 ```shell
-# Install additional dependencies
++---------------------+-----------+-----------------+----------+-------+---------+---------+
+| Model               | Dataset   | Metric          | Subset   |   Num |   Score | Cat.0   |
++=====================+===========+=================+==========+=======+=========+=========+
+| Qwen2.5-7B-Instruct | gsm8k     | AverageAccuracy | main     |    10 |     0.8 | default |
++---------------------+-----------+-----------------+----------+-------+---------+---------+
+```
+
+See more detail in: [EvalScope doc - Model API Service Evaluation](https://evalscope.readthedocs.io/en/latest/get_started/basic_usage.html#model-api-service-evaluation).
+
+## 4. Run model inference stress testing using EvalScope
+
+### Install EvalScope[perf] using pip
+
+```shell
 pip install evalscope[perf] -U
 ```
 
-### Basic Usage
+### Basic usage
 
-You should launch a model service using vllm ascend online serving.
-
-You can start the model inference performance stress testing tool using the following two methods:
-
+You can use `evalscope perf` run perf test:
 ```
 evalscope perf \
-    --url "http://localhost:8000/v1/completions" \
+    --url "http://localhost:8000/v1/chat/completions" \
     --parallel 5 \
     --model Qwen/Qwen2.5-7B-Instruct \
     --number 20 \
@@ -104,99 +109,65 @@ evalscope perf \
     --stream
 ```
 
-Please refer to this link for [parameters](https://evalscope.readthedocs.io/en/latest/user_guides/stress_test/parameters.html).
+### Output results
 
-### Output Results
-
-After 1-2 mins, the output is as shown below, [metric descriptions](https://evalscope.readthedocs.io/en/latest/user_guides/stress_test/quick_start.html#metric-descriptions) refer to this link: 
+After 1-2 mins, the output is as shown below: 
 
 ```shell
 Benchmarking summary:
-+-----------------------------------+-----------------------------------------------------------------+
-| Key                               | Value                                                           |
-+===================================+=================================================================+
-| Time taken for tests (s)          | 3.882                                                           |
-+-----------------------------------+-----------------------------------------------------------------+
-| Number of concurrency             | 5                                                               |
-+-----------------------------------+-----------------------------------------------------------------+
-| Total requests                    | 20                                                              |
-+-----------------------------------+-----------------------------------------------------------------+
-| Succeed requests                  | 20                                                              |
-+-----------------------------------+-----------------------------------------------------------------+
-| Failed requests                   | 0                                                               |
-+-----------------------------------+-----------------------------------------------------------------+
-| Output token throughput (tok/s)   | 983.7757                                                        |
-+-----------------------------------+-----------------------------------------------------------------+
-| Total token throughput (tok/s)    | 1242.6641                                                       |
-+-----------------------------------+-----------------------------------------------------------------+
-| Request throughput (req/s)        | 5.152                                                           |
-+-----------------------------------+-----------------------------------------------------------------+
-| Average latency (s)               | 0.8416                                                          |
-+-----------------------------------+-----------------------------------------------------------------+
-| Average time to first token (s)   | 0.0247                                                          |
-+-----------------------------------+-----------------------------------------------------------------+
-| Average time per output token (s) | 0.0044                                                          |
-+-----------------------------------+-----------------------------------------------------------------+
-| Average input tokens per request  | 50.25                                                           |
-+-----------------------------------+-----------------------------------------------------------------+
-| Average output tokens per request | 190.95                                                          |
-+-----------------------------------+-----------------------------------------------------------------+
-| Average package latency (s)       | 0.0043                                                          |
-+-----------------------------------+-----------------------------------------------------------------+
-| Average package per request       | 190.95                                                          |
-+-----------------------------------+-----------------------------------------------------------------+
-| Expected number of requests       | 20                                                              |
-+-----------------------------------+-----------------------------------------------------------------+
-| Result DB path                    | outputs/20250410_133556/Qwen2.5-0.5B-Instruct/benchmark_data.db |
-+-----------------------------------+-----------------------------------------------------------------+
++-----------------------------------+---------------------------------------------------------------+
+| Key                               | Value                                                         |
++===================================+===============================================================+
+| Time taken for tests (s)          | 38.3744                                                       |
++-----------------------------------+---------------------------------------------------------------+
+| Number of concurrency             | 5                                                             |
++-----------------------------------+---------------------------------------------------------------+
+| Total requests                    | 20                                                            |
++-----------------------------------+---------------------------------------------------------------+
+| Succeed requests                  | 20                                                            |
++-----------------------------------+---------------------------------------------------------------+
+| Failed requests                   | 0                                                             |
++-----------------------------------+---------------------------------------------------------------+
+| Output token throughput (tok/s)   | 132.6926                                                      |
++-----------------------------------+---------------------------------------------------------------+
+| Total token throughput (tok/s)    | 158.8819                                                      |
++-----------------------------------+---------------------------------------------------------------+
+| Request throughput (req/s)        | 0.5212                                                        |
++-----------------------------------+---------------------------------------------------------------+
+| Average latency (s)               | 8.3612                                                        |
++-----------------------------------+---------------------------------------------------------------+
+| Average time to first token (s)   | 0.1035                                                        |
++-----------------------------------+---------------------------------------------------------------+
+| Average time per output token (s) | 0.0329                                                        |
++-----------------------------------+---------------------------------------------------------------+
+| Average input tokens per request  | 50.25                                                         |
++-----------------------------------+---------------------------------------------------------------+
+| Average output tokens per request | 254.6                                                         |
++-----------------------------------+---------------------------------------------------------------+
+| Average package latency (s)       | 0.0324                                                        |
++-----------------------------------+---------------------------------------------------------------+
+| Average package per request       | 254.6                                                         |
++-----------------------------------+---------------------------------------------------------------+
+| Expected number of requests       | 20                                                            |
++-----------------------------------+---------------------------------------------------------------+
+| Result DB path                    | outputs/20250423_002442/Qwen2.5-7B-Instruct/benchmark_data.db |
++-----------------------------------+---------------------------------------------------------------+
 
 Percentile results:
 +------------+----------+---------+-------------+--------------+---------------+----------------------+
 | Percentile | TTFT (s) | ITL (s) | Latency (s) | Input tokens | Output tokens | Throughput(tokens/s) |
 +------------+----------+---------+-------------+--------------+---------------+----------------------+
-|    10%     |  0.0118  |  0.004  |   0.3434    |      42      |      80       |       215.1057       |
-|    25%     |  0.0122  | 0.0041  |   0.5027    |      47      |      113      |       223.166        |
-|    50%     |  0.0157  | 0.0042  |   0.7857    |      49      |      194      |       226.2531       |
-|    66%     |  0.0161  | 0.0043  |   1.0707    |      52      |      246      |       229.2028       |
-|    75%     |  0.0293  | 0.0044  |   1.1826    |      55      |      268      |       229.7484       |
-|    80%     |  0.0633  | 0.0044  |   1.2737    |      58      |      290      |       230.8304       |
-|    90%     |  0.0654  | 0.0046  |   1.4551    |      62      |      328      |       232.939        |
-|    95%     |  0.0655  | 0.0049  |   1.4913    |      66      |      335      |       250.1984       |
-|    98%     |  0.0655  | 0.0065  |   1.4913    |      66      |      335      |       250.1984       |
-|    99%     |  0.0655  | 0.0072  |   1.4913    |      66      |      335      |       250.1984       |
+|    10%     |  0.0962  |  0.031  |   4.4571    |      42      |      135      |       29.9767        |
+|    25%     |  0.0971  | 0.0318  |   6.3509    |      47      |      193      |       30.2157        |
+|    50%     |  0.0987  | 0.0321  |   9.3387    |      49      |      285      |       30.3969        |
+|    66%     |  0.1017  | 0.0324  |   9.8519    |      52      |      302      |       30.5182        |
+|    75%     |  0.107   | 0.0328  |   10.2391   |      55      |      313      |       30.6124        |
+|    80%     |  0.1221  | 0.0329  |   10.8257   |      58      |      330      |       30.6759        |
+|    90%     |  0.1245  | 0.0333  |   13.0472   |      62      |      404      |       30.9644        |
+|    95%     |  0.1247  | 0.0336  |   14.2936   |      66      |      432      |       31.6691        |
+|    98%     |  0.1247  | 0.0353  |   14.2936   |      66      |      432      |       31.6691        |
+|    99%     |  0.1247  | 0.0627  |   14.2936   |      66      |      432      |       31.6691        |
 +------------+----------+---------+-------------+--------------+---------------+----------------------+
 ```
 
-You can see more usage on [EvalScope Docs](https://evalscope.readthedocs.io/en/latest/user_guides/stress_test/parameters.html).
-
-## 4. Run gsm8k accuracy test using EvalScope
-
-Specify the model API service address (api_url) and API Key (api_key) to evaluate the deployed model API service. In this case, the parameter must be specified as , for example:`eval-type``service`
-
-You should launch a model service using vllm ascend online serving.
-
-Then, you can use the following command to evaluate the model API service:
-
-```
-evalscope eval \
- --model Qwen/Qwen2.5-7B-Instruct \
- --api-url http://localhost:8000/v1/completions \
- --api-key EMPTY \
- --eval-type service \
- --datasets gsm8k \
- --limit 10
-```
-
-Please refer to this link for [parameters]( https://evalscope.readthedocs.io/en/latest/get_started/parameters.html#parameters).
-
-After 1-2 mins, the output is as shown below:
-
-```shell
-+-----------------------+----------------+-----------------+-----------------+---------------+-------+---------+
-| Model Name            | Dataset Name   | Metric Name     | Category Name   | Subset Name   |   Num |   Score |
-+=======================+================+=================+=================+===============+=======+=========+
-| Qwen2.5-7B-Instruct   |  gsm8k         | AverageAccuracy | default         | main          |    10 |    0.4  |
-+-----------------------+----------------+-----------------+-----------------+---------------+-------+---------+
-```
-
-You can see more usage on [EvalScope Docs](https://evalscope.readthedocs.io/en/latest/get_started/basic_usage.html#).
+See more detail in: [EvalScope doc - Model Inference Stress Testing](https://evalscope.readthedocs.io/en/latest/user_guides/stress_test/quick_start.html#basic-usage).
