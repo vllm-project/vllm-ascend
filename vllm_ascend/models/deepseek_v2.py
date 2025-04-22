@@ -84,7 +84,6 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
-from vllm_ascend.utils import VLLM_ENABLE_GRAPH_MODE
 
 
 class CustomDeepseekV2MoE(nn.Module):
@@ -153,7 +152,7 @@ class CustomDeepseekV2MoE(nn.Module):
         vllm_config = get_current_vllm_config()
         self.dp_size = get_dp_group().world_size
         batch_size = vllm_config.scheduler_config.max_num_seqs
-        self.enable_mc2 = int(os.environ.get("VLLM_ENABLE_MC2", 0)) == 1
+        self.enable_mc2 = int(os.environ.get("VLLM_ENABLE_MC2", '0')) == 1
 
         params_dtype = torch.get_default_dtype()
         self.final_hidden_states = torch.zeros(
@@ -332,7 +331,8 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
 
         self.prefix = prefix
         self.debug_layer_idx = int(self.prefix.split(".")[-2])
-        self.is_graph_mode = VLLM_ENABLE_GRAPH_MODE == '1'
+        self.enable_graph_mode = get_current_vllm_config(
+        ).additional_config.get("enable_graph_mode", False)
 
     def forward(
             self,
@@ -345,7 +345,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             hidden_states_or_q_c = self.q_a_layernorm(ckq)
         else:
             hidden_states_or_q_c = hidden_states
-        if self.is_graph_mode:
+        if self.enable_graph_mode:
             return self.mla_attn.impl.forward(self.mla_attn,
                                               hidden_states_or_q_c,
                                               hidden_states, None, kv_cache,

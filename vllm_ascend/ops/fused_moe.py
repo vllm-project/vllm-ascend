@@ -496,7 +496,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 e_score_correction_bias=e_score_correction_bias,
             )
 
-        if os.environ.get("VLLM_ENABLE_MC2") == "1" and not is_prefill:
+        if os.environ.get("VLLM_ENABLE_MC2", '0') == "1" and not is_prefill:
             return fused_experts_with_mc2(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -627,10 +627,10 @@ class AscendFusedMoE(FusedMoE):
             real_top_k = self.top_k
 
         if self.dp_size > 1:
-            if int(os.environ.get("VLLM_ENABLE_MC2")  # type: ignore
+            if int(os.environ.get("VLLM_ENABLE_MC2", '0')  # type: ignore
                    ) == 1 and not is_prefill:
                 ...
-            elif int(os.environ.get("USING_LCCL_COM")) == 1:  # type: ignore
+            elif int(os.environ.get("USING_LCCL_COM", '0')) == 1:  # type: ignore
                 hidden_states = get_dp_group().all_gather(
                     hidden_states, 0, False)
                 router_logits = get_dp_group().all_gather(
@@ -657,7 +657,7 @@ class AscendFusedMoE(FusedMoE):
             is_prefill=is_prefill)
 
         if self.dp_size > 1:
-            if int(os.environ.get("VLLM_ENABLE_MC2")  # type: ignore
+            if int(os.environ.get("VLLM_ENABLE_MC2", '0')  # type: ignore
                    ) == 1 and not is_prefill:
                 ...
             else:

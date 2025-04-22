@@ -478,7 +478,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 e_score_correction_bias=e_score_correction_bias,
             )
 
-        if os.environ.get("VLLM_ENABLE_MC2") == "1" and not is_prefill:
+        if os.environ.get("VLLM_ENABLE_MC2", '0') == "1" and not is_prefill:
             return fused_experts_with_mc2(
                 hidden_states=x,
                 w1=layer.w13_weight,

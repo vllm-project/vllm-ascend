@@ -56,7 +56,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import (DeviceMemoryProfiler, PyObjectCache, flatten_2d_lists,
-                        is_pin_memory_available, supports_dynamo)
+                        is_pin_memory_available)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -546,8 +546,7 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
         }
 
         # Add graph_pad_size here
-        if self.runner.vllm_config.compilation_config.level ==\
-           CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+        if self.runner.enable_graph_mode:
             graph_pad_size = self.runner.scheduler_config.max_num_seqs - len(
                 seq_lens)
         else:
@@ -609,8 +608,7 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
         ]
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
-        if self.runner.vllm_config.compilation_config.level ==\
-            CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+        if self.runner.enable_graph_mode:
             torch._dynamo.mark_static(input_tokens_tensor)
             torch._dynamo.mark_static(input_positions_tensor)
             torch._dynamo.mark_static(attn_metadata.block_tables)
@@ -871,6 +869,9 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         self.max_batchsize_to_capture = \
             self.vllm_config.compilation_config.max_capture_size
 
+        self.enable_graph_mode = vllm_config.additional_config.get(
+            "enable_graph_mode", False)
+
         self.has_inner_state = model_config.has_inner_state
 
         self.in_profile_run = False
@@ -971,8 +972,7 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
             self.model = self.lora_manager.create_lora_manager(self.model)
 
         # adapter torch compile with npu_backend
-        if self.vllm_config.compilation_config.level ==\
-            CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+        if self.enable_graph_mode:
             import torchair  # type: ignore
             from torchair import patch_for_hcom  # type: ignore
 
@@ -1279,8 +1279,8 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
         self.attn_state.begin_forward(model_input)
 
         assert model_input.attn_metadata is not None
-        if self.vllm_config.compilation_config.level ==\
-            CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+        # TODO(zzzzwwjj): Do we need to do it every time?
+        if self.enable_graph_mode:
             torch._dynamo.mark_static(model_input.input_tokens)
             torch._dynamo.mark_static(model_input.input_positions)
             torch._dynamo.mark_static(model_input.attn_metadata.block_tables)
@@ -1295,7 +1295,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
         virtual_engine = model_input.virtual_engine
         prefill_meta = model_input.attn_metadata.prefill_metadata
         previous_hidden_states = kwargs.get("previous_hidden_states")
-        if prefill_meta is None and self.vllm_config.compilation_config.level > 0:
+        if prefill_meta is None and self.enable_graph_mode:
             model_executable = self.compile_model
             # Note: graph_batch_size value not same as GPU
             graph_batch_size = model_input.input_tokens.shape[  # type: ignore
@@ -1338,8 +1338,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_inner_state else {}
 
-        if self.vllm_config.compilation_config.level ==\
-            CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+        if self.enable_graph_mode:
             model_kwargs: Dict[str, Any] = {"inputs_embeds": None}
         else:
             model_kwargs = {}
@@ -1357,7 +1356,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                                      self.vllm_config, virtual_engine):
                 if model_input.attn_metadata is not None:
                     model_input.attn_metadata.input_positions = model_input.input_positions
-                if self.vllm_config.compilation_config.level > 0:
+                if self.enable_graph_mode:
                     model_kwargs["kv_caches"] = kv_caches
                     model_kwargs["attn_metadata"] = model_input.attn_metadata
                 hidden_or_intermediate_states = model_executable(
@@ -1430,8 +1429,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                 hidden_states = hidden_or_intermediate_states.index_select(
                     0, indices)
                 output.prefill_hidden_states = hidden_or_intermediate_states
-            elif self.vllm_config.compilation_config.level == \
-                CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+            elif self.enable_graph_mode:
                 hidden_states = hidden_or_intermediate_states[:len(indices)]
             else:
                 hidden_states = hidden_or_intermediate_states
