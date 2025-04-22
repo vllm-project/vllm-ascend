@@ -24,7 +24,7 @@ import torch
 from packaging.version import InvalidVersion, Version
 from vllm.logger import logger
 
-import vllm_ascend.envs as envs
+from vllm_ascend import envs
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig

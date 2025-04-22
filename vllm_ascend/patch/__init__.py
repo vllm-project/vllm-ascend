@@ -88,16 +88,39 @@
 #
 # * Worker Patch:
 # ===============
+# ** File: worker/patch_common/patch_utils.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.utils.direct_register_custom_op`
+#    Why:
+#       direct_register_custom_op requires pytorch version >= 2.7.0,
+#       but vllm-ascend only support pytorch version 2.5.1
+#    How：
+#       Convert annotation type to typing type for 2.5.1 backward compatibility
+#    Related PR (if no, explain why):
+#       No related PR, it's the change in vllm-ascend.
+#    Future Plan:
+#       Update pytorch and torch-npu to 2.7.0 in the future.
+# ** File: worker/patch_common/patch_cache_engine.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.worker.cache_engine.CacheEngine._allocate_kv_cache`
+#    Why:
+#       Add graph_mode optimization for kv cache allocation.
+#    How：
+#       If graph_mode is enabled, add layer_kv_cache_nope and layer_kv_cache_pe to the kv_cache.
+#    Related PR (if no, explain why):
+#       Need a PR to vllm to fix the issue.
+#    Future Plan:
+#       Revert it when the related pr is merged in vllm.
 # ** File: worker/patch_common/patch_metrics.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.spec_decode.metrics.AsyncMetricsCollector.maybe_collect_rejsample_metrics`
+#   1. `vllm.spec_decode.metrics.AsyncMetricsCollector._copy_rejsample_metrics_async`
 #    Why:
 #       There are cuda hard code (current_platform.is_cuda_alike()) in
-#       `AsyncMetricsCollector.maybe_collect_rejsample_metrics`
+#       `AsyncMetricsCollector._copy_rejsample_metrics_async`
 #    How：
 #       Change to use `current_platform.Event` to determine whether to return None
-#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
-#       https://github.com/vllm-project/vllm/pull/14411
+#    Related PR (if no, explain why):
+#       Need a PR to vllm to fix the issue.
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm.
 #
@@ -110,7 +133,7 @@
 #       However float32 is not supported in cann rope op, thus we keep this patch
 #    How：
 #       Removed the dtype convert operations in forward
-#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
+#    Related PR (if no, explain why):
 #       NO, only for npu due to rope op.
 #    Future Plan:
 #       Keep this patch in vllm-ascend.
@@ -126,7 +149,7 @@
 #       - support attention metadata register to the set supported spec decode
 #       - offer a api in platform to determine whether spec decode is supported,
 #         and deprecate is_cuda_alike in it.
-#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
+#    Related PR (if no, explain why):
 #       - https://github.com/vllm-project/vllm/pull/15195
 #       - https://github.com/vllm-project/vllm-ascend/pull/395
 #    Future Plan:
@@ -138,7 +161,7 @@
 #       vLLM `Remove Sampler from Model Code` so vllm-ascend needs adapt to this change.
 #    How：
 #       Use vLLM 0.8.4 method to patch it.
-#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
+#    Related PR (if no, explain why):
 #       - https://github.com/vllm-project/vllm/pull/15195
 #       - https://github.com/vllm-project/vllm-ascend/pull/395
 #    Future Plan:
@@ -153,7 +176,7 @@
 #           `FlashAttentionMetadata`
 #    How：
 #       ditto
-#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
+#    Related PR (if no, explain why):
 #       - https://github.com/vllm-project/vllm/pull/15195
 #       - https://github.com/vllm-project/vllm-ascend/pull/395
 #    Future Plan:

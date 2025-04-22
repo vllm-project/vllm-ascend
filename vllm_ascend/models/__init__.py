@@ -2,12 +2,15 @@ from vllm import ModelRegistry
 
 
 def register_model():
-    from .deepseek_mtp import CustomDeepSeekMTP  # noqa: F401
-    from .deepseek_v2 import CustomDeepseekV2ForCausalLM  # noqa: F401
-    from .deepseek_v2 import CustomDeepseekV3ForCausalLM  # noqa: F401
-    from .qwen2_5_vl import \
+    from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP  # noqa: F401
+    from vllm_ascend.models.deepseek_v2 import \
+        CustomDeepseekV2ForCausalLM  # noqa: F401
+    from vllm_ascend.models.deepseek_v2 import \
+        CustomDeepseekV3ForCausalLM  # noqa: F401
+    from vllm_ascend.models.qwen2_5_vl import \
         AscendQwen2_5_VLForConditionalGeneration  # noqa: F401
-    from .qwen2_vl import AscendQwen2VLForConditionalGeneration  # noqa: F401
+    from vllm_ascend.models.qwen2_vl import \
+        AscendQwen2VLForConditionalGeneration  # noqa: F401
 
     ModelRegistry.register_model(
         "DeepSeekMTPModel",
