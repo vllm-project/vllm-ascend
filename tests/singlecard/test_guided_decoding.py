@@ -16,26 +16,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import gc
 import json
 import os
 import re
-import weakref
 
 import jsonschema
 import pytest
-import torch
-from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
+from tests.conftest import VllmRunner
+
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
-GUIDED_DECODING_BACKENDS = [
+GuidedDecodingBackendV0 = [
     "outlines",
     "lm-format-enforcer",
-    "xgrammar:disable-any-whitespace",
+    "xgrammar",
 ]
+GuidedDecodingBackendV1 = ["xgrammar", "guidance:disable-any-whitespace"]
+GuidedDecodingBackend = list(
+    set(GuidedDecodingBackendV0 + GuidedDecodingBackendV1))
 
 
 @pytest.fixture(scope="module")
@@ -86,84 +87,89 @@ def sample_json_schema():
     }
 
 
-def clean_up():
-    gc.collect()
-    torch.npu.empty_cache()
+@pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
+def test_guided_json_completion(guided_decoding_backend: str,
+                                sample_json_schema):
+    if guided_decoding_backend == "xgrammar":
+        # xgrammar does not support json schema, will fall back to outlines, skip it
+        pytest.skip(
+            f"{guided_decoding_backend} will fall back to outlines, skip it")
+    if guided_decoding_backend not in GuidedDecodingBackendV0 and os.getenv(
+            "VLLM_USE_V1") == "0":
+        # guidance does not support on v0, skip it
+        pytest.skip(
+            f"{guided_decoding_backend} does not support on v0, skip it")
+    if guided_decoding_backend not in GuidedDecodingBackendV1 and os.getenv(
+            "VLLM_USE_V1") == "1":
+        pytest.skip(f"{guided_decoding_backend} does not support v1, skip it")
+
+    sampling_params = SamplingParams(
+        temperature=1.0,
+        max_tokens=1000,
+        guided_decoding=GuidedDecodingParams(json=sample_json_schema))
+    with VllmRunner(
+            MODEL_NAME,
+            seed=0,
+            dtype="auto",
+            guided_decoding_backend=guided_decoding_backend,
+    ) as vllm_model:
+        prompts = [
+            f"Give an example JSON for an employee profile "
+            f"that fits this schema: {sample_json_schema}"
+        ] * 2
+        inputs = vllm_model.get_inputs(prompts)
+        outputs = vllm_model.model.generate(inputs,
+                                            sampling_params=sampling_params)
+
+        assert outputs is not None
+
+        for output in outputs:
+            assert output is not None
+            assert isinstance(output, RequestOutput)
+            prompt = output.prompt
+
+            generated_text = output.outputs[0].text
+            assert generated_text is not None
+            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+            output_json = json.loads(generated_text)
+            jsonschema.validate(instance=output_json,
+                                schema=sample_json_schema)
 
 
-@pytest.fixture(scope="module")
-def llm():
-    # pytest caches the fixture so we use weakref.proxy to
-    # enable garbage collection
-    llm = LLM(model=MODEL_NAME, max_model_len=1024, seed=0)
-    with llm.deprecate_legacy_api():
-        yield weakref.proxy(llm)
-        del llm
-    clean_up()
+@pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
+def test_guided_regex(guided_decoding_backend: str, sample_regex):
+    if guided_decoding_backend not in GuidedDecodingBackendV0 and os.getenv(
+            "VLLM_USE_V1") == "0":
+        # guidance does not support on v0, skip it
+        pytest.skip(
+            f"{guided_decoding_backend} does not support on v0, skip it")
+    if guided_decoding_backend not in GuidedDecodingBackendV1 and os.getenv(
+            "VLLM_USE_V1") == "1":
+        pytest.skip(f"{guided_decoding_backend} does not support v1, skip it")
 
-
-# TODO: Add v1 fully tested
-@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "1",
-                    reason="v1 does not support guided decoding")
-@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
-def test_guided_regex(sample_regex, llm, guided_decoding_backend: str):
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
                                      guided_decoding=GuidedDecodingParams(
-                                         regex=sample_regex,
-                                         backend=guided_decoding_backend))
-    print(f"Using backend: {guided_decoding_backend}")
-    outputs = llm.generate(prompts=[
-        f"Give an example IPv4 address with this regex: {sample_regex}"
-    ] * 2,
-                           sampling_params=sampling_params,
-                           use_tqdm=True)
-
-    assert outputs is not None
-    for output in outputs:
-        assert output is not None
-        assert isinstance(output, RequestOutput)
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        print(generated_text)
-        assert generated_text is not None
-        assert re.fullmatch(sample_regex, generated_text) is not None
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-
-
-@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "1",
-                    reason="v1 does not support guided decoding")
-@pytest.mark.parametrize("guided_decoding_backend", GUIDED_DECODING_BACKENDS)
-def test_guided_json_completion(sample_json_schema, llm,
-                                guided_decoding_backend: str):
-    if guided_decoding_backend == "xgrammar:disable-any-whitespace":
-        # xgrammar does not support json schema, will fall back to outlines, skip it
-        pytest.skip(
-            f"{guided_decoding_backend} does not support json schema validation"
-        )
-
-    sampling_params = SamplingParams(temperature=1.0,
-                                     max_tokens=1000,
-                                     guided_decoding=GuidedDecodingParams(
-                                         json=sample_json_schema,
-                                         backend=guided_decoding_backend))
-    print(f"Using backend: {guided_decoding_backend}")
-    outputs = llm.generate(prompts=[
-        f"Give an example JSON for an employee profile "
-        f"that fits this schema: {sample_json_schema}"
-    ] * 2,
-                           sampling_params=sampling_params,
-                           use_tqdm=True)
-
-    assert outputs is not None
-
-    for output in outputs:
-        assert output is not None
-        assert isinstance(output, RequestOutput)
-        prompt = output.prompt
-
-        generated_text = output.outputs[0].text
-        assert generated_text is not None
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-        output_json = json.loads(generated_text)
-        jsonschema.validate(instance=output_json, schema=sample_json_schema)
+                                         regex=sample_regex, ))
+    with VllmRunner(
+            MODEL_NAME,
+            seed=0,
+            dtype="auto",
+            guided_decoding_backend=guided_decoding_backend,
+    ) as vllm_model:
+        prompts = [
+            f"Give an example IPv4 address with this regex: {sample_regex}"
+        ] * 2
+        inputs = vllm_model.get_inputs(prompts)
+        outputs = vllm_model.model.generate(inputs,
+                                            sampling_params=sampling_params)
+        assert outputs is not None
+        for output in outputs:
+            assert output is not None
+            assert isinstance(output, RequestOutput)
+            prompt = output.prompt
+            generated_text = output.outputs[0].text
+            print(generated_text)
+            assert generated_text is not None
+            assert re.fullmatch(".*", generated_text) is not None
+            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
