@@ -44,9 +44,9 @@ from vllm_ascend.utils import try_register_lib
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 try:
-    from vllm.distributed import ensure_kv_transfer_initialized
+    from vllm.distributed import ensure_kv_transfer_initialized # noqa
 except ImportError:
-    from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
+    from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized # noqa
 
 
 class NPUWorker(WorkerBase):

@@ -51,9 +51,9 @@ from vllm_ascend.worker.model_runner import NPUModelRunner
 from vllm_ascend.worker.pooling_model_runner import NPUPoolingModelRunner
 
 try:
-    from vllm.distributed import ensure_kv_transfer_initialized
+    from vllm.distributed import ensure_kv_transfer_initialized # noqa
 except ImportError:
-    from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
+    from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized # noqa
 
 
 class NPUWorker(LocalOrDistributedWorkerBase):

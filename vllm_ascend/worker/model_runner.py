@@ -66,9 +66,9 @@ from vllm.worker.model_runner_base import (
 
 
 try:
-    from vllm.distributed import get_kv_transfer_group
+    from vllm.distributed import get_kv_transfer_group # noqa
 except ImportError:
-    from vllm.distributed.kv_transfer import get_kv_transfer_group
+    from vllm.distributed.kv_transfer import get_kv_transfer_group # noqa
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
