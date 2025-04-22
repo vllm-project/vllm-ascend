@@ -16,8 +16,6 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
-import os
-
 import torch
 import torch_npu  # noqa: F401
 from packaging.version import Version

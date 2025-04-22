@@ -914,8 +914,11 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         self.w_kc = None
         self.w_vc = None
 
-        self.enable_graph_mode = get_current_vllm_config(
-        ).additional_config.get("enable_graph_mode", False)
+        self.enable_graph_mode = False
+        additional_config = get_current_vllm_config().additional_config
+        if additional_config:
+            self.enable_graph_mode = additional_config.get(
+                "enable_graph_mode", False)
 
     def exec_kv(
         self,

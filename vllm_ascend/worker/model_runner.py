@@ -32,7 +32,7 @@ import torch_npu
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.utils import CommonAttentionState
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import get_pp_group
 from vllm.forward_context import set_forward_context
@@ -869,8 +869,11 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         self.max_batchsize_to_capture = \
             self.vllm_config.compilation_config.max_capture_size
 
-        self.enable_graph_mode = vllm_config.additional_config.get(
-            "enable_graph_mode", False)
+        self.enable_graph_mode = False
+        additional_config = vllm_config.additional_config
+        if additional_config:
+            self.enable_graph_mode = additional_config.get(
+                "enable_graph_mode", False)
 
         self.has_inner_state = model_config.has_inner_state
 

@@ -17,7 +17,7 @@
 # limitations under the License.
 #
 
-from typing import List, Tuple
+from typing import Any, List
 
 import torch
 from vllm.config import get_current_vllm_config
@@ -29,15 +29,15 @@ def allocate_kv_cache(
     self,
     num_blocks: int,
     device: str,
-) -> List[Tuple]:
+) -> List[Any]:
     """Allocates KV cache on the specified device."""
     kv_cache_shape = self.attn_backend.get_kv_cache_shape(
         num_blocks, self.block_size, self.num_kv_heads, self.head_size)
     pin_memory = is_pin_memory_available() if device == "cpu" else False
-    if get_current_vllm_config().additional_config.get("enable_graph_mode",
-                                                       False) == True:
-        kv_cache: List[Tuple] = []
+    kv_cache: List[Any] = []
 
+    additional_config = get_current_vllm_config().additional_config
+    if additional_config and additional_config.get("enable_graph_mode", False):
         # Align entries so they are 256 byte aligned for better performance
         # Primarily targets MLA as this typically only ends up having entries
         # be 128 byte aligned.
@@ -64,8 +64,6 @@ def allocate_kv_cache(
             # when entry_shape is higher than 1D
             kv_cache.append((layer_kv_cache_nope, layer_kv_cache_pe))
     else:
-        kv_cache: List[torch.Tensor] = []
-
         for _ in range(self.num_attention_layers):
             # null block in CpuGpuBlockAllocator requires at least that
             # block to be zeroed-out.
@@ -79,5 +77,6 @@ def allocate_kv_cache(
             # when entry_shape is higher than 1D
             kv_cache.append(layer_kv_cache)
     return kv_cache
+
 
 CacheEngine._allocate_kv_cache = allocate_kv_cache
