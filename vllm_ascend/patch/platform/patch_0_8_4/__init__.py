@@ -14,17 +14,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# What's Patched and how it works:
-# ** File: platform/patch_0_8_4/patch_config.py**
-#   1. `vllm.config.ModelConfig.__init__()`
-#    Why:
-#       It is hard coded for sleep mode to support cuda platform only
-#    How：
-#       Using a new method to check if sleep mode is available
-#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
-#       https://github.com/vllm-project/vllm/pull/16562
-#    Future Plan:
-#       This patch is only used for 084 and can't be revert. just keep as it is.
 
 import vllm_ascend.patch.platform.patch_0_8_4.patch_config  # noqa
-import vllm_ascend.patch.platform.patch_0_8_4.patch_distributed  # noqa
