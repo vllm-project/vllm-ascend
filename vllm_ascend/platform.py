@@ -149,7 +149,8 @@ class NPUPlatform(Platform):
                     "ascend_scheduler_config", None) is not None:
                 additional_scheduler_config = additional_config.get(
                     "ascend_scheduler_config")
-                from vllm_ascend.core.schedule_config import AscendSchedulerConfig
+                from vllm_ascend.core.schedule_config import \
+                    AscendSchedulerConfig
                 ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
                     vllm_config.scheduler_config, additional_scheduler_config)
                 vllm_config.scheduler_config = ascend_scheduler_config
