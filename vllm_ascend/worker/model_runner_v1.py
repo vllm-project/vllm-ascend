@@ -64,12 +64,8 @@ class NPUModelRunner:
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
-        self.load_config = vllm_config.load_config
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
-        self.speculative_config = vllm_config.speculative_config
-        self.prompt_adapter_config = vllm_config.prompt_adapter_config
-        self.observability_config = vllm_config.observability_config
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -87,7 +83,6 @@ class NPUModelRunner:
                 cache_config.cache_dtype]
 
         self.is_multimodal_model = model_config.is_multimodal_model
-        self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
         self.max_model_len = model_config.max_model_len
         self.max_num_blocks_per_req = cdiv(self.max_model_len, self.block_size)
@@ -124,7 +119,6 @@ class NPUModelRunner:
 
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
             weakref.proxy(self))
-        self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
 
         # Multi-modal data support
         self.input_registry = INPUT_REGISTRY
@@ -143,9 +137,6 @@ class NPUModelRunner:
         self.kv_caches: List[torch.Tensor] = []
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
-
-        # Set up speculative decoding.
-        self.use_spec_decode = False
 
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}
@@ -233,7 +224,6 @@ class NPUModelRunner:
         self.input_positions_cpu = torch.arange(0,
                                                 self.max_num_tokens,
                                                 device="cpu")
-        self.attn_mask = None
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler

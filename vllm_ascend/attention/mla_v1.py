@@ -741,21 +741,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                                                [0, q.shape[-1] - v.shape[-1]],
                                                value=0)
 
-            '''
-            attn_output, attn_softmax_lse = self.flash_attn_varlen_func(
-                q=q,
-                k=k,
-                v=v_padded,
-                cu_seqlens_q=prefill_metadata.query_start_loc,
-                cu_seqlens_k=prefill_metadata.chunked_context.cu_seq_lens[i],
-                max_seqlen_q=prefill_metadata.max_query_len,
-                max_seqlen_k=prefill_metadata.chunked_context.max_seq_lens[i],
-                softmax_scale=self.scale,
-                causal=False,  # Context is unmasked
-                return_softmax_lse=True,
-            )
-            '''
-
             attn_output, attn_softmax_lse = flash_attn_varlen_func_torch(
                 q=q,
                 k=k,
@@ -810,21 +795,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         v_padded = torch.nn.functional.pad(v, [0, q.shape[-1] - v.shape[-1]],
                                            value=0)
 
-        '''
-        output = self.flash_attn_varlen_func(
-            q=q,
-            k=k,
-            v=v_padded,
-            cu_seqlens_q=attn_metadata.prefill.query_start_loc,
-            cu_seqlens_k=attn_metadata.prefill.query_start_loc,
-            max_seqlen_q=attn_metadata.prefill.max_query_len,
-            max_seqlen_k=attn_metadata.prefill.max_query_len,
-            softmax_scale=self.scale,
-            causal=True,
-            return_softmax_lse=has_context,
-        )
-        '''
-
         output = flash_attn_varlen_func_torch(
             q=q,
             k=k,
@@ -859,49 +829,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 .reshape(-1, self.num_heads * v.shape[-1])
 
         return self.o_proj(output)[0]
-
-    '''
-    def _forward_decode(
-        self,
-        q_nope: torch.Tensor,
-        q_pe: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: AscendMLAMetadata,
-    ) -> torch.Tensor:
-        assert kv_c_and_k_pe_cache.numel() > 0
-
-        decode_meta = attn_metadata.decode
-        assert decode_meta is not None
-
-        q = torch.cat([q_nope, q_pe], dim=-1)
-        num_tokens = q.size(0)
-        attn_output = torch.randn(
-            [num_tokens, self.num_heads, self.kv_lora_rank],
-            dtype=q.dtype,
-            device=q.device)
-        print("q size:", q.size())
-        print("kv_c_and_k_pe_cache size:", kv_c_and_k_pe_cache.size())
-        print("self.num_kv_heads:", self.num_kv_heads)
-        print("self.num_heads:", self.num_heads)
-        print("self.scale:", self.scale)
-        print("attn_metadata.decode.block_table:", attn_metadata.decode.block_table)
-        print("attn_metadata.decode.seq_lens:", attn_metadata.decode.seq_lens)
-        print("self.kv_lora_rank:", self.kv_lora_rank)
-        print("attn_output:", attn_output)
-        torch_npu._npu_paged_attention_mla(
-            query=q,
-            key_cache=kv_c_and_k_pe_cache,
-            num_kv_heads=self.num_kv_heads,
-            num_heads=self.num_heads,
-            scale_value=self.scale,
-            block_table=attn_metadata.decode.block_table,
-            context_lens=attn_metadata.decode.seq_lens,
-            mla_vheadsize=self.kv_lora_rank,
-            out=attn_output
-        )
-        return self._v_up_proj_and_o_proj(attn_output)
-    '''
-
+    
     def _forward_decode(
         self,
         q_nope: torch.Tensor,
@@ -971,8 +899,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         prefill_k_pe = k_pe[num_decode_tokens:]
         prefill_k_c_normed = k_c_normed[num_decode_tokens:]
 
-        print("attn_metadata.num_prefills:", attn_metadata.num_prefills)
-        print("attn_metadata.num_decodes:", attn_metadata.num_decodes)
         if has_decode:
             assert attn_metadata.decode is not None
             decode_ql_nope, decode_q_pe = \
