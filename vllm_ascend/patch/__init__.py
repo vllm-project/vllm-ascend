@@ -90,7 +90,7 @@
 #
 # * Worker Patch:
 # ===============
-# ** File: worker/patch_common/patch_metrics.py **
+# ** File: worker/patch_0_8_4/patch_metrics.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.spec_decode.metrics.AsyncMetricsCollector.init_tensors` and
 #       `vllm.spec_decode.metrics.AsyncMetricsCollector._copy_rejsample_metrics_async`
@@ -104,7 +104,9 @@
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm.
 #
-#   2. `vllm.spec_decode.metrics.AsyncMetricsCollector.maybe_collect_rejsample_metrics`
+# ** File: worker/patch_common/patch_metrics.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.spec_decode.metrics.AsyncMetricsCollector.maybe_collect_rejsample_metrics`
 #    Why:
 #       There are cuda hard code (current_platform.is_cuda_alike()) in
 #       `AsyncMetricsCollector.maybe_collect_rejsample_metrics`
