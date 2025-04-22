@@ -30,7 +30,7 @@ try:
     # register custom ops into torch_library here
     import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
 
-except ImportError as e:
+except ImportError:
     logging.warning(
         "Warning: Failed to register custom ops, all custom ops will be disabled"
     )

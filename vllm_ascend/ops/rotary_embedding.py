@@ -71,14 +71,12 @@ def rope_forward_oot(
     return query.view(query_shape), key.view(key_shape)
 
 
-def native_rope_deepseek_forward(
-    self,
-    positions: torch.Tensor,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    offsets: Optional[torch.Tensor] = None,
-    max_seq_len: int = None
-):
+def native_rope_deepseek_forward(self,
+                                 positions: torch.Tensor,
+                                 query: torch.Tensor,
+                                 key: torch.Tensor,
+                                 offsets: Optional[torch.Tensor] = None,
+                                 max_seq_len: int = None):
     if max_seq_len is not None and max_seq_len > self.max_seq_len:
         self._set_cos_sin_cache(max_seq_len, query.device, query.dtype)
     if len(key.shape) == 2:
@@ -89,10 +87,12 @@ def native_rope_deepseek_forward(
     neox_style = True
     if self.is_neox_style is False:
         b, h_q, d = query.shape
-        query = query.view(b, h_q, d // 2, 2).transpose(3, 2).reshape(b, h_q, d)
+        query = query.view(b, h_q, d // 2, 2).transpose(3,
+                                                        2).reshape(b, h_q, d)
         b, h_k, d = key.shape
         key = key.view(b, h_k, d // 2, 2).transpose(3, 2).reshape(b, h_k, d)
-    q_pe, k_pe = rope_forward_oot(self, positions, query, key, offsets, neox_style)
+    q_pe, k_pe = rope_forward_oot(self, positions, query, key, offsets,
+                                  neox_style)
     return q_pe, k_pe
 
 
@@ -217,8 +217,11 @@ def _set_cos_sin_cache(self, seq_len, device, dtype):
     t = torch.arange(seq_len, device=device, dtype=torch.float32)
 
     freqs = torch.outer(t, inv_freq)
-    cache = torch.cat([freqs.cos() * self.mscale, freqs.sin() * self.mscale], dim=-1).to(dtype)
+    cache = torch.cat([freqs.cos() * self.mscale,
+                       freqs.sin() * self.mscale],
+                      dim=-1).to(dtype)
     self.register_buffer("cos_sin_cache", cache, persistent=False)
+
 
 def deepseek_rope_init_func(
     self,
@@ -247,10 +250,14 @@ def deepseek_rope_init_func(
         yarn_get_mscale(self.scaling_factor, float(mscale)) /
         yarn_get_mscale(self.scaling_factor, float(mscale_all_dim)) *
         attn_factor)
-    super(DeepseekScalingRotaryEmbedding, self).__init__(head_size, rotary_dim, max_position_embeddings, base,
-                        is_neox_style, dtype)
+    super(DeepseekScalingRotaryEmbedding,
+          self).__init__(head_size, rotary_dim, max_position_embeddings, base,
+                         is_neox_style, dtype)
     self.max_seq_len = max_position_embeddings
-    _set_cos_sin_cache(self, max_position_embeddings, dtype=dtype, device="npu")
+    _set_cos_sin_cache(self,
+                       max_position_embeddings,
+                       dtype=dtype,
+                       device="npu")
 
 
 RotaryEmbedding.forward_oot = rope_forward_oot
