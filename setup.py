@@ -157,19 +157,22 @@ class cmake_build_ext(build_ext):
             # else specify pybind11 path installed from source code on CI container
             raise RuntimeError(f"CMake configuration failed: {e}")
 
-        # try retrive soc version from npu-smi
-        soc_command = [
-            "bash",
-            "-c",
-            "npu-smi info | grep OK | awk '{print $3}' | head -n 1",
-        ]
-        try:
-            soc_version = subprocess.check_output(soc_command,
-                                                  text=True).strip()
-            soc_version = soc_version.split("-")[0]
-            soc_version = "Ascend" + soc_version
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Retrive Soc version failed: {e}")
+        if envs.SOC_VERSION is None:
+            # try retrive soc version from npu-smi
+            soc_command = [
+                "bash",
+                "-c",
+                "npu-smi info | grep OK | awk '{print $3}' | head -n 1",
+            ]
+            try:
+                soc_version = subprocess.check_output(soc_command,
+                                                      text=True).strip()
+                soc_version = soc_version.split("-")[0]
+                soc_version = "Ascend" + soc_version
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f"Retrive Soc version failed: {e}")
+        else:
+            soc_version = envs.SOC_VERSION
 
         # add SOC_VERSION
         cmake_args += [f"-DSOC_VERSION={soc_version}"]
