@@ -148,6 +148,12 @@ pip install ./torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.man
 cd ..
 ```
 
+**[Optinal]** Config the extra-index of `pip` if you are working on a **x86** machine, so that the torch with cpu could be found:
+
+```bash
+pip config set global.extra-index-url https://download.pytorch.org/whl/cpu/
+```
+
 Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
 
 ```{code-block} bash
@@ -159,7 +165,11 @@ Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
 pip install vllm==|pip_vllm_version|
 
 # Install vllm-project/vllm-ascend from pypi.
-pip install vllm-ascend==|pip_vllm_ascend_version| --extra-index https://download.pytorch.org/whl/cpu/
+pip install vllm-ascend==|pip_vllm_ascend_version|
+```
+
+```{note}
+If you failed to install vllm due to no triton version could be installed, please build from source code.
 ```
 
 :::{dropdown} Click here to see "Build from source code"
@@ -171,20 +181,20 @@ or build from **source code**:
 # Install vLLM
 git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
 cd vllm
-VLLM_TARGET_DEVICE=empty pip install . --extra-index https://download.pytorch.org/whl/cpu/
+VLLM_TARGET_DEVICE=empty pip install .
 cd ..
 
 # Install vLLM Ascend
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
-pip install -e . --extra-index https://download.pytorch.org/whl/cpu/
+python setup.py develop
 cd ..
 ```
 :::
 
 ```{note}
 vllm-ascend will build custom ops by default. If you don't want to build it, set `COMPILE_CUSTOM_KERNELS=0` environment to disable it.
-To build custom ops, gcc/g++ higher than 8 and c++ 17 or higher is required. If you encourage a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
+To build custom ops, gcc/g++ higher than 8 and c++ 17 or higher is required. If you're using `pip install -e .` and encourage a torch-npu version conflict, please install with `pip install --no-build-isolation -e .` to build on system env.
 ```
 
 ::::
