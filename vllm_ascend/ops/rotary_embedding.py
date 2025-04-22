@@ -24,6 +24,7 @@ from vllm.model_executor.layers.rotary_embedding import (
 
 from vllm_ascend.platform import CUSTOM_OP_ENABLED
 
+
 def custom_rotary_embedding_enabled(query, neox_style, head_size):
     return query.dtype == torch.float16 and neox_style and head_size % 32 == 0 and CUSTOM_OP_ENABLED
 
