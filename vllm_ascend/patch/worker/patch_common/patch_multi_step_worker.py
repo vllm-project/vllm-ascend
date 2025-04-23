@@ -22,6 +22,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.draft_model_runner import TP1DraftModelRunner
 
 
@@ -61,15 +62,19 @@ def sampler_output(
     else:
         # Here we run multi-step directly, with every step prepared
         # on the CPU.
-        # TODO: Remove this branch once DraftModelRunner supports TP>1
+        # TODO Remove this branch once DraftModelRunner supports TP>1
         # and other restrictions that are part of DraftModelRunner's
         # supports_gpu_multi_step(..)
+        if expanded_request.previous_hidden_states is not None:
+            self.worker.model_runner.return_hidden_states = True
         for _ in range(sample_len):
             model_output: List[SamplerOutput] = self.worker.execute_model(
                 execute_model_req=expanded_request)
             assert (len(model_output) == 1
                     ), "composing multistep workers not supported"
             model_output = model_output[0]
+            self._maybe_update_previous_hidden_states(model_output,
+                                                      expanded_request)
 
             self._append_new_tokens(model_output,
                                     expanded_request.seq_group_metadata_list,
@@ -84,4 +89,22 @@ def sampler_output(
     return filtered_model_outputs, True
 
 
+def set_include_gpu_probs_tensor(self) -> None:
+    # Need include_gpu_probs_tensor for MultiSteoWorker
+    if hasattr(self.model_runner.model, "sampler"):
+        self.model_runner.model.sampler.include_gpu_probs_tensor = True
+    if not vllm_version_is("0.8.4"):
+        self.model_runner.sampler.include_gpu_probs_tensor = True
+
+
+def set_should_modify_greedy_probs_inplace(self) -> None:
+    if hasattr(self.model_runner.model, "sampler"):
+        self.model_runner.model.sampler.should_modify_greedy_probs_inplace = (
+            True)
+    if not vllm_version_is("0.8.4"):
+        self.model_runner.sampler.should_modify_greedy_probs_inplace = True
+
+
 MultiStepWorker.sampler_output = torch.inference_mode()(sampler_output)
+MultiStepWorker.set_include_gpu_probs_tensor = set_include_gpu_probs_tensor
+MultiStepWorker.set_should_modify_greedy_probs_inplace = set_should_modify_greedy_probs_inplace

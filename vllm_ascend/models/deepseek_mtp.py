@@ -17,11 +17,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Optional
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
+from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -34,6 +35,7 @@ from vllm.model_executor.models.deepseek_mtp import (
     SharedHead)
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import CustomDeepseekV2DecoderLayer
 
@@ -69,6 +71,8 @@ class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: AttentionMetadata,
         previous_hidden_states: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
         spec_step_index: int = 0,
@@ -88,6 +92,8 @@ class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
 
         hidden_states, residual = self.mtp_block(positions=positions,
                                                  hidden_states=hidden_states,
+                                                 kv_cache=kv_cache,
+                                                 attn_metadata=attn_metadata,
                                                  residual=None)
         hidden_states = residual + hidden_states
         return hidden_states
@@ -125,14 +131,20 @@ class CustomDeepSeekMultiTokenPredictor(DeepSeekMultiTokenPredictor):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        kv_caches: torch.Tensor,
+        attn_metadata: AttentionMetadata,
         previous_hidden_states: torch.Tensor,
         inputs_embeds: Optional[torch.Tensor] = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         current_step_idx = (spec_step_idx % self.num_mtp_layers)
+        step_kv_cache = kv_caches[
+            current_step_idx] if kv_caches is not None else None
         return self.layers_list[current_step_idx](
             input_ids,
             positions,
+            step_kv_cache,
+            attn_metadata,
             previous_hidden_states,
             inputs_embeds,
             current_step_idx,
@@ -170,3 +182,19 @@ class CustomDeepSeekMTP(DeepSeekMTP):
                                                            prefix, "model"))
 
         self.sampler = get_sampler()
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: Optional[List[torch.Tensor]] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
+        previous_hidden_states: Optional[torch.Tensor] = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   attn_metadata, previous_hidden_states,
+                                   inputs_embeds, spec_step_idx)
+        return hidden_states

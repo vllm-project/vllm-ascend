@@ -36,14 +36,20 @@ However, we still need to verify below scenario could be passed:
 With those tests, we can say at least, mtp would not break the
 correctess for the target model outputs.
 """
+import os
 
 import pytest
 
 from .conftest import run_equality_correctness_test
 
-# main model
-# NOTE vLLM use fp8 model, vllm-ascend use bf16 model
-MAIN_MODEL = "wemaster/deepseek_mtp_main_random_bf16"
+# NOTE both main model and MTP are bfloat16
+FLOAT_MODEL = "wemaster/deepseek_mtp_main_random_bf16"
+
+# NOTE main model is w8a8, MTP is bfloat16
+QUANT_MODEL = "wemaster/deepseek_mtp_main_random_w8a8_part"
+
+# TODO when msmodelslim can quantify both main and MTP model
+# This UT should use w8a8 fully weights.
 
 # max. number of speculative tokens: this corresponds to
 # num_nextn_predict_layers in the config.json of the speculator model.
@@ -51,8 +57,11 @@ MAX_SPEC_TOKENS = 1
 
 # precision
 PRECISION = "bfloat16"
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
 
 
+@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "1",
+                    reason="mtp is not supported on v1")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -66,7 +75,7 @@ PRECISION = "bfloat16"
         "dtype": PRECISION,
 
         # Main model
-        "model_name": MAIN_MODEL,
+        "model_name": FLOAT_MODEL,
 
         # GPU memory utilization
         "gpu_memory_utilization": 0.85
@@ -97,6 +106,7 @@ def test_mtp_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
                                   batch_size, output_len, seed)
 
 
+@pytest.mark.skipif(True, reason="quant model is not ready.")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -110,7 +120,53 @@ def test_mtp_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
         "dtype": PRECISION,
 
         # Main model
-        "model_name": MAIN_MODEL,
+        "model_name": QUANT_MODEL,
+
+        # GPU memory utilization
+        "gpu_memory_utilization": 0.85
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_config": {
+            "num_speculative_tokens": MAX_SPEC_TOKENS,
+        },
+    },
+])
+@pytest.mark.parametrize("output_len", [
+    128,
+])
+@pytest.mark.parametrize("batch_size", [1, 32])
+@pytest.mark.parametrize("seed", [1])
+def test_mtp_e2e_quant_greedy_correctness(vllm_runner, common_llm_kwargs,
+                                          per_test_common_llm_kwargs,
+                                          baseline_llm_kwargs, test_llm_kwargs,
+                                          batch_size: int, output_len: int,
+                                          seed: int):
+
+    run_equality_correctness_test(vllm_runner, common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs, test_llm_kwargs,
+                                  batch_size, output_len, seed)
+
+
+@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "1",
+                    reason="mtp is not supported on v1")
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Print spec metrics.
+        "disable_log_stats": False,
+
+        # Precision
+        "dtype": PRECISION,
+
+        # Main model
+        "model_name": FLOAT_MODEL,
 
         # GPU memory utilization
         "gpu_memory_utilization": 0.85
@@ -158,15 +214,13 @@ def test_mtp_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
         ["disable_logprobs"])
 
 
-@pytest.mark.skipif(
-    True,
-    reason=
-    "Open it when vllm-ascend support graph mode and support enforce_eager status is False to run model in graph mode"
-)
+@pytest.mark.skipif(True, reason="torchair ut can not clean mem.")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        "enforce_eager": False,
+        "additional_config": {
+            'enable_graph_mode': True,
+        },
 
         # Print spec metrics.
         "disable_log_stats": False,
@@ -175,7 +229,7 @@ def test_mtp_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
         "dtype": PRECISION,
 
         # Main model
-        "model_name": MAIN_MODEL,
+        "model_name": FLOAT_MODEL,
         "gpu_memory_utilization": 0.85
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
@@ -192,20 +246,64 @@ def test_mtp_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
 ])
 @pytest.mark.parametrize("batch_size", [1, 32])
 @pytest.mark.parametrize("seed", [1])
-def test_mtp_e2e_greedy_correctness_cuda_graph(vllm_runner, common_llm_kwargs,
-                                               per_test_common_llm_kwargs,
-                                               baseline_llm_kwargs,
-                                               test_llm_kwargs,
-                                               batch_size: int,
-                                               output_len: int, seed: int):
-    """Verify greedy equality with cuda graph enabled and different
-    batch sizes."""
+def test_mtp_e2e_greedy_correctness_torchair_graph(
+        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
+        seed: int):
+    """Verify greedy equality with torchair graph enabled and different
+    batch sizes using bfloat16 weights."""
     run_equality_correctness_test(vllm_runner, common_llm_kwargs,
                                   per_test_common_llm_kwargs,
                                   baseline_llm_kwargs, test_llm_kwargs,
                                   batch_size, output_len, seed)
 
 
+@pytest.mark.skipif(True, reason="quant model is not ready.")
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        "additional_config": {
+            'enable_graph_mode': True,
+        },
+
+        # Print spec metrics.
+        "disable_log_stats": False,
+
+        # Precision
+        "dtype": PRECISION,
+
+        # Main model
+        "model_name": QUANT_MODEL,
+        "gpu_memory_utilization": 0.85
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_config": {
+            "num_speculative_tokens": MAX_SPEC_TOKENS,
+        },
+    },
+])
+@pytest.mark.parametrize("output_len", [
+    128,
+])
+@pytest.mark.parametrize("batch_size", [1, 32])
+@pytest.mark.parametrize("seed", [1])
+def test_mtp_e2e_quant_greedy_correctness_torchair_graph(
+        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
+        seed: int):
+    """Verify greedy equality with torchair graph enabled and different
+    batch sizes using quant weights."""
+    run_equality_correctness_test(vllm_runner, common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs, test_llm_kwargs,
+                                  batch_size, output_len, seed)
+
+
+@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "1",
+                    reason="mtp is not supported on v1")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -221,7 +319,7 @@ def test_mtp_e2e_greedy_correctness_cuda_graph(vllm_runner, common_llm_kwargs,
         "dtype": PRECISION,
 
         # Main model
-        "model_name": MAIN_MODEL,
+        "model_name": FLOAT_MODEL,
 
         # GPU memory utilization
         "gpu_memory_utilization": 0.9
@@ -256,6 +354,8 @@ def test_mtp_e2e_greedy_correctness_with_preemption(
                                   batch_size, output_len, seed)
 
 
+@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "1",
+                    reason="mtp is not supported on v1")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -266,7 +366,7 @@ def test_mtp_e2e_greedy_correctness_with_preemption(
         "dtype": PRECISION,
 
         # Main model
-        "model_name": MAIN_MODEL,
+        "model_name": FLOAT_MODEL,
 
         # GPU memory utilization
         "gpu_memory_utilization": 0.9
@@ -305,6 +405,8 @@ def test_mtp_different_k(vllm_runner, common_llm_kwargs,
                                   batch_size, output_len, seed)
 
 
+@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "1",
+                    reason="mtp is not supported on v1")
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
@@ -315,7 +417,7 @@ def test_mtp_different_k(vllm_runner, common_llm_kwargs,
         "dtype": PRECISION,
 
         # Main model
-        "model_name": MAIN_MODEL,
+        "model_name": FLOAT_MODEL,
 
         # GPU memory utilization
         "gpu_memory_utilization": 0.9

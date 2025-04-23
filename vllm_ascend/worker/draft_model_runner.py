@@ -293,8 +293,8 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                     sampling_metadata=model_input.sampling_metadata,
                 )
             else:
-                assert self.sampler is not None
-                output = self.sampler(
+                assert self.model_runner.sampler is not None
+                output = self.model_runner.sampler(
                     logits=logits,
                     sampling_metadata=model_input.sampling_metadata,
                 )

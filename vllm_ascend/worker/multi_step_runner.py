@@ -23,6 +23,7 @@ from vllm.worker.multi_step_model_runner import (ModelOutput,
                                                  PythonizationCache,
                                                  StatefulModelInput)
 
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.model_runner import (
     ModelInputForNPUWithSamplingMetadata, NPUModelRunnerBase)
 
@@ -318,8 +319,12 @@ class MultiStepModelNPURunner(NPUModelRunnerBase[StatefulModelInputForNPU]):
                     device="cpu",
                     pin_memory=True)
 
-            self._base_model_runner.model.sampler.include_gpu_probs_tensor = (
-                True)
+            if vllm_version_is("0.8.4"):
+                self._base_model_runner.model.sampler.include_gpu_probs_tensor = (
+                    True)
+            else:
+                assert self._base_model_runner.sampler is not None
+                self._base_model_runner.sampler.include_gpu_probs_tensor = True
             if frozen_model_input.sampling_metadata:
                 frozen_model_input.sampling_metadata.skip_sampler_cpu_output = (
                     True)
