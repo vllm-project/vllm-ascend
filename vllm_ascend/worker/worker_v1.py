@@ -23,6 +23,7 @@ from typing import Dict, List, Optional
 import torch
 import torch.nn as nn
 import torch_npu
+from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
@@ -65,7 +66,9 @@ class NPUWorker(WorkerBase):
         from vllm_ascend.utils import adapt_patch
         adapt_patch()
         # Register ops when worker init.
-        from vllm_ascend import ops  # noqa: F401
+        from vllm_ascend import ops
+        ops.register_dummy_fusion_op()
+        _register_atb_extensions()
 
         super().__init__(vllm_config=vllm_config,
                          local_rank=local_rank,
@@ -179,8 +182,17 @@ class NPUWorker(WorkerBase):
         self.model_runner.load_model()
 
     def compile_or_warm_up_model(self) -> None:
+        warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
         if not self.model_config.enforce_eager:
-            logger.warning("Graph capture is not supported on NPU.")
+            warmup_sizes = [
+                x for x in warmup_sizes if x not in
+                self.vllm_config.compilation_config.cudagraph_capture_sizes
+            ]
+        for size in sorted(warmup_sizes, reverse=True):
+            logger.info("Compile and warming up model for size %d", size)
+            self.model_runner._dummy_run(size)
+        if not self.model_config.enforce_eager:
+            self.model_runner.capture_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
