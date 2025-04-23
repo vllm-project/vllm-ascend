@@ -89,7 +89,7 @@
 #       on multi-node dp inference implementation
 #   4. `ParallelConfig.stateless_init_dp_group`
 #    Why:
-#       vLLM use gloo backend by default to initialize stateless dp process gourp, but we want to use hccl here to 
+#       vLLM use gloo backend by default to initialize stateless dp process gourp, but we want to use hccl here to
 #       get better performance
 #    How：
 #       adopt nccl backend to init process group
