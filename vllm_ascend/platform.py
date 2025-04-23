@@ -115,29 +115,33 @@ class NPUPlatform(Platform):
         from vllm.config import CompilationLevel  # noqa: E402
         compilation_config = vllm_config.compilation_config
 
-        enforce_eager_flag = False
-        # Check whether the eager mode is configured
-        try:
-            enforce_eager_flag = vllm_config.model_config.enforce_eager
-        except Exception:
-            logger.warning(
-                "There is currently no enforce_eager mode configured, the default value of enforce_eager=False is used"
-            )
+        if vllm_config.model_config is None:
+            logger.warning("Model config is missing. This may indicate "
+                           "that we are running a test case")
+            enforce_eager = False
+        else:
+            enforce_eager = getattr(vllm_config.model_config, "enforce_eager",
+                                    False)
 
-        if enforce_eager_flag or compilation_config.level == CompilationLevel.NO_COMPILATION:
-            logger.warning(
-                "Compilation level PIECEWISE is not enable on NPU now, current compilation level to NO_COMPILATION"
-            )
+        # TODO(Yizhou): Override the value of enforce_eager to True before
+        # the CANN and torch_npu support NPU compilation.
+        enforce_eager = True
+        logger.warning(
+            "NPU compilation support pending. Will be available in future CANN and "
+            "torch_npu releases. Using default: enforce_eager=True")
+
+        if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:
+            logger.info("Compilation disabled, using eager mode by default")
             compilation_config.level = CompilationLevel.NO_COMPILATION
         elif compilation_config.level != CompilationLevel.PIECEWISE:
             logger.warning(
-                "Compilation level %s is not enable on NPU now, forcing compilation level to NO_COMPILATION",
+                "NPU does not support %s compilation level. Setting level to NO_COMPILATION",
                 compilation_config.level)
             compilation_config.level = CompilationLevel.NO_COMPILATION
         else:
             logger.info(
-                "Compilation level PIECEWISE is enable on NPU now, But use_inductor is no support, only use npu_graph now"
-            )
+                "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
+                "using only ACL Graph mode")
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(
                 ["vllm.unified_ascend_attention_with_output"])
