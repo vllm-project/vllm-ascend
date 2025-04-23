@@ -152,6 +152,21 @@ def parallel_config_get_dp_port(self) -> int:
     return port
 
 
+
+def ascend_stateless_init_dp_group(self) -> "ProcessGroup":
+    from vllm.distributed.utils import (
+        stateless_init_torch_distributed_process_group)
+
+    dp_group = stateless_init_torch_distributed_process_group(
+        self.data_parallel_master_ip,
+        self.get_next_dp_init_port(),
+        self.data_parallel_rank,
+        self.data_parallel_size,
+        backend="hccl")
+
+    return dp_group
+
 vllm.distributed.parallel_state.destroy_model_parallel = ascend_destroy_model_parallel
 vllm.distributed.stateless_init_torch_distributed_process_group = ascend_stateless_init_torch_distributed_process_group
 ParallelConfig.get_next_dp_init_port = parallel_config_get_dp_port
+ParallelConfig.stateless_init_dp_group = ascend_stateless_init_dp_group
