@@ -11,8 +11,6 @@
 import gc
 import os
 
-VLLM_ENABLE_GRAPGH_MODE = os.environ.get("VLLM_ENABLE_GRAPH_MODE") == "1"
-
 
 def main():
     dp_rank = int(os.environ['RANK'])
@@ -20,8 +18,8 @@ def main():
     dp_size = int(os.environ['WORLD_SIZE'])
     master_addr = os.environ['MASTER_ADDR']
     master_port = os.environ['MASTER_PORT']
-    tp_size = 4
-    etp_size = 2
+    tp_size = 1
+    etp_size = 1
 
     os.environ["VLLM_DP_RANK"] = str(dp_rank)
     os.environ["VLLM_DP_SIZE"] = str(dp_size)
@@ -58,15 +56,15 @@ def main():
                                      max_tokens=4,
                                      min_tokens=4)
     # Create an LLM.
-    llm = LLM(
-        model="deepseek-ai/DeepSeek-V2-Lite-Chat",
-        tensor_parallel_size=tp_size,
-        trust_remote_code=True,
-        expert_tensor_parallel_size=etp_size,
-        max_model_len=4096,
-        max_num_seqs=num_seqs,
-        compilation_config=1 if VLLM_ENABLE_GRAPGH_MODE else 0,
-    )
+    llm = LLM(model="deepseek-ai/DeepSeek-V2-Lite-Chat",
+              tensor_parallel_size=tp_size,
+              trust_remote_code=True,
+              max_model_len=4096,
+              max_num_seqs=num_seqs,
+              additional_config={
+                  'expert_tensor_parallel_size': etp_size,
+                  'enable_graph_mode': False,
+              })
 
     outputs = llm.generate(prompts, sampling_params)
     for output in outputs:
