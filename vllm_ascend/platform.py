@@ -114,11 +114,33 @@ class NPUPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm.config import CompilationLevel  # noqa: E402
         compilation_config = vllm_config.compilation_config
-        if compilation_config and compilation_config.level != CompilationLevel.NO_COMPILATION:
+
+        enforce_eager_flag = False
+        # Check whether the eager mode is configured
+        try:
+            enforce_eager_flag = vllm_config.model_config.enforce_eager
+        except Exception:
             logger.warning(
-                "Compilation level %s is not supported on NPU now, forcing compilation level to NO_COMPILATION",
+                "There is currently no enforce_eager mode configured, the default value of enforce_eager=False is used"
+            )
+
+        if enforce_eager_flag or compilation_config.level == CompilationLevel.NO_COMPILATION:
+            logger.warning(
+                "Compilation level PIECEWISE is not enable on NPU now, current compilation level to NO_COMPILATION"
+            )
+            compilation_config.level = CompilationLevel.NO_COMPILATION
+        elif compilation_config.level != CompilationLevel.PIECEWISE:
+            logger.warning(
+                "Compilation level %s is not enable on NPU now, forcing compilation level to NO_COMPILATION",
                 compilation_config.level)
             compilation_config.level = CompilationLevel.NO_COMPILATION
+        else:
+            logger.info(
+                "Compilation level PIECEWISE is enable on NPU now, But use_inductor is no support, only use npu_graph now"
+            )
+            compilation_config.use_inductor = False
+            compilation_config.splitting_ops.extend(
+                ["vllm.unified_ascend_attention_with_output"])
 
         if vllm_config.additional_config is not None:
             enable_graph_mode = vllm_config.additional_config.get(
