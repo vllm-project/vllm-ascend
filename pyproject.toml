@@ -11,7 +11,7 @@ requires = [
     "scipy",
     "setuptools>=64",
     "setuptools-scm>=8",
-    "torch_npu",
+    "torch_npu == 2.5.1rc1",
     "torch >= 2.5.1",
     "torchvision<0.21.0",
 ]
