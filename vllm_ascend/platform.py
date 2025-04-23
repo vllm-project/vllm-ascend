@@ -24,6 +24,7 @@ import torch_npu  # noqa: F401
 import vllm.envs as envs
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
+from vllm.utils import supports_dynamo
 
 CUSTOM_OP_ENABLED = False
 try:
@@ -118,6 +119,15 @@ class NPUPlatform(Platform):
                 "Compilation level %s is not supported on NPU now, forcing compilation level to NO_COMPILATION",
                 compilation_config.level)
             compilation_config.level = CompilationLevel.NO_COMPILATION
+
+        if vllm_config.additional_config is not None:
+            enable_graph_mode = vllm_config.additional_config.get(
+                "enable_graph_mode", False)
+            if enable_graph_mode and not supports_dynamo():
+                logger.warning(
+                    "enable_graph_mode is not supported because the version of torch is too low, forcing close enable_graph_mode"
+                )
+                vllm_config.additional_config["enable_graph_mode"] = False
 
         parallel_config = vllm_config.parallel_config
         if parallel_config and parallel_config.worker_cls == "auto":
