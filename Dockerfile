@@ -53,6 +53,7 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     export LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LIBRARY_PATH && \
     python3 -m pip install -v /workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/
 
+
 # Install modelscope (for fast download) and ray (for multinode)
 RUN python3 -m pip install modelscope ray
 
