@@ -87,7 +87,15 @@
 #    Future Plan:
 #       Its a workaround in vllm-ascend to enable multi-node dp inference, maybe removed if vllm have better plan
 #       on multi-node dp inference implementation
-#
+#   4. `ParallelConfig.stateless_init_dp_group`
+#    Why:
+#       vLLM use gloo backend by default to initialize stateless dp process gourp, but we want to use hccl here to
+#       get better performance
+#    How：
+#       adopt nccl backend to init process group
+#    Related PR (if no, explain why): no related PR, we want add this ability into vllm
+#    Future Plan:
+#       Remove those patch when vllm merged them
 # * Worker Patch:
 # ===============
 # ** File: worker/patch_0_8_4/patch_metrics.py **
