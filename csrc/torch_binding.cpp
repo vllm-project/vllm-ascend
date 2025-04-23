@@ -103,6 +103,8 @@ std::tuple<at::Tensor, at::Tensor> rotary_embedding(at::Tensor &positions, at::T
 TORCH_LIBRARY_EXPAND(_C, ops)
 {
     // vLLM-Ascend custom ops
+    ops.def("weak_ref_tensor(Tensor input) -> Tensor");
+    ops.impl("weak_ref_tensor", torch::kPrivateUse1, &vllm_ascend::weak_ref_tensor);
 
     // Rotary embedding
     // Apply GPT-NeoX style rotary embedding to query and key.
