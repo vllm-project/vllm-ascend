@@ -16,9 +16,9 @@
 # limitations under the License.
 
 import torch
-import torch_npu
-import math
-from typing import Optional, Tuple, Union
+# import torch_npu
+# import math
+from typing import Optional, Tuple, Union, List
 
 def concat_and_cache_mla_torch(
     kv_c_normed: torch.Tensor,  # [num_tokens, num_kv_head, nope]
@@ -42,7 +42,7 @@ def merge_attn_states_torch(
         suffix_output: torch.Tensor,
         suffix_lse: torch.Tensor,
         output_lse: Optional[torch.Tensor] = None,
-) -> None:
+) -> torch.Tensor:
     # Reference implementation.
     dtype = prefix_output.dtype
     max_lse = torch.maximum(prefix_lse, suffix_lse)
@@ -135,7 +135,7 @@ def flash_attn_varlen_func_torch(
     softmax_scale: float,          # scale factor for attention scores
     causal: bool = True,           # whether to apply causal mask
     return_softmax_lse: bool = False  # whether to return log sum exp of softmax
-) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+) -> Union[torch.Tensor, torch.Tensor]:
     """Reference implementation of flash attention with variable length sequences.
     
     Args:
@@ -158,8 +158,8 @@ def flash_attn_varlen_func_torch(
     device = q.device
     dtype = q.dtype
     
-    ref_output = []
-    lse_list = [] if return_softmax_lse else None
+    ref_output: List[torch.Tensor] = []
+    lse_list: List[torch.Tensor] = []
     
     for i in range(batch_size):
         # Get sequence lengths for current batch

@@ -844,7 +844,7 @@ class NPUModelRunner:
                 assert num_blocks >= kv_cache_config.num_blocks
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
-                num_blocks = num_blocks // 4
+                #num_blocks = num_blocks // 4
                 if isinstance(kv_cache_spec, FullAttentionSpec):
                     kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,

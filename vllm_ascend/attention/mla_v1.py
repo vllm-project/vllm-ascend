@@ -184,15 +184,15 @@ for chunk_idx in range(cdiv(C, MCC)):
 
 return curr_o @ W_O
 """
-import functools
-from abc import abstractmethod
+# import functools
+# from abc import abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, Optional, TypeVar, Type
+from typing import TYPE_CHECKING, Any, Optional, TypeVar, Type
 
 import torch
-import torch_npu
-import numpy as np
-from vllm import _custom_ops as ops
+# import torch_npu
+# import numpy as np
+# from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
@@ -203,7 +203,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.utils import cdiv, round_down
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla, vanilla_decode_mla
+# from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla, vanilla_decode_mla
 from vllm_ascend.ops.cache import concat_and_cache_mla_torch, flash_attn_varlen_func_torch, gather_cache_torch, merge_attn_states_torch, flash_mla_with_kvcache_torch #, get_mla_metadata, scaled_dot_product_attention
 
 if TYPE_CHECKING:
