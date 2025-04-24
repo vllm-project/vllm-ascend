@@ -187,7 +187,7 @@ return curr_o @ W_O
 # import functools
 # from abc import abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, TypeVar, Type
+from typing import TYPE_CHECKING, Any, Optional, Type, TypeVar
 
 import torch
 # import torch_npu
@@ -201,9 +201,12 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.utils import cdiv, round_down
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 # from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla, vanilla_decode_mla
-from vllm_ascend.ops.cache import concat_and_cache_mla_torch, flash_attn_varlen_func_torch, gather_cache_torch, merge_attn_states_torch, flash_mla_with_kvcache_torch
+from vllm_ascend.ops.cache import (concat_and_cache_mla_torch,
+                                   flash_attn_varlen_func_torch,
+                                   flash_mla_with_kvcache_torch,
+                                   gather_cache_torch, merge_attn_states_torch)
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput

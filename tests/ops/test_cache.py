@@ -3,14 +3,13 @@
 # test https://github.com/vllm-project/vllm/blob/main/vllm/attention/backends/mla/common.py#L1399-L1406
 # test https://github.com/vllm-project/vllm/blob/main/vllm/attention/backends/mla/common.py#L1221-L1228
 import random
+from typing import Optional
 
 import pytest
 import torch
-
 #from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
-from typing import Optional
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [42]  # Arbitrary values for testing

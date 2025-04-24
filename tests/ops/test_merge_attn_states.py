@@ -3,6 +3,7 @@
 #test https://github.com/vllm-project/vllm/blob/main/vllm/attention/backends/mla/common.py#L1263-L1270
 
 from typing import Optional
+
 import pytest
 import torch
 from vllm.platforms import current_platform

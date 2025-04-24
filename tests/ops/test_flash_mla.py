@@ -1,9 +1,10 @@
 #forked https://github.com/vllm-project/vllm/blob/main/tests/kernels/test_flashmla.py
 #test https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/mla/flashmla.py#L136-L146
-import torch
-import pytest
-from typing import Tuple
 import random
+from typing import Tuple
+
+import pytest
+import torch
 
 
 def cal_diff(x: torch.Tensor, y: torch.Tensor, name: str) -> None:

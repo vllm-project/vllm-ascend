@@ -15,10 +15,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import torch
 # import torch_npu
 # import math
-from typing import Optional, Tuple, Union, List
+from typing import List, Optional, Tuple, Union
+
+import torch
 
 
 def concat_and_cache_mla_torch(

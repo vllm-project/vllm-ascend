@@ -1,8 +1,9 @@
 #forked https://github.com/vllm-project/vllm/blob/main/tests/kernels/test_flash_attn.py
 #test https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/mla/common.py#L667-L674
+from typing import List, Union
+
 import pytest
 import torch
-from typing import Union, List
 from vllm.platforms import current_platform
 
 
