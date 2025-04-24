@@ -87,6 +87,14 @@ class NPUPlatform(Platform):
         return torch.npu.get_device_name(device_id)
 
     @classmethod
+    def get_device_count(cls) -> int:
+        return torch.npu.device_count()
+
+    @classmethod
+    def get_device_event(cls, blocking) -> torch.npu.Event:
+        return torch.npu.Event(blocking=blocking)
+
+    @classmethod
     def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
         return True
 
