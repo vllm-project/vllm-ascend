@@ -1,6 +1,10 @@
 # Multi-NPU (deepseek-v2-lite-w8a8)
 
 ## Run docker container:
+:::{note}
+w8a8 quantization feature is supported by v0.8.4rc2 or highter
+:::
+
 ```bash
 # Update the vllm-ascend image
 export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
@@ -24,9 +28,12 @@ docker run --rm \
 ```
 
 ## Install modelslim and convert model
+:::{note}
+You can choose to convert the model yourself or use the quantized model we uploaded, 
+see https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V2-Lite-w8a8
+:::
+
 ```bash
-# You can choose to convert the model yourself or use the quantized model we uploaded, 
-# see https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V2-Lite-w8a8
 git clone https://gitee.com/ascend/msit
 
 # (Optional)This commit has been verified
