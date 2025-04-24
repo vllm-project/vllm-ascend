@@ -28,7 +28,7 @@ import vllm  # noqa: F401
 from tests.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
-
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
 
 @pytest.mark.parametrize("model, distributed_executor_backend", [
     ("Qwen/QwQ-32B", "mp"),
