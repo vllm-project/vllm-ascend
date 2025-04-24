@@ -6,6 +6,6 @@
 single_npu
 single_npu_multimodal
 multi_npu
-multi_node
 w8a8_quantization
+multi_node
 :::
