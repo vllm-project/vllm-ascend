@@ -1,13 +1,13 @@
 # Introduction
-This document outlines the benchmarking process for vllm-ascend, designed to evaluate its performance under various workloads. To make consistency with the vllm community, we have reused the vllm community [benchmark](https://github.com/vllm-project/vllm/tree/main/benchmarks) script.
+This document details the benchmark methodology for vllm-ascend, aimed at evaluating the performance under a variety of workloads. To maintain alignment with vLLM, we use the [benchmark](https://github.com/vllm-project/vllm/tree/main/benchmarks) script provided by the vllm project.
 # Run benchmarks
-**Benchmarking Coverage**: We measure offline e2e latency  and throughput, and fixed-QPS online serving benchmarks, for more details see [vllm-ascend](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks).
+**Benchmark Coverage**: We measure offline e2e latency and throughput, and fixed-QPS online serving benchmarks, for more details see [vllm-ascend](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks).
 
 ## 1. Run docker container
 ```bash
 # Update DEVICE according to your device (/dev/davinci[0-7])
 export DEVICE=/dev/davinci7
-export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:v0.8.4rc1
+export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
 --name vllm-ascend \
 --device $DEVICE \
@@ -27,19 +27,20 @@ docker run --rm \
 /bin/bash
 ```
 
-## 2. Prepare ENV
-Install benchmark dependencies
+## 2. Install dependencies
 ```bash
+cd /workspace/vllm-ascend
 pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 pip install -r benchmarks/requirements-bench.txt
 ```
-## 3. Run benchmark script
+
+## 3. (Optional)Prepare model weights
+For faster running speed, we recommend downloading the model in advance：
 ```bash
-# For faster running speed, we recommend downloading the model in advance：
-# modelscope download --model LLM-Research/Meta-Llama-3.1-8B-Instruct
-bash benchmarks/scripts/run-performance-benchmarks.sh
+modelscope download --model LLM-Research/Meta-Llama-3.1-8B-Instruct
 ```
-you can also replace all model paths in the [json](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks/tests) file with your local paths:
+
+You can also replace all model paths in the [json](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks/tests) files with your local paths:
 ```bash
 [
   {
@@ -53,6 +54,12 @@ you can also replace all model paths in the [json](https://github.com/vllm-proje
     }
   }
 ]
+```
+
+## 4. Run benchmark script
+Run benchmark script:
+```bash
+bash benchmarks/scripts/run-performance-benchmarks.sh
 ```
 
 After about 10 mins, the output is as shown below:
@@ -165,7 +172,9 @@ Throughput: 4.64 requests/s, 2000.51 total tokens/s, 1010.54 output tokens/s
 Total num prompt tokens:  42659
 Total num output tokens:  43545
 ```
-for more details, detailed json file is generated to the path `benchmark/results`
+For more details, detailed json file is generated to the path `benchmark/results`
+These files contain detailed benchmarking results for further analysis.
+
 ```bash
 .
 |-- latency_llama8B_tp1.json
@@ -175,14 +184,3 @@ for more details, detailed json file is generated to the path `benchmark/results
 |-- serving_llama8B_tp1_qps_inf.json
 `-- throughput_llama8B_tp1.json
 ```
-
-Once the script completes, you can find the results in the benchmarks/results folder. The output files may resemble the following:
-```
-|-- latency_llama8B_tp1.json
-|-- serving_llama8B_tp1_sharegpt_qps_1.json
-|-- serving_llama8B_tp1_sharegpt_qps_16.json
-|-- serving_llama8B_tp1_sharegpt_qps_4.json
-|-- serving_llama8B_tp1_sharegpt_qps_inf.json
-|-- throughput_llama8B_tp1.json
-```
-These files contain detailed benchmarking results for further analysis.
