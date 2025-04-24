@@ -12,13 +12,14 @@ HEAD_SIZES = [128, 192, 256]
 BLOCK_SIZES = [16]
 DTYPES = [torch.float16, torch.bfloat16]
 
+
 # forked https://github.com/vllm-project/vllm/blob/main/tests/kernels/test_cascade_flash_attn.py#L56-L64
 def merge_attn_states_torch(
-        prefix_output: torch.Tensor,
-        prefix_lse: torch.Tensor,
-        suffix_output: torch.Tensor,
-        suffix_lse: torch.Tensor,
-        output_lse: Optional[torch.Tensor] = None,
+    prefix_output: torch.Tensor,
+    prefix_lse: torch.Tensor,
+    suffix_output: torch.Tensor,
+    suffix_lse: torch.Tensor,
+    output_lse: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     # Reference implementation.
     dtype = prefix_output.dtype
@@ -32,6 +33,7 @@ def merge_attn_states_torch(
     output = p_scale * prefix_output + s_scale * suffix_output
     output = output.to(dtype)
     return output
+
 
 @pytest.mark.parametrize("num_tokens", [1, 39, 16912])
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -62,8 +64,8 @@ def test_merge_kernel(
     prefix_lse = torch.randn(num_query_heads, num_tokens, dtype=torch.float32)
     suffix_lse = torch.randn(num_query_heads, num_tokens, dtype=torch.float32)
 
-    ref_output = merge_attn_states_torch(prefix_output, prefix_lse, suffix_output, suffix_lse)
-   
+    merge_attn_states_torch(prefix_output, prefix_lse, suffix_output,
+                            suffix_lse)
     '''
     from vllm.v1.attention.backends.flash_attn import merge_attn_states
     # Run the kernel.
@@ -74,4 +76,3 @@ def test_merge_kernel(
     # Compare the results.
     torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2)
     '''
-

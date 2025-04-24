@@ -63,7 +63,7 @@ class NPUModelRunner:
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
-        self.cache_config = vllm_config.cache_config # work mla_v1
+        self.cache_config = vllm_config.cache_config  # work mla_v1
         self.lora_config = vllm_config.lora_config
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
@@ -416,7 +416,6 @@ class NPUModelRunner:
         else:
             return None
 
-
     def _process_reqs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -428,12 +427,10 @@ class NPUModelRunner:
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
-
         modified_batch = self.attn_metadata_builder.reorder_batch(
             self.input_batch, scheduler_output)
         if modified_batch:
             self.input_batch.refresh_sampling_metadata()
-
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
@@ -456,7 +453,6 @@ class NPUModelRunner:
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                arange,
                out=positions_np)
-
 
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
@@ -491,11 +487,10 @@ class NPUModelRunner:
             self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
 
         self.positions[:total_num_scheduled_tokens].copy_(
-                self.positions_cpu[:total_num_scheduled_tokens],
-                non_blocking=True)
+            self.positions_cpu[:total_num_scheduled_tokens], non_blocking=True)
 
         # Prepare for cascade attention if enabled & beneficial.
-        common_prefix_len = 0
+        # common_prefix_len = 0
         attn_metadata = self.attn_metadata_builder.build(
             num_reqs=num_reqs,
             num_actual_tokens=total_num_scheduled_tokens,
@@ -506,9 +501,8 @@ class NPUModelRunner:
 
         logits_indices = attn_metadata.query_start_loc[1:] - 1
         spec_decode_metadata = None
- 
-        return attn_metadata, logits_indices, spec_decode_metadata
 
+        return attn_metadata, logits_indices, spec_decode_metadata
 
     def apply_grammar_bitmask(
         self,
@@ -564,7 +558,6 @@ class NPUModelRunner:
         )
         return logits.to(self.device).to(logits_dtype)
 
-
     @torch.inference_mode()
     def execute_model(
         self,
@@ -575,7 +568,8 @@ class NPUModelRunner:
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOuptut if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
-        attn_metadata, logits_indices, spec_decode_metadata = self._process_reqs(scheduler_output, intermediate_tensors)
+        attn_metadata, logits_indices, spec_decode_metadata = self._process_reqs(
+            scheduler_output, intermediate_tensors)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
@@ -630,7 +624,6 @@ class NPUModelRunner:
         logprobs_tensors = sampler_output.logprobs_tensors
         logprobs_lists = logprobs_tensors.tolists() \
             if logprobs_tensors is not None else None
-
 
         # Get the valid generated tokens.
         sampled_token_ids = sampler_output.sampled_token_ids
@@ -757,7 +750,8 @@ class NPUModelRunner:
                         dtype=self.dtype,
                         device=self.device))
             intermediate_tensors = IntermediateTensors({
-                k: v[:self.max_num_tokens]
+                k:
+                v[:self.max_num_tokens]
                 for k, v in self.intermediate_tensors.items()
             })
 

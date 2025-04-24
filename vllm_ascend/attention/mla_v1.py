@@ -196,7 +196,6 @@ import torch
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
-from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
                                                UnquantizedLinearMethod)
@@ -204,13 +203,11 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.utils import cdiv, round_down
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 # from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla, vanilla_decode_mla
-from vllm_ascend.ops.cache import concat_and_cache_mla_torch, flash_attn_varlen_func_torch, gather_cache_torch, merge_attn_states_torch, flash_mla_with_kvcache_torch #, get_mla_metadata, scaled_dot_product_attention
+from vllm_ascend.ops.cache import concat_and_cache_mla_torch, flash_attn_varlen_func_torch, gather_cache_torch, merge_attn_states_torch, flash_mla_with_kvcache_torch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
-
-logger = init_logger(__name__)
 
 
 class AscendMLABackend(AttentionBackend):
@@ -230,12 +227,8 @@ class AscendMLABackend(AttentionBackend):
         return AscendMLAMetadataBuilder
 
     @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int
-    ) -> tuple[int, ...]:
+    def get_kv_cache_shape(num_blocks: int, block_size: int, num_kv_heads: int,
+                           head_size: int) -> tuple[int, ...]:
         return (num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
@@ -270,7 +263,6 @@ class AscendMLAPrefillMetadata:
     chunked_context: Optional[ChunkedContextMetadata] = None
 
 
-
 @dataclass
 class AscendMLADecodeMetadata:
     # Input positions for rotrary embeddings since for MLA the rotary
@@ -280,7 +272,6 @@ class AscendMLADecodeMetadata:
     seq_lens: torch.Tensor
     #tile_scheduler_metadata: tuple[torch.Tensor, torch.Tensor]
     #num_splits: torch.Tensor
-
 
 
 @dataclass
@@ -335,18 +326,18 @@ class AscendMLAMetadataBuilder:
     NOTE: Please read the comment at the top of the file before trying to
     understand this class
     """
+
     # _attn_mask_builder = None
     def __init__(self,
                  runner: "NPUModelRunner",
-                 metadata_cls: Optional[AscendMLAMetadata] = None):
-        self.metadata_cls: Optional[AscendMLAMetadata] = metadata_cls \
+                 metadata_cls: Optional[type[M]] = None):
+        self.metadata_cls = metadata_cls \
             if metadata_cls is not None else AscendMLAMetadata
         self.runner = runner
         scheduler_config = runner.scheduler_config
         model_config = runner.model_config
         cache_config = runner.cache_config
-        #self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
-        self.chunked_prefill_enabled = True
+        self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
         self.num_q_heads = self.runner.model_config.get_num_attention_heads(
             self.runner.parallel_config)
 
@@ -438,7 +429,10 @@ class AscendMLAMetadataBuilder:
 
         return modified_batch
 
-    def build(self, num_reqs: int, num_actual_tokens: int, max_query_len: int,
+    def build(self,
+              num_reqs: int,
+              num_actual_tokens: int,
+              max_query_len: int,
               common_prefix_len: Optional[int] = None) -> AscendMLAMetadata:
         assert self._num_decodes + self._num_prefills == num_reqs
 
@@ -786,7 +780,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         has_context = attn_metadata.prefill.chunked_context is not None
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(\
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
-        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim],
+                                  dim=-1)
 
         k = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))), dim=-1)
 
@@ -808,7 +803,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             return_softmax_lse=has_context,
         )
 
-
         if has_context:
             suffix_output, suffix_lse = output
             context_output, context_lse = self._compute_prefill_context( \
@@ -829,7 +823,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 .reshape(-1, self.num_heads * v.shape[-1])
 
         return self.o_proj(output)[0]
-    
+
     def _forward_decode(
         self,
         q_nope: torch.Tensor,
@@ -918,12 +912,13 @@ class AscendMLAImpl(MLAAttentionImpl):
                 prefill_q_pe.contiguous(), prefill_k_pe)
 
         if kv_cache.numel() > 0:
-            concat_and_cache_mla_torch(k_c_normed, k_pe, kv_cache, attn_metadata.slot_mapping.flatten())
+            concat_and_cache_mla_torch(k_c_normed, k_pe, kv_cache,
+                                       attn_metadata.slot_mapping.flatten())
             # TODO: replaced back to ascend ops
             # key = torch.cat([k_c_normed.view([num_actual_toks, self.num_kv_heads, -1]), k_pe], dim=2)
             # torch_npu._npu_reshape_and_cache_siso(
-            #     key=key, 
-            #     key_cache=kv_cache, 
+            #     key=key,
+            #     key_cache=kv_cache,
             #     slot_indices=attn_metadata.slot_mapping.flatten())
 
         if has_prefill:
