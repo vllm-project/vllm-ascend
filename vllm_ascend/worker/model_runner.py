@@ -556,7 +556,8 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
         #print(f"before tensor input_positions: {input_positions}")
         #print(f"before list seq_lens: {seq_lens}")
         input_tokens = flatten_2d_lists(input_tokens)
-        input_positions = flatten_2d_lists(input_positions)
+        if input_positions:
+            input_positions = flatten_2d_lists(input_positions)
         if graph_pad_size != -1 and not is_prompt:
             input_tokens.extend(itertools.repeat(0, graph_pad_size))
             input_positions.extend(  # type: ignore
