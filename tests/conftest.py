@@ -31,7 +31,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import is_list_of
 
-from tests.model_utils import (TokensTextLogprobs,
+from tests.model_utils import (PROMPT_TEMPLATES, TokensTextLogprobs,
                                TokensTextLogprobsPromptLogprobs)
 # TODO: remove this part after the patch merged into vllm, if
 # we not explicitly patch here, some of them might be effectiveless
@@ -344,3 +344,8 @@ class VllmRunner:
 @pytest.fixture(scope="session")
 def vllm_runner():
     return VllmRunner
+
+
+@pytest.fixture(params=list(PROMPT_TEMPLATES.keys()))
+def prompt_template(request):
+    return PROMPT_TEMPLATES[request.param]
