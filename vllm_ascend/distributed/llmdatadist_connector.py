@@ -16,23 +16,28 @@
 #
 import os
 import re
+import time
+import struct
+import hashlib
 import subprocess
 from typing import TYPE_CHECKING, List, Tuple, Union
 
 import torch
 import torch_npu
 import torchair  # type: ignore
-from vllm.config import VllmConfig
-from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-from vllm.logger import logger
-from vllm.sequence import IntermediateTensors
 
-import vllm_ascend.envs as envs
+from vllm.logger import logger
+from vllm.config import VllmConfig
+from vllm.sequence import IntermediateTensors
+from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
+import vllm_ascend.envs as envs
+
 import llm_datadist  # type: ignore
+from llm_datadist import LLMException, LLMStatusCode
 
 TORCH_DTYPE_TO_NPU_DTYPE = {
     torch.half: llm_datadist.DataType.DT_FLOAT16,
@@ -47,35 +52,6 @@ TORCH_DTYPE_TO_NPU_DTYPE = {
 
 # Get all device ips using hccn_tool
 HCCN_TOOL_PATH = envs.HCCN_PATH
-
-
-def get_device_ips():
-    world_size = 8
-    npu_info = subprocess.run(['npu-smi', 'info', '-m'],
-                              stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE,
-                              universal_newlines=True)
-    if npu_info.returncode != 0 or not os.path.exists(HCCN_TOOL_PATH):
-        raise RuntimeError("No npu-smi/hccn_tool tools provided for NPU.")
-    re_result = re.match(r'.*\n\t([0-9]+).*', npu_info.stdout)
-    if re_result is None:
-        raise RuntimeError("Can't find npu start index")
-    npu_start_idx = int(re_result.group(1))
-    device_ip_list = []
-    for ip_offset in range(world_size):
-        cmd = [
-            HCCN_TOOL_PATH, '-i', f'{npu_start_idx + ip_offset}', '-ip', '-g'
-        ]
-        device_ip_info = subprocess.run(cmd,
-                                        stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE,
-                                        universal_newlines=True)
-        re_result = re.match(r'ipaddr:(.*)\n', device_ip_info.stdout)
-        if re_result is None:
-            raise RuntimeError("Can't find npu ip")
-        device_ip = re_result.group(1)
-        device_ip_list.append(device_ip)
-    return device_ip_list
 
 
 class KVTransferEngine:
@@ -93,7 +69,7 @@ class KVTransferEngine:
         decode_device_ids = envs.DECODE_DEVICE_ID
         if prompt_device_ids is None or decode_device_ids is None:
             raise ValueError(
-                "Please specify env PROMPT_DEVICE_ID or DECODE_DEVICE_ID")
+                "Please specify env PROMPT_DEVICE_ID and DECODE_DEVICE_ID")
 
         prompt_ids = [
             int(x.strip()) for x in prompt_device_ids.split(",") if x.strip()
@@ -175,127 +151,97 @@ class LLMDataDistConnector(KVConnectorBase):
         kv_caches: List[torch.Tensor],
         hidden_or_intermediate_states: Union[torch.Tensor, IntermediateTensors]
     ) -> None:
-        input_tokens_tensor = model_input.input_tokens
-        seq_lens = model_input.attn_metadata.seq_lens
-        slot_mapping_flat = model_input.attn_metadata.slot_mapping.flatten()
+        # Use the `kv_cache_layers` variable for the entire key-value cache, and
+        # `kv_caches` for the current request's cache.
+        kv_cache_layers = kv_caches
+        kv_caches = None
+
+        attn_metadata = model_input.attn_metadata
+        query_start_loc = attn_metadata.query_start_loc.tolist()
+        slot_mapping_flat = attn_metadata.slot_mapping.flatten()
+        # Assuming that the order of request IDs in `request_ids_to_seq_ids`
+        # matches the order in the batch. If this assumption is incorrect, a
+        # more reliable method to determine the order of request IDs is
+        # required.
+        request_ids = list(model_input.request_ids_to_seq_ids.keys())
+
+        # Get model config
         start_layer = model_executable.model.start_layer
         end_layer = model_executable.model.end_layer
-
-        model_config = model_executable.model.config
-        num_heads = int(model_config.num_key_value_heads / self.tp_size)
-        hidden_size = model_config.hidden_size
-        num_attention_heads = model_config.num_attention_heads
-        head_size = int(hidden_size / num_attention_heads)
-
         num_layer = end_layer - start_layer
+        # If use MLA, the kv cache shape is [num_blocks, block_size, num_heads,
+        # head_dim], otherwise it is [2, num_blocks, block_size, num_heads,
+        # head_dim].
+        is_mla = len(kv_cache_layers[0].shape) == 4
 
-        # Get shape of input_tokens_tensor and kv_cache
-        input_shape = (1, input_tokens_tensor.shape[0], 1, 1)
-        hidden_shape = (1, input_tokens_tensor.shape[0], 1, hidden_size)
-        kv_shape = (1, input_tokens_tensor.shape[0], num_heads, head_size)
-
-        assert kv_caches[0].dtype == hidden_or_intermediate_states.dtype
-        kv_hidden_dtype = kv_caches[0].dtype
-        input_dtype = torch.int32
-
-        # initialize LLMDatadist data structure
-        key_desc = llm_datadist.CacheDesc(
-            num_layer,
-            kv_shape,
-            TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
-            seq_len_dim_index=1)
-        value_desc = llm_datadist.CacheDesc(
-            num_layer,
-            kv_shape,
-            TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
-            seq_len_dim_index=1)
-        input_desc = llm_datadist.CacheDesc(
-            1,
-            input_shape,
-            TORCH_DTYPE_TO_NPU_DTYPE[input_dtype],
-            seq_len_dim_index=-1)
-        hidden_desc = llm_datadist.CacheDesc(
-            1,
-            hidden_shape,
-            TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
-            seq_len_dim_index=-1)
-
-        key_cache_keys = [
-            llm_datadist.CacheKey(self.llm_datadist_engine.cluster_id, 0, 1)
-        ]
-        value_cache_keys = [
-            llm_datadist.CacheKey(self.llm_datadist_engine.cluster_id, 0, 2)
-        ]
-        input_cache_keys = [
-            llm_datadist.CacheKey(self.llm_datadist_engine.cluster_id, 0, 3)
-        ]
-        hidden_cache_keys = [
-            llm_datadist.CacheKey(self.llm_datadist_engine.cluster_id, 0, 4)
-        ]
-
-        self.key_buffer = self.llm_datadist_engine.kv_transfer.allocate_cache(
-            key_desc, key_cache_keys)
-        self.value_buffer = self.llm_datadist_engine.kv_transfer.allocate_cache(
-            value_desc, value_cache_keys)
-        self.input_buffer = self.llm_datadist_engine.kv_transfer.allocate_cache(
-            input_desc, input_cache_keys)
-        self.hidden_buffer = self.llm_datadist_engine.kv_transfer.allocate_cache(
-            hidden_desc, hidden_cache_keys)
-
-        key_buffer_addr = self.key_buffer.per_device_tensor_addrs[0]
-        value_buffer_addr = self.value_buffer.per_device_tensor_addrs[0]
-        input_buffer_addr = self.input_buffer.per_device_tensor_addrs[0]
-        hidden_buffer_addr = self.hidden_buffer.per_device_tensor_addrs[0]
-
-        self.key_cache = torchair.llm_datadist.create_npu_tensors(
-            key_desc.shape, kv_hidden_dtype, key_buffer_addr)
-        self.value_cache = torchair.llm_datadist.create_npu_tensors(
-            value_desc.shape, kv_hidden_dtype, value_buffer_addr)
-        self.input_cache = torchair.llm_datadist.create_npu_tensors(
-            input_desc.shape, input_dtype, input_buffer_addr)
-        self.hidden_cache = torchair.llm_datadist.create_npu_tensors(
-            hidden_desc.shape, kv_hidden_dtype, hidden_buffer_addr)
-
+        kv_hidden_dtype = kv_cache_layers[0].dtype
+        assert kv_hidden_dtype == hidden_or_intermediate_states.dtype, \
+            "KV cache and hidden states should have the same dtype"
         indices = torch.tensor([0], dtype=torch.int64).npu()
+        for idx in range(len(query_start_loc) - 1):
+            request_id = request_ids[idx]
+            start_pos = query_start_loc[idx]
+            end_pos = query_start_loc[idx + 1]
+            req_slot_mapping = slot_mapping_flat[start_pos:end_pos]
 
-        # copy cache data into llm datadist cache using scatter update
-        for idx, slen in enumerate(seq_lens):
-            start_pos = sum(seq_lens[:idx])
-            end_pos = start_pos + slen
-            current_tokens = input_tokens_tensor[start_pos:end_pos].to(
-                torch.int32)
+            # Each request uses the same llm_datadist request_id, which needs to
+            # be converted to an integer value.
+            datadist_request_id = string_to_int64_hash(request_id)
 
+            # Extract the kv caches of the current request from the vllm kv
+            # caches.
+            kv_caches = []
             for layer_id in range(start_layer, end_layer):
-                kv_cache = kv_caches[layer_id - start_layer]
+                kv_cache_layer = kv_cache_layers[layer_id - start_layer]
+                kv_cache = self._extract_kv_from_layer(kv_cache_layer,
+                                                       req_slot_mapping,
+                                                       is_mla)
+                kv_cache = kv_cache.unsqueeze(0)
+                kv_caches.append(kv_cache)
 
-                key_cache = kv_cache[0].view(-1, num_heads, head_size)
-                value_cache = kv_cache[1].view(-1, num_heads, head_size)
+            # Initialize the datadist kv cache buffer, and copy the generated kv
+            # caches to the datadist kv cache buffer.
+            kv_shape = kv_caches[0].shape
+            kv_cache_keys = [
+                llm_datadist.CacheKey(self.llm_datadist_engine.cluster_id,
+                                      datadist_request_id, 1)
+            ]
+            kv_buffer, pushed_kv_caches = create_cache_tensors(
+                self.llm_datadist_engine.kv_transfer, num_layer, kv_shape,
+                kv_hidden_dtype, kv_cache_keys)
+            for kv_cache in kv_caches:
 
-                current_slot_mapping = slot_mapping_flat[start_pos:end_pos]
+                datadist_kv_cache = pushed_kv_caches[layer_id]
+                torch_npu.scatter_update_(datadist_kv_cache,
+                                          indices,
+                                          kv_cache,
+                                          axis=-2)
 
-                # copy key into datadist
-                k = self.key_cache[layer_id][:, start_pos:end_pos, :, :]
-                new_k = key_cache[current_slot_mapping].unsqueeze(0)
-                torch_npu.scatter_update_(k, indices, new_k, axis=-2)
-
-                # copy value into datadist
-                val = self.value_cache[layer_id][:, start_pos:end_pos, :, :]
-                new_val = value_cache[current_slot_mapping].unsqueeze(0)
-                torch_npu.scatter_update_(val, indices, new_val, axis=-2)
-
-            # copy input into datadist
-            inp = self.input_cache[0][:, start_pos:end_pos, :, :]
-            new_inp = current_tokens.view(1, current_tokens.shape[0], 1, 1)
-            torch_npu.scatter_update_(inp, indices, new_inp, axis=-2)
-
-            # copy hidden into datadist
-            hid = self.hidden_cache[0][:, start_pos:end_pos, :, :]
+            # Get the current request's hidden state from the current batch, and
+            # copy it to the datadist buffer.
             hid_shape0, hid_shape1 = hidden_or_intermediate_states[
                 start_pos:end_pos].shape
-            new_hid = hidden_or_intermediate_states[start_pos:end_pos].view(
-                1, hid_shape0, 1, hid_shape1)
-            torch_npu.scatter_update_(hid, indices, new_hid, axis=-2)
+            req_hidden_states = hidden_or_intermediate_states[
+                start_pos:end_pos].view(1, hid_shape0, 1, hid_shape1)
+            hidden_state_shape = req_hidden_states.shape
+            hidden_cache_keys = [
+                llm_datadist.CacheKey(self.llm_datadist_engine.cluster_id,
+                                      datadist_request_id, 2)
+            ]
+            hidden_buffer, pushed_hidden_states = create_cache_tensors(
+                self.llm_datadist_engine.kv_transfer, 1, hidden_state_shape,
+                kv_hidden_dtype, hidden_cache_keys)
+            torch_npu.scatter_update_(pushed_hidden_states[0],
+                                      indices,
+                                      req_hidden_states,
+                                      axis=-2)
 
+            # Release reference count
+            self.llm_datadist_engine.kv_transfer.deallocate_cache(kv_buffer)
+            self.llm_datadist_engine.kv_transfer.deallocate_cache(
+                hidden_buffer)
+
+        # put prefill info to coordinator
         logger.info("[rank%d][P]: KV send DONE.", torch.distributed.get_rank())
 
     def recv_kv_caches_and_hidden_states(
@@ -304,148 +250,108 @@ class LLMDataDistConnector(KVConnectorBase):
         kv_caches: List[torch.Tensor]
     ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForGPUWithSamplingMetadata"]:
+        # Use the `kv_cache_layers` variable for the entire key-value cache, and
+        # `kv_caches` for the current request's cache.
+        kv_cache_layers = kv_caches
+        kv_caches = None
+
         bypass_model_exec = True
 
-        input_tokens_tensor = model_input.input_tokens
-        seq_lens = model_input.attn_metadata.seq_lens
-        slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
+        attn_metadata = model_input.attn_metadata
+        query_start_loc = attn_metadata.query_start_loc.tolist()
+        slot_mapping_flat = attn_metadata.slot_mapping.flatten()
+        # Assuming that the order of request IDs in `request_ids_to_seq_ids`
+        # matches the order in the batch. If this assumption is incorrect, a
+        # more reliable method to determine the order of request IDs is
+        # required.
+        request_ids = list(model_input.request_ids_to_seq_ids.keys())
 
-        hidden_or_intermediate_states_for_one_req = []
-
-        input_tokens_list = []
-        num_computed_tokens_list = []
-        start_pos_list = []
-
-        # get model config
+        # Get model config
         start_layer = model_executable.model.start_layer
         end_layer = model_executable.model.end_layer
-        model_config = model_executable.model.config
-        num_heads = int(model_config.num_key_value_heads / self.tp_size)
-        hidden_size = model_config.hidden_size
-        num_attention_heads = model_config.num_attention_heads
-        head_size = int(hidden_size / num_attention_heads)
+        hidden_size = model_executable.model.config.hidden_size
         num_layer = end_layer - start_layer
+        # If use MLA, the kv cache shape is [num_blocks, block_size, num_heads,
+        # head_dim], otherwise it is [2, num_blocks, block_size, num_heads,
+        # head_dim].
+        is_mla = len(kv_cache_layers[0].shape) == 4
 
-        # get input_tensor_shape and hidden_shape
-        input_shape = (1, input_tokens_tensor.shape[0], 1, 1)
-        hidden_shape = (1, input_tokens_tensor.shape[0], 1, hidden_size)
-        kv_shape = (1, input_tokens_tensor.shape[0], num_heads, head_size)
+        kv_hidden_dtype = kv_cache_layers[0].dtype
+        indices = torch.tensor([0],
+                               dtype=torch.int64,
+                               device=torch.npu.current_device())
 
-        kv_hidden_dtype = kv_caches[0].dtype
-        input_dtype = torch.int32
+        kv_cache_layer_shape = kv_cache_layers[0].shape
+        num_heads = kv_cache_layer_shape[-2]
+        head_size = kv_cache_layer_shape[-1]
 
-        # Add LLM DataDist initialization
-        key_desc = llm_datadist.CacheDesc(
-            num_layer,
-            kv_shape,
-            TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
-            seq_len_dim_index=-1)
-        value_desc = llm_datadist.CacheDesc(
-            num_layer,
-            kv_shape,
-            TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
-            seq_len_dim_index=-1)
-        input_desc = llm_datadist.CacheDesc(
-            1,
-            input_shape,
-            TORCH_DTYPE_TO_NPU_DTYPE[input_dtype],
-            seq_len_dim_index=-1)
-        hidden_desc = llm_datadist.CacheDesc(
-            1,
-            hidden_shape,
-            TORCH_DTYPE_TO_NPU_DTYPE[kv_hidden_dtype],
-            seq_len_dim_index=-1)
-        self.decode_key_buffer = self.llm_datadist_engine.kv_transfer.allocate_cache(
-            key_desc)
-        self.decode_value_buffer = self.llm_datadist_engine.kv_transfer.allocate_cache(
-            value_desc)
-        self.decode_input_buffer = self.llm_datadist_engine.kv_transfer.allocate_cache(
-            input_desc)
-        self.decode_hidden_buffer = self.llm_datadist_engine.kv_transfer.allocate_cache(
-            hidden_desc)
-        key_buffer_addrs = self.decode_key_buffer.per_device_tensor_addrs[0]
-        value_buffer_addrs = self.decode_value_buffer.per_device_tensor_addrs[
-            0]
-        input_buffer_addrs = self.decode_input_buffer.per_device_tensor_addrs[
-            0]
-        hidden_buffer_addrs = self.decode_hidden_buffer.per_device_tensor_addrs[
-            0]
-        self.key_cache = torchair.llm_datadist.create_npu_tensors(
-            key_desc.shape, kv_hidden_dtype, key_buffer_addrs)
-        self.value_cache = torchair.llm_datadist.create_npu_tensors(
-            value_desc.shape, kv_hidden_dtype, value_buffer_addrs)
-        self.input_cache = torchair.llm_datadist.create_npu_tensors(
-            input_desc.shape, input_dtype, input_buffer_addrs)
-        self.hidden_cache = torchair.llm_datadist.create_npu_tensors(
-            hidden_desc.shape, kv_hidden_dtype, hidden_buffer_addrs)
+        hidden_or_intermediate_states_for_one_req = []
+        for idx in range(len(query_start_loc) - 1):
+            request_id = request_ids[idx]
+            start_pos = query_start_loc[idx]
+            end_pos = query_start_loc[idx + 1]
+            slen = end_pos - start_pos
+            req_slot_mapping = slot_mapping_flat[start_pos:end_pos]
 
-        key_cache_key = llm_datadist.CacheKeyByIdAndIndex(
-            self.cluster.remote_cluster_id, 1, 0)
-        value_cache_key = llm_datadist.CacheKeyByIdAndIndex(
-            self.cluster.remote_cluster_id, 2, 0)
-        input_cache_key = llm_datadist.CacheKeyByIdAndIndex(
-            self.cluster.remote_cluster_id, 3, 0)
-        hidden_cache_key = llm_datadist.CacheKeyByIdAndIndex(
-            self.cluster.remote_cluster_id, 4, 0)
+            # Each request uses the same llm_datadist request_id, which needs to
+            # be converted into an integer value.
+            llm_datadist_request_id = string_to_int64_hash(request_id)
+            remote_cluster_id = self.cluster.remote_cluster_id
 
-        self.llm_datadist_engine.kv_transfer.pull_cache(
-            key_cache_key, self.decode_key_buffer, 0)
-        self.llm_datadist_engine.kv_transfer.pull_cache(
-            value_cache_key, self.decode_value_buffer, 0)
-        self.llm_datadist_engine.kv_transfer.pull_cache(
-            input_cache_key, self.decode_input_buffer, 0)
-        self.llm_datadist_engine.kv_transfer.pull_cache(
-            hidden_cache_key, self.decode_hidden_buffer, 0)
+            # Pull kv cache from prefill node by request
+            if is_mla:
+                kv_shape = (1, slen, num_heads, head_size)
+            else:
+                kv_shape = (1, 2, slen, num_heads, head_size)
+            kv_buffer, pulled_kv_caches = create_cache_tensors(
+                self.llm_datadist_engine.kv_transfer, num_layer, kv_shape,
+                kv_hidden_dtype)
+            key_cache_key = llm_datadist.CacheKey(remote_cluster_id,
+                                                  llm_datadist_request_id, 1)
+            self.llm_datadist_engine.kv_transfer.pull_cache(
+                key_cache_key, kv_buffer, 0)
 
-        keys = self.key_cache
-        values = self.value_cache
-        inputs = self.input_cache
-        hidden = self.hidden_cache
+            # Pull hidden states from prefill node by request
+            hidden_shape = (1, slen, 1, hidden_size)
+            hidden_buffer, pulled_hidden_states = create_cache_tensors(
+                self.llm_datadist_engine.kv_transfer, 1, hidden_shape,
+                kv_hidden_dtype)
+            hidden_cache_key = llm_datadist.CacheKey(remote_cluster_id,
+                                                     llm_datadist_request_id,
+                                                     2)
+            self.llm_datadist_engine.kv_transfer.pull_cache(
+                hidden_cache_key, hidden_buffer, 0)
 
-        # enumerate different requests
-        for idx, slen in enumerate(seq_lens):
-            start_pos = sum(seq_lens[:idx])
-            end_pos = start_pos + slen
-            current_tokens = input_tokens_tensor[start_pos:end_pos]
-            num_tokens = slen
-
-            # collecting data for rebuilding the input
-            input_tokens_list.append(current_tokens)
-            start_pos_list.append(start_pos)
-
-            num_computed_tokens = inputs[0][0, start_pos:end_pos, 0,
-                                            0].shape[0]
-            num_computed_tokens_list.append(num_computed_tokens)
-
-            # check if both KV cache and the hidden states are received
-            # If not, need to redo the forwarding to compute missing states
-            if not all([(num_computed_tokens == num_tokens), hidden is not None
-                        ]):
+            # Check for any transmission failures; we need to redo the
+            # forwarding to compute the missing states.
+            if pulled_kv_caches is None or pulled_hidden_states is None:
                 bypass_model_exec = False
+                logger.error(
+                    "[rank%d][D]: Failed to receive all KVs and hidden "
+                    "states, redo model forwarding.",
+                    torch.distributed.get_rank(),
+                )
+                break
 
-            # update the end position based on how many tokens are cached.
-            end_pos = start_pos + num_computed_tokens
+            # Put received KV caches into paged memory
+            for i in range(start_layer, end_layer):
+                kv_cache_layer = kv_cache_layers[i - start_layer]
+                pulled_kv_cache = pulled_kv_caches[i - start_layer]
+                self._inject_kv_into_layer(kv_cache_layer, pulled_kv_cache,
+                                           req_slot_mapping, is_mla)
 
-            # put received KV caches into paged memory
-            for i in range(model_executable.model.start_layer,
-                           model_executable.model.end_layer):
-                kv_cache = kv_caches[i - model_executable.model.start_layer]
-                key_cache, value_cache = kv_cache[0], kv_cache[1]
-
-                sliced_key = keys[i - model_executable.model.start_layer][
-                    0, start_pos:end_pos, :, :]
-                sliced_value = values[i - model_executable.model.start_layer][
-                    0, start_pos:end_pos, :, :]
-
-                torch_npu._npu_reshape_and_cache(
-                    key=sliced_key,
-                    value=sliced_value,
-                    key_cache=key_cache,
-                    value_cache=value_cache,
-                    slot_indices=slot_mapping[start_pos:end_pos])
-
+            hidden_states = torch.empty_like(pulled_hidden_states[0])
+            torch_npu.scatter_update_(hidden_states,
+                                      indices,
+                                      pulled_hidden_states[0],
+                                      axis=1)
             hidden_or_intermediate_states_for_one_req.append(
-                hidden[0][0, start_pos:end_pos, 0, :])
+                hidden_states[0, :, 0, :])
+
+            # Release the reference count
+            self.llm_datadist_engine.kv_transfer.deallocate_cache(kv_buffer)
+            self.llm_datadist_engine.kv_transfer.deallocate_cache(
+                hidden_buffer)
 
         if not bypass_model_exec:
             # Some of the KV cache is not retrieved
@@ -454,17 +360,165 @@ class LLMDataDistConnector(KVConnectorBase):
             # prefilling on those tokens that are missing KV caches.
             logger.info(
                 "[rank%d][D]: Failed to receive all KVs and hidden "
-                "states, redo model forwarding.", torch.distributed.get_rank())
+                "states, redo model forwarding.",
+                torch.distributed.get_rank(),
+            )
             hidden_or_intermediate_states = None
         else:
             logger.info(
                 "[rank%d][D]: Successfully received all KVs and hidden "
-                "states, skip model forwarding.", torch.distributed.get_rank())
+                "states, skip model forwarding.",
+                torch.distributed.get_rank(),
+            )
             hidden_or_intermediate_states = torch.cat(
                 hidden_or_intermediate_states_for_one_req, dim=0)
 
         return hidden_or_intermediate_states, bypass_model_exec, model_input
 
-    def close(self, ):
+    def close(self):
         self.llm_datadist_engine.data_dist.unlink_clusters([self.cluster],
                                                            5000)
+
+    def _inject_kv_into_layer(
+        self,
+        dst_kv_cache_layer: torch.Tensor,
+        pulled_kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        is_mla: bool,
+    ) -> None:
+        """Inject the KV cache into the layer.
+
+        Args:
+            dst_kv_cache_layer (torch.Tensor): the destination KV cache
+                layer. In shape [2, num_blocks, block_size, num_heads, head_dim]
+                if not using MLA, [num_blocks, block_size, num_heads, head_dim]
+                otherwise.
+            src_kv_cache (torch.Tensor): the source KV cache. In shape
+                [1, 2, num_tokens, num_heads, head_dim] if not using MLA, [1,
+                num_tokens, num_heads, head_dim] otherwise.
+            slot_mapping (torch.Tensor): the slot mapping. In shape
+                [num_tokens].
+        """
+        # The performance of this function is suboptimal. Using
+        # `torch_npu._npu_reshape_and_cache` or
+        # `torch_npu._npu_reshape_and_cache_siso` could improve performance
+        # significantly. However, attempts to use these methods have failed, and
+        # the root cause remains unclear. The only available information is an
+        # error log from the ATB log file, which states:
+        # "ReshapeAndCacheOperation_1 invalid param, setup check fail, error
+        # code: 13."
+
+        # The pulled KV cache resides in the mbuf memory space and cannot be
+        # directly copied to the kv_cache_layer. Therefore, it must first be
+        # copied to a standard torch tensor using `scatter_update_`.
+        kv_cache = torch.empty_like(pulled_kv_cache)
+        indices = torch.tensor([0], dtype=torch.int64, device="npu")
+        torch_npu.scatter_update_(kv_cache, indices, pulled_kv_cache, axis=-2)
+        kv_cache = kv_cache.squeeze(0)
+
+        dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
+        if is_mla:
+            block_size = dst_kv_cache_layer_shape[1]
+            num_heads = dst_kv_cache_layer_shape[2]
+            head_dim = dst_kv_cache_layer_shape[3]
+            idx_for_copy = slot_mapping // block_size * block_size + slot_mapping % block_size
+            dst_kv_cache_layer = dst_kv_cache_layer.view(
+                -1, num_heads, head_dim)
+            dst_kv_cache_layer[idx_for_copy, ...] = kv_cache
+        else:
+            block_size = dst_kv_cache_layer_shape[2]
+            num_heads = dst_kv_cache_layer_shape[3]
+            head_dim = dst_kv_cache_layer_shape[4]
+            idx_for_copy = slot_mapping // block_size * block_size + slot_mapping % block_size
+            dst_kv_cache_layer = dst_kv_cache_layer.view(
+                2, -1, num_heads, head_dim)
+            dst_kv_cache_layer[:, idx_for_copy, ...] = kv_cache
+
+    def _extract_kv_from_layer(
+        self,
+        kv_cache_layer: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        is_mla: bool,
+    ) -> torch.Tensor:
+        """Extract the KV cache from the layer.
+
+        Assume the shape of the layer is [2, num_blocks, block_size, num_heads,
+        head_dim] if MLA is not used, and [num_blocks, block_size, num_heads,
+        head_dim] otherwise.
+        """
+        if is_mla:
+            num_heads, head_dim = kv_cache_layer.shape[
+                2], kv_cache_layer.shape[3]
+            return kv_cache_layer.view(-1, num_heads, head_dim)[slot_mapping,
+                                                                ...]
+
+        num_heads, head_dim = kv_cache_layer.shape[2], kv_cache_layer.shape[3]
+        return kv_cache_layer.view(2, -1, num_heads, head_dim)[:, slot_mapping,
+                                                               ...]
+
+
+def get_device_ips():
+    world_size = 8
+    npu_info = subprocess.run(['npu-smi', 'info', '-m'],
+                              stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE,
+                              universal_newlines=True)
+    if npu_info.returncode != 0 or not os.path.exists(HCCN_TOOL_PATH):
+        raise RuntimeError("No npu-smi/hccn_tool tools provided for NPU.")
+    npu_start_idx = int(
+        re.match(r'.*\n\t([0-9]+).*', npu_info.stdout).group(1))
+    device_ip_list = []
+    for ip_offset in range(world_size):
+        cmd = [
+            HCCN_TOOL_PATH, '-i', f'{npu_start_idx + ip_offset}', '-ip', '-g'
+        ]
+        device_ip_info = subprocess.run(cmd,
+                                        stdout=subprocess.PIPE,
+                                        stderr=subprocess.PIPE,
+                                        universal_newlines=True)
+        device_ip = re.match(r'ipaddr:(.*)\n', device_ip_info.stdout).group(1)
+        device_ip_list.append(device_ip)
+    return device_ip_list
+
+
+def string_to_int64_hash(input_str):
+    """
+    Hash the string using SHA-256 and convert it into an int64 integer.
+    """
+    hashed_bytes = hashlib.sha256(input_str.encode("utf-8")).digest()
+    trunked_bytes = hashed_bytes[:8]
+    uint64_value = struct.unpack("<Q", trunked_bytes)[0]
+    return uint64_value
+
+
+def create_cache_tensors(kv_transfer,
+                         num_layer: int,
+                         shape: List[int],
+                         dtype: torch.dtype,
+                         cache_keys=[]):
+    cache_desc = llm_datadist.CacheDesc(num_layer,
+                                        shape,
+                                        TORCH_DTYPE_TO_NPU_DTYPE[dtype],
+                                        seq_len_dim_index=-1)
+
+    # At present, there is no method to determine the available space in the
+    # mbuf memory. Therefore, we can only attempt to handle allocation failures;
+    # if the failure is due to insufficient space, we pause briefly before
+    # retrying until the allocation succeeds.
+    while True:
+        try:
+            cache_buf = kv_transfer.allocate_cache(cache_desc, cache_keys)
+            break
+        except LLMException as e:
+            if e.status_code == LLMStatusCode.LLM_DEVICE_OUT_OF_MEMORY:
+                logger.warning(
+                    f"allocate_cache failed due to insufficient space in the mbuf memory."
+                )
+                time.sleep(0.03)  # wait for cache buf to be ready
+            else:
+                raise e
+
+    cache_buf_addrs = cache_buf.per_device_tensor_addrs[0]
+    cache_tensors = torchair.llm_datadist.create_npu_tensors(
+        cache_desc.shape, dtype, cache_buf_addrs)
+    return cache_buf, cache_tensors
