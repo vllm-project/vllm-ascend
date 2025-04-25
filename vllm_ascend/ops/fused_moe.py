@@ -188,7 +188,7 @@ def fused_experts(
     # assert dtype in [torch.float32, torch.float16, torch.bfloat16
     #                  ], "Only float32, float16, and bfloat16 are supported"
 
-    if expert_map is not None:
+    if True or expert_map is not None:
         # Generate token indices and flatten
         token_indices = (torch.arange(num_tokens,
                                       device=device,
@@ -198,7 +198,7 @@ def fused_experts(
         # Flatten token-to-expert mappings and map to local experts
         weights_flat = topk_weights.view(-1)
         experts_flat = topk_ids.view(-1)
-        local_experts_flat = expert_map[experts_flat]
+        local_experts_flat = expert_map[experts_flat] if expert_map is not None else experts_flat
 
         # Filter valid token-expert pairs
         mask = local_experts_flat != -1
@@ -270,7 +270,7 @@ def fused_experts(
 
     down_out_list = torch.cat(down_out_list, dim=0)
 
-    if expert_map is not None:
+    if True or expert_map is not None:
         weighted_down_out = down_out_list * sorted_weights.unsqueeze(1)
 
         final_hidden_states = torch.zeros(*original_shape,
@@ -614,8 +614,8 @@ class AscendFusedMoE(FusedMoE):
     def forward(self,
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
-                is_prefill: bool,
-                top_k=None):
+                is_prefill: bool = True,
+                top_k: Optional[int] = None):
         assert self.quant_method is not None
 
         if top_k:
