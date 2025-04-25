@@ -34,6 +34,7 @@ import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
                          get_current_vllm_config)
 from vllm.distributed import (get_dp_group, get_pp_group,
@@ -209,8 +210,42 @@ class CustomDeepseekV2MoE(nn.Module):
 
         self.tp_group = get_tp_group().device_group
         self.tp_rank = get_tp_group().rank_in_group
+        self.enable_graph_mode = False
+        additional_config = get_current_vllm_config().additional_config
+        if additional_config:
+            self.enable_graph_mode = additional_config.get(
+                "enable_graph_mode", False)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.enable_graph_mode:
+            return self._forward(hidden_states)
+        else:
+            return self._forward_eager(hidden_states)
+    
+    def _forward_eager(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        num_tokens, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+
+        if self.n_shared_experts is not None:
+            shared_output = self.shared_experts(hidden_states)
+
+        # router_logits: (num_tokens, n_experts)
+        router_logits, _ = self.gate(hidden_states)
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits) * self.routed_scaling_factor
+
+        # NOTE(Yizhou): Quite strange that the order of these two operations
+        # is reversed in the original vLLM code
+        if self.tp_size > 1:
+            final_hidden_states = tensor_model_parallel_all_reduce(
+                final_hidden_states)
+        if shared_output is not None:
+            final_hidden_states = final_hidden_states + shared_output
+
+        return final_hidden_states.view(num_tokens, hidden_dim)
+
+    def _forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
         # when profile runs, force experts to load balanced tokens
         # to avoid high memory consumption on a single rank.
@@ -555,6 +590,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         return hidden_states, residual
 
 
+@support_torch_compile
 class CustomDeepseekV2Model(nn.Module):
 
     fall_back_to_pt_during_load = False
