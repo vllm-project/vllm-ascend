@@ -35,9 +35,9 @@ def clean_up():
 
 
 def run_prefill(prefill_done, process_close, prompts: List[str], model: str):
-    os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "0,1,2,3"
-    os.environ["PROMPT_DEVICE_ID"] = "0,1,2,3"
-    os.environ["DECODE_DEVICE_ID"] = "4,5,6,7"
+    os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "0,1"
+    os.environ["PROMPT_DEVICE_ID"] = "0,1"
+    os.environ["DECODE_DEVICE_ID"] = "2,3"
 
     sampling_params = SamplingParams(temperature=0, top_p=0.9, max_tokens=1)
     ktc = KVTransferConfig.from_cli(
@@ -49,7 +49,7 @@ def run_prefill(prefill_done, process_close, prompts: List[str], model: str):
             kv_transfer_config=ktc,
             max_model_len=2000,
             gpu_memory_utilization=0.8,
-            tensor_parallel_size=4,
+            tensor_parallel_size=2,
             distributed_executor_backend="mp",
     ) as llm:
         for _ in range(5):
@@ -74,9 +74,9 @@ def run_prefill(prefill_done, process_close, prompts: List[str], model: str):
 
 
 def run_decode(prefill_done, prompts: List[str], model: str):
-    os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "4,5,6,7"
-    os.environ["PROMPT_DEVICE_ID"] = "0,1,2,3"
-    os.environ["DECODE_DEVICE_ID"] = "4,5,6,7"
+    os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "2,3"
+    os.environ["PROMPT_DEVICE_ID"] = "0,1"
+    os.environ["DECODE_DEVICE_ID"] = "2,3"
 
     sampling_params = SamplingParams(temperature=0, top_p=0.9)
     ktc = KVTransferConfig.from_cli(
@@ -88,7 +88,7 @@ def run_decode(prefill_done, prompts: List[str], model: str):
             kv_transfer_config=ktc,
             max_model_len=2000,
             gpu_memory_utilization=0.8,
-            tensor_parallel_size=4,
+            tensor_parallel_size=2,
             distributed_executor_backend="mp",
     ) as llm:
         for _ in range(5):
@@ -111,7 +111,7 @@ def run_decode(prefill_done, prompts: List[str], model: str):
     clean_up()
 
 
-@pytest.mark.parametrize("model, distributed_executor_backend", [
+@pytest.mark.parametrize("model", [
     ("Qwen/QwQ-32B"),
     ("deepseek-ai/DeepSeek-V2-Lite"),
 ])
