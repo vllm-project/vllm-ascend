@@ -7,20 +7,21 @@ outputs.
 
 Run `pytest tests/test_offline_disaggregated_prefill.py`.
 """
-import os
 import gc
-import time
-from typing import List
 import multiprocessing as mp
+import os
+import time
 from multiprocessing import Event, Process
+from typing import List
 
+import pytest
 import torch
 import vllm  # noqa: F401
 from vllm import SamplingParams
 from vllm.config import KVTransferConfig
-from vllm.distributed.parallel_state import destroy_distributed_environment, destroy_model_parallel
+from vllm.distributed.parallel_state import (destroy_distributed_environment,
+                                             destroy_model_parallel)
 
-import pytest
 from tests.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
@@ -43,7 +44,7 @@ def run_prefill(prefill_done, process_close, prompts: List[str], model: str):
         '{"kv_connector":"AscendHcclConnector","kv_buffer_device":"npu","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":2}'
     )
     with VllmRunner(
-            model=model,
+            model_name=model,
             trust_remote_code=True,
             kv_transfer_config=ktc,
             max_model_len=2000,
@@ -82,7 +83,7 @@ def run_decode(prefill_done, prompts: List[str], model: str):
         '{"kv_connector":"AscendHcclConnector","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":2}'
     )
     with VllmRunner(
-            model=model,
+            model_name=model,
             trust_remote_code=True,
             kv_transfer_config=ktc,
             max_model_len=2000,

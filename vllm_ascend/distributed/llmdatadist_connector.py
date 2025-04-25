@@ -14,30 +14,29 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import hashlib
 import os
 import re
-import time
 import struct
-import hashlib
 import subprocess
+import time
 from typing import TYPE_CHECKING, List, Tuple, Union
 
 import torch
 import torch_npu
 import torchair  # type: ignore
-
-from vllm.logger import logger
 from vllm.config import VllmConfig
-from vllm.sequence import IntermediateTensors
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+from vllm.logger import logger
+from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
-import vllm_ascend.envs as envs
-
 import llm_datadist  # type: ignore
 from llm_datadist import LLMException, LLMStatusCode
+
+import vllm_ascend.envs as envs
 
 TORCH_DTYPE_TO_NPU_DTYPE = {
     torch.half: llm_datadist.DataType.DT_FLOAT16,
@@ -154,7 +153,7 @@ class LLMDataDistConnector(KVConnectorBase):
         # Use the `kv_cache_layers` variable for the entire key-value cache, and
         # `kv_caches` for the current request's cache.
         kv_cache_layers = kv_caches
-        kv_caches = None
+        kv_caches = []
 
         attn_metadata = model_input.attn_metadata
         query_start_loc = attn_metadata.query_start_loc.tolist()
@@ -223,7 +222,7 @@ class LLMDataDistConnector(KVConnectorBase):
                 start_pos:end_pos].shape
             req_hidden_states = hidden_or_intermediate_states[
                 start_pos:end_pos].view(1, hid_shape0, 1, hid_shape1)
-            hidden_state_shape = req_hidden_states.shape
+            hidden_state_shape = tuple(req_hidden_states.shape)
             hidden_cache_keys = [
                 llm_datadist.CacheKey(self.llm_datadist_engine.cluster_id,
                                       datadist_request_id, 2)
@@ -253,7 +252,7 @@ class LLMDataDistConnector(KVConnectorBase):
         # Use the `kv_cache_layers` variable for the entire key-value cache, and
         # `kv_caches` for the current request's cache.
         kv_cache_layers = kv_caches
-        kv_caches = None
+        kv_caches = []
 
         bypass_model_exec = True
 
@@ -269,7 +268,7 @@ class LLMDataDistConnector(KVConnectorBase):
         # Get model config
         start_layer = model_executable.model.start_layer
         end_layer = model_executable.model.end_layer
-        hidden_size = model_executable.model.config.hidden_size
+        hidden_size = int(model_executable.model.config.hidden_size)
         num_layer = end_layer - start_layer
         # If use MLA, the kv cache shape is [num_blocks, block_size, num_heads,
         # head_dim], otherwise it is [2, num_blocks, block_size, num_heads,
@@ -282,14 +281,14 @@ class LLMDataDistConnector(KVConnectorBase):
                                device=torch.npu.current_device())
 
         kv_cache_layer_shape = kv_cache_layers[0].shape
-        num_heads = kv_cache_layer_shape[-2]
-        head_size = kv_cache_layer_shape[-1]
+        num_heads = int(kv_cache_layer_shape[-2])
+        head_size = int(kv_cache_layer_shape[-1])
 
         hidden_or_intermediate_states_for_one_req = []
         for idx in range(len(query_start_loc) - 1):
             request_id = request_ids[idx]
-            start_pos = query_start_loc[idx]
-            end_pos = query_start_loc[idx + 1]
+            start_pos = int(query_start_loc[idx])
+            end_pos = int(query_start_loc[idx + 1])
             slen = end_pos - start_pos
             req_slot_mapping = slot_mapping_flat[start_pos:end_pos]
 
@@ -300,7 +299,7 @@ class LLMDataDistConnector(KVConnectorBase):
 
             # Pull kv cache from prefill node by request
             if is_mla:
-                kv_shape = (1, slen, num_heads, head_size)
+                kv_shape: Tuple[int, ...] = (1, slen, num_heads, head_size)
             else:
                 kv_shape = (1, 2, slen, num_heads, head_size)
             kv_buffer, pulled_kv_caches = create_cache_tensors(
@@ -493,7 +492,7 @@ def string_to_int64_hash(input_str):
 
 def create_cache_tensors(kv_transfer,
                          num_layer: int,
-                         shape: List[int],
+                         shape: Tuple[int, ...],
                          dtype: torch.dtype,
                          cache_keys=[]):
     cache_desc = llm_datadist.CacheDesc(num_layer,
