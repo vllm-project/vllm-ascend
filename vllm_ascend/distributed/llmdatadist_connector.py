@@ -512,7 +512,7 @@ def create_cache_tensors(kv_transfer,
         except LLMException as e:
             if e.status_code == LLMStatusCode.LLM_DEVICE_OUT_OF_MEMORY:
                 logger.warning(
-                    f"allocate_cache failed due to insufficient space in the mbuf memory."
+                    "allocate_cache failed due to insufficient space in the mbuf memory."
                 )
                 time.sleep(0.03)  # wait for cache buf to be ready
             else:
