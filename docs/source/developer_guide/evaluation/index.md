@@ -6,5 +6,7 @@
 using_opencompass
 using_lm_eval
 using_evalscope
-benchmark
+:caption: Performance
+:maxdepth: 1
+performance_benchmark
 :::
