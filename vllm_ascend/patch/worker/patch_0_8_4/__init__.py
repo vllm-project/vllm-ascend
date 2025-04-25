@@ -16,3 +16,4 @@
 #
 
 import vllm_ascend.patch.worker.patch_0_8_4.patch_metrics  # noqa
+import vllm_ascend.patch.worker.patch_0_8_4.patch_tritonplaceholder  # noqa
