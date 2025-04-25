@@ -1,6 +1,8 @@
 -r requirements-lint.txt
+-r requirements.txt
 modelscope
 pytest >= 6.0
 pytest-asyncio
 lm-eval
 ray
+types-jsonschema

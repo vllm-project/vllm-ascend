@@ -32,7 +32,7 @@ import torch_npu
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.utils import CommonAttentionState
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import get_pp_group
 from vllm.forward_context import set_forward_context
@@ -56,7 +56,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import (DeviceMemoryProfiler, PyObjectCache, flatten_2d_lists,
-                        is_pin_memory_available, supports_dynamo)
+                        is_pin_memory_available)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -546,8 +546,7 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
         }
 
         # Add graph_pad_size here
-        if self.runner.vllm_config.compilation_config.level ==\
-           CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+        if self.runner.enable_graph_mode:
             graph_pad_size = self.runner.scheduler_config.max_num_seqs - len(
                 seq_lens)
         else:
@@ -557,7 +556,8 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
         #print(f"before tensor input_positions: {input_positions}")
         #print(f"before list seq_lens: {seq_lens}")
         input_tokens = flatten_2d_lists(input_tokens)
-        input_positions = flatten_2d_lists(input_positions)
+        if input_positions:
+            input_positions = flatten_2d_lists(input_positions)
         if graph_pad_size != -1 and not is_prompt:
             input_tokens.extend(itertools.repeat(0, graph_pad_size))
             input_positions.extend(  # type: ignore
@@ -609,8 +609,7 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
         ]
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
-        if self.runner.vllm_config.compilation_config.level ==\
-            CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+        if self.runner.enable_graph_mode:
             torch._dynamo.mark_static(input_tokens_tensor)
             torch._dynamo.mark_static(input_positions_tensor)
             torch._dynamo.mark_static(attn_metadata.block_tables)
@@ -871,6 +870,12 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         self.max_batchsize_to_capture = \
             self.vllm_config.compilation_config.max_capture_size
 
+        self.enable_graph_mode = False
+        additional_config = vllm_config.additional_config
+        if additional_config:
+            self.enable_graph_mode = additional_config.get(
+                "enable_graph_mode", False)
+
         self.has_inner_state = model_config.has_inner_state
 
         self.in_profile_run = False
@@ -932,6 +937,12 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
               SamplingMetadataCache() \
                 if self.parallel_config.pipeline_parallel_size == 1 else None
 
+        if vllm_version_is("0.8.4"):
+            self.sampler = None
+        else:
+            from vllm.model_executor.layers.sampler import get_sampler
+            self.sampler = get_sampler()
+
     def get_model(self) -> nn.Module:
         return self.model
 
@@ -971,8 +982,7 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
             self.model = self.lora_manager.create_lora_manager(self.model)
 
         # adapter torch compile with npu_backend
-        if self.vllm_config.compilation_config.level ==\
-            CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+        if self.enable_graph_mode:
             import torchair  # type: ignore
             from torchair import patch_for_hcom  # type: ignore
 
@@ -1279,15 +1289,12 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
         self.attn_state.begin_forward(model_input)
 
         assert model_input.attn_metadata is not None
-        if self.vllm_config.compilation_config.level ==\
-            CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+        # TODO(zzzzwwjj): Do we need to do it every time?
+        if self.enable_graph_mode:
             torch._dynamo.mark_static(model_input.input_tokens)
             torch._dynamo.mark_static(model_input.input_positions)
             torch._dynamo.mark_static(model_input.attn_metadata.block_tables)
             torch._dynamo.mark_static(model_input.attn_metadata.slot_mapping)
-            torch._dynamo.mark_static(
-                model_input.attn_metadata.query_start_loc)
-            torch._dynamo.mark_static(model_input.attn_metadata.seq_start_loc)
             for kv in kv_caches:
                 if isinstance(kv, tuple):
                     torch._dynamo.mark_static(kv[0])
@@ -1298,7 +1305,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
         virtual_engine = model_input.virtual_engine
         prefill_meta = model_input.attn_metadata.prefill_metadata
         previous_hidden_states = kwargs.get("previous_hidden_states")
-        if prefill_meta is None and self.vllm_config.compilation_config.level > 0:
+        if prefill_meta is None and self.enable_graph_mode:
             model_executable = self.compile_model
             # Note: graph_batch_size value not same as GPU
             graph_batch_size = model_input.input_tokens.shape[  # type: ignore
@@ -1341,9 +1348,8 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_inner_state else {}
 
-        if self.vllm_config.compilation_config.level ==\
-            CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
-            model_kwargs = {"inputs_embeds": None}
+        if self.enable_graph_mode:
+            model_kwargs: Dict[str, Any] = {"inputs_embeds": None}
         else:
             model_kwargs = {}
         if previous_hidden_states is not None:
@@ -1360,6 +1366,9 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                                      self.vllm_config, virtual_engine):
                 if model_input.attn_metadata is not None:
                     model_input.attn_metadata.input_positions = model_input.input_positions
+                if self.enable_graph_mode:
+                    model_kwargs["kv_caches"] = kv_caches
+                    model_kwargs["attn_metadata"] = model_input.attn_metadata
                 hidden_or_intermediate_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,
@@ -1401,10 +1410,17 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
             model_input.async_callback()
 
         # Sample the next token.
-        output: SamplerOutput = self.model.sample(
-            logits=logits,
-            sampling_metadata=model_input.sampling_metadata,
-        )
+        if vllm_version_is("0.8.4"):
+            output = self.model.sample(
+                logits=logits,
+                sampling_metadata=model_input.sampling_metadata,
+            )
+        else:
+            assert self.sampler is not None
+            output = self.sampler(
+                logits=logits,
+                sampling_metadata=model_input.sampling_metadata,
+            )
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time
                 and output is not None):
@@ -1430,8 +1446,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                 hidden_states = hidden_or_intermediate_states.index_select(
                     0, indices)
                 output.prefill_hidden_states = hidden_or_intermediate_states
-            elif self.vllm_config.compilation_config.level == \
-                CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+            elif self.enable_graph_mode:
                 hidden_states = hidden_or_intermediate_states[:len(indices)]
             else:
                 hidden_states = hidden_or_intermediate_states

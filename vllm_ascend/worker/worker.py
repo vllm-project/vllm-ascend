@@ -24,7 +24,7 @@ import torch
 import torch.distributed
 from torch import nn
 from vllm import envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
@@ -300,7 +300,8 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             from contextlib import nullcontext
             context = nullcontext()  # type: ignore
         with context:
-            self._init_cache_engine()
+            with set_current_vllm_config(self.vllm_config):
+                self._init_cache_engine()
         self._warm_up_model()
 
     def _init_cache_engine(self):
@@ -511,10 +512,9 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size)
         expert_tensor_parallel_size = 1
-        if additional_config is not None and hasattr(
-                additional_config, "expert_tensor_parallel_size"):
-            expert_tensor_parallel_size = getattr(
-                additional_config, "expert_tensor_parallel_size")
+        if additional_config:
+            expert_tensor_parallel_size = additional_config.get(
+                "expert_tensor_parallel_size", 1)
         init_ascend_model_parallel(parallel_config.tensor_parallel_size,
                                    parallel_config.pipeline_parallel_size,
                                    expert_tensor_parallel_size)
