@@ -5,7 +5,8 @@
 w8a8 quantization feature is supported by v0.8.4rc2 or highter
 :::
 
-```bash
+```{code-block} bash
+   :substitutions:
 # Update the vllm-ascend image
 export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
