@@ -227,7 +227,7 @@ def _set_cos_sin_cache(self, seq_len, device, dtype):
                          persistent=False)
 
 
-# TODO: Patch when aclnn ops avaiable
+# TODO: Patch when aclnn ops available
 RotaryEmbedding.forward_oot = rope_forward_oot
 DeepseekScalingRotaryEmbedding.forward = native_rope_deepseek_forward
 DeepseekScalingRotaryEmbedding._set_cos_sin_cache = _set_cos_sin_cache

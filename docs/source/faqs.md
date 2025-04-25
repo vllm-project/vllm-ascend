@@ -89,7 +89,7 @@ Currently, w8a8 quantization is already supported by vllm-ascend originally on v
 
 Currently, w8a8 DeepSeek is working in process: [support AscendW8A8 quantization](https://github.com/vllm-project/vllm-ascend/pull/511)
 
-Please run DeepSeek with BF16 now, follwing the [Multi-Node DeepSeek inferencing tutorail](https://vllm-ascend.readthedocs.io/en/main/tutorials/multi_node.html)
+Please run DeepSeek with BF16 now, following the [Multi-Node DeepSeek inferencing tutorail](https://vllm-ascend.readthedocs.io/en/main/tutorials/multi_node.html)
 
 ### 12. There is not output in log when loading models using vllm-ascend, How to solve it?
 
