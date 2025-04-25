@@ -49,6 +49,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
+from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -174,6 +175,8 @@ class NPUModelRunner:
             model_config=self.model_config,
             scheduler_config=self.scheduler_config,
             mm_registry=self.mm_registry)
+
+        self.sampler = Sampler()
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
@@ -645,7 +648,7 @@ class NPUModelRunner:
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
-        sampler_output = self.model.sample(
+        sampler_output = self.sampler(
             logits=logits,
             sampling_metadata=sampling_metadata,
         )
