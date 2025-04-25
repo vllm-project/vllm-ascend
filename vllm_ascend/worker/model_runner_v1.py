@@ -479,7 +479,6 @@ class NPUModelRunner:
                block_offsets,
                out=self.slot_mapping_np[:total_num_scheduled_tokens])
 
-        
         attn_state = AscendAttentionState.ChunkedPrefill
         if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillOnly
@@ -487,7 +486,6 @@ class NPUModelRunner:
             attn_state = AscendAttentionState.DecodeOnly
         else:
             attn_state = AscendAttentionState.ChunkedPrefill
-
 
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
@@ -617,8 +615,9 @@ class NPUModelRunner:
                 inputs_embeds=inputs_embeds,
             )
 
-        if logits_indices == None:
-            logits = self.model.compute_logits(hidden_states[sample_indices], None)
+        if logits_indices is None:
+            logits = self.model.compute_logits(hidden_states[sample_indices],
+                                               None)
         else:
             hidden_states = hidden_states[:num_scheduled_tokens]
             sample_hidden_states = hidden_states[logits_indices]
