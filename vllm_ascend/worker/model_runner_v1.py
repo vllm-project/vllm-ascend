@@ -46,7 +46,6 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
-
 from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.platform import NPUPlatform
@@ -454,6 +453,8 @@ class NPUModelRunner:
                arange,
                out=positions_np)
 
+        positions = self.positions[:total_num_scheduled_tokens]
+        self.query_lens = torch.from_numpy(num_scheduled_tokens)
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
 
@@ -474,6 +475,14 @@ class NPUModelRunner:
                block_offsets,
                out=self.slot_mapping_np[:total_num_scheduled_tokens])
 
+        attn_state = AscendAttentionState.ChunkedPrefill
+        if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
+            attn_state = AscendAttentionState.PrefillOnly
+        elif np.all(num_scheduled_tokens == 1):
+            attn_state = AscendAttentionState.DecodeOnly
+        else:
+            attn_state = AscendAttentionState.ChunkedPrefill
+
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
         self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
@@ -481,6 +490,7 @@ class NPUModelRunner:
         self.seq_lens_np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens)
+        seq_lens = self.seq_lens_cpu[:num_reqs]
 
         # Copy the tensors to the npu.
         self.input_ids[:total_num_scheduled_tokens].copy_(
@@ -488,6 +498,13 @@ class NPUModelRunner:
 
         self.positions[:total_num_scheduled_tokens].copy_(
             self.positions_cpu[:total_num_scheduled_tokens], non_blocking=True)
+
+        attn_mask = self._make_attention_mask(seq_lens=seq_lens,
+                                              query_lens=num_scheduled_tokens,
+                                              position=positions,
+                                              attn_state=attn_state)
+        self.attn_mask = attn_mask
+        self.attn_state = attn_state  # type: ignore
 
         # Prepare for cascade attention if enabled & beneficial.
         # common_prefix_len = 0
@@ -589,10 +606,6 @@ class NPUModelRunner:
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
             )
-
-        if not get_pp_group().is_last_rank:
-            # For mid-pipeline stages, return the hidden states.
-            return hidden_states
 
         #logits = self.model.compute_logits(hidden_states, None)
         hidden_states = hidden_states[:num_scheduled_tokens]

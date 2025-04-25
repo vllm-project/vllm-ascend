@@ -1,4 +1,3 @@
-# forked https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/mla/common.py
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Type, TypeVar
 
