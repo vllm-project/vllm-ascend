@@ -125,6 +125,20 @@
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm.
 #
+# ** File: worker/patch_common/patch_minicpm.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.minicpm.MiniCPMAttention.forward`
+#    Why:
+#       The forward func of MiniCPMAttention in vllm do a datatype convert
+#       (original datatype --> float32) to ensure the precision on cuda.
+#       However float32 is not supported in cann rope op, thus we keep this patch
+#    How：
+#       Removed the dtype convert operations in forward
+#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
+#       NO, only for npu due to rope op.
+#    Future Plan:
+#       Keep this patch in vllm-ascend.
+#
 # ** File: worker/patch_common/patch_multi_step_worker.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.spec_decode.multi_step_worker.MultiStepWorker.sampler_output`
