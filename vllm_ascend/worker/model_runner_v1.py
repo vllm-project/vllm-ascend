@@ -447,6 +447,9 @@ class NPUModelRunner:
         cu_num_tokens = np.cumsum(num_scheduled_tokens)
         cumsums_offsets = np.repeat(cu_num_tokens - num_scheduled_tokens,
                                     num_scheduled_tokens)
+        sample_indices = cu_num_tokens - 1
+        sample_indices = torch.from_numpy(sample_indices).to(self.device,
+                                                             non_blocking=True)
         arange = self.arange_np[:total_num_scheduled_tokens] - cumsums_offsets
 
         positions_np = self.positions_np[:total_num_scheduled_tokens]
@@ -476,6 +479,7 @@ class NPUModelRunner:
                block_offsets,
                out=self.slot_mapping_np[:total_num_scheduled_tokens])
 
+        
         attn_state = AscendAttentionState.ChunkedPrefill
         if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillOnly
@@ -483,6 +487,7 @@ class NPUModelRunner:
             attn_state = AscendAttentionState.DecodeOnly
         else:
             attn_state = AscendAttentionState.ChunkedPrefill
+
 
         # Prepare the attention metadata.
         self.query_start_loc_np[0] = 0
@@ -517,10 +522,14 @@ class NPUModelRunner:
             common_prefix_len=None,
         )
 
-        logits_indices = attn_metadata.query_start_loc[1:] - 1
+        if hasattr(attn_metadata, 'query_start_loc'):
+            logits_indices = attn_metadata.query_start_loc[1:] - 1
+        else:
+            logits_indices = None
+
         spec_decode_metadata = None
 
-        return attn_metadata, logits_indices, spec_decode_metadata
+        return attn_metadata, logits_indices, spec_decode_metadata, sample_indices
 
     def apply_grammar_bitmask(
         self,
@@ -586,7 +595,7 @@ class NPUModelRunner:
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOuptut if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
-        attn_metadata, logits_indices, spec_decode_metadata = self._process_reqs(
+        attn_metadata, logits_indices, spec_decode_metadata, sample_indices = self._process_reqs(
             scheduler_output, intermediate_tensors)
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
@@ -608,10 +617,12 @@ class NPUModelRunner:
                 inputs_embeds=inputs_embeds,
             )
 
-        #logits = self.model.compute_logits(hidden_states, None)
-        hidden_states = hidden_states[:num_scheduled_tokens]
-        sample_hidden_states = hidden_states[logits_indices]
-        logits = self.model.compute_logits(sample_hidden_states, None)
+        if logits_indices == None:
+            logits = self.model.compute_logits(hidden_states[sample_indices], None)
+        else:
+            hidden_states = hidden_states[:num_scheduled_tokens]
+            sample_hidden_states = hidden_states[logits_indices]
+            logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
@@ -740,19 +751,19 @@ class NPUModelRunner:
         self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
     @torch.inference_mode()
-    def _dummy_run(self) -> torch.Tensor:
+    def _dummy_run(self, num_tokens: int) -> torch.Tensor:
         model = self.model
         if self.is_multimodal_model:
             input_ids = None
-            inputs_embeds = self.inputs_embeds[:self.max_num_tokens]
+            inputs_embeds = self.inputs_embeds[:num_tokens]
         else:
-            input_ids = self.input_ids[:self.max_num_tokens]
+            input_ids = self.input_ids[:num_tokens]
             inputs_embeds = None
 
         if self.uses_mrope:
-            positions = self.mrope_positions[:, :self.max_num_tokens]
+            positions = self.mrope_positions[:, :num_tokens]
         else:
-            positions = self.input_positions_cpu[:self.max_num_tokens]
+            positions = self.positions[:num_tokens]
 
         if get_pp_group().is_first_rank:
             intermediate_tensors = None
@@ -760,17 +771,17 @@ class NPUModelRunner:
             if self.intermediate_tensors is None:
                 self.intermediate_tensors = (
                     self.model.make_empty_intermediate_tensors(
-                        batch_size=self.max_num_tokens,
+                        batch_size=num_tokens,
                         dtype=self.dtype,
                         device=self.device))
             intermediate_tensors = IntermediateTensors({
-                k: v[:self.max_num_tokens]
+                k: v[:num_tokens]
                 for k, v in self.intermediate_tensors.items()
             })
 
         with set_forward_context(None, self.vllm_config):
             hidden_states = model(input_ids=input_ids,
-                                  positions=positions.to(self.device),
+                                  positions=positions,
                                   intermediate_tensors=intermediate_tensors,
                                   inputs_embeds=inputs_embeds)
         return hidden_states
@@ -803,7 +814,7 @@ class NPUModelRunner:
         ]
 
         # Trigger compilation for general shape.
-        hidden_states = self._dummy_run()
+        hidden_states = self._dummy_run(self.max_num_tokens)
 
         if get_pp_group().is_last_rank:
             hidden_states = hidden_states[logit_indices]
@@ -851,7 +862,6 @@ class NPUModelRunner:
                 assert num_blocks >= kv_cache_config.num_blocks
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
-                #num_blocks = num_blocks // 4
                 if isinstance(kv_cache_spec, FullAttentionSpec):
                     kv_cache_shape = self.attn_backend.get_kv_cache_shape(
                         num_blocks, kv_cache_spec.block_size,
