@@ -1,10 +1,11 @@
-# Introduction
+# Performance Benchmark
 This document details the benchmark methodology for vllm-ascend, aimed at evaluating the performance under a variety of workloads. To maintain alignment with vLLM, we use the [benchmark](https://github.com/vllm-project/vllm/tree/main/benchmarks) script provided by the vllm project.
-# Run benchmarks
-**Benchmark Coverage**: We measure offline e2e latency and throughput, and fixed-QPS online serving benchmarks, for more details see [vllm-ascend](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks).
+
+**Benchmark Coverage**: We measure offline e2e latency and throughput, and fixed-QPS online serving benchmarks, for more details see [vllm-ascend benchmark scripts](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks).
 
 ## 1. Run docker container
-```bash
+```{code-block} bash
+   :substitutions:
 # Update DEVICE according to your device (/dev/davinci[0-7])
 export DEVICE=/dev/davinci7
 export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
@@ -172,7 +173,7 @@ Throughput: 4.64 requests/s, 2000.51 total tokens/s, 1010.54 output tokens/s
 Total num prompt tokens:  42659
 Total num output tokens:  43545
 ```
-For more details, detailed json file is generated to the path `benchmark/results`
+The result json files are generated into the path `benchmark/results`
 These files contain detailed benchmarking results for further analysis.
 
 ```bash
