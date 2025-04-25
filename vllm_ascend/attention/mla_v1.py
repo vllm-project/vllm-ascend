@@ -10,6 +10,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.utils import cdiv, round_down
+
 from vllm_ascend.ops.cache import (concat_and_cache_mla_torch,
                                    flash_attn_varlen_func_torch,
                                    flash_mla_with_kvcache_torch,
