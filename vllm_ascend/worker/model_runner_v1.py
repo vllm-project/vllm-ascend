@@ -346,20 +346,34 @@ class NPUModelRunner:
                 generator.manual_seed(sampling_params.seed)
             else:
                 generator = None
-
-            self.requests[req_id] = CachedRequestState(
-                req_id=req_id,
-                prompt_token_ids=new_req_data.prompt_token_ids,
-                prompt=new_req_data.prompt,
-                mm_inputs=new_req_data.mm_inputs,
-                mm_positions=new_req_data.mm_positions,
-                sampling_params=sampling_params,
-                generator=generator,
-                block_ids=new_req_data.block_ids,
-                num_computed_tokens=new_req_data.num_computed_tokens,
-                output_token_ids=[],
-                lora_request=new_req_data.lora_request,
-            )
+            if vllm_version_is("0.8.4"):
+                self.requests[req_id] = CachedRequestState(
+                    req_id=req_id,
+                    prompt_token_ids=new_req_data.prompt_token_ids,
+                    prompt=new_req_data.prompt,
+                    mm_inputs=new_req_data.mm_inputs,
+                    mm_positions=new_req_data.mm_positions,
+                    sampling_params=sampling_params,
+                    generator=generator,
+                    block_ids=new_req_data.block_ids,
+                    num_computed_tokens=new_req_data.num_computed_tokens,
+                    output_token_ids=[],
+                    lora_request=new_req_data.lora_request,
+                )
+            else:
+                # the prompt removed by: https://github.com/vllm-project/vllm/pull/17214
+                self.requests[req_id] = CachedRequestState(
+                    req_id=req_id,
+                    prompt_token_ids=new_req_data.prompt_token_ids,
+                    mm_inputs=new_req_data.mm_inputs,
+                    mm_positions=new_req_data.mm_positions,
+                    sampling_params=sampling_params,
+                    generator=generator,
+                    block_ids=new_req_data.block_ids,
+                    num_computed_tokens=new_req_data.num_computed_tokens,
+                    output_token_ids=[],
+                    lora_request=new_req_data.lora_request,
+                )
 
             req_ids_to_add.append(req_id)
 
