@@ -46,7 +46,8 @@ RUN python3 -m pip uninstall -y triton
 # Install vllm-ascend
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib:$LD_LIBRARY_PATH && \
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib && \
+    echo $LD_LIBRARY_PATH && \
     export LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LIBRARY_PATH && \
     python3 -m pip install -v /workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/
 
