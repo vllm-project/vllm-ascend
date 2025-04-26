@@ -9,11 +9,11 @@ This document describes how to install vllm-ascend manually.
 - A hardware with Ascend NPU. It's usually the Atlas 800 A2 series.
 - Software:
 
-    | Software     | Supported version | Note |
-    | ------------ | ----------------- | ---- | 
-    | CANN         | >= 8.0.0          | Required for vllm-ascend and torch-npu |
-    | torch-npu    | >= 2.5.1.dev20250320       | Required for vllm-ascend |
-    | torch        | >= 2.5.1          | Required for torch-npu and vllm |
+    | Software  | Supported version | Note                                   |
+    |-----------|-------------------|----------------------------------------| 
+    | CANN      | >= 8.0.0          | Required for vllm-ascend and torch-npu |
+    | torch-npu | >= 2.5.1          | Required for vllm-ascend               |
+    | torch     | >= 2.5.1          | Required for torch-npu and vllm        |
 
 You have 2 way to install:
 - **Using pip**: first prepare env manually or via CANN image, then install `vllm-ascend` using pip.
@@ -125,27 +125,6 @@ First install system dependencies:
 ```bash
 apt update  -y
 apt install -y gcc g++ cmake libnuma-dev wget
-```
-
-Current version depends on a unreleased `torch-npu`, you need to install manually:
-
-```
-# Once the packages are installed, you need to install `torch-npu` manually,
-# because that vllm-ascend relies on an unreleased version of torch-npu.
-# This step will be removed in the next vllm-ascend release.
-# 
-# Here we take python 3.10 on aarch64 as an example. Feel free to install the correct version for your environment. See:
-#
-# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py39.tar.gz
-# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
-# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py311.tar.gz
-#
-mkdir pta
-cd pta
-wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
-tar -xvf pytorch_v2.5.1_py310.tar.gz
-pip install ./torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
-cd ..
 ```
 
 **[Optinal]** Config the extra-index of `pip` if you are working on a **x86** machine, so that the torch with cpu could be found:

@@ -42,9 +42,6 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install /workspace/vllm/ --extra-i
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
 RUN python3 -m pip uninstall -y triton
 
-# Install torch-npu
-RUN bash /workspace/vllm-ascend/pta_install.sh
-
 # Install vllm-ascend
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
