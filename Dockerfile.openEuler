@@ -21,9 +21,8 @@ ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 
 RUN yum update -y && \
     yum install -y python3-pip git vim wget net-tools && \
-    rm -rf /var/cache/yum &&\
-    rm -rf /tmp/*
-
+    rm -rf /var/cache/yum && \
+    yum clean all
 
 WORKDIR /workspace
 
