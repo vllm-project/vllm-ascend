@@ -16,6 +16,7 @@ from typing import List
 
 import pytest
 import torch
+import torch_npu  # noqa: F401
 import vllm  # noqa: F401
 from vllm import SamplingParams
 from vllm.config import KVTransferConfig
@@ -45,7 +46,6 @@ def run_prefill(prefill_done, process_close, prompts: List[str], model: str):
     )
     with VllmRunner(
             model_name=model,
-            trust_remote_code=True,
             kv_transfer_config=ktc,
             max_model_len=2000,
             gpu_memory_utilization=0.8,
@@ -84,7 +84,6 @@ def run_decode(prefill_done, prompts: List[str], model: str):
     )
     with VllmRunner(
             model_name=model,
-            trust_remote_code=True,
             kv_transfer_config=ktc,
             max_model_len=2000,
             gpu_memory_utilization=0.8,
@@ -136,8 +135,15 @@ def test_models_distributed(model: str) -> None:
     prefill_process.start()
     # Start decode node
     decode_process.start()
-    # Terminate the prefill node when decode is finished
+    # Wait for decode node to exit
     decode_process.join()
+    # Terminate prefill process
+    process_close.set()
+    # Wait for prefill node to exit
+    prefill_process.join()
+
+    assert prefill_process.exitcode == 0
+    assert decode_process.exitcode == 0
 
 
 if __name__ == "__main__":
