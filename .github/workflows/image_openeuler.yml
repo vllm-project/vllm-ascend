@@ -96,4 +96,4 @@ jobs:
         # TODO: support and enable custom ops build for openEuler
         build-args: |
           PIP_INDEX_URL=https://pypi.org/simple
-          COMPILE_CUSTOM_KERNELS=0
+
