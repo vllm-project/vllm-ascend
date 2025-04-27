@@ -62,6 +62,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("C_COMPILER", None),
     "VLLM_VERSION":
     lambda: os.getenv("VLLM_VERSION", None),
+    "GLOBAL_RANKTABLE":
+    lambda: os.getenv("GLOBAL_RANKTABLE", None)
 }
 
 # end-env-vars-definition
