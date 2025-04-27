@@ -138,9 +138,7 @@ Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
 ```{code-block} bash
    :substitutions:
 
-# Install vllm-project/vllm from pypi
-# There was a vLLM v0.8.4 installation bug, please use "Build from source code"
-# https://github.com/vllm-project/vllm-ascend/issues/581
+# Install vllm-project/vllm from pypi (v0.8.4 aarch64 is unsupported see detail in below note)
 pip install vllm==|pip_vllm_version|
 
 # Install vllm-project/vllm-ascend from pypi.
@@ -148,7 +146,8 @@ pip install vllm-ascend==|pip_vllm_ascend_version|
 ```
 
 ```{note}
-If you failed to install vllm due to no triton version could be installed, please build from source code.
+There was a installation bug on vLLM v0.8.4 aarch64: [No matching distribution found for triton](https://github.com/vllm-project/vllm-ascend/issues/581).
+If you failed to install vLLM due to it, please build from source code.
 ```
 
 :::{dropdown} Click here to see "Build from source code"
@@ -160,13 +159,13 @@ or build from **source code**:
 # Install vLLM
 git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
 cd vllm
-VLLM_TARGET_DEVICE=empty pip install -e -v .
+VLLM_TARGET_DEVICE=empty pip install -v -e .
 cd ..
 
 # Install vLLM Ascend
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
-pip install -e -v .
+pip install -v -e .
 cd ..
 ```
 
