@@ -1088,7 +1088,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                                                  key_cache=kv_cache[0],
                                                  value_cache=kv_cache[1],
                                                  slot_indices=slots)
-        elif kv_cache.numle() > 0:
+        elif kv_cache.numel() > 0:
             concat_and_cache_mla(kv_c_normed, k_pe, kv_cache,
                                  attn_metadata.slot_mapping)
 
