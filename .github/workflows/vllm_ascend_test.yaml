@@ -97,25 +97,10 @@ jobs:
         run: |
           VLLM_TARGET_DEVICE=empty pip install -e .
 
-      - name: Install pta
-        run: |
-          if [ ! -d /root/.cache/pta ]; then
-            mkdir -p /root/.cache/pta
-          fi
-
-          if [ ! -f /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl ]; then
-            cd /root/.cache/pta
-            rm -rf pytorch_v2.5.1_py310*
-            wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
-            tar -zxvf pytorch_v2.5.1_py310.tar.gz
-          fi
-
-          pip install /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
-
       - name: Install vllm-project/vllm-ascend
         run: |
           pip install -r requirements-dev.txt
-          pip install -v --no-build-isolation -e .
+          pip install -v -e .
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         env:

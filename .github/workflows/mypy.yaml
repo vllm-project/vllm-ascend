@@ -38,7 +38,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        # TODO(yikun): Add 3.12 back when torch-npu support 3.12
+        python-version: ["3.9", "3.10", "3.11"]
     steps:
     - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
     - name: Set up Python ${{ matrix.python-version }}
@@ -47,7 +48,7 @@ jobs:
         python-version: ${{ matrix.python-version }}
     - name: Install dependencies
       run: |
-        pip install -r requirements-dev.txt
+        pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
     - name: Checkout vllm-project/vllm repo
       uses: actions/checkout@v4
