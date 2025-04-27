@@ -722,11 +722,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
             kv_cache: shape = [2, num_blocks, block_size,
-                               num_kv_heads * head_size]
+                               num_kv_heads, head_size]
                       key_cache = [num_blocks, block_size,
-                                   num_kv_heads * head_size]
+                                   num_kv_heads, head_size]
                       value_cache = [num_blocks, block_size,
-                                     num_kv_heads * head_size]
+                                     num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [batch_size, seq_len * num_heads * head_size]
