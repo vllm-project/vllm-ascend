@@ -18,6 +18,8 @@
 name: 'e2e test'
 
 on:
+  schedule:
+    - cron: '00 16 * * *'
   pull_request:
     branches:
       - 'main'
