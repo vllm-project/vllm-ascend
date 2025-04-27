@@ -30,7 +30,8 @@ You can get our containers at `Quay.io`, e.g., [<u>vllm-ascend</u>](https://quay
 If you are in China, you can use `daocloud` to accelerate your downloading:
 
 ```bash
-docker pull m.daocloud.io/quay.io/ascend/vllm-ascend:v0.7.3rc2
+TAG=vllm-ascend released tag you want to pull(eg: v0.7.3rc2)
+docker pull m.daocloud.io/quay.io/ascend/vllm-ascend:$TAG
 ```
 
 ### 3. What models does vllm-ascend supports?
@@ -80,7 +81,7 @@ Currently, only 1P1D is supported by vllm. For vllm-ascend, it'll be done by [th
 
 ### 10. Does vllm-ascend support quantization method?
 
-Currently, there is no quantization method supported in vllm-ascend originally. And the quantization supported is working in progress, w8a8 will firstly be supported.
+Currently, w8a8 quantization is supporeted with the integration of vllm-ascend and mindie-turbo, please use `pip install vllm-ascend[mindie-turbo]`
 
 ### 11. There is not output in log when loading models using vllm-ascend, How to solve it?
 
