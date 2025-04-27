@@ -21,3 +21,79 @@ Below series are NOT supported yet:
 - Ascend 910, Ascend 910 Pro B (Ascend-cann-kernels-910) unplanned yet
 
 From a technical view, vllm-ascend support would be possible if the torch-npu is supported. Otherwise, we have to implement it by using custom ops. We are also welcome to join us to improve together.
+
+
+### 2. How to get our docker containers?
+
+You can get our containers at `Quay.io`, e.g., [<u>vllm-ascend</u>](https://quay.io/repository/ascend/vllm-ascend?tab=tags) and [<u>cann</u>](https://quay.io/repository/ascend/cann?tab=tags).
+
+If you are in China, you can use `daocloud` to accelerate your downloading:
+
+```bash
+docker pull m.daocloud.io/quay.io/ascend/vllm-ascend:v0.7.3rc2
+```
+
+### 3. What models does vllm-ascend supports?
+
+Find more details [<u>here</u>](https://vllm-ascend.readthedocs.io/en/v0.7.3-dev/user_guide/supported_models.html).
+
+### 4. How to get in touch with our community?
+
+There are many channels that you can communicate with our community developers / users:
+
+- Submit a GitHub [<u>issue</u>](https://github.com/vllm-project/vllm-ascend/issues?page=1).
+- Join our [<u>weekly meeting</u>](https://docs.google.com/document/d/1hCSzRTMZhIB8vRq1_qOOjx4c9uYUxvdQvDsMV2JcSrw/edit?tab=t.0#heading=h.911qu8j8h35z) and share your ideas.
+- Join our [<u>WeChat</u>](https://github.com/vllm-project/vllm-ascend/issues/227) group and ask your quenstions.
+- Join our ascend channel in [<u>vLLM forums</u>](https://discuss.vllm.ai/c/hardware-support/vllm-ascend-support/6) and publish your topics.
+
+### 5. What features does vllm-ascend V1 supports?
+
+Find more details [<u>here</u>](https://github.com/vllm-project/vllm-ascend/issues/414).
+
+### 6. How to solve the problem of "Failed to infer device type" or "libatb.so: cannot open shared object file"?
+
+Basically, the reason is that the NPU environment is not configured correctly. You can:
+1. try `source /usr/local/Ascend/nnal/atb/set_env.sh` to enable NNAL package.
+2. try `source /usr/local/Ascend/ascend-toolkit/set_env.sh` to enable CANN package.
+3. try `npu-smi info` to check whether the NPU is working.
+
+If all above steps are not working, you can try the following code with python to check whether there is any error:
+
+```
+import torch
+import torch_npu
+import vllm
+```
+
+If all above steps are not working, feel free to submit a GitHub issue.
+
+### 7. How does vllm-ascend perform?
+
+Currently, only some models are improved. Such as `Qwen2 VL`, `Deepseek  V3`. Others are not good enough. In the future, we will support graph mode and custom ops to improve the performance of vllm-ascend. And when the official release of vllm-ascend is released, you can install `mindie-turbo` with `vllm-ascend` to speed up the inference as well.
+
+### 8. How vllm-ascend work with vllm?
+vllm-ascend is a plugin for vllm. Basically, the version of vllm-ascend is the same as the version of vllm. For example, if you use vllm 0.7.3, you should use vllm-ascend 0.7.3 as well. For main branch, we will make sure `vllm-ascend` and `vllm` are compatible by each commit.
+
+### 9. Does vllm-ascend support Prefill Disaggregation feature?
+
+Currently, only 1P1D is supported by vllm. For vllm-ascend, it'll be done by [this PR](https://github.com/vllm-project/vllm-ascend/pull/539). For NPND, vllm is not stable and fully supported yet. We will make it stable and supported by vllm-ascend in the future.
+
+### 10. Does vllm-ascend support quantization method?
+
+Currently, there is no quantization method supported in vllm-ascend originally. And the quantization supported is working in progress, w8a8 will firstly be supported.
+
+### 11. There is not output in log when loading models using vllm-ascend, How to solve it?
+
+If you're using vllm 0.7.3 version, this is a known progress bar display issue in VLLM, which has been resolved in [this PR](https://github.com/vllm-project/vllm/pull/12428), please cherry-pick it locally by yourself. Otherwise, please fill up an issue.
+
+### 12. How vllm-ascend is tested
+
+vllm-ascend is tested by functional test, performance test and accuracy test.
+
+- **Functional test**: we added CI, includes portion of vllm's native unit tests and vllm-ascend's own unit tests，on vllm-ascend's test, we test basic functionality and [supported features](https://vllm-ascend.readthedocs.io/en/v0.7.3-dev/user_guide/suppoted_features.html)
+
+- **Performance test**: we provide [benchmark](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks) tools for end-to-end performance benchmark which can easily to re-route locally, we'll publish a perf website like [vllm](https://simon-mo-workspace.observablehq.cloud/vllm-dashboard-v0/perf) does to show the performance test results for each pull request
+
+- **Accuracy test**: we're working on adding accuracy test to CI as well.
+
+Finnall, for each release, we'll publish the performance test and accuracy test report in the future.
