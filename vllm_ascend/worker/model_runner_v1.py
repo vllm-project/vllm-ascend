@@ -38,6 +38,8 @@ from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_dp_group, get_pp_group
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import logger
@@ -1209,6 +1211,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
+        # Update KVConnector with the KVConnector metadata forward().
+        if has_kv_transfer_group():
+            get_kv_transfer_group().bind_connector_metadata(
+                scheduler_output.kv_connector_metadata)
+
         with ProfileExecuteDuration().capture_async(
                 "prepare input and forward"):
             self._update_states(scheduler_output)
