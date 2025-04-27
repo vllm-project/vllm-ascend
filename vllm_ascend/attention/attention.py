@@ -599,14 +599,6 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
         max_decode_seq_len = max(self.curr_seq_lens, default=0)
-
-        if self.num_prefills > 0:
-            self.attn_mask = AscendMetadataBuilder._attn_mask_builder.get_attn_mask(  # type: ignore
-                max_prefill_seq_len,
-                self.input_builder.runner.model_config.dtype,
-                self.input_builder.runner.device)
-        else:
-            self.attn_mask = None
         num_decode_tokens = self.num_decode_tokens
 
         if self.num_prefills == 0 and use_torchair_graph:
@@ -630,14 +622,6 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
                 self.input_builder.runner.device)
         else:
             self.attn_mask = None
-        num_decode_tokens = self.num_decode_tokens
-
-        block_tables = make_tensor_with_pad(
-            self.block_tables,
-            pad=0,
-            dtype=torch.int32,
-            device=device,
-        )
 
         assert max_query_len > 0, "query_lens: {}".format(query_lens)
 
