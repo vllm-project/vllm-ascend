@@ -61,16 +61,22 @@ As shown above:
 - `version` documentation: Corresponds to specific released versions (e.g., `v0.7.3`, `v0.7.3rc1`). No further updates after release.
 - `stable` documentation (**not yet released**): Official release documentation. Updates are allowed in real-time after release, typically based on vX.Y.Z-dev. Once stable documentation is available, non-stable versions should display a header warning: `You are viewing the latest developer preview docs. Click here to view docs for the latest stable release.`.
 
+## Software Dependency Management
+- `torch-npu`: Ascend Extension for PyTorch (torch-npu) releases a stable version to [PyPi](https://pypi.org/project/torch-npu)
+  every 3 months, a development version (aka the POC version) every month, and a nightly version every day.
+  The PyPi stable version **CAN** be used in vLLM Ascend final version, the monthly dev version **ONLY CANN** be used in
+  vLLM Ascend RC version for rapid iteration, the nightly version **CANNOT** be used in vLLM Ascend any version and branches.
+
 ## Release Compatibility Matrix
 
 Following is the Release Compatibility Matrix for vLLM Ascend Plugin:
 
-| vllm-ascend  | vLLM         | Python | Stable CANN | PyTorch/torch_npu |
-|--------------|--------------| --- | --- | --- |
-| v0.8.4rc1 | v0.8.4 | 3.9 - 3.12 | 8.0.0   |  2.5.1 / 2.5.1.dev20250320 |
-| v0.7.3rc2 | v0.7.3 | 3.9 - 3.12 | 8.0.0   |  2.5.1 / 2.5.1.dev20250320 |
-| v0.7.3rc1 | v0.7.3 | 3.9 - 3.12 | 8.0.0   |  2.5.1 / 2.5.1.dev20250308 |
-| v0.7.1rc1 | v0.7.1 | 3.9 - 3.12 | 8.0.0   |  2.5.1 / 2.5.1.dev20250218 |
+| vllm-ascend  | vLLM         | Python         | Stable CANN | PyTorch/torch_npu |
+|--------------|--------------|----------------| --- | --- |
+| v0.8.4rc1 | v0.8.4 | >= 3.9, < 3.12 | 8.0.0   |  2.5.1 / 2.5.1.dev20250320 |
+| v0.7.3rc2 | v0.7.3 | >= 3.9, < 3.12 | 8.0.0   |  2.5.1 / 2.5.1.dev20250320 |
+| v0.7.3rc1 | v0.7.3 | >= 3.9, < 3.12 | 8.0.0   |  2.5.1 / 2.5.1.dev20250308 |
+| v0.7.1rc1 | v0.7.1 | >= 3.9, < 3.12 | 8.0.0   |  2.5.1 / 2.5.1.dev20250218 |
 
 ## Release cadence
 

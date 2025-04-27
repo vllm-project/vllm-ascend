@@ -10,7 +10,8 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/utils.cmake)
 # Suppress potential warnings about unused manually-specified variables
 set(ignoreMe "${VLLM_PYTHON_PATH}")
 
-set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
+# TODO: Add 3.12 back when torch-npu support 3.12
+set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11")
 
 find_package(pybind11 REQUIRED)
 
