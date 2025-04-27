@@ -104,7 +104,9 @@ class NPUModelRunner:
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config  # work mla_v1
         self.lora_config = vllm_config.lora_config
+        self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.device = device
         self.is_multimodal_model = self.model_config.is_multimodal_model
@@ -486,7 +488,7 @@ class NPUModelRunner:
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
-        # Check input valid
+        # check input valid
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -500,18 +502,13 @@ class NPUModelRunner:
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit(num_reqs)
-
         # Get the number of scheduled tokens for each request.
-        # TODO: The Python loop can be slow. Optimize.
-        num_scheduled_tokens = np.empty(num_reqs, dtype=np.int32)
-        max_num_scheduled_tokens = 0
-        for i, req_id in enumerate(self.input_batch.req_ids):
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_scheduled_tokens[i] = num_tokens
-            max_num_scheduled_tokens = max(max_num_scheduled_tokens,
-                                           num_tokens)
+        req_ids = self.input_batch.req_ids
+        tokens = [scheduler_output.num_scheduled_tokens[i] for i in req_ids]
+        num_scheduled_tokens = np.array(tokens, dtype=np.int32)
+        max_num_scheduled_tokens = max(tokens)
 
-        # Prepare positions
+        # prepare positions
         req_indices = np.repeat(self.arange_np[:num_reqs],
                                 num_scheduled_tokens)
         cu_num_tokens = np.cumsum(num_scheduled_tokens)
@@ -527,15 +524,18 @@ class NPUModelRunner:
                arange,
                out=positions_np)
 
-        self.positions[:total_num_scheduled_tokens].copy_(
-            self.positions_cpu[:total_num_scheduled_tokens], non_blocking=True)
         positions = self.positions[:total_num_scheduled_tokens]
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
+        token_indices = (positions_np +
+                         req_indices * self.input_batch.token_ids_cpu.shape[1])
 
-        self.seq_lens_np[:num_reqs] = (
-            self.input_batch.num_computed_tokens_cpu[:num_reqs] +
-            num_scheduled_tokens)
-        seq_lens = self.seq_lens_cpu[:num_reqs]
+        # NOTE(woosuk): We use torch.index_select instead of np.take here
+        # because torch.index_select is much faster than np.take for large
+        # tensors.
+        torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
+                           0,
+                           torch.from_numpy(token_indices),
+                           out=self.input_ids_cpu[:total_num_scheduled_tokens])
 
         block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                positions_np // self.block_size)
@@ -554,6 +554,22 @@ class NPUModelRunner:
         else:
             attn_state = AscendAttentionState.ChunkedPrefill
 
+        # Prepare the attention metadata.
+        self.query_start_loc_np[0] = 0
+        self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
+
+        self.seq_lens_np[:num_reqs] = (
+            self.input_batch.num_computed_tokens_cpu[:num_reqs] +
+            num_scheduled_tokens)
+        seq_lens = self.seq_lens_cpu[:num_reqs]
+
+        # Copy the tensors to the npu.
+        self.input_ids[:total_num_scheduled_tokens].copy_(
+            self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
+
+        self.positions[:total_num_scheduled_tokens].copy_(
+            self.positions_cpu[:total_num_scheduled_tokens], non_blocking=True)
+
         attn_mask = self._make_attention_mask(seq_lens=seq_lens,
                                               query_lens=num_scheduled_tokens,
                                               position=positions,
@@ -561,36 +577,24 @@ class NPUModelRunner:
         self.attn_mask = attn_mask
         self.attn_state = attn_state  # type: ignore
 
-        attn_metadata = self.attn_metadata_builder.build(  # type: ignore
+        # Prepare for cascade attention if enabled & beneficial.
+        # common_prefix_len = 0
+        attn_metadata = self.attn_metadata_builder.build(
             num_reqs=num_reqs,
             num_actual_tokens=total_num_scheduled_tokens,
             max_query_len=max_num_scheduled_tokens,
+            #common_prefix_len=common_prefix_len,
             common_prefix_len=None,
         )
 
-        # Prepare input_ids
-        token_indices = (positions_np +
-                         req_indices * self.input_batch.token_ids_cpu.shape[1])
-        torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
-                           0,
-                           torch.from_numpy(token_indices),
-                           out=self.input_ids_cpu[:total_num_scheduled_tokens])
-        # Copy the tensors to the NPU.
-        self.input_ids[:total_num_scheduled_tokens].copy_(
-            self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
-        input_ids = self.input_ids[:total_num_scheduled_tokens]
+        if hasattr(attn_metadata, 'query_start_loc'):
+            logits_indices = attn_metadata.query_start_loc[1:] - 1
+        else:
+            logits_indices = None
 
-        # Run forward pass
-        with set_forward_context(attn_metadata, self.vllm_config):
-            assert self.model is not None
-            hidden_states = self.model(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=None,
-            )
+        spec_decode_metadata = None
 
-        return hidden_states[sample_indices]
+        return attn_metadata, logits_indices, spec_decode_metadata, sample_indices
 
     def apply_grammar_bitmask(
         self,
@@ -656,13 +660,35 @@ class NPUModelRunner:
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOuptut if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
-        hidden_states = self._process_reqs(scheduler_output,
-                                           intermediate_tensors)
-        logits = self.model.compute_logits(hidden_states, None)
+        attn_metadata, logits_indices, spec_decode_metadata, sample_indices = self._process_reqs(
+            scheduler_output, intermediate_tensors)
 
-        # Apply structured output bitmasks if present
-        if scheduler_output.grammar_bitmask is not None:
-            logits = self.apply_grammar_bitmask(scheduler_output, logits)
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+
+        # Eager mode.
+        num_input_tokens = num_scheduled_tokens
+        attn_metadata.num_input_tokens = num_input_tokens
+
+        input_ids = self.input_ids[:num_input_tokens]
+        inputs_embeds = None
+        positions = self.positions[:num_input_tokens]
+
+        # Run the decoder.
+        with set_forward_context(attn_metadata, self.vllm_config):
+            hidden_states = self.model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+            )
+
+        if logits_indices is None:
+            logits = self.model.compute_logits(hidden_states[sample_indices],
+                                               None)
+        else:
+            hidden_states = hidden_states[:num_scheduled_tokens]
+            sample_hidden_states = hidden_states[logits_indices]
+            logits = self.model.compute_logits(sample_hidden_states, None)
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
