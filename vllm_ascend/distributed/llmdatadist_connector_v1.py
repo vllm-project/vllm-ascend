@@ -334,9 +334,9 @@ class ReqMeta:
                   block_size: int, is_store: bool) -> "ReqMeta":
         token_ids_tensor = torch.tensor(token_ids)
         valid_num_tokens = len(token_ids)
-        block_ids_tensor = torch.tensor(block_ids)
+        block_ids_tensor = torch.tensor(block_ids, dtype=torch.int32)
         num_blocks = block_ids_tensor.shape[0]
-        block_offsets = torch.arange(0, block_size)
+        block_offsets = torch.arange(0, block_size, dtype=torch.int32)
         slot_mapping = block_offsets.reshape(
             (1, block_size)) + block_ids_tensor.reshape(
                 (num_blocks, 1)) * block_size
@@ -495,7 +495,7 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
             # NOTE: slen is the len of kv cache need to load for this request
             # in decode, request_len =  prefill_prompt_len + 1
             slen = request.token_ids.shape[0] - 1
-            cur_slot_mapping = request.slot_mapping[:slen]
+            req_slot_mapping = request.slot_mapping[:slen].to(device="npu")
 
             # For the datadist tensor, the first dimension is 1, the reason can
             # be found in wait_for_save function
@@ -545,7 +545,7 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
             for layer_id, kv_cache_layer in enumerate(kv_cache_layers):
                 pulled_kv_cache = pulled_kv_caches[layer_id]
                 self._inject_kv_into_layer(kv_cache_layer, pulled_kv_cache,
-                                           cur_slot_mapping, is_mla)
+                                           req_slot_mapping, is_mla)
 
             # Release the reference count
             self.llm_datadist_engine.kv_transfer.deallocate_cache(kv_buffer)
@@ -686,42 +686,24 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
             slot_mapping (torch.Tensor): the slot mapping. In shape
                 [num_tokens].
         """
-        # NOTE: The performance of this function is suboptimal. Using
-        # `torch_npu._npu_reshape_and_cache` or
-        # `torch_npu._npu_reshape_and_cache_siso` could improve performance
-        # significantly. However, attempts to use these methods have failed, and
-        # the root cause remains unclear. The only available information is an
-        # error log from the ATB log file, which states:
-        # "ReshapeAndCacheOperation_1 invalid param, setup check fail, error
-        # code: 13."
-
-        # The pulled KV cache resides in the mbuf memory space and cannot be
-        # directly copied to the kv_cache_layer. Therefore, it must first be
-        # copied to a standard torch tensor using `scatter_update_`.
-        kv_cache = torch.empty_like(pulled_kv_cache)
-        indices = torch.tensor([0], dtype=torch.int64, device="npu")
-        torch_npu.scatter_update_(kv_cache, indices, pulled_kv_cache, axis=-2)
         # The `wait_for_save` function explains why the first dimension is
         # necessary.
-        kv_cache = kv_cache.squeeze(0)
-
-        dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
+        kv_cache = pulled_kv_cache.squeeze(0)
         if is_mla:
-            block_size = dst_kv_cache_layer_shape[1]
-            num_heads = dst_kv_cache_layer_shape[2]
-            head_dim = dst_kv_cache_layer_shape[3]
-            idx_for_copy = slot_mapping // block_size * block_size + slot_mapping % block_size
-            dst_kv_cache_layer = dst_kv_cache_layer.view(
-                -1, num_heads, head_dim)
-            dst_kv_cache_layer[idx_for_copy, ...] = kv_cache
+            torch_npu._npu_reshape_and_cache_siso(
+                key=kv_cache,
+                key_cache=dst_kv_cache_layer,
+                slot_indices=slot_mapping,
+            )
+
         else:
-            block_size = dst_kv_cache_layer_shape[2]
-            num_heads = dst_kv_cache_layer_shape[3]
-            head_dim = dst_kv_cache_layer_shape[4]
-            idx_for_copy = slot_mapping // block_size * block_size + slot_mapping % block_size
-            dst_kv_cache_layer = dst_kv_cache_layer.view(
-                2, -1, num_heads, head_dim)
-            dst_kv_cache_layer[:, idx_for_copy, ...] = kv_cache
+            torch_npu._npu_reshape_and_cache(
+                key=kv_cache[0],
+                value=kv_cache[1],
+                key_cache=dst_kv_cache_layer[0],
+                value_cache=dst_kv_cache_layer[1],
+                slot_indices=slot_mapping,
+            )
 
     def _extract_kv_from_layer(
         self,
