@@ -1088,6 +1088,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                                                  value_cache=kv_cache[1],
                                                  slot_indices=slots)
         elif kv_cache.numel() > 0:
+            # TODO replace this naive implement with fusion kernel
             concat_and_cache_mla(kv_c_normed, k_pe, kv_cache,
                                  attn_metadata.slot_mapping)
 
