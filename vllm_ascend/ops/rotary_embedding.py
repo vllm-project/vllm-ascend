@@ -265,5 +265,9 @@ def deepseek_rope_init_func(
 
 
 RotaryEmbedding.forward_oot = rope_forward_oot
+
+# Note: we adopt the native huggingface deepseek rope initialization code from 
+# https://huggingface.co/deepseek-ai/DeepSeek-V3-0324/blob/main/modeling_deepseek.py for
+# its more ascend compute friendly
 DeepseekScalingRotaryEmbedding.__init__ = deepseek_rope_init_func
 DeepseekScalingRotaryEmbedding.forward = native_rope_deepseek_forward
