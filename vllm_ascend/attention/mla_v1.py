@@ -244,8 +244,8 @@ class AscendMLAMetadataBuilder:
         if self._num_decodes > 0:
             decode_metadata = AscendMLADecodeMetadata(
                 input_positions=input_positions[:self._num_decode_tokens],
-                block_table=block_table[:self._num_decode_tokens, ...],
-                seq_lens=seq_lens[:self._num_decode_tokens])
+                block_table=block_table[:self._num_decodes, ...],
+                seq_lens=seq_lens[:self._num_decodes])
 
         return self.metadata_cls(  # type: ignore
             num_actual_tokens=num_actual_tokens,
