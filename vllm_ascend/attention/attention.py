@@ -40,9 +40,10 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
 from vllm.config import get_current_vllm_config
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
+
+from vllm_ascend.ops.cache import concat_and_cache_mla
 from vllm_ascend.worker.model_runner import (
     ModelInputForNPUBuilder, ModelInputForNPUWithSamplingMetadata)
-from vllm_ascend.ops.cache import concat_and_cache_mla
 
 
 def generate_attn_mask(max_seq_len: int, dtype=torch.float16, mask_value=None):
@@ -1088,7 +1089,8 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                                                  value_cache=kv_cache[1],
                                                  slot_indices=slots)
         elif kv_cache.numle() > 0:
-            concat_and_cache_mla(kv_c_normed, k_pe, kv_cache, attn_metadata.slot_mapping)
+            concat_and_cache_mla(kv_c_normed, k_pe, kv_cache,
+                                 attn_metadata.slot_mapping)
 
         if attn_metadata.num_prefills > 0:
             attn_output = torch.empty(num_tokens,
