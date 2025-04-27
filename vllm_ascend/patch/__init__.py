@@ -96,6 +96,8 @@
 #    Related PR (if no, explain why): no related PR, we want add this ability into vllm
 #    Future Plan:
 #       Remove those patch when vllm merged them
+#
+#
 # * Worker Patch:
 # ===============
 # ** File: worker/patch_0_8_4/patch_metrics.py **
@@ -124,6 +126,20 @@
 #       https://github.com/vllm-project/vllm/pull/14411
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm.
+#
+# ** File: worker/patch_common/patch_minicpm.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.minicpm.MiniCPMAttention.forward`
+#    Why:
+#       The forward func of MiniCPMAttention in vllm do a datatype convert
+#       (original datatype --> float32) to ensure the precision on cuda.
+#       However float32 is not supported in cann rope op, thus we keep this patch
+#    How：
+#       Removed the dtype convert operations in forward
+#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
+#       NO, only for npu due to rope op.
+#    Future Plan:
+#       Keep this patch in vllm-ascend.
 #
 # ** File: worker/patch_common/patch_multi_step_worker.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -156,3 +172,15 @@
 #       - https://github.com/vllm-project/vllm-ascend/pull/395
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm and vllm-ascend.
+#
+# ** File: worker/patch_0_8_4/patch_tritonplaceholder.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `triton` Module
+#    Why:
+#       Triton is not supported on npu currently, importing triton will break vllm-ascend
+#    How：
+#       ditto
+#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
+#       TritonPlaceholder is only available in vllm>0.8.4
+#    Future Plan:
+#       Revert it when branch main doesn't maintain v0.8.4.
