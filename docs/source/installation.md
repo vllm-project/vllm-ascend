@@ -5,7 +5,7 @@ This document describes how to install vllm-ascend manually.
 ## Requirements
 
 - OS: Linux
-- Python: 3.9 or higher
+- Python: >= 3.9, < 3.12
 - A hardware with Ascend NPU. It's usually the Atlas 800 A2 series.
 - Software:
 
@@ -160,13 +160,13 @@ or build from **source code**:
 # Install vLLM
 git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
 cd vllm
-VLLM_TARGET_DEVICE=empty pip install .
+VLLM_TARGET_DEVICE=empty pip install -e -v .
 cd ..
 
 # Install vLLM Ascend
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
-python setup.py develop
+pip install -e -v .
 cd ..
 ```
 
