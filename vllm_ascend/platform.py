@@ -64,6 +64,7 @@ class NPUPlatform(Platform):
                                 parser: Optional[FlexibleArgumentParser] = None
                                 ) -> None:
         import vllm_ascend.patch_config  # noqa: F401
+        import vllm_ascend.patch_outputs  # noqa: F401
         from vllm_ascend.quantization.quant_config import \
             AscendQuantConfig  # noqa: F401
 
