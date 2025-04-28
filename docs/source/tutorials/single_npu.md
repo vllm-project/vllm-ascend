@@ -1,4 +1,4 @@
-# Single NPU (Qwen2.5 7B)
+# Single NPU (Qwen3 8B)
 
 ## Run vllm-ascend on Single NPU
 
@@ -50,7 +50,7 @@ prompts = [
     "The future of AI is",
 ]
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
-llm = LLM(model="Qwen/Qwen2.5-7B-Instruct", max_model_len=26240)
+llm = LLM(model="Qwen/Qwen3-8B", max_model_len=26240)
 
 outputs = llm.generate(prompts, sampling_params)
 for output in outputs:
@@ -91,7 +91,7 @@ docker run --rm \
 -e VLLM_USE_MODELSCOPE=True \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
 -it $IMAGE \
-vllm serve Qwen/Qwen2.5-7B-Instruct --max_model_len 26240
+vllm serve Qwen/Qwen3-8B --max_model_len 26240
 ```
 
 :::{note}
@@ -112,7 +112,7 @@ Once your server is started, you can query the model with input prompts:
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "Qwen/Qwen2.5-7B-Instruct",
+        "model": "Qwen/Qwen3-8B",
         "prompt": "The future of AI is",
         "max_tokens": 7,
         "temperature": 0
@@ -122,7 +122,7 @@ curl http://localhost:8000/v1/completions \
 If you query the server successfully, you can see the info shown below (client):
 
 ```bash
-{"id":"cmpl-b25a59a2f985459781ce7098aeddfda7","object":"text_completion","created":1739523925,"model":"Qwen/Qwen2.5-7B-Instruct","choices":[{"index":0,"text":" here. It’s not just a","logprobs":null,"finish_reason":"length","stop_reason":null,"prompt_logprobs":null}],"usage":{"prompt_tokens":5,"total_tokens":12,"completion_tokens":7,"prompt_tokens_details":null}}
+{"id":"cmpl-b25a59a2f985459781ce7098aeddfda7","object":"text_completion","created":1739523925,"model":"Qwen/Qwen3-8B","choices":[{"index":0,"text":" here. It’s not just a","logprobs":null,"finish_reason":"length","stop_reason":null,"prompt_logprobs":null}],"usage":{"prompt_tokens":5,"total_tokens":12,"completion_tokens":7,"prompt_tokens_details":null}}
 ```
 
 Logs of the vllm server:

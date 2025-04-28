@@ -124,7 +124,7 @@ First install system dependencies:
 
 ```bash
 apt update  -y
-apt install -y gcc g++ cmake libnuma-dev wget
+apt install -y gcc g++ cmake libnuma-dev wget git
 ```
 
 **[Optinal]** Config the extra-index of `pip` if you are working on a **x86** machine, so that the torch with cpu could be found:
@@ -138,8 +138,14 @@ Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
 ```{code-block} bash
    :substitutions:
 
-# Install vllm-project/vllm from pypi (v0.8.4 aarch64 is unsupported see detail in below note)
-pip install vllm==|pip_vllm_version|
+# Install vllm-project/vllm from pypi
+# (v0.8.4 aarch64 is unsupported see detail in below note)
+# pip install vllm==|pip_vllm_version|
+# Install vLLM
+git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
+cd vllm
+VLLM_TARGET_DEVICE=empty pip install -v -e .
+cd ..
 
 # Install vllm-project/vllm-ascend from pypi.
 pip install vllm-ascend==|pip_vllm_ascend_version|
