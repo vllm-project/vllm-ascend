@@ -160,7 +160,12 @@ class ClusterInfo:
             str, Any] = kv_transfer_config.get_from_extra_config("decode", {})
 
         self._servers: List[ServerInfo] = get_servers_from_ranktable(
-            GLOBAL_RANKTABLE, self.prefill_tp, self.decode_tp)
+            GLOBAL_RANKTABLE, self.prefill_tp_size, self.decode_tp_size)
+
+        self._num_prefill_instances = len(
+            self.get_servers_by_role(ServerRole.Prefill))
+        self._num_decode_instances = len(
+            self.get_servers_by_role(ServerRole.Decode))
 
     def get_device(self, server_id: str, dp_rank: int,
                    tp_rank: int) -> Union[DeviceInfo, None]:
@@ -182,6 +187,10 @@ class ClusterInfo:
     def get_servers_by_role(self, role: ServerRole) -> List[ServerInfo]:
         return [server for server in self._servers if server.role == role]
 
+    def is_1p1d(self) -> bool:
+        return (self._num_prefill_instances == 1
+                and self._num_decode_instances == 1)
+
     @property
     def router_endpoint(self):
         for server in self._servers:
@@ -190,28 +199,28 @@ class ClusterInfo:
         raise ValueError("Router endpoint not found")
 
     @property
-    def prefill_dp(self):
+    def prefill_dp_size(self):
         candidate_keys = ["data_parallel_size", "dp_size", "dp"]
         return int(
             self._get_first_matching_value(self._prefill_parallel_config,
                                            candidate_keys, self._dp_size))
 
     @property
-    def prefill_tp(self):
+    def prefill_tp_size(self):
         candidate_keys = ["tensor_parallel_size", "tp_size", "tp"]
         return int(
             self._get_first_matching_value(self._prefill_parallel_config,
                                            candidate_keys, self._tp_size))
 
     @property
-    def decode_dp(self):
+    def decode_dp_size(self):
         candidate_keys = ["data_parallel_size", "dp_size", "dp"]
         return int(
             self._get_first_matching_value(self._decode_parallel_config,
                                            candidate_keys, self._dp_size))
 
     @property
-    def decode_tp(self):
+    def decode_tp_size(self):
         candidate_keys = ["tensor_parallel_size", "tp_size", "tp"]
         return int(
             self._get_first_matching_value(self._decode_parallel_config,
@@ -311,7 +320,8 @@ class KVTransferEngine:
                 ServerRole.Prefill):
             for device in server.devices:
                 target_tp_rank = self.tp_rank % min(
-                    self.cluster_info.prefill_tp, self.cluster_info.decode_tp)
+                    self.cluster_info.prefill_tp_size,
+                    self.cluster_info.decode_tp_size)
                 if target_tp_rank == device.tp_rank:
                     cluster = self.make_cluster(device.device_ip,
                                                 device.cluster_id)
@@ -399,9 +409,21 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
 
         self.local_server_id = kv_transfer_config.get_from_extra_config(
             "local_server_id", None)
-        assert (
-            self.local_server_id is not None
-        ), "Cannot find `local_server_id` from `kv_transfer_config.kv_connector_extra_config`."
+        if self.local_server_id is None:
+            if not self.cluster_info.is_1p1d(
+            ) or self.cluster_info.prefill_dp_size != 1:
+                raise ValueError(
+                    "Cannot find `local_server_id` from"
+                    " `kv_transfer_config.kv_connector_extra_config`.")
+            # In a 1p1d configuration (1 prefill node and 1 decode node), the
+            # server ID can be directly determined from the rank table based on
+            # the KV role.
+            servers = self.cluster_info.get_servers_by_role(
+                ServerRole.Prefill if self.kv_role ==
+                llm_datadist.LLMRole.PROMPT else ServerRole.Decode)
+            assert len(servers) == 1, \
+                f"Expected only one server for {self.kv_role}, but got {len(servers)}"
+            self.local_server_id = servers[0].server_id
 
         self.dp_rank = self._vllm_config.parallel_config.data_parallel_rank
         self.tp_size = self._vllm_config.parallel_config.tensor_parallel_size
@@ -467,8 +489,25 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
             self._get_unique_req_id(req.request_id)
             for req in metadata.requests if not req.is_store
         ]
-        prefill_infos = fetch_prefill_info(self.cluster_info.router_endpoint,
-                                           request_ids)
+        if self.cluster_info.is_1p1d(
+        ) and self.cluster_info.prefill_dp_size == 1:
+            # In a 1p1d configuration (1 prefill node and 1 decode node), the
+            # server ID can be directly determined from the rank table based on
+            # the KV role.
+            servers = self.cluster_info.get_servers_by_role(ServerRole.Prefill)
+            assert len(servers) == 1, \
+                f"Expected only one server for {self.kv_role}, but got {len(servers)}"
+            prefill_infos = {
+                request_id: {
+                    "dp_rank": 0,
+                    "server_id": servers[0].server_id,
+                }
+                for request_id in request_ids
+            }
+        else:
+            prefill_infos = fetch_prefill_info(
+                self.cluster_info.router_endpoint, request_ids)
+
         # If prefill_infos is None, it indicates that get_prefill_info failed.
         # Therefore, we need to recalculate the kv cache during the decoding
         # phase. If there is a performance issue, we should consider whether
@@ -518,8 +557,8 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
                 self.num_layers, kv_cache_shape, kv_hidden_dtype)
 
             target_tp_rank = self.tp_rank % min(
-                self.cluster_info.prefill_tp,
-                self.cluster_info.decode_tp,
+                self.cluster_info.prefill_tp_size,
+                self.cluster_info.decode_tp_size,
             )
             remote_cluster_id = self.cluster_info.get_cluster_id(
                 server_id, dp_rank, target_tp_rank)
@@ -662,9 +701,15 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
             # Release reference count
             self.llm_datadist_engine.kv_transfer.deallocate_cache(kv_buffer)
 
-        # Report prefill info to meta server
-        report_prefill_info(self.cluster_info.router_endpoint,
-                            prefill_info_input)
+        # If the cluster is configured as 1p1d (1 prefill node and 1 decode
+        # node), and the data parallel size on the prefill node is 1, we don't
+        # need to report the prefill information to the router. This is because
+        # there is only one candidate server for the decode node to request the
+        # KV cache from.
+        if not self.cluster_info.is_1p1d(
+        ) or self.cluster_info.prefill_dp_size != 1:
+            report_prefill_info(self.cluster_info.router_endpoint,
+                                prefill_info_input)
         logger.info("[rank%d][P]: KV send DONE.", torch.distributed.get_rank())
 
     def _inject_kv_into_layer(

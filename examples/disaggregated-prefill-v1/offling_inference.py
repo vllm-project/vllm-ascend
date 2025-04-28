@@ -18,10 +18,7 @@ def get_kv_transfer_config(role: Literal["kv_producer", "kv_consumer"],
         "kv_buffer_device": "npu",
         "kv_role": "{role}",
         "kv_rank": {kv_rank},
-        "kv_parallel_size": 2,
-        "kv_connector_extra_config": {{
-            "local_server_id": "{local_server_id}"
-        }}
+        "kv_parallel_size": 2
     }}"""
 
 
