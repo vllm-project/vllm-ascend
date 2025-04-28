@@ -15,4 +15,16 @@
 # limitations under the License.
 #
 
-from vllm_ascend.patch import worker  # noqa: F401
+from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
+
+
+def _configure_model_sampler_for_spec_decode(self):
+    (self.scorer_worker.model_runner.model.sampler.include_gpu_probs_tensor
+     ) = True
+    (self.scorer_worker.model_runner.model.sampler.
+     should_modify_greedy_probs_inplace) = True
+    self.proposer_worker.set_include_gpu_probs_tensor()
+    self.proposer_worker.set_should_modify_greedy_probs_inplace()
+
+
+SpecDecodeWorker._configure_model_sampler_for_spec_decode = _configure_model_sampler_for_spec_decode

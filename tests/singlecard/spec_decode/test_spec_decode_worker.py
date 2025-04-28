@@ -39,8 +39,6 @@ from tests.singlecard.spec_decode.test_utils import mock_spec_decode_sampler
 from tests.singlecard.spec_decode.utils import (create_batch,
                                                 create_sampler_output_list,
                                                 create_worker, mock_worker)
-# patch SpecDecodeWorker, AsyncMetricsCollector
-from vllm_ascend.patch.worker import patch_common  # noqa: F401
 from vllm_ascend.worker.draft_model_runner import TP1DraftModelRunner
 from vllm_ascend.worker.worker import NPUWorker
 

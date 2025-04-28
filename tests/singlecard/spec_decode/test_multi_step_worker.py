@@ -33,7 +33,6 @@ from tests.singlecard.spec_decode.utils import (
     assert_logprobs_dict_allclose, create_batch,
     create_seq_group_metadata_from_prompts, create_worker,
     patch_execute_model_with_seeds, zero_kv_cache)
-from vllm_ascend.patch.worker import patch_common  # noqa: F401
 from vllm_ascend.worker.draft_model_runner import TP1DraftModelRunner
 from vllm_ascend.worker.worker import NPUWorker
 
