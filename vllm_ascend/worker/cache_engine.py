@@ -41,7 +41,8 @@ def allocate_kv_cache(
         # Align entries so they are 256 byte aligned for better performance
         # Primarily targets MLA as this typically only ends up having entries
         # be 128 byte aligned.
-        alloc_shape = kv_cache_shape
+        alloc_shape = self.attn_backend.get_kv_cache_shape(
+            num_blocks, self.num_kv_heads, self.block_size, self.head_size)
 
         for _ in range(self.num_attention_layers):
             # null block in CpuGpuBlockAllocator requires at least that
