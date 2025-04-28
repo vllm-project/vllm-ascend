@@ -20,7 +20,7 @@ For example:
 
 vllm-ascend has main branch and dev branch.
 
-- **main**: main branch，corresponds to the vLLM main branch, and is continuously monitored for quality through Ascend CI.
+- **main**: main branch，corresponds to the vLLM main branch and latest 1 or 2 release version. It is continuously monitored for quality through Ascend CI.
 - **vX.Y.Z-dev**: development branch, created with part of new releases of vLLM. For example, `v0.7.3-dev` is the dev branch for vLLM `v0.7.3` version.
 
 Usually, a commit should be ONLY first merged in the main branch, and then backported to the dev branch to reduce maintenance costs as much as possible.
@@ -45,6 +45,13 @@ Usually, each minor version of vLLM (such as 0.7) will correspond to a vllm-asce
 | main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.8.x branch   |
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version |
 | v0.7.1-dev | Unmaintained | Replaced by v0.7.3-dev               |
+
+### Backward compatibility
+
+For main branch, vllm-ascend should works with vLLM main branch and latest 1 or 2 release version. So to ensure the backward compatibility, we will do the following:
+- Both main branch and target vLLM release is tested by Ascend E2E CI. For example, currently, vLLM main branch and vLLM 0.8.4 are tested now.
+- For code changes, we will make sure that the changes are compatible with the latest 1 or 2 vLLM release version as well. In this case, vllm-ascend introduced a version check machinism inner the code. It'll check the version of installed vLLM pacakge first to decide which code logic to use. If users hit the `InvalidVersion` error, it sometimes means that they have installed an dev/editable version of vLLM package. In this case, we provide the env variable `VLLM_VERSION` to let users specify the version of vLLM package to use.
+- For documentation changes, we will make sure that the changes are compatible with the latest 1 or 2 vLLM release version as well. Note should be added if there are any breaking changes.
 
 ## Document Branch Policy
 To reduce maintenance costs, **all branch documentation content should remain consistent, and version differences can be controlled via variables in [docs/source/conf.py](https://github.com/vllm-project/vllm-ascend/blob/main/docs/source/conf.py)**. While this is not a simple task, it is a principle we should strive to follow.

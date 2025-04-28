@@ -103,3 +103,6 @@ vllm-ascend is tested by functional test, performance test and accuracy test.
 - **Accuracy test**: we're working on adding accuracy test to CI as well.
 
 Finnall, for each release, we'll publish the performance test and accuracy test report in the future.
+
+### 14. How to fix the error "InvalidVersion" when using vllm-ascend?
+It's usually because you have installed an dev/editable version of vLLM package. In this case, we provide the env variable `VLLM_VERSION` to let users specify the version of vLLM package to use. Please set the env variable `VLLM_VERSION` to the version of vLLM package you have installed. The format of `VLLM_VERSION` should be `X.Y.Z`.
