@@ -23,7 +23,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import SequenceGroup, SequenceGroupBase, SequenceStatus
 
 
-@classmethod
+@classmethod  # type: ignore
 def from_seq_group(
     cls, seq_group: SequenceGroup, use_cache: bool,
     seq_id_to_seq_group: Dict[str, SequenceGroupBase]
@@ -31,8 +31,7 @@ def from_seq_group(
     finished = seq_group.is_finished()
 
     if seq_group.request_id in seq_id_to_seq_group:
-        group: SequenceGroupBase = seq_id_to_seq_group[
-            seq_group.request_id]
+        group: SequenceGroupBase = seq_id_to_seq_group[seq_group.request_id]
         assembled_seq_group = group.maybe_assemble_group(seq_group)
         if finished:
             group.finish_seq(seq_group)
@@ -45,7 +44,7 @@ def from_seq_group(
                 if sub_request_id in seq_id_to_seq_group:
                     del seq_id_to_seq_group[sub_request_id]
         return cls.from_seq_group(assembled_seq_group, use_cache,
-                                    seq_id_to_seq_group)
+                                  seq_id_to_seq_group)
 
     sampling_params = seq_group.sampling_params
     if sampling_params is None:
@@ -81,8 +80,7 @@ def from_seq_group(
     # num_cached_tokens should be the same for all the sequences
     num_cached_tokens = None
     for i, seq in enumerate(top_n_seqs):
-        output_text = seq.get_output_text_to_return(
-            text_buffer_length, delta)
+        output_text = seq.get_output_text_to_return(text_buffer_length, delta)
 
         output_token_ids = seq.get_output_token_ids_to_return(delta)
         num_output_tokens = 1 if isinstance(output_token_ids,
@@ -106,12 +104,12 @@ def from_seq_group(
             if i >= len(cached_outputs):
                 cached_outputs.append(
                     CompletionOutput(index=i,
-                                        text="",
-                                        token_ids=[],
-                                        cumulative_logprob=None,
-                                        logprobs=None,
-                                        finish_reason=None,
-                                        stop_reason=None))
+                                     text="",
+                                     token_ids=[],
+                                     cumulative_logprob=None,
+                                     logprobs=None,
+                                     finish_reason=None,
+                                     stop_reason=None))
             output = cached_outputs[i]
 
             # Init cached output object
@@ -180,6 +178,7 @@ def from_seq_group(
         request_output = cls(**init_kwargs)  # type: ignore
 
     return request_output
+
 
 # Add code to clear finished seq in seq_id_to_seq_group
 RequestOutput.from_seq_group = from_seq_group
