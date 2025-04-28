@@ -28,7 +28,6 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
 import numpy as np
 import torch
 import torch.nn as nn
-import torch_npu
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.utils import CommonAttentionState
@@ -1145,7 +1144,7 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
                     device=self.device)
 
             self.execute_model(model_input, kv_caches, intermediate_tensors)
-            torch_npu.npu.synchronize()
+            torch.npu.synchronize()
             return
 
     def remove_all_loras(self):
@@ -1357,8 +1356,8 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
-            model_forward_start = torch_npu.npu.Event(enable_timing=True)
-            model_forward_end = torch_npu.npu.Event(enable_timing=True)
+            model_forward_start = torch.npu.Event(enable_timing=True)
+            model_forward_end = torch.npu.Event(enable_timing=True)
             model_forward_start.record()
 
         if not bypass_model_exec:

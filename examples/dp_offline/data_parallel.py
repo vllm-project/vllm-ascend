@@ -30,7 +30,6 @@ def main():
         for i in range(local_rank * tp_size, (local_rank + 1) * tp_size))
 
     import torch
-    import torch_npu  # noqa
     from vllm import LLM, SamplingParams
     from vllm.distributed.parallel_state import (
         destroy_distributed_environment, destroy_model_parallel)

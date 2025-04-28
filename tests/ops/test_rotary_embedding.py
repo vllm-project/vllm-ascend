@@ -9,7 +9,6 @@ from typing import Optional, Tuple, Union
 import pytest
 import torch
 import torch.nn as nn
-import torch_npu  # noqa: F401
 
 import vllm_ascend.platform  # noqa: F401
 

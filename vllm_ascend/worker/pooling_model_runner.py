@@ -134,9 +134,8 @@ class NPUPoolingModelRunner(
         } if self.has_inner_state else {}
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
-            import torch_npu
-            model_forward_start = torch_npu.npu.Event(enable_timing=True)
-            model_forward_end = torch_npu.npu.Event(enable_timing=True)
+            model_forward_start = torch.npu.Event(enable_timing=True)
+            model_forward_end = torch.npu.Event(enable_timing=True)
             model_forward_start.record()
 
         cross_enc_kwargs = {}

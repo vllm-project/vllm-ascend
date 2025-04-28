@@ -17,7 +17,6 @@
 # limitations under the License.
 #
 import torch
-import torch_npu  # noqa: F401
 
 from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import \
     HCCLLibrary

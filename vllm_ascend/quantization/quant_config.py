@@ -19,7 +19,6 @@ from types import MappingProxyType
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 import torch
-import torch_npu  # noqa: F401
 from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)

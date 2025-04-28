@@ -24,12 +24,6 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 import torch
 from acl.rt import memcpy  # type: ignore # noqa: F401
 from vllm.logger import logger
-
-try:
-    import torch_npu  # noqa: F401
-except ImportError:
-    print("Failed to import torch_npu.")
-
 from vllm.utils import is_pin_memory_available
 
 
@@ -95,10 +89,10 @@ def unmap_and_release(allocation_handle: HandleType) -> None:
 def get_pluggable_allocator(
     python_malloc_fn: Callable[[tuple[int, int, int, int]], None],
     python_free_func: Callable[[int], tuple[int, int, int, int]]
-) -> torch_npu.npu.memory.NPUPluggableAllocator:
+) -> torch.npu.memory.NPUPluggableAllocator:
     init_module(python_malloc_fn, python_free_func)
-    new_alloc = torch_npu.npu.memory.NPUPluggableAllocator(
-        lib_name, 'my_malloc', 'my_free')
+    new_alloc = torch.npu.memory.NPUPluggableAllocator(lib_name, 'my_malloc',
+                                                       'my_free')
     return new_alloc
 
 
@@ -107,8 +101,8 @@ def use_memory_pool_with_allocator(
         python_malloc_fn: Callable[[tuple[int, int, int, int]], None],
         python_free_func: Callable[[int], tuple[int, int, int, int]]):
     new_alloc = get_pluggable_allocator(python_malloc_fn, python_free_func)
-    mem_pool = torch_npu.npu.memory.MemPool(new_alloc._allocator)
-    with torch_npu.npu.memory.use_mem_pool(mem_pool):
+    mem_pool = torch.npu.memory.MemPool(new_alloc._allocator)
+    with torch.npu.memory.use_mem_pool(mem_pool):
         yield mem_pool, new_alloc
 
 

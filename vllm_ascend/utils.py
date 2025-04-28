@@ -17,7 +17,6 @@
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 import torch
-import torch_npu  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from vllm.logger import logger
 
