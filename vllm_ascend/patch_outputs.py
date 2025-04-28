@@ -15,6 +15,7 @@
 # limitations under the License.
 #
 
+import time
 from typing import Dict, Optional
 
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -22,7 +23,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import SequenceGroup, SequenceGroupBase, SequenceStatus
 
 
-@classmethod  # type: ignore
+@classmethod
 def from_seq_group(
     cls, seq_group: SequenceGroup, use_cache: bool,
     seq_id_to_seq_group: Dict[str, SequenceGroupBase]
@@ -30,7 +31,8 @@ def from_seq_group(
     finished = seq_group.is_finished()
 
     if seq_group.request_id in seq_id_to_seq_group:
-        group: SequenceGroupBase = seq_id_to_seq_group[seq_group.request_id]
+        group: SequenceGroupBase = seq_id_to_seq_group[
+            seq_group.request_id]
         assembled_seq_group = group.maybe_assemble_group(seq_group)
         if finished:
             group.finish_seq(seq_group)
@@ -43,7 +45,7 @@ def from_seq_group(
                 if sub_request_id in seq_id_to_seq_group:
                     del seq_id_to_seq_group[sub_request_id]
         return cls.from_seq_group(assembled_seq_group, use_cache,
-                                  seq_id_to_seq_group)
+                                    seq_id_to_seq_group)
 
     sampling_params = seq_group.sampling_params
     if sampling_params is None:
@@ -79,12 +81,13 @@ def from_seq_group(
     # num_cached_tokens should be the same for all the sequences
     num_cached_tokens = None
     for i, seq in enumerate(top_n_seqs):
-        output_text = seq.get_output_text_to_return(text_buffer_length, delta)
+        output_text = seq.get_output_text_to_return(
+            text_buffer_length, delta)
 
         output_token_ids = seq.get_output_token_ids_to_return(delta)
         num_output_tokens = 1 if isinstance(output_token_ids,
                                             int) else len(output_token_ids)
-        num_cached_tokens = seq.data.get_num_cached_tokens()  # noqa
+        num_cached_tokens = seq.data.get_num_cached_tokens()
 
         output_logprobs = seq.output_logprobs if include_logprobs else None
 
@@ -103,12 +106,12 @@ def from_seq_group(
             if i >= len(cached_outputs):
                 cached_outputs.append(
                     CompletionOutput(index=i,
-                                     text="",
-                                     token_ids=[],
-                                     cumulative_logprob=None,
-                                     logprobs=None,
-                                     finish_reason=None,
-                                     stop_reason=None))
+                                        text="",
+                                        token_ids=[],
+                                        cumulative_logprob=None,
+                                        logprobs=None,
+                                        finish_reason=None,
+                                        stop_reason=None))
             output = cached_outputs[i]
 
             # Init cached output object
@@ -139,8 +142,44 @@ def from_seq_group(
 
         outputs.append(output)
 
-    return None
+    # Every sequence in the sequence group should have the same prompt.
+    if include_prompt:
+        prompt = seq_group.prompt
+        prompt_token_ids = seq_group.prompt_token_ids
+        encoder_prompt = seq_group.encoder_prompt
+        encoder_prompt_token_ids = seq_group.encoder_prompt_token_ids
+        prompt_logprobs = seq_group.prompt_logprobs
+    else:
+        prompt = None
+        prompt_token_ids = None
+        encoder_prompt = None
+        encoder_prompt_token_ids = None
+        prompt_logprobs = None
+    finished_time = time.time() if finished else None
+    seq_group.set_finished_time(finished_time)
 
+    init_kwargs = {
+        "request_id": seq_group.request_id,
+        "prompt": prompt,
+        "prompt_token_ids": prompt_token_ids,
+        "prompt_logprobs": prompt_logprobs,
+        "outputs": outputs,
+        "finished": finished,
+        "metrics": seq_group.metrics,
+        "lora_request": seq_group.lora_request,
+        "encoder_prompt": encoder_prompt,
+        "encoder_prompt_token_ids": encoder_prompt_token_ids,
+        "num_cached_tokens": num_cached_tokens,
+        "multi_modal_placeholders": seq_group.multi_modal_placeholders
+    }
+
+    if use_cache:
+        request_output = seq_group.cached_request_output
+        request_output.__init__(**init_kwargs)  # type: ignore
+    else:
+        request_output = cls(**init_kwargs)  # type: ignore
+
+    return request_output
 
 # Add code to clear finished seq in seq_id_to_seq_group
 RequestOutput.from_seq_group = from_seq_group
