@@ -17,6 +17,7 @@
 # Adapted from vllm/triton_utils/importing.py
 #
 
+import importlib
 import sys
 import types
 from importlib.util import find_spec
@@ -40,6 +41,8 @@ if not HAS_TRITON:
             self.autotune = self._dummy_decorator("autotune")
             self.heuristics = self._dummy_decorator("heuristics")
             self.language = TritonLanguagePlaceholder()
+            self.__spec__ = importlib.machinery.ModuleSpec(
+                name="triton", loader=None, origin="placeholder")
             logger.warning_once(
                 "Triton is not installed. Using dummy decorators. "
                 "Install it via `pip install triton` to enable kernel"
