@@ -40,6 +40,7 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
 from vllm.config import get_current_vllm_config
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
+from vllm_ascend.ops.cache import concat_and_cache_mla
 from vllm_ascend.worker.model_runner import (
     ModelInputForNPUBuilder, ModelInputForNPUWithSamplingMetadata)
 
@@ -1086,16 +1087,10 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                                                  key_cache=kv_cache[0],
                                                  value_cache=kv_cache[1],
                                                  slot_indices=slots)
-        else:
-            if kv_cache.numel() > 0:
-                key = torch.cat([
-                    kv_c_normed.view(num_tokens, self.num_kv_heads, -1), k_pe
-                ],
-                                dim=2)
-                slots = attn_metadata.slot_mapping
-                torch_npu._npu_reshape_and_cache_siso(key=key,
-                                                      key_cache=kv_cache,
-                                                      slot_indices=slots)
+        elif kv_cache.numel() > 0:
+            # TODO replace this naive implement with fusion kernel
+            concat_and_cache_mla(kv_c_normed, k_pe, kv_cache,
+                                 attn_metadata.slot_mapping)
 
         if attn_metadata.num_prefills > 0:
             attn_output = torch.empty(num_tokens,
