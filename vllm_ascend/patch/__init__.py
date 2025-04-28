@@ -127,7 +127,7 @@
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm.
 #
-# ** File: worker/patch_common/patch_minicpm.py **
+# ** File: worker/patch_main/patch_minicpm.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.minicpm.MiniCPMAttention.forward`
 #    Why:
@@ -173,14 +173,3 @@
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm and vllm-ascend.
 #
-# ** File: worker/patch_0_8_4/patch_tritonplaceholder.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `triton` Module
-#    Why:
-#       Triton is not supported on npu currently, importing triton will break vllm-ascend
-#    How：
-#       ditto
-#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
-#       TritonPlaceholder is only available in vllm>0.8.4
-#    Future Plan:
-#       Revert it when branch main doesn't maintain v0.8.4.
