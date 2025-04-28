@@ -114,6 +114,19 @@
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm.
 #
+# ** File: worker/patch_0_8_4/patch_spec_decode_worker.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.spec_decode.spec_decode_worker.SpecDecodeWorker._configure_model_sampler_for_spec_decode`
+#    Why:
+#       vLLM `Remove Sampler from Model Code` so vllm-ascend needs a patch to run in v0.8.4.
+#    How：
+#       Use vLLM 0.8.4 method tp patch it.
+#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
+#       - https://github.com/vllm-project/vllm/pull/17084
+#       - https://github.com/vllm-project/vllm-ascend/pull/636
+#    Future Plan:
+#       Follow v0.8.4 version strategy.
+#
 # ** File: worker/patch_common/patch_metrics.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.spec_decode.metrics.AsyncMetricsCollector.maybe_collect_rejsample_metrics`
@@ -158,7 +171,19 @@
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm and vllm-ascend.
 #
-# ** File: worker/patch_common/patch_multi_step_worker.py **
+#   2. `vllm.spec_decode.multi_step_worker.MultiStepWorker.set_include_gpu_probs_tensor` and
+#       `vllm.spec_decode.multi_step_worker.MultiStepWorker.set_should_modify_greedy_probs_inplace`
+#    Why:
+#       vLLM `Remove Sampler from Model Code` so vllm-ascend needs adapt to this change.
+#    How：
+#       Use vLLM 0.8.4 method to patch it.
+#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
+#       - https://github.com/vllm-project/vllm/pull/15195
+#       - https://github.com/vllm-project/vllm-ascend/pull/395
+#    Future Plan:
+#       Remove it when we identify the reasons clearly.
+#
+# ** File: worker/patch_common/patch_spec_decode_worker.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.spec_decode.spec_decode_worker.SpecDecodeWorker.create_worker`
 #    Why:

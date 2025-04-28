@@ -93,7 +93,7 @@ def create_worker(
 
             proposer_worker = MultiStepWorker(**draft_worker_kwargs)
             if draft_model_config.hf_config.model_type == "deepseek_mtp":
-                num_spec_prefill_steps = num_speculative_tokens
+                num_spec_prefill_steps = draft_model_config.hf_config.n_predict
 
         proposer_worker = SmallerTpProposerWorker.maybe_wrap_worker(
             proposer_worker, draft_tp, target_tp)
