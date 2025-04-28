@@ -134,11 +134,11 @@ class AscendQwen2VisionBlock(Qwen2VisionBlock):
                                                prefix=f"{prefix}.attn")
 
     def forward(
-            self,
-            x: torch.Tensor,
-            cu_seqlens: torch.Tensor,
-            cos: torch.Tensor,
-            sin: torch.Tensor,
+        self,
+        x: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
     ) -> torch.Tensor:
         x = x + self.attn(
             self.norm1(x),
@@ -149,6 +149,7 @@ class AscendQwen2VisionBlock(Qwen2VisionBlock):
 
         x = x + self.mlp(self.norm2(x))
         return x
+
 
 class AscendQwen2VisionPatchEmbed(Qwen2VisionPatchEmbed):
 
