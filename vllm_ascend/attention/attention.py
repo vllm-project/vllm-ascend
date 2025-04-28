@@ -920,7 +920,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv = kv.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
 
-        k_pe, k_nope = torch.ops.npu_inference.npu_kv_rmsnorm_rope_cache(
+        k_pe, k_nope, _, _ = torch.ops.npu_inference.npu_kv_rmsnorm_rope_cache(
             kv,
             self.kv_a_layernorm.weight,
             cos,
@@ -1081,12 +1081,26 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
             ) > 0 and attn_metadata.num_prefills > 0:
                 slots = attn_metadata.slot_mapping
                 # NOTE: Seperate the kv cache in advance to avoid OOM or other issues
+                # View the kv cache before reshape_and_cache for graph mode
+                num_blocks, _, block_size, _ = kv_cache[0].shape
+                k_nope_cache, k_pe_cache = kv_cache
+                # [n_blocks, kv_heads, block_size, head_dim]  -> [n_blocks, block_size, kv_heads, head_dim]
+                k_nope_cache = k_nope_cache.view(num_blocks, block_size,
+                                                 self.num_kv_heads, -1)
+                k_pe_cache = k_pe_cache.view(num_blocks, block_size,
+                                             self.num_kv_heads, -1)
                 torch_npu._npu_reshape_and_cache(key=kv_c_normed.view(
                     num_tokens, self.num_kv_heads, -1),
                                                  value=k_pe,
-                                                 key_cache=kv_cache[0],
-                                                 value_cache=kv_cache[1],
+                                                 key_cache=k_nope_cache,
+                                                 value_cache=k_pe_cache,
                                                  slot_indices=slots)
+                # Restore the shape of the kv cache
+                k_nope_cache = k_nope_cache.view(num_blocks, self.num_kv_heads,
+                                                 block_size, -1)
+                k_pe_cache = k_pe_cache.view(num_blocks, self.num_kv_heads,
+                                             block_size, -1)
+
         elif kv_cache.numel() > 0:
             # TODO replace this naive implement with fusion kernel
             concat_and_cache_mla(kv_c_normed, k_pe, kv_cache,
@@ -1145,7 +1159,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                     antiquant_mode=0,
                     antiquant_scale=None,
                     block_table=attn_metadata.block_tables,
-                    block_size=kv_cache[0].shape[1],
+                    block_size=kv_cache[0].shape[2],
                     actual_seq_lengths_kv=attn_metadata.seq_lens,
                 )
                 attn_output = attn_output.view(num_tokens, -1,
