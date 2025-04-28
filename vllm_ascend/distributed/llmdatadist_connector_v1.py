@@ -4,12 +4,12 @@ import json
 import struct
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, List, Tuple
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
 
 import requests
 import torch
 import torch_npu
-import torchair
+import torchair  # type: ignore
 from vllm.distributed import get_tensor_model_parallel_rank, get_world_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
@@ -67,7 +67,8 @@ class ServerInfo:
     role: ServerRole
     devices: List[DeviceInfo]
 
-    def get_device(self, tp_rank: int, dp_rank: int) -> DeviceInfo:
+    def get_device(self, tp_rank: int,
+                   dp_rank: int) -> Union[DeviceInfo, None]:
         for device in self.devices:
             if device.tp_rank == tp_rank and device.dp_rank == dp_rank:
                 return device
@@ -162,7 +163,7 @@ class ClusterInfo:
             GLOBAL_RANKTABLE, self.prefill_tp, self.decode_tp)
 
     def get_device(self, server_id: str, dp_rank: int,
-                   tp_rank: int) -> DeviceInfo:
+                   tp_rank: int) -> Union[DeviceInfo, None]:
         for server in self._servers:
             if server.server_id != server_id:
                 continue
@@ -225,7 +226,7 @@ class ClusterInfo:
         return default
 
 
-_CLUSTER_INFO: "ClusterInfo" = None
+_CLUSTER_INFO: Optional["ClusterInfo"] = None
 
 
 def init_cluster_info(vllm_config: "VllmConfig") -> None:
@@ -272,7 +273,7 @@ class KVTransferEngine:
         local_device_info = self.cluster_info.get_device(
             local_server_id, dp_rank, tp_rank)
         assert local_device_info is not None, \
-            f"Could not find local device from cluster info."
+            "Could not find local device from cluster info."
 
         self.cluster_id = local_device_info.cluster_id
         self.local_device_ip = local_device_info.device_ip
@@ -379,8 +380,8 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
             self.kv_role = llm_datadist.LLMRole.DECODER
         else:
             raise ValueError(
-                f"The value of kv_role must be either `kv_producer` or `kv_consumer`, but received {kv_transfer_config.kv_role}."
-            )
+                "The value of kv_role must be either `kv_producer` or"
+                f" `kv_consumer`, but received {kv_transfer_config.kv_role}.")
 
         # Used by scheduler process
         self._requests_need_load: dict[str, Request] = {}
@@ -400,7 +401,7 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
             "local_server_id", None)
         assert (
             self.local_server_id is not None
-        ), f"Cannot find `local_server_id` from `kv_transfer_config.kv_connector_extra_config`."
+        ), "Cannot find `local_server_id` from `kv_transfer_config.kv_connector_extra_config`."
 
         self.dp_rank = self._vllm_config.parallel_config.data_parallel_rank
         self.tp_size = self._vllm_config.parallel_config.tensor_parallel_size
@@ -474,7 +475,7 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
         # this is the cause.
         if prefill_infos is None:
             logger.error(
-                f"[rank%d][D]: Failed to get prefill info, redo model forwarding.",
+                "[rank%d][D]: Failed to get prefill info, redo model forwarding.",
                 torch.distributed.get_rank())
             return None
 
@@ -853,8 +854,8 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
             except LLMException as e:
                 if e.status_code == LLMStatusCode.LLM_DEVICE_OUT_OF_MEMORY:
                     logger.warning(
-                        f"allocate_cache failed due to insufficient space in the mbuf memory."
-                    )
+                        "allocate_cache failed due to insufficient space in the"
+                        " mbuf memory.")
                     time.sleep(0.03)  # wait for cache buf to be ready
                 else:
                     raise e
