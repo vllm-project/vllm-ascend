@@ -9,6 +9,12 @@ import time
 from multiprocessing import Event, Process
 
 
+kv_connector_extra_config = {
+    "prompt_device_ips": ["1.2.3.1", "1.2.3.2", "1.2.3.3", "1.2.3.4", "1.2.3.5", "1.2.3.6", "1.2.3.7", "1.2.3.8"], 
+    "decode_device_ips": ["1.2.3.9", "1.2.3.10", "1.2.3.11", "1.2.3.12", "1.2.3.13", "1.2.3.14", "1.2.3.15", "1.2.3.16"],
+    "llmdatadist_comm_port": 26000,
+}
+
 def clean_up():
     import gc
 
@@ -36,7 +42,8 @@ def run_prefill(prefill_done, process_close):
     ktc = KVTransferConfig.from_cli(
         '{"kv_connector":"AscendHcclConnector","kv_buffer_device":"npu","kv_role":"kv_producer", "kv_parallel_size":2}'
     )
-
+    global kv_connector_extra_config
+    ktc.kv_connector_extra_config = kv_connector_extra_config
     # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
     # memory. You may need to adjust the value to fit your GPU.
     llm = LLM(model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
@@ -77,7 +84,8 @@ def run_decode(prefill_done):
     ktc = KVTransferConfig.from_cli(
         '{"kv_connector":"AscendHcclConnector","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_parallel_size":2}'
     )
-
+    global kv_connector_extra_config
+    ktc.kv_connector_extra_config = kv_connector_extra_config
     llm = LLM(model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
               kv_transfer_config=ktc,
               max_model_len=2000,
