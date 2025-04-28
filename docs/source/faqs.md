@@ -30,7 +30,9 @@ You can get our containers at `Quay.io`, e.g., [<u>vllm-ascend</u>](https://quay
 If you are in China, you can use `daocloud` to accelerate your downloading:
 
 ```bash
-docker pull m.daocloud.io/quay.io/ascend/vllm-ascend:v0.7.3rc2
+# Replace with tag you want to pull
+TAG=v0.7.3rc2
+docker pull m.daocloud.io/quay.io/ascend/vllm-ascend:$TAG
 ```
 
 ### 3. What models does vllm-ascend supports?
@@ -80,7 +82,7 @@ Currently, only 1P1D is supported by vllm. For vllm-ascend, it'll be done by [th
 
 ### 10. Does vllm-ascend support quantization method?
 
-Currently, there is no quantization method supported in vllm-ascend originally. And the quantization supported is working in progress, w8a8 will firstly be supported.
+Currently, w8a8 quantization is already supported by vllm-ascend originally on v0.8.4rc2 or heigher, If you're using vllm 0.7.3 version, w8a8 quantization is supporeted with the integration of vllm-ascend and mindie-turbo, please use `pip install vllm-ascend[mindie-turbo]`.
 
 ### 11. How to run w8a8 DeepSeek model?
 
@@ -96,7 +98,7 @@ If you're using vllm 0.7.3 version, this is a known progress bar display issue i
 
 vllm-ascend is tested by functional test, performance test and accuracy test.
 
-- **Functional test**: we added CI, includes portion of vllm's native unit tests and vllm-ascend's own unit tests，on vllm-ascend's test, we test basic functional usability for popular models, include `Qwen2.5-7B-Instruct`、 `Qwen2.5-VL-7B-Instruct`、`Qwen2.5-VL-32B-Instruct`、`QwQ-32B`.
+- **Functional test**: we added CI, includes portion of vllm's native unit tests and vllm-ascend's own unit tests，on vllm-ascend's test, we test basic functionality、popular models availability and [supported features](https://vllm-ascend.readthedocs.io/en/latest/user_guide/suppoted_features.html) via e2e test
 
 - **Performance test**: we provide [benchmark](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks) tools for end-to-end performance benchmark which can easily to re-route locally, we'll publish a perf website like [vllm](https://simon-mo-workspace.observablehq.cloud/vllm-dashboard-v0/perf) does to show the performance test results for each pull request
 
