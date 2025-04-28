@@ -4,7 +4,7 @@ import json
 import os
 
 import aiohttp
-from quart import Quart, make_response, request
+from quart import Quart, make_response, request  # type: ignore
 
 AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 
@@ -47,7 +47,7 @@ async def handle_request():
             },
         ):
             # Print the prefill result
-            print(f"===== Prefill result =====")
+            print("===== Prefill result =====")
             print(prefill_result.decode("utf-8"))
             print("==========================")
             response = json.loads(prefill_result.decode("utf-8"))
