@@ -93,7 +93,5 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
         tags: ${{ steps.meta.outputs.tags }}
         file: Dockerfile.openEuler
-        # TODO: support and enable custom ops build for openEuler
         build-args: |
           PIP_INDEX_URL=https://pypi.org/simple
-          COMPILE_CUSTOM_KERNELS=0
