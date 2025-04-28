@@ -4,7 +4,7 @@ import json
 import struct
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 import requests
 import torch
@@ -497,7 +497,7 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
             servers = self.cluster_info.get_servers_by_role(ServerRole.Prefill)
             assert len(servers) == 1, \
                 f"Expected only one server for {self.kv_role}, but got {len(servers)}"
-            prefill_infos = {
+            prefill_infos: Dict[str, Any] = {
                 request_id: {
                     "dp_rank": 0,
                     "server_id": servers[0].server_id,
@@ -548,8 +548,8 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
                 kv_cache_shape = (1, 2, slen, num_heads, head_dim)
 
             uniq_req_id = self._get_unique_req_id(request.request_id)
-            dp_rank = prefill_infos[uniq_req_id]["dp_rank"]
-            server_id = prefill_infos[uniq_req_id]["server_id"]
+            dp_rank: int = prefill_infos[uniq_req_id]["dp_rank"]
+            server_id: str = prefill_infos[uniq_req_id]["server_id"]
 
             # pull kv cache from prefill node by request
             kv_hidden_dtype = kv_cache_layers[0].dtype
