@@ -32,6 +32,7 @@ from tests.conftest import VllmRunner
 MODELS = [
     "Qwen/Qwen2.5-0.5B-Instruct",
     "vllm-ascend/Qwen2.5-0.5B-Instruct-w8a8",
+    "Qwen/Qwen3-0.6B-Base",
 ]
 MULTIMODALITY_MODELS = ["Qwen/Qwen2.5-VL-3B-Instruct"]
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
