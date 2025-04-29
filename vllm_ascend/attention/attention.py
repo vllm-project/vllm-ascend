@@ -1080,7 +1080,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
             if len(kv_cache) > 0 and kv_cache[0].numel(
             ) > 0 and attn_metadata.num_prefills > 0:
                 slots = attn_metadata.slot_mapping
-                # NOTE: Seperate the kv cache in advance to avoid OOM or other issues
+                # NOTE: Separate the kv cache in advance to avoid OOM or other issues
                 torch_npu._npu_reshape_and_cache(key=kv_c_normed.view(
                     num_tokens, self.num_kv_heads, -1),
                                                  value=k_pe,

@@ -278,7 +278,7 @@ def fused_experts(
                                           dtype=dtype)
 
         # TODO: npu_grouped_matmul output random values at [num_valid_tokens:, ...]
-        # This created multiple NaN and index_add_ will mix them up which harms accracy
+        # This created multiple NaN and index_add_ will mix them up which harms accuracy
         # remove this mask and filter after it being fixed
         num_valid_tokens = mask.sum()
         valid_token_mask = torch.arange(

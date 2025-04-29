@@ -29,7 +29,7 @@ using vllm_ascend::AccType;
 using vllm_ascend::local_mem_copy;
 template <typename scalar_t, bool isNeox> class RotaryEmbedding {
     // NOTE(ganyi): we use 512B as load stride for pipe, need to find another way to
-    // retrive this size from runtime for more Soc support
+    // retrieve this size from runtime for more Soc support
     static int constexpr loadSize = 512;
     using dst_t = scalar_t;
     using acc_t = typename AccType<scalar_t>::type;
@@ -66,7 +66,7 @@ public:
         pipe_->InitBuffer(inQue_, 1 /* buffer_num */, loadSize /* buffer_size */);
         pipe_->InitBuffer(inQueSinCos_, 1 /* buffer_num */, rotDim_ * sizeof(scalar_t) /* buffer_size */);
         pipe_->InitBuffer(outQue_, 1 /* buffer_num */, loadSize /* buffer_size */);
-        // 2 temperary calculation buffer
+        // 2 temporary calculation buffer
         calcTmpBufferOffset_ = 0;
         // 1 upcast buffer for bf16 (headSize)
         upcastInputBufferOffset_ = calcTmpBufferOffset_ + sizeof(acc_t) * embedDim_ * 2;
@@ -75,10 +75,10 @@ public:
         // 2 sin cos upcast buffer for bf16
         cosSinUpcastBufferOffset_ = upcastTempBufferOffset_ + sizeof(acc_t) * 2 * embedDim_;
         // 2. bf16 path: needs 2 cos sin upcast buffer size
-        // 3. fp16 path: needs 2 temperary calculation buffer size
+        // 3. fp16 path: needs 2 temporary calculation buffer size
         tempBufferSize_ = cosSinUpcastBufferOffset_ + 2 * embedDim_ * sizeof(acc_t);
         // need to consider upcast the bf16 to fp32, so we might need 4 buffer just in case
-        // 2 temperary buffer, 2 input buffer, 1 cos buffer, 1 sin buffer, 2 scale buffer (headSize), 2 zp
+        // 2 temporary buffer, 2 input buffer, 1 cos buffer, 1 sin buffer, 2 scale buffer (headSize), 2 zp
         // buffer(headSize int8), 1 dst_temp buffer(headSize, int32)
         pipe_->InitBuffer(calcBuf_, tempBufferSize_ /* buffer_size */);
         if constexpr (!std::is_same_v<scalar_t, acc_t>) {

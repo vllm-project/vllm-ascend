@@ -18,6 +18,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from https://github.com/vllm-project/vllm/tree/main/tools
 #
+export SHELLCHECK_OPTS="--exclude=SC2046,SC2006"
 
 if command -v actionlint &> /dev/null; then
     actionlint .github/workflows/*.yml .github/workflows/*.yaml
@@ -29,4 +30,4 @@ fi
 
 # download a binary to the current directory - v1.7.3
 bash <(curl https://raw.githubusercontent.com/rhysd/actionlint/aa0a7be8e566b096e64a5df8ff290ec24fa58fbc/scripts/download-actionlint.bash)
-./actionlint  .github/workflows/*.yml .github/workflows/*.yaml
+./actionlint .github/workflows/*.yml .github/workflows/*.yaml

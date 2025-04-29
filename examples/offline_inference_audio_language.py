@@ -93,7 +93,7 @@ def main(args):
     inputs = {"prompt": prompt, "multi_modal_data": mm_data}
     if args.num_prompts > 1:
         # Batch inference
-        inputs = [inputs] * args.num_prompts
+        inputs = [inputs] * args.num_prompts  # type: ignore
 
     outputs = llm.generate(inputs, sampling_params=sampling_params)
 

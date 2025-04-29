@@ -127,7 +127,7 @@ apt update  -y
 apt install -y gcc g++ cmake libnuma-dev wget git
 ```
 
-**[Optinal]** Config the extra-index of `pip` if you are working on a **x86** machine, so that the torch with cpu could be found:
+**[Optional]** Config the extra-index of `pip` if you are working on a **x86** machine, so that the torch with cpu could be found:
 
 ```bash
 pip config set global.extra-index-url https://download.pytorch.org/whl/cpu/

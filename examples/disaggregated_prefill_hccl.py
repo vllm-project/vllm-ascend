@@ -84,7 +84,7 @@ def run_decode(prefill_done):
               gpu_memory_utilization=0.8,
               tensor_parallel_size=2)
 
-    # Wait for the producer to start the comsumer
+    # Wait for the producer to start the consumer
     print("Waiting for prefill node to finish...")
     prefill_done.wait()
 
