@@ -1,0 +1,54 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Build and Release Wheel
+
+on:
+  push:
+    # Release when push tag
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    name: build and release wheel
+    strategy:
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm]
+        python-version: ['3.9', '3.10', '3.11']
+    runs-on: ${{ matrix.os }}
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Print
+      run: |
+        lscpu
+
+    - name: Get tag
+      id: get-tag
+      run: |
+        result=$(basename ${{ github.ref }})  
+        echo "tag=$result" >> $GITHUB_OUTPUT  
+
+    - name: Build wheels 
+      run: |
+        ls
+        docker build -f ./.github/Dockerfile.buildwheel \
+        --build-arg PY_VERSION=${{ matrix.python-version }} \
+        --build-arg TAG=${{ steps.get-tag.outputs.tag }} \
+        --build-arg PYPI_TOKEN=${{ secrets.PYPI_TOKEN }} \
+        -t wheel:v1 .
