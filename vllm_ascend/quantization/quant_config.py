@@ -68,7 +68,7 @@ class AscendQuantConfig(QuantizationConfig):
 
     @classmethod
     def get_config_filenames(cls) -> List[str]:
-        return []
+        return ["quant_model_description.json"]
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "AscendQuantConfig":
