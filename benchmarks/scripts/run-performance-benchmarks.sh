@@ -264,6 +264,10 @@ main() {
   # turn of the reporting of the status of each request, to clean up the terminal output
   export VLLM_LOG_LEVEL="WARNING"
 
+  # set env
+  export VLLM_USE_MODELSCOPE="True"
+  export HF_ENDPOINT="https://hf-mirror.com"
+
   # prepare for benchmarking
   cd benchmarks || exit 1
   get_benchmarks_scripts

@@ -7,7 +7,7 @@ from vllm.distributed.parallel_state import (GroupCoordinator, get_world_group,
 # vllm-ascend will maintain its own EP GroupCoordinator and ETP GroupCoordinator for
 # customize parallel solution
 _EP: Optional[GroupCoordinator] = None
-_ETP: Optional[list[GroupCoordinator]] = None
+_ETP: Optional[GroupCoordinator] = None
 
 
 def get_ep_group() -> GroupCoordinator:

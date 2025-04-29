@@ -24,6 +24,7 @@ import torch_npu  # noqa: F401
 import vllm.envs as envs
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
+from vllm.utils import supports_dynamo
 
 CUSTOM_OP_ENABLED = False
 try:
@@ -110,11 +111,46 @@ class NPUPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm.config import CompilationLevel  # noqa: E402
         compilation_config = vllm_config.compilation_config
-        if compilation_config and compilation_config.level != CompilationLevel.NO_COMPILATION:
+
+        if vllm_config.model_config is None:
+            logger.warning("Model config is missing. This may indicate "
+                           "that we are running a test case")
+            enforce_eager = False
+        else:
+            enforce_eager = getattr(vllm_config.model_config, "enforce_eager",
+                                    False)
+
+        # TODO(Yizhou): Override the value of enforce_eager to True before
+        # the CANN and torch_npu support NPU compilation.
+        enforce_eager = True
+        logger.warning(
+            "NPU compilation support pending. Will be available in future CANN and "
+            "torch_npu releases. Using default: enforce_eager=True")
+
+        if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:
+            logger.info("Compilation disabled, using eager mode by default")
+            compilation_config.level = CompilationLevel.NO_COMPILATION
+        elif compilation_config.level != CompilationLevel.PIECEWISE:
             logger.warning(
-                "Compilation level %s is not supported on NPU now, forcing compilation level to NO_COMPILATION",
+                "NPU does not support %s compilation level. Setting level to NO_COMPILATION",
                 compilation_config.level)
             compilation_config.level = CompilationLevel.NO_COMPILATION
+        else:
+            logger.info(
+                "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
+                "using only ACL Graph mode")
+            compilation_config.use_inductor = False
+            compilation_config.splitting_ops.extend(
+                ["vllm.unified_ascend_attention_with_output"])
+
+        if vllm_config.additional_config is not None:
+            enable_graph_mode = vllm_config.additional_config.get(
+                "enable_graph_mode", False)
+            if enable_graph_mode and not supports_dynamo():
+                logger.warning(
+                    "enable_graph_mode is not supported because the version of torch is too low, forcing close enable_graph_mode"
+                )
+                vllm_config.additional_config["enable_graph_mode"] = False
 
         parallel_config = vllm_config.parallel_config
         if parallel_config and parallel_config.worker_cls == "auto":

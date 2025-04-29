@@ -175,7 +175,7 @@ def test_ngram_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
 
 # TODO: There is a problem with the preemptive scheduling in the current
 # version, which makes this case fail. Please release this case after the
-# preemptive scheduling preblem is solved.
+# preemptive scheduling problem is solved.
 # @pytest.mark.parametrize(
 #     "common_llm_kwargs",
 #     [{

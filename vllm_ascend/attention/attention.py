@@ -27,6 +27,7 @@ try:
 except ImportError:
     print("Failed to import torch_npu.")
 
+import torchair._contrib.custom_torch_ops  # type: ignore  # noqa: F401
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata, AttentionType,
@@ -36,9 +37,10 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
                                            compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
+from vllm.config import get_current_vllm_config
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
-from vllm_ascend.utils import VLLM_ENABLE_GRAPH_MODE
+from vllm_ascend.ops.cache import concat_and_cache_mla
 from vllm_ascend.worker.model_runner import (
     ModelInputForNPUBuilder, ModelInputForNPUWithSamplingMetadata)
 
@@ -598,14 +600,6 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
         max_decode_seq_len = max(self.curr_seq_lens, default=0)
-
-        if self.num_prefills > 0:
-            self.attn_mask = AscendMetadataBuilder._attn_mask_builder.get_attn_mask(  # type: ignore
-                max_prefill_seq_len,
-                self.input_builder.runner.model_config.dtype,
-                self.input_builder.runner.device)
-        else:
-            self.attn_mask = None
         num_decode_tokens = self.num_decode_tokens
 
         if self.num_prefills == 0 and use_torchair_graph:
@@ -629,14 +623,6 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
                 self.input_builder.runner.device)
         else:
             self.attn_mask = None
-        num_decode_tokens = self.num_decode_tokens
-
-        block_tables = make_tensor_with_pad(
-            self.block_tables,
-            pad=0,
-            dtype=torch.int32,
-            device=device,
-        )
 
         assert max_query_len > 0, "query_lens: {}".format(query_lens)
 
@@ -913,6 +899,12 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         self.w_kc = None
         self.w_vc = None
 
+        self.enable_graph_mode = False
+        additional_config = get_current_vllm_config().additional_config
+        if additional_config:
+            self.enable_graph_mode = additional_config.get(
+                "enable_graph_mode", False)
+
     def exec_kv(
         self,
         hidden_states: torch.Tensor,
@@ -1084,27 +1076,21 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                                                        self.num_heads, -1)
 
         # TODO: Replace the env with more flexible expressions
-        if VLLM_ENABLE_GRAPH_MODE == '1':
+        if self.enable_graph_mode:
             if len(kv_cache) > 0 and kv_cache[0].numel(
             ) > 0 and attn_metadata.num_prefills > 0:
                 slots = attn_metadata.slot_mapping
-                # NOTE: Seperate the kv cache in advance to avoid OOM or other issues
+                # NOTE: Separate the kv cache in advance to avoid OOM or other issues
                 torch_npu._npu_reshape_and_cache(key=kv_c_normed.view(
                     num_tokens, self.num_kv_heads, -1),
                                                  value=k_pe,
                                                  key_cache=kv_cache[0],
                                                  value_cache=kv_cache[1],
                                                  slot_indices=slots)
-        else:
-            if kv_cache.numel() > 0:
-                key = torch.cat([
-                    kv_c_normed.view(num_tokens, self.num_kv_heads, -1), k_pe
-                ],
-                                dim=2)
-                slots = attn_metadata.slot_mapping
-                torch_npu._npu_reshape_and_cache_siso(key=key,
-                                                      key_cache=kv_cache,
-                                                      slot_indices=slots)
+        elif kv_cache.numel() > 0:
+            # TODO replace this naive implement with fusion kernel
+            concat_and_cache_mla(kv_c_normed, k_pe, kv_cache,
+                                 attn_metadata.slot_mapping)
 
         if attn_metadata.num_prefills > 0:
             attn_output = torch.empty(num_tokens,
@@ -1141,7 +1127,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                 )
         elif attn_metadata.decode_metadata:
             assert kv_cache is not None
-            if VLLM_ENABLE_GRAPH_MODE == '1':
+            if self.enable_graph_mode:
                 # TorchAir's shape is [bs, num_heads_per_rank, seq_len, dim]
                 q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1)
                 q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)

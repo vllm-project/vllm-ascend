@@ -19,7 +19,10 @@
 
 import gc
 import os
+import time
 import weakref
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 import numpy as np
@@ -28,7 +31,7 @@ import torch
 import torch.nn as nn
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
-from vllm.config import VllmConfig
+from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
@@ -50,12 +53,50 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.platform import NPUPlatform
+from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import SchedulerOutput
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
+
+
+@dataclass
+class GraphCaptureContext:
+    stream: torch.npu.Stream
+
+
+@contextmanager
+def graph_capture(device: torch.device):
+    """
+    `graph_capture` is a context manager which should surround the code that
+    is capturing the NPU graph. Its main purpose is to ensure that the
+    some operations will be run after the graph is captured, before the graph
+    is replayed. It returns a `GraphCaptureContext` object which contains the
+    necessary data for the graph capture. Currently, it only contains the
+    stream that the graph capture is running on. This stream is set to the
+    current NPU stream when the context manager is entered and reset to the
+    default stream when the context manager is exited. This is to ensure that
+    the graph capture is running on a separate stream from the default stream,
+    in order to explicitly distinguish the kernels to capture
+    from other kernels possibly launched on background in the default stream.
+    """
+    graph_capture_context = GraphCaptureContext(
+        torch.npu.Stream(device=device))
+    stream = graph_capture_context.stream
+
+    # we use nullcontext now
+    maybe_ca_context = nullcontext()
+
+    # ensure all initialization operations complete before attempting to
+    # capture the graph on another stream
+    curr_stream = torch.npu.current_stream()
+    if curr_stream != stream:
+        stream.wait_stream(curr_stream)
+
+    with torch.npu.stream(stream), maybe_ca_context:
+        yield graph_capture_context
 
 
 class NPUModelRunner:
@@ -229,6 +270,12 @@ class NPUModelRunner:
                                                 device="cpu")
         self.attn_mask = None
         self.attn_state = None
+        self.use_npu_graph = (self.vllm_config.compilation_config.level
+                              == CompilationLevel.PIECEWISE
+                              and not self.model_config.enforce_eager)
+        self.npugraph_batch_sizes = list(
+            reversed(
+                self.vllm_config.compilation_config.cudagraph_capture_sizes))
 
         # NOTE: Pre-construct a mask matrix to improve the efficiency of
         # attention mask construction during inference.
@@ -243,6 +290,12 @@ class NPUModelRunner:
                                  int(mask_len))
         self.attn_mask_builder = AttentionMaskBuilder.initialize_from_len(
             self.attn_mask_len, self.dtype)
+
+        if vllm_version_is("0.8.4"):
+            self.sampler = None
+        else:
+            from vllm.v1.sample.sampler import Sampler
+            self.sampler = Sampler()
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -293,20 +346,34 @@ class NPUModelRunner:
                 generator.manual_seed(sampling_params.seed)
             else:
                 generator = None
-
-            self.requests[req_id] = CachedRequestState(
-                req_id=req_id,
-                prompt_token_ids=new_req_data.prompt_token_ids,
-                prompt=new_req_data.prompt,
-                mm_inputs=new_req_data.mm_inputs,
-                mm_positions=new_req_data.mm_positions,
-                sampling_params=sampling_params,
-                generator=generator,
-                block_ids=new_req_data.block_ids,
-                num_computed_tokens=new_req_data.num_computed_tokens,
-                output_token_ids=[],
-                lora_request=new_req_data.lora_request,
-            )
+            if vllm_version_is("0.8.4"):
+                self.requests[req_id] = CachedRequestState(
+                    req_id=req_id,
+                    prompt_token_ids=new_req_data.prompt_token_ids,
+                    prompt=new_req_data.prompt,
+                    mm_inputs=new_req_data.mm_inputs,
+                    mm_positions=new_req_data.mm_positions,
+                    sampling_params=sampling_params,
+                    generator=generator,
+                    block_ids=new_req_data.block_ids,
+                    num_computed_tokens=new_req_data.num_computed_tokens,
+                    output_token_ids=[],
+                    lora_request=new_req_data.lora_request,
+                )
+            else:
+                # the prompt removed by: https://github.com/vllm-project/vllm/pull/17214
+                self.requests[req_id] = CachedRequestState(
+                    req_id=req_id,
+                    prompt_token_ids=new_req_data.prompt_token_ids,
+                    mm_inputs=new_req_data.mm_inputs,
+                    mm_positions=new_req_data.mm_positions,
+                    sampling_params=sampling_params,
+                    generator=generator,
+                    block_ids=new_req_data.block_ids,
+                    num_computed_tokens=new_req_data.num_computed_tokens,
+                    output_token_ids=[],
+                    lora_request=new_req_data.lora_request,
+                )
 
             req_ids_to_add.append(req_id)
 
@@ -599,10 +666,17 @@ class NPUModelRunner:
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
-        sampler_output = self.model.sample(
-            logits=logits,
-            sampling_metadata=sampling_metadata,
-        )
+        if vllm_version_is("0.8.4"):
+            sampler_output = self.model.sample(
+                logits=logits,
+                sampling_metadata=sampling_metadata,
+            )
+        else:
+            assert self.sampler is not None
+            sampler_output = self.sampler(
+                logits=logits,
+                sampling_metadata=sampling_metadata,
+            )
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
@@ -724,19 +798,19 @@ class NPUModelRunner:
         self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
     @torch.inference_mode()
-    def _dummy_run(self) -> torch.Tensor:
+    def _dummy_run(self, num_tokens: int) -> torch.Tensor:
         model = self.model
         if self.is_multimodal_model:
             input_ids = None
-            inputs_embeds = self.inputs_embeds[:self.max_num_tokens]
+            inputs_embeds = self.inputs_embeds[:num_tokens]
         else:
-            input_ids = self.input_ids[:self.max_num_tokens]
+            input_ids = self.input_ids[:num_tokens]
             inputs_embeds = None
 
         if self.uses_mrope:
-            positions = self.mrope_positions[:, :self.max_num_tokens]
+            positions = self.mrope_positions[:, :num_tokens]
         else:
-            positions = self.input_positions_cpu[:self.max_num_tokens]
+            positions = self.positions[:num_tokens]
 
         if get_pp_group().is_first_rank:
             intermediate_tensors = None
@@ -744,17 +818,17 @@ class NPUModelRunner:
             if self.intermediate_tensors is None:
                 self.intermediate_tensors = (
                     self.model.make_empty_intermediate_tensors(
-                        batch_size=self.max_num_tokens,
+                        batch_size=num_tokens,
                         dtype=self.dtype,
                         device=self.device))
             intermediate_tensors = IntermediateTensors({
-                k: v[:self.max_num_tokens]
+                k: v[:num_tokens]
                 for k, v in self.intermediate_tensors.items()
             })
 
         with set_forward_context(None, self.vllm_config):
             hidden_states = model(input_ids=input_ids,
-                                  positions=positions.to(self.device),
+                                  positions=positions,
                                   intermediate_tensors=intermediate_tensors,
                                   inputs_embeds=inputs_embeds)
         return hidden_states
@@ -787,7 +861,7 @@ class NPUModelRunner:
         ]
 
         # Trigger compilation for general shape.
-        hidden_states = self._dummy_run()
+        hidden_states = self._dummy_run(self.max_num_tokens)
 
         if get_pp_group().is_last_rank:
             hidden_states = hidden_states[logit_indices]
@@ -892,3 +966,31 @@ class NPUModelRunner:
                     f"Unknown attention type: {attn_module.attn_type}")
 
         return kv_cache_spec
+
+    def capture_model(self) -> None:
+        if not self.use_npu_graph:
+            logger.warning(
+                "Skipping NPU graph capture. Please add "
+                "-O %s to use NPU graphs.", CompilationLevel.PIECEWISE)
+            return
+
+        start_time = time.perf_counter()
+        start_free_npu_memory = torch.npu.mem_get_info()[0]
+
+        # Trigger NPU graph capture for specific shapes.
+        # Capture the large shapes first so that the smaller shapes
+        # can reuse the memory pool allocated for the large shapes.
+        with graph_capture(device=self.device):
+            for num_tokens in reversed(self.npugraph_batch_sizes):
+                for _ in range(self.vllm_config.compilation_config.
+                               cudagraph_num_of_warmups):
+                    self._dummy_run(num_tokens)
+                self._dummy_run(num_tokens)
+
+        end_time = time.perf_counter()
+        end_free_npu_memory = torch.npu.mem_get_info()[0]
+        elapsed_time = end_time - start_time
+        npu_graph_size = start_free_npu_memory - end_free_npu_memory
+        # This usually takes 5~20 seconds.
+        logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
+                    elapsed_time, npu_graph_size / (1 << 30))

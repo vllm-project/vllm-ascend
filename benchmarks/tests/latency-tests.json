@@ -2,7 +2,7 @@
   {
     "test_name": "latency_llama8B_tp1",
     "parameters": {
-      "model": "meta-llama/Llama-3.1-8B-Instruct",
+      "model": "LLM-Research/Meta-Llama-3.1-8B-Instruct",
       "tensor_parallel_size": 1,
       "load_format": "dummy",
       "num_iters_warmup": 5,

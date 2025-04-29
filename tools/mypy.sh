@@ -28,11 +28,7 @@ fi
 
 run_mypy() {
     echo "Running mypy on $1"
-    if [ "$CI" -eq 1 ] && [ -z "$1" ]; then
-        mypy --python-version "${PYTHON_VERSION}" "$@"
-        return
-    fi
-    mypy --follow-imports skip --python-version "${PYTHON_VERSION}" "$@"
+    mypy --check-untyped-defs --follow-imports skip --python-version "${PYTHON_VERSION}" "$@"
 }
 
 run_mypy vllm_ascend

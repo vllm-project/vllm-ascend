@@ -16,16 +16,12 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
-import os
-
 import torch
 import torch_npu  # noqa: F401
-from packaging.version import Version
+from packaging.version import InvalidVersion, Version
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs
-
-VLLM_ENABLE_GRAPH_MODE = os.environ.get('VLLM_ENABLE_GRAPH_MODE', '0')
 
 
 def try_register_lib(lib_name: str, lib_info: str = ""):
@@ -90,6 +86,17 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import worker  # noqa: F401
 
 
-def vllm_version_is(version: str):
-    import vllm
-    return Version(vllm.__version__) == Version(version)
+def vllm_version_is(target_vllm_version: str):
+    if envs.VLLM_VERSION is not None:
+        vllm_version = envs.VLLM_VERSION
+    else:
+        import vllm
+        vllm_version = vllm.__version__
+    try:
+        return Version(vllm_version) == Version(target_vllm_version)
+    except InvalidVersion:
+        raise ValueError(
+            f"Invalid vllm version {vllm_version} found. A dev version of vllm "
+            "is installed probably. Set the environment variable VLLM_VERSION "
+            "to control it by hand. And please make sure the vaule follows the "
+            "format of x.y.z.")

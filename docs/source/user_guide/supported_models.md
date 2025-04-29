@@ -5,6 +5,8 @@
 | DeepSeek v3 | ✅|||
 | DeepSeek R1 | ✅|||
 | DeepSeek Distill (Qwen/LLama) |✅||
+| Qwen3 | ✅ ||
+| Qwen3-Moe | ✅ ||
 | Qwen2-VL | ✅ ||
 | Qwen2-Audio | ✅ ||
 | Qwen2.5 | ✅ ||

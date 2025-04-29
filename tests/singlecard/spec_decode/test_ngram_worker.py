@@ -24,7 +24,6 @@ from vllm.spec_decode.top1_proposer import Top1Proposer
 
 from tests.singlecard.spec_decode.utils import (
     create_seq_group_metadata_from_prompts, create_worker)
-from vllm_ascend.patch.worker import patch_common  # noqa: F401
 
 
 def test_ngram_algo_correctness_for_single_no_match():
