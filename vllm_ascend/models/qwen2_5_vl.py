@@ -42,8 +42,8 @@ from vllm.model_executor.models.qwen2_5_vl import (
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
-MIN_PAD_SIZE = 64
-MAX_PAD_SIZE = 128
+MIN_PAD_SIZE = 64  # min_size to pad weight
+MAX_PAD_SIZE = 128  # max_size to pad weight
 
 
 class AscendQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
@@ -96,7 +96,7 @@ class AscendQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
 
         context_layer = torch.torch.empty_like(q)
 
-        # operator requires pta version >= 2.5.1.dev20250226
+        # operator requires pta version >= 2.5.1
         torch_npu._npu_flash_attention_unpad(
             query=q,
             key=k,
@@ -199,7 +199,7 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
     def cal_cos_sin(self, rotary_pos_emb):
         cos = rotary_pos_emb.cos()  # [seqlen, rotary_dim / 2]
         sin = rotary_pos_emb.sin()
-        if self.enable_pad == True:
+        if self.enable_pad:
             cos = torch.nn.functional.pad(
                 cos, (0, self.half_pad_hidden_size_per_attention_head))
             sin = torch.nn.functional.pad(
@@ -289,11 +289,11 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
-                if ("attn.proj.weight" in name) and self.enable_pad == True:
+                if ("attn.proj.weight" in name) and self.enable_pad:
                     param.data = self.pad_proj_weight(param.data)
-                if ("attn.qkv.weight" in name) and self.enable_pad == True:
+                if ("attn.qkv.weight" in name) and self.enable_pad:
                     param.data = self.pad_qkv_weight(param.data)
-                if ("attn.qkv.bias" in name) and self.enable_pad == True:
+                if ("attn.qkv.bias" in name) and self.enable_pad:
                     param.data = self.pad_qkv_bias(param.data)
             loaded_params.add(name)
         return loaded_params
