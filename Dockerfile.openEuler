@@ -34,7 +34,7 @@ COPY . /workspace/vllm-ascend/
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=v0.8.4
+ARG VLLM_TAG=v0.8.5
 
 RUN git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /workspace/vllm
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.

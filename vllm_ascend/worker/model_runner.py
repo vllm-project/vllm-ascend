@@ -34,6 +34,7 @@ from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import get_pp_group
+from vllm.distributed.kv_transfer import get_kv_transfer_group
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import logger
@@ -42,7 +43,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata, SamplingMetadataCache
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models import supports_lora, supports_multimodal
@@ -62,13 +63,6 @@ from vllm.worker.model_runner_base import (
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
-
-from vllm_ascend.utils import vllm_version_is
-
-if vllm_version_is("0.8.4"):
-    from vllm.distributed import get_kv_transfer_group
-else:
-    from vllm.distributed.kv_transfer import get_kv_transfer_group
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -935,12 +929,7 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         self.sampling_metadata_cache: SamplingMetadataCache = \
               SamplingMetadataCache() \
                 if self.parallel_config.pipeline_parallel_size == 1 else None
-
-        if vllm_version_is("0.8.4"):
-            self.sampler = None
-        else:
-            from vllm.model_executor.layers.sampler import get_sampler
-            self.sampler = get_sampler()
+        self.sampler = get_sampler()
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -1409,17 +1398,10 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
             model_input.async_callback()
 
         # Sample the next token.
-        if vllm_version_is("0.8.4"):
-            output = self.model.sample(
-                logits=logits,
-                sampling_metadata=model_input.sampling_metadata,
-            )
-        else:
-            assert self.sampler is not None
-            output = self.sampler(
-                logits=logits,
-                sampling_metadata=model_input.sampling_metadata,
-            )
+        output = self.sampler(
+            logits=logits,
+            sampling_metadata=model_input.sampling_metadata,
+        )
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time
                 and output is not None):

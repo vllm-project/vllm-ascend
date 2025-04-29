@@ -23,9 +23,5 @@ def register():
 
 
 def register_model():
-    # TODO: fixme when TritonPlaceholder fixed
-    from vllm_ascend.utils import vllm_version_is
-    if vllm_version_is("0.8.4"):
-        import vllm_ascend.patch.worker.patch_0_8_4.patch_tritonplaceholder  # noqa
     from .models import register_model
     register_model()

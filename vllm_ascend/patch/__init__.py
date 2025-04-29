@@ -24,9 +24,9 @@
 #           each worker's `__init__` function.
 #
 # Then in each kind of patch, there are three folders:
-# - patch_0_8_4: contains the patches applied when vllm version is 0.8.4.
+# - patch_0_8_5: contains the patches applied when vllm version is 0.8.5.
 # - patch_main: contains the patches applied when vllm version is main branch.
-# - patch_common: contains the patches applied in both 0.8.4 and main branch.
+# - patch_common: contains the patches applied in both 0.8.5 and main branch.
 #
 # In the future, with the vllm version upgrade, the new patch folder such as
 # patch_0_8_5, patch_0_8_6, etc. will be added to manage the patch for different
@@ -42,18 +42,6 @@
 # --------------------------------
 # * Platform Patch:
 # =================
-# ** File: platform/patch_0_8_4/patch_config.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.ModelConfig.__init__()`
-#    Why:
-#       It is hard coded for sleep mode to support cuda platform only
-#    How：
-#       Using a new method to check if sleep mode is available
-#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
-#       https://github.com/vllm-project/vllm/pull/16562
-#    Future Plan:
-#       This patch is only used for 084 and can't be revert. just keep as it is.
-#
 # ** File: platform/patch_common/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.parallel_state.destroy_model_parallel()`
@@ -100,33 +88,6 @@
 #
 # * Worker Patch:
 # ===============
-# ** File: worker/patch_0_8_4/patch_metrics.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.spec_decode.metrics.AsyncMetricsCollector.init_tensors` and
-#       `vllm.spec_decode.metrics.AsyncMetricsCollector._copy_rejsample_metrics_async`
-#    Why:
-#       There are cuda hard code (torch.cuda.Stream) in `AsyncMetricsCollector.init_tensors` and
-#       `AsyncMetricsCollector._copy_rejsample_metrics_async`
-#    How：
-#       Replace it with the corresponding npu method
-#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
-#       https://github.com/vllm-project/vllm/pull/14411
-#    Future Plan:
-#       Revert it when the related pr is merged in vllm.
-#
-# ** File: worker/patch_0_8_4/patch_spec_decode_worker.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.spec_decode.spec_decode_worker.SpecDecodeWorker._configure_model_sampler_for_spec_decode`
-#    Why:
-#       vLLM `Remove Sampler from Model Code` so vllm-ascend needs a patch to run in v0.8.4.
-#    How：
-#       Use vLLM 0.8.4 method tp patch it.
-#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
-#       - https://github.com/vllm-project/vllm/pull/17084
-#       - https://github.com/vllm-project/vllm-ascend/pull/636
-#    Future Plan:
-#       Follow v0.8.4 version strategy.
-#
 # ** File: worker/patch_common/patch_metrics.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.spec_decode.metrics.AsyncMetricsCollector.maybe_collect_rejsample_metrics`
@@ -198,14 +159,3 @@
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm and vllm-ascend.
 #
-# ** File: worker/patch_0_8_4/patch_tritonplaceholder.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `triton` Module
-#    Why:
-#       Triton is not supported on npu currently, importing triton will break vllm-ascend
-#    How：
-#       ditto
-#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
-#       TritonPlaceholder is only available in vllm>0.8.4
-#    Future Plan:
-#       Revert it when branch main doesn't maintain v0.8.4.

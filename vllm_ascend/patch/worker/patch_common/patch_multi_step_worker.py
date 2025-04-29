@@ -22,7 +22,6 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.draft_model_runner import TP1DraftModelRunner
 
 
@@ -93,16 +92,14 @@ def set_include_gpu_probs_tensor(self) -> None:
     # Need include_gpu_probs_tensor for MultiSteoWorker
     if hasattr(self.model_runner.model, "sampler"):
         self.model_runner.model.sampler.include_gpu_probs_tensor = True
-    if not vllm_version_is("0.8.4"):
-        self.model_runner.sampler.include_gpu_probs_tensor = True
+    self.model_runner.sampler.include_gpu_probs_tensor = True
 
 
 def set_should_modify_greedy_probs_inplace(self) -> None:
     if hasattr(self.model_runner.model, "sampler"):
         self.model_runner.model.sampler.should_modify_greedy_probs_inplace = (
             True)
-    if not vllm_version_is("0.8.4"):
-        self.model_runner.sampler.should_modify_greedy_probs_inplace = True
+    self.model_runner.sampler.should_modify_greedy_probs_inplace = True
 
 
 MultiStepWorker.sampler_output = torch.inference_mode()(sampler_output)

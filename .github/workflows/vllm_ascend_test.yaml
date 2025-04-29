@@ -48,7 +48,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-arm64-npu-1, linux-arm64-npu-4]
-        vllm_verison: [main, v0.8.4]
+        vllm_verison: [main, v0.8.5]
     concurrency:
       group: >
         ${{ 
