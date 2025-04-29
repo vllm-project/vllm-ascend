@@ -18,6 +18,8 @@
 name: 'e2e test'
 
 on:
+  schedule:
+    - cron: '0 23 * * *'
   pull_request:
     branches:
       - 'main'
@@ -148,9 +150,7 @@ jobs:
               - "vllm_ascend/patch/worker/patch_common/patch_multi_step_worker.py"
 
       - name: Run vllm-project/vllm-ascend Speculative Decode test
-        env:
-          VLLM_USE_V1: 0
-        if: steps.filter_spec_decode.outputs.speculative_tests_changed == 'true'
+        if: steps.filter_spec_decode.outputs.speculative_tests_changed == 'true' || github.event_name == 'schedule'
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
             pytest -sv tests/singlecard/spec_decode/e2e/test_mtp_correctness.py  # it needs a clean process
