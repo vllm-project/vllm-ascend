@@ -20,7 +20,6 @@ import os
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
-import torch_npu  # noqa: F401
 import vllm.envs as envs
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
@@ -244,7 +243,6 @@ class NPUPlatform(Platform):
                                   timeout) -> None:
         from torch.distributed import ProcessGroup, is_hccl_available
         assert is_hccl_available()
-        import torch_npu  # noqa
         from torch_npu._C._distributed_c10d import ProcessGroupHCCL
         backend_options = ProcessGroupHCCL.Options()
         backend_options._timeout = timeout

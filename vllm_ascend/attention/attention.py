@@ -20,14 +20,9 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 
 import numpy as np
 import torch
-from torch.nn.functional import scaled_dot_product_attention
-
-try:
-    import torch_npu  # noqa: F401
-except ImportError:
-    print("Failed to import torch_npu.")
-
+import torch_npu
 import torchair._contrib.custom_torch_ops  # type: ignore  # noqa: F401
+from torch.nn.functional import scaled_dot_product_attention
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer,
                                               AttentionMetadata, AttentionType,
