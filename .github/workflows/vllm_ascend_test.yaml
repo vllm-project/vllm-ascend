@@ -114,7 +114,8 @@ jobs:
             pytest -sv tests/ops
             pytest -sv tests/compile
           else
-            pytest -sv tests/multicard/test_offline_inference_distributed.py
+            pytest -sv -k "QwQ" tests/multicard/test_offline_inference_distributed.py
+            pytest -sv -k "DeepSeek" tests/multicard/test_offline_inference_distributed.py
             pytest -sv tests/ops
             pytest -sv tests/compile
           fi
