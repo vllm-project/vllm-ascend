@@ -20,7 +20,7 @@ import re
 import struct
 import subprocess
 import time
-from typing import TYPE_CHECKING, List, Tuple, Union
+from typing import TYPE_CHECKING, Dict, List, Tuple, Union
 
 import torch
 import torch_npu
@@ -51,6 +51,7 @@ TORCH_DTYPE_TO_NPU_DTYPE = {
 
 # Get all device ips using hccn_tool
 HCCN_TOOL_PATH = envs.HCCN_PATH
+HCCN_CONF_PATH = envs.HCCN_CONF_PATH
 
 
 class KVTransferEngine:
@@ -457,26 +458,60 @@ class LLMDataDistConnector(KVConnectorBase):
 
 
 def get_device_ips():
+
+    def get_ips_from_hccn_conf():
+        device_ips: Dict[str, str] = {}
+        with open(HCCN_CONF_PATH, 'r') as fin:
+            for hccn_item in fin.readlines():
+                if hccn_item.strip().startswith('address_'):
+                    device_id, device_ip = hccn_item.split('=')
+                    device_id = device_id.split('_')[1]
+                    device_ips[device_id] = device_ip.strip()
+        return device_ips
+
     world_size = 8
     npu_info = subprocess.run(['npu-smi', 'info', '-m'],
                               stdout=subprocess.PIPE,
                               stderr=subprocess.PIPE,
                               universal_newlines=True)
-    if npu_info.returncode != 0 or not os.path.exists(HCCN_TOOL_PATH):
-        raise RuntimeError("No npu-smi/hccn_tool tools provided for NPU.")
-    npu_start_idx = int(
-        re.match(r'.*\n\t([0-9]+).*', npu_info.stdout).group(1))
+    if npu_info.returncode != 0:
+        raise RuntimeError("No npu-smi tools provided for NPU.")
+
+    match = re.match(r'.*\n\t([0-9]+).*', npu_info.stdout)
+    if match is None:
+        raise ValueError(
+            "Failed to extract NPU start index from npu-smi output.")
+    npu_start_idx = int(match.group(1))
+
     device_ip_list = []
-    for ip_offset in range(world_size):
-        cmd = [
-            HCCN_TOOL_PATH, '-i', f'{npu_start_idx + ip_offset}', '-ip', '-g'
-        ]
-        device_ip_info = subprocess.run(cmd,
-                                        stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE,
-                                        universal_newlines=True)
-        device_ip = re.match(r'ipaddr:(.*)\n', device_ip_info.stdout).group(1)
-        device_ip_list.append(device_ip)
+    if os.path.exists(HCCN_TOOL_PATH):
+        for ip_offset in range(world_size):
+            cmd = [
+                HCCN_TOOL_PATH, '-i', f'{npu_start_idx + ip_offset}', '-ip',
+                '-g'
+            ]
+            device_ip_info = subprocess.run(cmd,
+                                            stdout=subprocess.PIPE,
+                                            stderr=subprocess.PIPE,
+                                            universal_newlines=True)
+            match = re.match(r'ipaddr:(.*)\n', device_ip_info.stdout)
+            if match is None:
+                raise ValueError(
+                    "Failed to extract device ip from hccn_tool output.")
+            device_ip = match.group(1)
+            device_ip_list.append(device_ip)
+
+    elif os.path.exists(HCCN_CONF_PATH):
+        device_ips = get_ips_from_hccn_conf()
+        for ip_offset in range(world_size):
+            device_ip = device_ips[str(npu_start_idx + ip_offset)]
+            device_ip_list.append(device_ip)
+
+    else:
+        raise RuntimeError(
+            "Failed to find information for rank_table, please check the "
+            "existence of hccn_tool and hccn.conf")
+
     return device_ip_list
 
 
