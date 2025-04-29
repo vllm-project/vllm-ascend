@@ -132,16 +132,16 @@ def gather_cache_torch(
         seq_starts: Optional[torch.Tensor] = None  # Optional: [BATCH]
 ) -> None:
     """
-        从源缓存中收集序列数据到目标tensor
-        Args:
-        src_cache: 源缓存tensor [NUM_BLOCKS, BLOCK_SIZE, HEAD, ENTRIES]
-        dst: 目标tensor [TOT_TOKENS, ENTRIES]
-        block_table: 块表映射 [BATCH, BLOCK_INDICES]
-        cu_seq_lens: 累积序列长度 [BATCH+1]
-        batch_size: 批大小
-        seq_starts: 可选,每个batch的起始偏移 [BATCH]
-        """
-    # 基本参数检查
+    Gather sequence data from source cache to destination tensor
+    Args:
+        src_cache: Source cache tensor [NUM_BLOCKS, BLOCK_SIZE, HEAD, ENTRIES]
+        dst: Destination tensor [TOT_TOKENS, ENTRIES]
+        block_table: Block table mapping [BATCH, BLOCK_INDICES]
+        cu_seq_lens: Cumulative sequence lengths [BATCH+1]
+        batch_size: Batch size
+        seq_starts: Optional, starting offsets for each batch [BATCH]
+    """
+    # Basic parameter checks
     assert src_cache.dtype == dst.dtype, "src_cache and dst must have same dtype"
     assert block_table.dtype == torch.int32, "block_table must be int32"
     assert cu_seq_lens.dtype == torch.int32, "cu_seq_lens must be int32"
@@ -150,9 +150,9 @@ def gather_cache_torch(
         assert seq_starts.dtype == torch.int32, "seq_starts must be int32"
 
     block_size = src_cache.size(1)
-    # 对每个batch进行处理
+    # Process each batch
     for bid in range(batch_size):
-        # 获取当前batch的序列起始和结束位置
+        # Get sequence start and end positions for current batch
         seq_start = cu_seq_lens[bid].item()
         seq_end = cu_seq_lens[bid + 1].item()
         seq_len = seq_end - seq_start
@@ -160,29 +160,29 @@ def gather_cache_torch(
         if seq_len == 0:
             continue
 
-        # 计算需要的block数
+        # Calculate required number of blocks
         tot_blocks = (seq_len + block_size - 1) // block_size
 
-        # 如果有seq_starts,计算block偏移
+        # Calculate block offset if seq_starts is provided
         offset = 0
         if seq_starts is not None:
             offset = seq_starts[bid].item() // block_size
 
-        # 获取当前batch的block table
+        # Get block table for current batch
         batch_block_table = block_table[bid, offset:offset + tot_blocks]
-        # 计算完整blocks和最后一个partial block
+        # Calculate complete blocks and last partial block
         full_blocks = tot_blocks - 1 if seq_len % block_size else tot_blocks
         partial_block_size = seq_len % block_size if seq_len % block_size else 0
-        # 复制完整blocks
+        # Copy complete blocks
         dst_start = seq_start
         for i in range(full_blocks):
             block_id = batch_block_table[i].item()
-            # 复制整个block，移除HEAD维度
+            # Copy entire block, remove HEAD dimension
             dst[dst_start:dst_start +
                 block_size] = src_cache[block_id].squeeze(1)
             dst_start += block_size
 
-        # 处理最后一个不完整block
+        # Handle last incomplete block
         if partial_block_size > 0:
             block_id = batch_block_table[full_blocks].item()
             dst[dst_start:dst_start + partial_block_size] = \
