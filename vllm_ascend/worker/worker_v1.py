@@ -274,3 +274,6 @@ class NPUWorker(WorkerBase):
                     torch_profiler_trace_dir))
         else:
             return None
+
+    def execute_dummy_batch(self) -> None:
+        self.model_runner._dummy_run(1)
