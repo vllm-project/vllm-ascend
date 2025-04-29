@@ -31,15 +31,12 @@ try:
     # register custom ops into torch_library here
     import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
 
-except ImportError as e:
-    if not str(
-            e
-    ) == "dynamic module does not define module export function (PyInit_vllm_ascend_C)":
-        logging.warning(
-            "Warning: Failed to register custom ops, all custom ops will be disabled"
-        )
-    else:
-        CUSTOM_OP_ENABLED = True
+except ImportError:
+    logging.warning(
+        "Warning: Failed to register custom ops, all custom ops will be disabled"
+    )
+else:
+    CUSTOM_OP_ENABLED = True
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -180,9 +177,10 @@ class NPUPlatform(Platform):
         if envs.VLLM_USE_V1:
             # Activate custom ops for v1.
             vllm_config.compilation_config.custom_ops = ["all"]
-            additional_config = vllm_config.additional_config
             # If ascend_scheduler_config exists in additional_config,
             # extents original scheduler_config to use AscendScheduler.
+
+            additional_config = vllm_config.additional_config
             if additional_config and additional_config.get(
                     "ascend_scheduler_config", None) is not None:
                 additional_scheduler_config = additional_config.get(
