@@ -1378,30 +1378,44 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                     **seqlen_agnostic_kwargs,
                     **model_kwargs)
 
-            # Compute the logits in the last pipeline stage.
-            if not get_pp_group().is_last_rank:
-                if (self.is_driver_worker
-                        and hidden_or_intermediate_states is not None
-                        and isinstance(hidden_or_intermediate_states,
-                                       IntermediateTensors)
-                        and self.observability_config is not None and
-                        self.observability_config.collect_model_forward_time):
-                    model_forward_end.synchronize()
-                    model_forward_time = model_forward_start.elapsed_time(
-                        model_forward_end)
-                    orig_model_forward_time = 0.0
-                    if intermediate_tensors is not None:
-                        orig_model_forward_time = intermediate_tensors.tensors.get(
-                            "model_forward_time", torch.tensor(0.0)).item()
-                    hidden_or_intermediate_states.tensors[
-                        "model_forward_time"] = (
-                            torch.tensor(model_forward_time +
-                                         orig_model_forward_time))
-                return hidden_or_intermediate_states
-            # TODO: remove the synchronize here
-            torch.npu.synchronize()
-            logits = self.model.compute_logits(hidden_or_intermediate_states,
-                                               model_input.sampling_metadata)
+
+        # Sending KV cache in distributed KV cache transfer setting
+        # NOTE: the send operation is non-blocking
+        if self.need_send_kv(model_input, kv_caches):
+            get_kv_transfer_group().send_kv_caches_and_hidden_states(
+                # model_executable is used to know which layer the current
+                # worker is working on, so that we can send KV for only those
+                # layers.
+                model_executable,
+                model_input,
+                kv_caches,
+                hidden_or_intermediate_states,
+            )
+
+        # Compute the logits in the last pipeline stage.
+        if not get_pp_group().is_last_rank:
+            if (self.is_driver_worker
+                    and hidden_or_intermediate_states is not None
+                    and isinstance(hidden_or_intermediate_states,
+                                    IntermediateTensors)
+                    and self.observability_config is not None and
+                    self.observability_config.collect_model_forward_time):
+                model_forward_end.synchronize()
+                model_forward_time = model_forward_start.elapsed_time(
+                    model_forward_end)
+                orig_model_forward_time = 0.0
+                if intermediate_tensors is not None:
+                    orig_model_forward_time = intermediate_tensors.tensors.get(
+                        "model_forward_time", torch.tensor(0.0)).item()
+                hidden_or_intermediate_states.tensors[
+                    "model_forward_time"] = (
+                        torch.tensor(model_forward_time +
+                                        orig_model_forward_time))
+            return hidden_or_intermediate_states
+        # TODO: remove the synchronize here
+        torch.npu.synchronize()
+        logits = self.model.compute_logits(hidden_or_intermediate_states,
+                                            model_input.sampling_metadata)
 
         if not self.is_driver_worker:
             return []
