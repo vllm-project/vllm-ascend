@@ -69,6 +69,8 @@ if TYPE_CHECKING:
 
 TModelInputForNPU = TypeVar('TModelInputForNPU', bound="ModelInputForNPU")
 ENCODER_NUM = 0
+# if True, allow tensor initialization and casting with internal format (e.g., NZ)
+torch.npu.config.allow_internal_format = True
 
 
 @dataclass(frozen=True)
@@ -864,10 +866,13 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
             self.vllm_config.compilation_config.max_capture_size
 
         self.enable_graph_mode = False
+        self.use_cached_npu_graph = False
         additional_config = vllm_config.additional_config
         if additional_config:
             self.enable_graph_mode = additional_config.get(
                 "enable_graph_mode", False)
+            self.use_cached_npu_graph = additional_config.get(
+                "use_cached_npu_graph", False)
 
         self.has_inner_state = model_config.has_inner_state
 
@@ -981,12 +986,20 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
             config.experimental_config.frozen_parameter = True
             config.experimental_config.tiling_schedule_optimize = True
             torch.npu.set_compile_mode(jit_compile=False)
-            self.compile_model = torchair.inference.cache_compile(
-                self.model.forward,
-                dynamic=True,
-                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                config=config,
-                ge_cache=False)
+            if not self.use_cached_npu_graph:
+                npu_backend = torchair.get_npu_backend(compiler_config=config)
+                self.compile_model = torch.compile(
+                    self.model,
+                    dynamic=True,
+                    fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    backend=npu_backend)
+            else:
+                self.compile_model = torchair.inference.cache_compile(
+                    self.model.forward,
+                    dynamic=True,
+                    fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    config=config,
+                    ge_cache=False)
 
     def save_sharded_state(
         self,

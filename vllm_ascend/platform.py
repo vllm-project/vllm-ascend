@@ -124,7 +124,10 @@ class NPUPlatform(Platform):
         enforce_eager = True
         logger.warning(
             "NPU compilation support pending. Will be available in future CANN and "
-            "torch_npu releases. Using default: enforce_eager=True")
+            "torch_npu releases. NPU graph mode is currently experimental and disabled "
+            "by default. You can just adopt additional_config={'enable_graph_mode': True} "
+            "to serve deepseek models with NPU graph mode on vllm-ascend with V0 engine. "
+        )
 
         if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:
             logger.info("Compilation disabled, using eager mode by default")
@@ -149,6 +152,11 @@ class NPUPlatform(Platform):
                 logger.warning(
                     "enable_graph_mode is not supported because the version of torch is too low, forcing close enable_graph_mode"
                 )
+                vllm_config.additional_config["enable_graph_mode"] = False
+            if enable_graph_mode and envs.VLLM_USE_V1:
+                logger.warning(
+                    "NPU graph mode is still experimental and not supported for V1 currently, "
+                    "it has been disabled automatically.")
                 vllm_config.additional_config["enable_graph_mode"] = False
 
         parallel_config = vllm_config.parallel_config
