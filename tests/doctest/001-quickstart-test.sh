@@ -27,38 +27,26 @@ function wait_url_ready() {
   i=0
   while true; do
     _info "===> Waiting for ${serve_name} to be ready...${i}s"
-    i=$((i + ${CURL_COOLDOWN}))
-
+    i=$((i + CURL_COOLDOWN))
     set +e
-
-    curl \
-      --silent \
-      --max-time "$CURL_TIMEOUT" \
-      ${url} \
-      >/dev/null
-
+    curl --silent --max-time "$CURL_TIMEOUT" "${url}" >/dev/null
     result=$?
-
     set -e
-
     if [ "$result" -eq 0 ]; then
       break
     fi
-
     if [ "$i" -gt "$CURL_MAX_TRIES" ]; then
       _info "===> \$CURL_MAX_TRIES exceeded waiting for ${serve_name} to be ready"
       return 1
     fi
-
     sleep "$CURL_COOLDOWN"
   done
-
   _info "===> ${serve_name} is ready."
 }
 
 function wait_for_exit() {
   local VLLM_PID="$1"
-  while kill -0 $VLLM_PID; do
+  while kill -0 "$VLLM_PID"; do
     _info "===> Wait for ${VLLM_PID} to exit."
     sleep 1
   done
@@ -71,7 +59,7 @@ function simple_test() {
 
 function quickstart_offline_test() {
   export VLLM_USE_MODELSCOPE=true
-  python3 ${SCRIPT_DIR}/../../examples/offline_inference_npu.py
+  python3 "${SCRIPT_DIR}/../../examples/offline_inference_npu.py"
 }
 
 function quickstart_online_test() {
@@ -86,10 +74,10 @@ function quickstart_online_test() {
         "max_tokens": 5,
         "temperature": 0
     }' | python3 -m json.tool
-  ps -ef | grep "vllm serve" | grep -v grep
-  VLLM_PID=$(ps -ef | grep "vllm serve" | grep -v grep | awk '{print $2}')
-  kill -2 $VLLM_PID
-  wait_for_exit $VLLM_PID
+  VLLM_PID=$(pgrep -f "vllm serve")
+  _info "===> Try kill -2 ${VLLM_PID} to exit."
+  kill -2 "$VLLM_PID"
+  wait_for_exit "$VLLM_PID"
 }
 
 _info "====> Start simple_test"

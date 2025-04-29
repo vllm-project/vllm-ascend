@@ -146,9 +146,8 @@ vLLM is serving as background process, you can use `kill -2 $VLLM_PID` to stop t
 it's equal to `Ctrl-C` to stop foreground vLLM process:
 
 ```bash
-ps -ef | grep "/.venv/bin/vllm serve" | grep -v grep
-VLLM_PID=`ps -ef | grep "/.venv/bin/vllm serve" | grep -v grep | awk '{print $2}'`
-kill -2 $VLLM_PID
+  VLLM_PID=$(pgrep -f "vllm serve")
+  kill -2 "$VLLM_PID"
 ```
 
 You will see output as below:
