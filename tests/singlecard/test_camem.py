@@ -25,11 +25,6 @@ from vllm.utils import GiB_bytes
 from tests.utils import fork_new_process_for_each_test
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 
-try:
-    import torch_npu  # noqa: F401
-except ImportError:
-    print("Failed to import torch_npu.")
-
 
 @fork_new_process_for_each_test
 def test_basic_camem():
@@ -53,9 +48,9 @@ def test_basic_camem():
     output = x + y + z
     assert torch.allclose(output, torch.ones_like(output) * 3)
 
-    free_bytes = torch_npu.npu.mem_get_info()[0]
+    free_bytes = torch.npu.mem_get_info()[0]
     allocator.sleep()
-    free_bytes_after_sleep = torch_npu.npu.mem_get_info()[0]
+    free_bytes_after_sleep = torch.npu.mem_get_info()[0]
     assert free_bytes_after_sleep > free_bytes
     allocator.wake_up()
 
@@ -67,7 +62,7 @@ def test_basic_camem():
 @fork_new_process_for_each_test
 def test_end_to_end():
     os.environ["VLLM_USE_V1"] = "0"
-    free, total = torch_npu.npu.mem_get_info()
+    free, total = torch.npu.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
     llm = LLM("Qwen/Qwen2.5-0.5B-Instruct", enable_sleep_mode=True)
     prompt = "How are you?"
@@ -79,7 +74,7 @@ def test_end_to_end():
     # test sleep level 1 here.
     llm.sleep(level=1)
 
-    free_gpu_bytes_after_sleep, total = torch_npu.npu.mem_get_info()
+    free_gpu_bytes_after_sleep, total = torch.npu.mem_get_info()
     used_bytes = total - free_gpu_bytes_after_sleep - used_bytes_baseline
     # now the memory usage should be less than the model weights
     # (0.5B model, 1GiB weights)

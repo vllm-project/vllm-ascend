@@ -19,7 +19,6 @@ from typing import Optional, Union
 
 import torch
 import torch.distributed as dist
-import torch_npu  # noqa: F401
 from torch.distributed import ProcessGroup, ReduceOp
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import logger

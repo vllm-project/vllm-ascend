@@ -20,7 +20,6 @@ import multiprocessing
 import os
 
 import torch
-import torch_npu  # noqa: F401
 from vllm.distributed.parallel_state import (get_world_group,
                                              init_distributed_environment)
 from vllm.utils import update_environment_variables
