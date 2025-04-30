@@ -47,13 +47,13 @@ from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.sample.sampler import Sampler
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -291,11 +291,7 @@ class NPUModelRunner:
         self.attn_mask_builder = AttentionMaskBuilder.initialize_from_len(
             self.attn_mask_len, self.dtype)
 
-        if vllm_version_is("0.8.4"):
-            self.sampler = None
-        else:
-            from vllm.v1.sample.sampler import Sampler
-            self.sampler = Sampler()
+        self.sampler = Sampler()
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -346,34 +342,19 @@ class NPUModelRunner:
                 generator.manual_seed(sampling_params.seed)
             else:
                 generator = None
-            if vllm_version_is("0.8.4"):
-                self.requests[req_id] = CachedRequestState(
-                    req_id=req_id,
-                    prompt_token_ids=new_req_data.prompt_token_ids,
-                    prompt=new_req_data.prompt,
-                    mm_inputs=new_req_data.mm_inputs,
-                    mm_positions=new_req_data.mm_positions,
-                    sampling_params=sampling_params,
-                    generator=generator,
-                    block_ids=new_req_data.block_ids,
-                    num_computed_tokens=new_req_data.num_computed_tokens,
-                    output_token_ids=[],
-                    lora_request=new_req_data.lora_request,
-                )
-            else:
-                # the prompt removed by: https://github.com/vllm-project/vllm/pull/17214
-                self.requests[req_id] = CachedRequestState(
-                    req_id=req_id,
-                    prompt_token_ids=new_req_data.prompt_token_ids,
-                    mm_inputs=new_req_data.mm_inputs,
-                    mm_positions=new_req_data.mm_positions,
-                    sampling_params=sampling_params,
-                    generator=generator,
-                    block_ids=new_req_data.block_ids,
-                    num_computed_tokens=new_req_data.num_computed_tokens,
-                    output_token_ids=[],
-                    lora_request=new_req_data.lora_request,
-                )
+
+            self.requests[req_id] = CachedRequestState(
+                req_id=req_id,
+                prompt_token_ids=new_req_data.prompt_token_ids,
+                mm_inputs=new_req_data.mm_inputs,
+                mm_positions=new_req_data.mm_positions,
+                sampling_params=sampling_params,
+                generator=generator,
+                block_ids=new_req_data.block_ids,
+                num_computed_tokens=new_req_data.num_computed_tokens,
+                output_token_ids=[],
+                lora_request=new_req_data.lora_request,
+            )
 
             req_ids_to_add.append(req_id)
 
@@ -666,17 +647,10 @@ class NPUModelRunner:
 
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
-        if vllm_version_is("0.8.4"):
-            sampler_output = self.model.sample(
-                logits=logits,
-                sampling_metadata=sampling_metadata,
-            )
-        else:
-            assert self.sampler is not None
-            sampler_output = self.sampler(
-                logits=logits,
-                sampling_metadata=sampling_metadata,
-            )
+        sampler_output = self.sampler(
+            logits=logits,
+            sampling_metadata=sampling_metadata,
+        )
 
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
