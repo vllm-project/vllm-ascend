@@ -12,7 +12,7 @@ export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
 
 kv_transfer_config='{ \
-"kv_connector": "AscendHcclConnector", \
+"kv_connector": "AscendSimpleConnector", \
 "kv_buffer_device": "npu", \
 "kv_role": "kv_consumer", \
 "kv_parallel_size": 8, \

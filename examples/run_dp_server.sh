@@ -14,7 +14,8 @@ export VLLM_DP_RANK=0
 export VLLM_DP_MASTER_IP="2.0.0.0"
 export VLLM_DP_MASTER_PORT=40001
 export VLLM_DP_PROXY_IP="2.0.0.0"
-export VLLM_DP_PROXY_PORT=30003
+export VLLM_DP_PROXY_PORT=30002
+export VLLM_DP_MONITOR_PORT=30003
 export VLLM_HTTP_PORT=20001
 
 vllm serve /data/weights/Qwen2.5-0.5B-Instruct \

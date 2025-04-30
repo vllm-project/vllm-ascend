@@ -30,25 +30,17 @@ from vllm.logger import init_logger
 from vllm.utils import get_ip
 
 import vllm_ascend.envs as envs
+from vllm_ascend.distributed.kv_transfer.utils import NPU_DTYPE_TO_TORCH_DTYPE
 
 import llm_datadist  # type: ignore
 
 logger = init_logger(__name__)
 
 
-NPU_DTYPE_TO_TORCH_DTYPE = {
-    llm_datadist.DataType.DT_FLOAT16: torch.half,
-    llm_datadist.DataType.DT_FLOAT16: torch.float16,
-    llm_datadist.DataType.DT_BF16: torch.bfloat16,
-    llm_datadist.DataType.DT_FLOAT: torch.float,
-    llm_datadist.DataType.DT_FLOAT: torch.float32,
-    llm_datadist.DataType.DT_INT8: torch.int8,
-    llm_datadist.DataType.DT_INT64: torch.int64,
-    llm_datadist.DataType.DT_INT32: torch.int32,
-}
 
 
-class LLMDataDistPipe(KVPipeBase):
+
+class SimplePipe(KVPipeBase):
 
     def __init__(
         self,
@@ -97,18 +89,6 @@ class LLMDataDistPipe(KVPipeBase):
             _, ret = self.data_dist.link_clusters([self.cluster], 20000)
             logger.info(f"local_rank {self.local_rank} link, ret={ret}")
 
-        # Initialize zmq socket and register to proxy.
-        # Note that only NPU 0 of each P/D instance register to proxy.
-        if not hostname:
-            hostname = get_ip()  # Get ip of current host.
-        port = kv_transfer_config.kv_port + port_offset
-        if port == 0:
-            raise ValueError("Port cannot be 0")
-        self._hostname = hostname
-        self._port = port
-        # Each card corresponds to a ZMQ address.
-        self.zmq_address = f"{self._hostname}:{self._port}"
-
         # If `proxy_ip` or `proxy_port` is `""`,
         # then the ping thread will not be enabled.
         proxy_ip = self.config.get_from_extra_config("proxy_ip", "")
@@ -118,12 +98,23 @@ class LLMDataDistPipe(KVPipeBase):
         else:
             self.proxy_address = proxy_ip + ":" + proxy_port
 
-        self.context = zmq.Context()
-        self.router_socket = self.context.socket(zmq.ROUTER)
-        self.router_socket.bind(f"tcp://{self.zmq_address}")
-
         self._register_thread = None
         if port_offset == 0 and self.proxy_address != "":
+            # Initialize zmq socket and register to proxy.
+            # Note that only NPU 0 of each P/D instance register to proxy.
+            if not hostname:
+                hostname = get_ip()  # Get ip of current host.
+            port = kv_transfer_config.kv_port + port_offset
+            if port == 0:
+                raise ValueError("Port cannot be 0")
+            self._hostname = hostname
+            self._port = port
+            # Each card corresponds to a ZMQ address.
+            self.zmq_address = f"{self._hostname}:{self._port}"
+
+            self.context = zmq.Context()
+            self.router_socket = self.context.socket(zmq.ROUTER)
+            self.router_socket.bind(f"tcp://{self.zmq_address}")
             # The `http_port` must be consistent with the serving port of OpenAI.
             self.http_address = (
                 f"{self._hostname}:"

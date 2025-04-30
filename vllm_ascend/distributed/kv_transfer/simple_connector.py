@@ -26,9 +26,9 @@ from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 import vllm.envs as vllm_envs
 
-from vllm_ascend.distributed.kv_transfer.llmdatadist_pipe import LLMDataDistPipe
-from vllm_ascend.distributed.kv_transfer.llmdatadist_buffer import (
-    LLMDataDistBuffer,
+from vllm_ascend.distributed.kv_transfer.simple_pipe import SimplePipe
+from vllm_ascend.distributed.kv_transfer.simple_buffer import (
+    SimpleBuffer,
 )
 
 if TYPE_CHECKING:
@@ -37,7 +37,7 @@ if TYPE_CHECKING:
 import llm_datadist  # type: ignore
 
 
-class LLMDataDistConnector(KVConnectorBase):
+class SimpleConnector(KVConnectorBase):
 
     def __init__(
         self,
@@ -46,6 +46,7 @@ class LLMDataDistConnector(KVConnectorBase):
         config: VllmConfig,
     ):
         self.config = config
+        self.model_config = config.model_config.hf_config
         self.tp_size = config.parallel_config.tensor_parallel_size
         self.rank = rank
         self.local_rank = local_rank
@@ -55,28 +56,28 @@ class LLMDataDistConnector(KVConnectorBase):
             self.config.parallel_config
         )
 
-        self.producer_data_pipe: Optional[LLMDataDistPipe]
-        self.consumer_data_pipe: Optional[LLMDataDistPipe]
+        self.producer_data_pipe: Optional[SimplePipe]
+        self.consumer_data_pipe: Optional[SimplePipe]
 
-        self.producer_buffer: Optional[LLMDataDistBuffer] = None
-        self.consumer_buffer: Optional[LLMDataDistBuffer] = None
+        self.producer_buffer: Optional[SimpleBuffer] = None
+        self.consumer_buffer: Optional[SimpleBuffer] = None
 
         if self.config.kv_transfer_config.is_kv_producer:
-            self.producer_data_pipe = LLMDataDistPipe(
+            self.producer_data_pipe = SimplePipe(
                 local_rank=local_rank,
                 kv_transfer_config=config.kv_transfer_config,
                 hostname="",
                 port_offset=rank,
             )
-            self.producer_buffer = LLMDataDistBuffer(self.producer_data_pipe)
+            self.producer_buffer = SimpleBuffer(self.producer_data_pipe)
         else:
-            self.consumer_data_pipe = LLMDataDistPipe(
+            self.consumer_data_pipe = SimplePipe(
                 local_rank=local_rank,
                 kv_transfer_config=config.kv_transfer_config,
                 hostname="",
                 port_offset=rank,
             )
-            self.consumer_buffer = LLMDataDistBuffer(self.consumer_data_pipe)
+            self.consumer_buffer = SimpleBuffer(self.consumer_data_pipe)
 
     def select(
         self,
@@ -121,7 +122,7 @@ class LLMDataDistConnector(KVConnectorBase):
         start_layer = model_executable.model.start_layer
         end_layer = model_executable.model.end_layer
 
-        model_config = model_executable.model.config
+        model_config = self.model_config
         num_heads = int(model_config.num_key_value_heads / self.tp_size)
         hidden_size = model_config.hidden_size
         num_attention_heads = model_config.num_attention_heads
@@ -161,7 +162,7 @@ class LLMDataDistConnector(KVConnectorBase):
                 # - input_tokens[num_prefill_tokens:] contains decode tokens.
                 logger.warning(
                     "You have some decode requests while using "
-                    "LLMDataDistConnector. Their KVCache won't be sent."
+                    "SimpleConnector. Their KVCache won't be sent."
                 )
                 break
 
@@ -212,7 +213,7 @@ class LLMDataDistConnector(KVConnectorBase):
     ]:
         bypass_model_exec = True
 
-        model_config = model_executable.model.config
+        model_config = self.model_config
 
         # get model config
         start_layer = model_executable.model.start_layer

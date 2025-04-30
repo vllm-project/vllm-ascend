@@ -26,21 +26,10 @@ from vllm.distributed.kv_transfer.kv_lookup_buffer.base import (
 )
 from vllm.logger import init_logger
 
-from vllm_ascend.distributed.kv_transfer.llmdatadist_pipe import LLMDataDistPipe
+from vllm_ascend.distributed.kv_transfer.simple_pipe import SimplePipe
+from vllm_ascend.distributed.kv_transfer.utils import TORCH_DTYPE_TO_NPU_DTYPE
 
 logger = init_logger(__name__)
-
-
-TORCH_DTYPE_TO_NPU_DTYPE = {
-    torch.half: llm_datadist.DataType.DT_FLOAT16,
-    torch.float16: llm_datadist.DataType.DT_FLOAT16,
-    torch.bfloat16: llm_datadist.DataType.DT_BF16,
-    torch.float: llm_datadist.DataType.DT_FLOAT,
-    torch.float32: llm_datadist.DataType.DT_FLOAT,
-    torch.int8: llm_datadist.DataType.DT_INT8,
-    torch.int64: llm_datadist.DataType.DT_INT64,
-    torch.int32: llm_datadist.DataType.DT_INT32,
-}
 
 
 # Hash a string into a int32 value.
@@ -50,8 +39,8 @@ def int32_hash(data):
     return zlib.adler32(data)
 
 
-class LLMDataDistBuffer(KVLookupBufferBase):
-    def __init__(self, data_pipe: LLMDataDistPipe):
+class SimpleBuffer(KVLookupBufferBase):
+    def __init__(self, data_pipe: SimplePipe):
         self.data_pipe = data_pipe
         # Consumer buffer need these information to construct receiving buffer.
         self.num_layers: int = None
@@ -221,7 +210,7 @@ class LLMDataDistBuffer(KVLookupBufferBase):
             hidden = hidden.view(num_tokens, self.hidden_size)
         except Exception as e:
             logger.warning(
-                f"Faile to receive kv cache and hidden states of request: {orig_req_id}"
+                f"Faile to receive kv cache and hidden states of request: {orig_req_id} "
                 f"Error is {str(e)}"
             )
             return [None, None, None, None]

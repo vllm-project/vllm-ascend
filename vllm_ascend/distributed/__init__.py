@@ -23,5 +23,5 @@ KVConnectorFactory.register_connector(
     "LLMDataDistConnector")
 
 KVConnectorFactory.register_connector(
-    "AscendP2PConnector", "vllm_ascend.distributed.kv_transfer.p2p_connector",
-    "LLMDataDistConnector")
+    "AscendSimpleConnector", "vllm_ascend.distributed.kv_transfer.simple_connector",
+    "SimpleConnector")
