@@ -15,7 +15,5 @@ torchvision<0.21.0
 wheel
 
 # requirements for disaggregated prefill
-zmq
 msgpack
-aiohttp
 quart
