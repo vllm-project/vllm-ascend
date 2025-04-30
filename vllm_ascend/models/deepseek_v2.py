@@ -238,7 +238,6 @@ class CustomDeepseekV2MoE(nn.Module):
 
 =======
         if attn_metadata is None:
-            # profile / dummy run
             is_prefill = True
         else:
             is_prefill = True if attn_metadata.num_prefills > 0 else False

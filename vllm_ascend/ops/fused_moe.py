@@ -30,6 +30,7 @@ from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
 
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
+import vllm_ascend.envs as envs
 
 
 def fused_experts_with_mc2(
@@ -426,7 +427,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.local_batch_size = self.global_batch_size // self.ep_size
 
-        if os.environ.get("VLLM_ENABLE_MC2") == "1":
+        if envs.VLLM_ENABLE_MC2 == "1":
             # all to all comm is only enabled in MC2 mode
             try:
                 device_group = ep_group.device_group
