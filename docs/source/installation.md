@@ -7,6 +7,7 @@ This document describes how to install vllm-ascend manually.
 - OS: Linux
 - Python: >= 3.9, < 3.12
 - A hardware with Ascend NPU. It's usually the Atlas 800 A2 series.
+- Firmware: Ascend HDK >= 24.1RC1
 - Software:
 
     | Software     | Supported version | Note                                   |
@@ -119,7 +120,7 @@ First install system dependencies:
 
 ```bash
 apt update  -y
-apt install -y gcc g++ libnuma-dev
+apt install -y gcc g++ libnuma-dev git
 ```
 
 You can install `vllm` and `vllm-ascend` from **pre-built wheel**:
@@ -269,5 +270,5 @@ Prompt: 'The future of AI is', Generated text: ' not bright\n\nThere is no doubt
 
 Get more performance gains by optimizing Python and torch-npu with the Bisheng compiler, please follow these official turtorial:
 
-[Optimizing Python with Bisheng](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html)
-[Optimizing torch-npu with Bisheng](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0058.html)
+- [Optimizing Python with Bisheng](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html)
+- [Optimizing torch-npu with Bisheng](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0058.html)
