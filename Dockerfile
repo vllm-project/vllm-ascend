@@ -31,16 +31,16 @@ RUN apt-get update -y && \
 
 WORKDIR /workspace
 
-COPY . /workspace/vllm-ascend/
+COPY . /vllm-workspace/vllm-ascend/
 
 RUN pip config set global.index-url ${PIP_INDEX_URL}
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_TAG=v0.8.5
-RUN git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /workspace/vllm
+RUN git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /vllm-workspace/vllm
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
-RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -v -e /workspace/vllm/ --extra-index https://download.pytorch.org/whl/cpu/ && \
+RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -v -e /vllm-workspace/vllm/ --extra-index https://download.pytorch.org/whl/cpu/ && \
     python3 -m pip uninstall -y triton && \
     python3 -m pip cache purge
 
@@ -49,7 +49,7 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -v -e /workspace/vllm/ --e
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib && \
-    python3 -m pip install -v -e /workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
+    python3 -m pip install -v -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
     python3 -m pip cache purge
 
 # Install modelscope (for fast download) and ray (for multinode)
