@@ -157,7 +157,6 @@ class CustomDeepseekV2MoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         if attn_metadata is None:
-            # profile / dummy run
             is_prefill = True
         else:
             is_prefill = True if attn_metadata.num_prefills > 0 else False
