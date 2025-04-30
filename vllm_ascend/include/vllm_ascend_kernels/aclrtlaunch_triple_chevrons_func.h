@@ -1,4 +1,5 @@
 
+<<<<<<< HEAD
 #ifndef HEADER_ACLRTLAUNCH_ADVANCESTEPFLASHATTNKERNEL_HKERNEL_H_
 #define HEADER_ACLRTLAUNCH_ADVANCESTEPFLASHATTNKERNEL_HKERNEL_H_
 
@@ -14,6 +15,8 @@ inline uint32_t AdvanceStepFlashAttnKernel(uint32_t blockDim, void* hold, void* 
 
 #endif
 
+=======
+>>>>>>> 4361408 (Use git rebase to fit upstream/main)
 #ifndef HEADER_ACLRTLAUNCH_ROPE_CUSTOM_FALSE_BFLOAT16_T_HKERNEL_H_
 #define HEADER_ACLRTLAUNCH_ROPE_CUSTOM_FALSE_BFLOAT16_T_HKERNEL_H_
 
