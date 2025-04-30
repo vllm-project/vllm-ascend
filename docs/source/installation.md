@@ -134,6 +134,15 @@ pip install vllm==|pip_vllm_version|
 pip install vllm-ascend==|pip_vllm_ascend_version| --extra-index https://download.pytorch.org/whl/cpu/
 ```
 
+**Optional**
+Install MindIE Turbo for Performance acceleration:
+
+```{code-block} bash
+   :substitutions:
+# Install MindIE Turbo
+pip install vllm-ascend[mindie_turbo]==|pip_vllm_ascend_version| --extra-index https://download.pytorch.org/whl/cpu/
+```
+
 :::{dropdown} Click here to see "Build from source code"
 or build from **source code**:
 
@@ -149,6 +158,15 @@ VLLM_TARGET_DEVICE=empty pip install . --extra-index https://download.pytorch.or
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 pip install -e . --extra-index https://download.pytorch.org/whl/cpu/
+```
+
+**Optional**
+Install MindIE Turbo for Performance acceleration:
+
+```{code-block} bash
+   :substitutions:
+# Install MindIE Turbo
+pip install mindie_turbo
 ```
 :::
 
@@ -254,3 +272,10 @@ Prompt: 'The president of the United States is', Generated text: ' a very import
 Prompt: 'The capital of France is', Generated text: ' Paris. The oldest part of the city is Saint-Germain-des-Pr'
 Prompt: 'The future of AI is', Generated text: ' not bright\n\nThere is no doubt that the evolution of AI will have a huge'
 ```
+
+### Compile Enhancement
+
+Get more performance gains by optimizing Python and torch-npu with the Bisheng compiler, please follow these official turtorial:
+
+[Optimizing Python with Bisheng](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html)
+[Optimizing torch-npu with Bisheng](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0058.html)
