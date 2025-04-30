@@ -12,12 +12,12 @@ import os
 import time
 from multiprocessing import Event, Process
 
-
 kv_connector_extra_config = {
-    "prompt_device_ips": ["1.2.3.1", "1.2.3.2"], 
+    "prompt_device_ips": ["1.2.3.1", "1.2.3.2"],
     "decode_device_ips": ["1.2.3.9", "1.2.3.10"],
     "llmdatadist_comm_port": 26000,
 }
+
 
 def clean_up():
     import gc
@@ -48,8 +48,6 @@ def run_prefill(prefill_done, process_close):
     )
     global kv_connector_extra_config
     ktc.kv_connector_extra_config = kv_connector_extra_config
-    # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
-    # memory. You may need to adjust the value to fit your GPU.
     llm = LLM(model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
               kv_transfer_config=ktc,
               max_model_len=2000,
@@ -80,7 +78,8 @@ def run_decode(prefill_done):
     from vllm.config import KVTransferConfig
 
     prompts = [
-        "Hello, how are you today?", "Hi, what is your name?",
+        "Hello, how are you today?",
+        "Hi, what is your name?",
     ]
     sampling_params = SamplingParams(temperature=0, top_p=0.95)
 

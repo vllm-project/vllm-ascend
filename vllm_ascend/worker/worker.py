@@ -19,12 +19,12 @@
 
 import gc
 import os
-import zmq
-import msgpack
 from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
+import msgpack
 import torch
 import torch.distributed
+import zmq
 from torch import nn
 from vllm import envs
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -180,10 +180,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             # logger.debug("ping dp proxy start, DP_RANK:%s", dp_rank)
 
             sock.connect(f"tcp://{dp_proxy_listener_addr}")
-            data = {
-                "type": "DP",
-                "http_address": self.http_addr
-            }
+            data = {"type": "DP", "http_address": self.http_addr}
             for _ in range(10):
                 sock.send(msgpack.dumps(data))
 
@@ -409,11 +406,9 @@ class NPUWorker(LocalOrDistributedWorkerBase):
     @torch.inference_mode()
     def execute_worker(self, worker_input: WorkerInput) -> None:
         if self.enable_dummy_run:
-            logger.debug(f"send notify to the dp proxy: {self.dp_proxy_monitor_addr}")
-            data = {
-                "info": "notify_step",
-                "http_address": self.http_addr
-            }
+            logger.debug(
+                f"send notify to the dp proxy: {self.dp_proxy_monitor_addr}")
+            data = {"info": "notify_step", "http_address": self.http_addr}
             self.notify_socket.send(msgpack.dumps(data))
         virtual_engine = worker_input.virtual_engine
         # Issue cache operations.

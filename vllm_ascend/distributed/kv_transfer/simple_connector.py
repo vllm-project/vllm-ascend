@@ -15,27 +15,23 @@
 # limitations under the License.
 #
 
-from typing import TYPE_CHECKING, List, Tuple, Union, Optional
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 import torch_npu
-
+import vllm.envs as vllm_envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
-import vllm.envs as vllm_envs
-from vllm.config import ParallelConfig
 
+from vllm_ascend.distributed.kv_transfer.simple_buffer import SimpleBuffer
 from vllm_ascend.distributed.kv_transfer.simple_pipe import SimplePipe
-from vllm_ascend.distributed.kv_transfer.simple_buffer import (
-    SimpleBuffer,
-)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
-import llm_datadist  # type: ignore
 
 
 class SimpleConnector(KVConnectorBase):
@@ -54,15 +50,14 @@ class SimpleConnector(KVConnectorBase):
         self.is_deepseek_mla = config.model_config.is_deepseek_mla
         self.use_mla_opt = not vllm_envs.VLLM_MLA_DISABLE
         self.n_layer = self.config.model_config.get_num_layers(
-            self.config.parallel_config
-        )
+            self.config.parallel_config)
 
         self.producer_data_pipe: Optional[SimplePipe]
         self.consumer_data_pipe: Optional[SimplePipe]
 
         self.producer_buffer: Optional[SimpleBuffer] = None
         self.consumer_buffer: Optional[SimpleBuffer] = None
-        self.dp_group = ParallelConfig.stateless_init_dp_group()
+        self.dp_group = get_dp_group().cpu_group
 
         if self.config.kv_transfer_config.is_kv_producer:
             self.producer_data_pipe = SimplePipe(
@@ -89,8 +84,8 @@ class SimpleConnector(KVConnectorBase):
     ) -> List[Optional[torch.Tensor]]:
 
         assert self.consumer_buffer is not None, (
-            "Please initialize the " "consumer buffer before calling select."
-        )
+            "Please initialize the "
+            "consumer buffer before calling select.")
         return self.consumer_buffer.drop_select(input_tokens, roi, req_id)
 
     def insert(
@@ -104,18 +99,18 @@ class SimpleConnector(KVConnectorBase):
     ) -> None:
 
         assert self.producer_buffer is not None, (
-            "Please initialize the " "producer buffer before calling insert."
-        )
-        self.producer_buffer.insert(
-            input_tokens, roi, keys, values, hidden, req_id
-        )
+            "Please initialize the "
+            "producer buffer before calling insert.")
+        self.producer_buffer.insert(input_tokens, roi, keys, values, hidden,
+                                    req_id)
 
     def send_kv_caches_and_hidden_states(
         self,
         model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor],
-        hidden_or_intermediate_states: Union[torch.Tensor, IntermediateTensors],
+        hidden_or_intermediate_states: Union[torch.Tensor,
+                                             IntermediateTensors],
     ) -> None:
         input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
@@ -139,14 +134,12 @@ class SimpleConnector(KVConnectorBase):
         # num_key_value_heads / tp, qk_nope_head_dim + qk_rope_head_dim].
         # For more details, see vllm/attention/backends/mla/common.py.
         if self.is_deepseek_mla and self.use_mla_opt:
-            head_size = (
-                model_config.kv_lora_rank + model_config.qk_rope_head_dim
-            )
+            head_size = (model_config.kv_lora_rank +
+                         model_config.qk_rope_head_dim)
             num_heads = 1
         elif self.is_deepseek_mla and not self.use_mla_opt:
-            head_size = (
-                model_config.qk_nope_head_dim + model_config.qk_rope_head_dim
-            )
+            head_size = (model_config.qk_nope_head_dim +
+                         model_config.qk_rope_head_dim)
         else:
             head_size = getattr(
                 model_config,
@@ -162,10 +155,8 @@ class SimpleConnector(KVConnectorBase):
                 # vllm/worker/model_runner.py::_prepare_model_input_tensors:
                 # - input_tokens[:num_prefill_tokens] contains prefill tokens.
                 # - input_tokens[num_prefill_tokens:] contains decode tokens.
-                logger.warning(
-                    "You have some decode requests while using "
-                    "SimpleConnector. Their KVCache won't be sent."
-                )
+                logger.warning("You have some decode requests while using "
+                               "SimpleConnector. Their KVCache won't be sent.")
                 break
 
             current_tokens = input_tokens_tensor[start_pos:end_pos]
@@ -208,11 +199,8 @@ class SimpleConnector(KVConnectorBase):
         model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor],
-    ) -> Tuple[
-        Union[torch.Tensor, IntermediateTensors],
-        bool,
-        "ModelInputForGPUWithSamplingMetadata",
-    ]:
+    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
+               "ModelInputForGPUWithSamplingMetadata", ]:
         bypass_model_exec = True
 
         model_config = self.model_config
@@ -225,14 +213,12 @@ class SimpleConnector(KVConnectorBase):
         num_attention_heads = model_config.num_attention_heads
         num_layers = end_layer - start_layer
         if self.is_deepseek_mla and self.use_mla_opt:
-            head_size = (
-                model_config.kv_lora_rank + model_config.qk_rope_head_dim
-            )
+            head_size = (model_config.kv_lora_rank +
+                         model_config.qk_rope_head_dim)
             num_heads = 1
         elif self.is_deepseek_mla and not self.use_mla_opt:
-            head_size = (
-                model_config.qk_nope_head_dim + model_config.qk_rope_head_dim
-            )
+            head_size = (model_config.qk_nope_head_dim +
+                         model_config.qk_rope_head_dim)
         else:
             head_size = getattr(
                 model_config,
@@ -262,11 +248,9 @@ class SimpleConnector(KVConnectorBase):
             end_pos = start_pos + slen
 
             if start_pos >= num_prefill_tokens:
-                logger.warning(
-                    "You should set --enable_chunked_prefill=False "
-                    "and --max_num_batched_tokens "
-                    "should be equal to --max_seq_len_to_capture"
-                )
+                logger.warning("You should set --enable_chunked_prefill=False "
+                               "and --max_num_batched_tokens "
+                               "should be equal to --max_seq_len_to_capture")
                 bypass_model_exec = False
                 assert start_pos == num_prefill_tokens
                 break
@@ -301,14 +285,15 @@ class SimpleConnector(KVConnectorBase):
 
             # check if both KV cache and the hidden states are received
             # If not, need to redo the forwarding to compute missing states
-            if not all(
-                [(num_computed_tokens == num_tokens), hidden is not None]
-            ):
+            if not all([(num_computed_tokens == num_tokens), hidden is not None
+                        ]):
                 bypass_model_exec = False
-                break
 
-            bypass_model_exec_tensor = torch.tensor(1) if bypass_model_exec else torch.tensor(0)
-            torch.distributed.all_reduce(bypass_model_exec_tensor, op=torch.distributed.ReduceOp.MIN, group=self.dp_group)
+            bypass_model_exec_tensor = torch.tensor(
+                1) if bypass_model_exec else torch.tensor(0)
+            torch.distributed.all_reduce(bypass_model_exec_tensor,
+                                         op=torch.distributed.ReduceOp.MIN,
+                                         group=self.dp_group)
             # If there is any group have not receive the necessary hidden states or kv_cache, we force all the dp group execute.
             if bypass_model_exec_tensor.item() == 0:
                 bypass_model_exec = False
@@ -319,8 +304,8 @@ class SimpleConnector(KVConnectorBase):
 
             # put received KV caches into paged memory
             for i in range(
-                model_executable.model.start_layer,
-                model_executable.model.end_layer,
+                    model_executable.model.start_layer,
+                    model_executable.model.end_layer,
             ):
 
                 kv_cache = kv_caches[i - model_executable.model.start_layer]
@@ -331,15 +316,14 @@ class SimpleConnector(KVConnectorBase):
                     key_cache = kv_cache
                     slots = slot_mapping[start_pos:end_pos]
                     sliced_key = keys[i - model_executable.model.start_layer]
-                    torch_npu._npu_reshape_and_cache_siso(
-                        key=sliced_key, key_cache=key_cache, slot_indices=slots
-                    )
+                    torch_npu._npu_reshape_and_cache_siso(key=sliced_key,
+                                                          key_cache=key_cache,
+                                                          slot_indices=slots)
                 else:
                     key_cache, value_cache = kv_cache[0], kv_cache[1]
                     sliced_key = keys[i - model_executable.model.start_layer]
-                    sliced_value = values[
-                        i - model_executable.model.start_layer
-                    ]
+                    sliced_value = values[i -
+                                          model_executable.model.start_layer]
                     torch_npu._npu_reshape_and_cache(
                         key=sliced_key,
                         value=sliced_value,
@@ -371,9 +355,8 @@ class SimpleConnector(KVConnectorBase):
             # hidden_or_intermediate_states = torch.empty(total_num_tokens, hidden_size, dtype=kv_caches[0].dtype, device=kv_caches[0].device)
             if len(hidden_or_intermediate_states_for_one_req) == 1:
                 hidden = hidden_or_intermediate_states_for_one_req[0]
-                tmp_indice = torch.tensor(
-                    [0] * hidden.shape[0], dtype=torch.int64
-                ).npu()
+                tmp_indice = torch.tensor([0] * hidden.shape[0],
+                                          dtype=torch.int64).npu()
                 hidden_or_intermediate_states = torch.empty_like(hidden)
                 torch_npu.scatter_update_(
                     hidden_or_intermediate_states,
@@ -383,8 +366,7 @@ class SimpleConnector(KVConnectorBase):
                 )
             else:
                 hidden_or_intermediate_states = torch.cat(
-                    hidden_or_intermediate_states_for_one_req, dim=0
-                )
+                    hidden_or_intermediate_states_for_one_req, dim=0)
 
         return hidden_or_intermediate_states, bypass_model_exec, model_input
 

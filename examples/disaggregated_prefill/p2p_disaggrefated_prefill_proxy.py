@@ -27,9 +27,8 @@ def _listen_for_register(poller, router_socket):
                 global prefill_instances
                 global prefill_cv
                 with prefill_cv:
-                    prefill_instances[data["http_address"]] = data[
-                        "zmq_address"
-                    ]
+                    prefill_instances[
+                        data["http_address"]] = data["zmq_address"]
                     print(
                         "Get a prefill register with http_addr %s and zmq_addr %s",
                         data["http_address"],
@@ -39,7 +38,8 @@ def _listen_for_register(poller, router_socket):
                 global decode_instances
                 global decode_cv
                 with decode_cv:
-                    decode_instances[data["http_address"]] = data["zmq_address"]
+                    decode_instances[
+                        data["http_address"]] = data["zmq_address"]
                     print(
                         "Get a decode register with http_addr %s and zmq_addr %s",
                         data["http_address"],
@@ -66,9 +66,9 @@ def start_service_discovery(hostname, port):
     poller = zmq.Poller()
     poller.register(router_socket, zmq.POLLIN)
 
-    _listener_thread = threading.Thread(
-        target=_listen_for_register, args=[poller, router_socket], daemon=True
-    )
+    _listener_thread = threading.Thread(target=_listen_for_register,
+                                        args=[poller, router_socket],
+                                        daemon=True)
     _listener_thread.start()
     return _listener_thread
 
@@ -88,13 +88,10 @@ async def forward_request(url, data, request_id):
             "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
             "X-Request-Id": request_id,
         }
-        async with session.post(
-            url=url, json=data, headers=headers
-        ) as response:
+        async with session.post(url=url, json=data,
+                                headers=headers) as response:
             if response.status == 200:
-                async for chunk_bytes in response.content.iter_chunked(
-                    1024
-                ):
+                async for chunk_bytes in response.content.iter_chunked(1024):
                     yield chunk_bytes
 
 
@@ -118,8 +115,7 @@ async def handle_request():
             if len(prefill_instances) == 0:
                 res_str = (
                     "No Prefill instances has been registered to proxy. Please confirm that you have successfully"
-                    " and correctly started a Prefill vLLM instance."
-                )
+                    " and correctly started a Prefill vLLM instance.")
                 print(res_str)
                 response = await make_response(res_str)
                 return response
@@ -143,8 +139,7 @@ async def handle_request():
             if len(decode_instances) == 0:
                 res_str = (
                     "No Decode instances has been registered to proxy. Please confirm that you have successfully"
-                    " and correctly started a Decode vLLM instance."
-                )
+                    " and correctly started a Decode vLLM instance.")
                 print(res_str)
                 response = await make_response(res_str)
                 return response
@@ -160,9 +155,8 @@ async def handle_request():
         request_id = f"___prefill_addr_{prefill_addr}___decode_addr_{decode_addr}_{random_uuid()}"
 
         # finish prefill
-        async for _ in forward_request(
-            f"http://{prefill_addr}/v1/completions", prefill_request, request_id
-        ):
+        async for _ in forward_request(f"http://{prefill_addr}/v1/completions",
+                                       prefill_request, request_id):
             continue
 
         # return decode

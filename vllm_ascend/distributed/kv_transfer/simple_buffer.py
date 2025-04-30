@@ -15,15 +15,13 @@
 # limitations under the License.
 #
 
-from typing import Optional, List
 import zlib
+from typing import List, Optional
 
-import torch
 import llm_datadist  # type: ignore
-
-from vllm.distributed.kv_transfer.kv_lookup_buffer.base import (
-    KVLookupBufferBase,
-)
+import torch
+from vllm.distributed.kv_transfer.kv_lookup_buffer.base import \
+    KVLookupBufferBase
 from vllm.logger import init_logger
 
 from vllm_ascend.distributed.kv_transfer.simple_pipe import SimplePipe
@@ -40,6 +38,7 @@ def int32_hash(data):
 
 
 class SimpleBuffer(KVLookupBufferBase):
+
     def __init__(self, data_pipe: SimplePipe):
         self.data_pipe = data_pipe
         # Consumer buffer need these information to construct receiving buffer.
@@ -101,26 +100,20 @@ class SimpleBuffer(KVLookupBufferBase):
         )
 
         req_id = int32_hash(req_id)
-        key_cache_key = llm_datadist.CacheKey(
-            self.data_pipe.cluster_id, req_id, 1
-        )
-        value_cache_key = llm_datadist.CacheKey(
-            self.data_pipe.cluster_id, req_id, 2
-        )
-        hidden_cache_key = llm_datadist.CacheKey(
-            self.data_pipe.cluster_id, req_id, 3
-        )
+        key_cache_key = llm_datadist.CacheKey(self.data_pipe.cluster_id,
+                                              req_id, 1)
+        value_cache_key = llm_datadist.CacheKey(self.data_pipe.cluster_id,
+                                                req_id, 2)
+        hidden_cache_key = llm_datadist.CacheKey(self.data_pipe.cluster_id,
+                                                 req_id, 3)
 
         # Currently we use hash value of request id as key, so no need to send input_tokens
-        self.key_buffer = self.data_pipe.send_tensor(
-            key, key_desc, key_cache_key
-        )
-        self.value_buffer = self.data_pipe.send_tensor(
-            value, value_desc, value_cache_key
-        )
+        self.key_buffer = self.data_pipe.send_tensor(key, key_desc,
+                                                     key_cache_key)
+        self.value_buffer = self.data_pipe.send_tensor(value, value_desc,
+                                                       value_cache_key)
         self.hidden_buffer = self.data_pipe.send_tensor(
-            hidden, hidden_desc, hidden_cache_key
-        )
+            hidden, hidden_desc, hidden_cache_key)
 
     def drop_select(
         self,
@@ -175,15 +168,12 @@ class SimpleBuffer(KVLookupBufferBase):
             seq_len_dim_index=-1,
         )
 
-        key_cache_key = llm_datadist.CacheKey(
-            self.data_pipe.cluster_id, req_id, 1
-        )
-        value_cache_key = llm_datadist.CacheKey(
-            self.data_pipe.cluster_id, req_id, 2
-        )
-        hidden_cache_key = llm_datadist.CacheKey(
-            self.data_pipe.cluster_id, req_id, 3
-        )
+        key_cache_key = llm_datadist.CacheKey(self.data_pipe.cluster_id,
+                                              req_id, 1)
+        value_cache_key = llm_datadist.CacheKey(self.data_pipe.cluster_id,
+                                                req_id, 2)
+        hidden_cache_key = llm_datadist.CacheKey(self.data_pipe.cluster_id,
+                                                 req_id, 3)
 
         # Deallocate buffer allocated in last round.
         if self.key_buffer:
@@ -193,26 +183,20 @@ class SimpleBuffer(KVLookupBufferBase):
 
         try:
             self.key_buffer, key = self.data_pipe.recv_tensor(
-                key_desc, key_cache_key
-            )
+                key_desc, key_cache_key)
             self.value_buffer, value = self.data_pipe.recv_tensor(
-                value_desc, value_cache_key
-            )
+                value_desc, value_cache_key)
             self.hidden_buffer, hidden = self.data_pipe.recv_tensor(
-                hidden_desc, hidden_cache_key
-            )
-            key = key.view(
-                self.num_layers, num_tokens, self.num_heads, self.head_size
-            )
-            value = value.view(
-                self.num_layers, num_tokens, self.num_heads, self.head_size
-            )
+                hidden_desc, hidden_cache_key)
+            key = key.view(self.num_layers, num_tokens, self.num_heads,
+                           self.head_size)
+            value = value.view(self.num_layers, num_tokens, self.num_heads,
+                               self.head_size)
             hidden = hidden.view(num_tokens, self.hidden_size)
         except Exception as e:
             logger.warning(
                 f"Faile to receive kv cache and hidden states of request: {orig_req_id} "
-                f"Error is {str(e)}"
-            )
+                f"Error is {str(e)}")
             return [None, None, None, None]
 
         return [key, value, hidden, roi]

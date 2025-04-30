@@ -15,16 +15,16 @@
 # limitations under the License.
 #
 
-from typing import Optional
-import zmq # type: ignore
-import msgpack # type: ignore
-import time
 import threading
+import time
+from typing import Optional
 
+import llm_datadist  # type: ignore
+import msgpack  # type: ignore
 import torch
 import torch_npu
 import torchair  # type: ignore
-
+import zmq  # type: ignore
 from vllm.distributed.kv_transfer.kv_pipe.base import KVPipeBase
 from vllm.logger import init_logger
 from vllm.utils import get_ip
@@ -32,22 +32,17 @@ from vllm.utils import get_ip
 import vllm_ascend.envs as envs
 from vllm_ascend.distributed.kv_transfer.utils import NPU_DTYPE_TO_TORCH_DTYPE
 
-import llm_datadist  # type: ignore
-
 logger = init_logger(__name__)
-
-
-
 
 
 class SimplePipe(KVPipeBase):
 
     def __init__(
-        self,
-        local_rank,
-        kv_transfer_config,
-        hostname: str = "",
-        port_offset: int = 0,  # NPU offset in current P/D instance.
+            self,
+            local_rank,
+            kv_transfer_config,
+            hostname: str = "",
+            port_offset: int = 0,  # NPU offset in current P/D instance.
     ):
         self.local_rank = local_rank
         self.cluster_id = local_rank
@@ -60,26 +55,21 @@ class SimplePipe(KVPipeBase):
             self.role = llm_datadist.LLMRole.DECODER
         else:
             raise NotImplementedError(
-                "kv_role should be inside [kv_producer, kv_consumer]"
-            )
+                "kv_role should be inside [kv_producer, kv_consumer]")
 
         prompt_device_ips = kv_connector_extra_config.get(
-            "prompt_device_ips", None
-        )
+            "prompt_device_ips", None)
         decode_device_ips = kv_connector_extra_config.get(
-            "decode_device_ips", None
-        )
+            "decode_device_ips", None)
         if prompt_device_ips is None or decode_device_ips is None:
             raise ValueError(
                 "Please specify prompt_device_ips and decode_device_ips"
-                "in kv_transfer_config.kv_connector_extra_config"
-            )
+                "in kv_transfer_config.kv_connector_extra_config")
 
         self.prompt_ip_list = prompt_device_ips
         self.decode_ip_list = decode_device_ips
         self.llmdatadist_comm_port = kv_connector_extra_config.get(
-            "llmdatadist_comm_port", 26000
-        )
+            "llmdatadist_comm_port", 26000)
         # LLMDataDist initializing.
         self.data_dist = llm_datadist.LLMDataDist(self.role, self.cluster_id)
         self._prepare_data_dist()
@@ -118,11 +108,9 @@ class SimplePipe(KVPipeBase):
             # The `http_port` must be consistent with the serving port of OpenAI.
             self.http_address = (
                 f"{self._hostname}:"
-                f"{self.config.kv_connector_extra_config['http_port']}"
-            )
+                f"{self.config.kv_connector_extra_config['http_port']}")
             self._register_thread = threading.Thread(
-                target=self._register_to_proxy, daemon=True
-            )
+                target=self._register_to_proxy, daemon=True)
             self._register_thread.start()
 
     def _prepare_data_dist(self):
@@ -173,11 +161,9 @@ class SimplePipe(KVPipeBase):
         buffer = self.kv_transfer.allocate_cache(tensor_desc, [tensor_key])
         buffer_addr = buffer.per_device_tensor_addrs[0]
         data_tensor = torchair.llm_datadist.create_npu_tensors(
-            tensor_desc.shape, tensor.dtype, buffer_addr
-        )[0]
-        update_indices = torch.tensor(
-            [0] * tensor.shape[0], dtype=torch.int64
-        ).npu()
+            tensor_desc.shape, tensor.dtype, buffer_addr)[0]
+        update_indices = torch.tensor([0] * tensor.shape[0],
+                                      dtype=torch.int64).npu()
         torch_npu.scatter_update_(data_tensor, update_indices, tensor, axis=-1)
         # Free cache_id of buffer, actual deallocate will happen after consumer performing pull_cache.
         self.kv_transfer.deallocate_cache(buffer)

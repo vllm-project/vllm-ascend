@@ -14,8 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import torch
 import llm_datadist  # type: ignore
+import torch
 
 TORCH_DTYPE_TO_NPU_DTYPE = {
     torch.half: llm_datadist.DataType.DT_FLOAT16,
