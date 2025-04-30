@@ -37,7 +37,7 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .deepseek_v2 import CustomDeepseekV2DecoderLayer
+from vllm_ascend.models.deepseek_v2 import CustomDeepseekV2DecoderLayer
 
 
 class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):

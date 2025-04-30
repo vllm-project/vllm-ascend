@@ -16,11 +16,12 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
+
 import torch
 from packaging.version import InvalidVersion, Version
 from vllm.logger import logger
 
-import vllm_ascend.envs as envs
+from vllm_ascend import envs
 
 
 def try_register_lib(lib_name: str, lib_info: str = ""):
@@ -97,5 +98,5 @@ def vllm_version_is(target_vllm_version: str):
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
             "is installed probably. Set the environment variable VLLM_VERSION "
-            "to control it by hand. And please make sure the vaule follows the "
+            "to control it by hand. And please make sure the value follows the "
             "format of x.y.z.")
