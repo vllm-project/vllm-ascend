@@ -28,7 +28,6 @@ from vllm.worker.model_runner_base import (ModelRunnerBase,
                                            ModelRunnerWrapperBase)
 
 from vllm_ascend.attention.attention import AscendMetadata
-from vllm_ascend.utils import vllm_version_is
 
 # A flag to enable debug prints for the updated input tensors
 # before each step.
@@ -287,17 +286,11 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             if not self.is_driver_worker:
                 return []
             # Sample the next token.
-            if vllm_version_is("0.8.4"):
-                output = self.model.sample(
-                    logits=logits,
-                    sampling_metadata=model_input.sampling_metadata,
-                )
-            else:
-                assert self.model_runner.sampler is not None
-                output = self.model_runner.sampler(
-                    logits=logits,
-                    sampling_metadata=model_input.sampling_metadata,
-                )
+            assert self.model_runner.sampler is not None
+            output = self.model_runner.sampler(
+                logits=logits,
+                sampling_metadata=model_input.sampling_metadata,
+            )
             outputs.append(output)
 
             if model_input.attn_metadata.num_prefills == 0 \

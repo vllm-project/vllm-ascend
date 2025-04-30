@@ -18,8 +18,8 @@
 from vllm_ascend.utils import vllm_version_is
 
 # Import specific patches for different versions
-if vllm_version_is("0.8.4"):
-    from vllm_ascend.patch.worker import patch_0_8_4  # noqa: F401
+if vllm_version_is("0.8.5"):
+    from vllm_ascend.patch.worker import patch_0_8_5  # noqa: F401
     from vllm_ascend.patch.worker import patch_common  # noqa: F401
 else:
     from vllm_ascend.patch.worker import patch_common  # noqa: F401
