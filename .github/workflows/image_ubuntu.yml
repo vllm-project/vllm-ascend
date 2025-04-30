@@ -16,7 +16,7 @@ on:
       - 'main'
       - '*-dev'
     paths:
-      - '.github/workflows/image.yml'
+      - '.github/workflows/image_ubuntu.yml'
       - 'Dockerfile'
       - 'vllm_ascend/**'
   push:
@@ -27,13 +27,13 @@ on:
     tags:
       - 'v*'
     paths:
-      - '.github/workflows/image.yml'
+      - '.github/workflows/image_ubuntu.yml'
       - 'Dockerfile'
       - 'vllm_ascend/**'
 jobs:
 
   build:
-    name: vllm-ascend image
+    name: vllm-ascend Ubuntu image
     runs-on: ubuntu-latest
 
     steps:
@@ -72,9 +72,6 @@ jobs:
 
     - name: Build - Set up QEMU
       uses: docker/setup-qemu-action@v3
-      # TODO(yikun): remove this after https://github.com/docker/setup-qemu-action/issues/198 resolved
-      with:
-        image: tonistiigi/binfmt:qemu-v7.0.0-28
 
     - name: Build - Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
@@ -91,12 +88,11 @@ jobs:
       uses: docker/build-push-action@v6
       with:
         platforms: linux/amd64,linux/arm64
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+        # use the current repo path as the build context, ensure .git is contained
         context: .
         # only trigger when tag, branch/main push
         push: ${{ github.event_name == 'push' && github.repository_owner == 'vllm-project' }}
         labels: ${{ steps.meta.outputs.labels }}
         tags: ${{ steps.meta.outputs.tags }}
         build-args: |
-            PIP_INDEX_URL=https://pypi.org/simple
+          PIP_INDEX_URL=https://pypi.org/simple

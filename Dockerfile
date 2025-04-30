@@ -29,19 +29,19 @@ RUN apt-get update -y && \
 
 WORKDIR /workspace
 
-COPY . /workspace/vllm-ascend/
+COPY . /vllm-workspace/vllm-ascend/
 
 RUN pip config set global.index-url ${PIP_INDEX_URL}
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
 ARG VLLM_TAG=v0.7.3
-RUN git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /workspace/vllm
-RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /workspace/vllm/ --extra-index https://download.pytorch.org/whl/cpu/ && \
+RUN git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /vllm-workspace/vllm
+RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/ --extra-index https://download.pytorch.org/whl/cpu/ && \
     python3 -m pip cache purge
 
 # Install vllm-ascend
-RUN python3 -m pip install -e /workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
+RUN python3 -m pip install -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
     python3 -m pip cache purge
 
 # Install modelscope (for fast download) and ray (for multinode)
