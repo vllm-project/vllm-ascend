@@ -25,6 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
 import vllm.envs as vllm_envs
+from vllm.config import ParallelConfig
 
 from vllm_ascend.distributed.kv_transfer.simple_pipe import SimplePipe
 from vllm_ascend.distributed.kv_transfer.simple_buffer import (
@@ -61,6 +62,7 @@ class SimpleConnector(KVConnectorBase):
 
         self.producer_buffer: Optional[SimpleBuffer] = None
         self.consumer_buffer: Optional[SimpleBuffer] = None
+        self.dp_group = ParallelConfig.stateless_init_dp_group()
 
         if self.config.kv_transfer_config.is_kv_producer:
             self.producer_data_pipe = SimplePipe(
@@ -303,6 +305,14 @@ class SimpleConnector(KVConnectorBase):
                 [(num_computed_tokens == num_tokens), hidden is not None]
             ):
                 bypass_model_exec = False
+                break
+
+            bypass_model_exec_tensor = torch.tensor(1) if bypass_model_exec else torch.tensor(0)
+            torch.distributed.all_reduce(bypass_model_exec_tensor, op=torch.distributed.ReduceOp.MIN, group=self.dp_group)
+            # If there is any group have not receive the necessary hidden states or kv_cache, we force all the dp group execute.
+            if bypass_model_exec_tensor.item() == 0:
+                bypass_model_exec = False
+                break
 
             # update the end position based on how many tokens are cached.
             end_pos = start_pos + num_computed_tokens
