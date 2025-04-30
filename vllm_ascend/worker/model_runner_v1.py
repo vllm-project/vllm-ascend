@@ -40,7 +40,7 @@ from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.model_loader import get_model
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
@@ -60,8 +60,9 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 
-from vllm.v1.worker.utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
-                    scatter_mm_placeholders)
+from vllm.v1.worker.utils import (gather_mm_placeholders,
+                                  sanity_check_mm_encoder_outputs,
+                                  scatter_mm_placeholders)
 
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 
@@ -430,7 +431,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
             )
-            
+
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
                 image_grid_thw = []
@@ -467,7 +468,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         audio_feature_lengths=audio_feature_lengths,
                         use_audio_in_video=use_audio_in_video,
                     )
-                    
+
             req_ids_to_add.append(req_id)
 
         # Update the states of the running/resumed requests.
@@ -796,7 +797,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
                arange,
                out=positions_np)
-        
+
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -807,7 +808,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.mrope_positions[:, :total_num_scheduled_tokens].copy_(
                 self.mrope_positions_cpu[:, :total_num_scheduled_tokens],
                 non_blocking=True)
-            
+
         self.positions[:total_num_scheduled_tokens].copy_(
             self.positions_cpu[:total_num_scheduled_tokens], non_blocking=True)
         positions = self.positions[:num_input_tokens]
@@ -1427,7 +1428,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def profile_run(self) -> None:
         # FIXME Profile with multimodal encoder & encoder cache.
-        # current _profile_multimodal() using PyTorch SDPA backend method not 
+        # current _profile_multimodal() using PyTorch SDPA backend method not
         # support for window/full attn to reduce Memcpy operations, so will cause
         # Out Of Memory problem, so we currently don't use self._profile_multimodal()
         # self._profile_multimodal()
