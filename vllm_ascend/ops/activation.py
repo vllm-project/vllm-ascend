@@ -16,7 +16,7 @@
 #
 
 import torch
-from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
 
 
 def silu_and_mul_forward_oot(self, x: torch.Tensor) -> torch.Tensor:
@@ -26,4 +26,12 @@ def silu_and_mul_forward_oot(self, x: torch.Tensor) -> torch.Tensor:
     return out
 
 
+def quick_gelu_forward_oot(self, x: torch.tensor) -> torch.Tensor:
+    import torch_npu
+
+    out = torch_npu.npu_fast_gelu(x)
+    return out
+
+
+QuickGELU.forward_oot = quick_gelu_forward_oot
 SiluAndMul.forward_oot = silu_and_mul_forward_oot
