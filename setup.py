@@ -368,9 +368,7 @@ setup(
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     cmdclass=cmdclass,
-    extras_require={
-        "mindie_turbo": ["mindie-turbo"]
-        },
+    extras_require={"mindie_turbo": ["mindie-turbo"]},
     entry_points={
         "vllm.platform_plugins": ["ascend = vllm_ascend:register"],
         "vllm.general_plugins":
