@@ -42,8 +42,9 @@ def ascend_destroy_model_parallel():
     if _DP:
         _DP.destroy()
     _DP = None
-    from vllm.platforms import current_platform
-    current_platform.destroy_platform_model_parallel()
+    from vllm_ascend.distributed.parallel_state import \
+        destory_ascend_model_parallel
+    destory_ascend_model_parallel()
 
 
 def ascend_stateless_init_torch_distributed_process_group(
@@ -100,7 +101,6 @@ def ascend_stateless_init_torch_distributed_process_group(
         group_rank,
         group_size,
     )
-    from vllm.platforms import current_platform
     if backend == "gloo":
         from torch.distributed.distributed_c10d import ProcessGroupGloo
         backend_class = ProcessGroupGloo(prefix_store,
@@ -120,8 +120,18 @@ def ascend_stateless_init_torch_distributed_process_group(
                                          backend_options)
         backend_type = ProcessGroup.BackendType.NCCL
         device = torch.device("cuda")
-    elif current_platform.platform_has_backend_register():
-        current_platform.platform_register_backend()
+    elif backend == "hccl":
+        from torch.distributed import is_hccl_available
+        assert is_hccl_available()
+        from torch_npu._C._distributed_c10d import ProcessGroupHCCL
+        backend_options = ProcessGroupHCCL.Options()
+        backend_options._timeout = timeout
+        backend_class = ProcessGroupHCCL(prefix_store, group_rank, group_size,
+                                         backend_options)
+        device = torch.device("npu")
+        backend_class._set_sequence_number_for_group()
+        backend_type = ProcessGroup.BackendType.CUSTOM
+        pg._register_backend(device, backend_type, backend_class)
         return pg
     else:
         raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
