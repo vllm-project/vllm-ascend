@@ -39,13 +39,17 @@ class SimplePipe(KVPipeBase):
 
     def __init__(
             self,
+            rank,
             local_rank,
             kv_transfer_config,
             hostname: str = "",
             port_offset: int = 0,  # NPU offset in current P/D instance.
     ):
+        self.rank = rank
         self.local_rank = local_rank
-        self.cluster_id = local_rank
+        # Currently for 1P1D situation, we use cluster_id=0 for both Prefill and Decode
+        # Will change here in the future to support xPyD.
+        self.cluster_id = 0
         self.config = kv_transfer_config
         kv_connector_extra_config = kv_transfer_config.kv_connector_extra_config
         kv_role = kv_transfer_config.kv_role
@@ -65,6 +69,12 @@ class SimplePipe(KVPipeBase):
             raise ValueError(
                 "Please specify prompt_device_ips and decode_device_ips"
                 "in kv_transfer_config.kv_connector_extra_config")
+        p_device_num = len(prompt_device_ips)
+        d_device_num = len(decode_device_ips)
+        # When number of devices in P and D is not equal,
+        # we assume that device in D can be mapped to any device in P.
+        self.p_device_rank = self.rank % p_device_num
+        self.d_device_rank = self.rank % d_device_num
 
         self.prompt_ip_list = prompt_device_ips
         self.decode_ip_list = decode_device_ips
@@ -77,7 +87,7 @@ class SimplePipe(KVPipeBase):
         if self.role == llm_datadist.LLMRole.DECODER:
             self.cluster = self._make_cluster()
             _, ret = self.data_dist.link_clusters([self.cluster], 20000)
-            logger.info(f"local_rank {self.local_rank} link, ret={ret}")
+            logger.info(f"rank {self.rank}, local_rank {self.local_rank} link, ret={ret}")
 
         # If `proxy_ip` or `proxy_port` is `""`,
         # then the ping thread will not be enabled.
@@ -118,22 +128,22 @@ class SimplePipe(KVPipeBase):
             "llm.SyncKvCacheWaitTime": envs.LLMDATADIST_SYNC_CACHE_WAIT_TIME,
         }
         if self.role == llm_datadist.LLMRole.PROMPT:
-            options["ge.exec.deviceId"] = str(self.local_rank)
+            options["ge.exec.deviceId"] = str(self.rank)
             options["llm.listenIpInfo"] = (
-                f"{self.prompt_ip_list[self.local_rank]}:{self.llmdatadist_comm_port}"
+                f"{self.prompt_ip_list[self.p_device_rank]}:{self.llmdatadist_comm_port}"
             )
         else:
-            options["ge.exec.deviceId"] = str(self.local_rank)
+            options["ge.exec.deviceId"] = str(self.rank)
         print(f"prepare datadist, options: {options}")
         self.data_dist.init(options)
         self.kv_transfer = self.data_dist.kv_cache_manager
-        print(f"{self.local_rank} rank data dist is ready")
+        print(f"{self.rank} rank data dist is ready")
 
     def _make_cluster(self):
         cluster = llm_datadist.LLMClusterInfo()
         cluster.remote_cluster_id = self.cluster_id
-        local_ip = self.decode_ip_list[self.local_rank]
-        remote_ip = self.prompt_ip_list[self.cluster_id]
+        local_ip = self.decode_ip_list[self.d_device_rank]
+        remote_ip = self.prompt_ip_list[self.p_device_rank]
         cluster.append_local_ip_info(local_ip, 0)
         cluster.append_remote_ip_info(remote_ip, self.llmdatadist_comm_port)
         return cluster

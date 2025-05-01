@@ -61,6 +61,7 @@ class SimpleConnector(KVConnectorBase):
 
         if self.config.kv_transfer_config.is_kv_producer:
             self.producer_data_pipe = SimplePipe(
+                rank=rank,
                 local_rank=local_rank,
                 kv_transfer_config=config.kv_transfer_config,
                 hostname="",
@@ -69,6 +70,7 @@ class SimpleConnector(KVConnectorBase):
             self.producer_buffer = SimpleBuffer(self.producer_data_pipe)
         else:
             self.consumer_data_pipe = SimplePipe(
+                rank=rank,
                 local_rank=local_rank,
                 kv_transfer_config=config.kv_transfer_config,
                 hostname="",
