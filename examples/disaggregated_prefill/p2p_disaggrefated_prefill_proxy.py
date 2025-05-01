@@ -4,7 +4,7 @@ import threading
 import uuid
 
 import aiohttp
-import msgpack
+import msgpack  # type: ignore
 import zmq
 from quart import Quart, make_response, request
 
@@ -59,12 +59,12 @@ def start_service_discovery(hostname, port):
     if port == 0:
         raise ValueError("Port cannot be 0")
 
-    context = zmq.Context()
-    router_socket = context.socket(zmq.ROUTER)
+    context = zmq.Context()  # type: ignore
+    router_socket = context.socket(zmq.ROUTER)  # type: ignore
     router_socket.bind(f"tcp://{hostname}:{port}")
 
-    poller = zmq.Poller()
-    poller.register(router_socket, zmq.POLLIN)
+    poller = zmq.Poller()  # type: ignore
+    poller.register(router_socket, zmq.POLLIN)  # type: ignore
 
     _listener_thread = threading.Thread(target=_listen_for_register,
                                         args=[poller, router_socket],

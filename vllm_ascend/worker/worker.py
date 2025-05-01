@@ -21,7 +21,7 @@ import gc
 import os
 from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
-import msgpack
+import msgpack  # type: ignore
 import torch
 import torch.distributed
 import zmq
@@ -173,8 +173,8 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             http_ip = get_ip()
             port = os.environ["VLLM_HTTP_PORT"]
             self.http_addr = f"{http_ip}:{port}"
-            context = zmq.Context()
-            sock = context.socket(zmq.DEALER)
+            context = zmq.Context()  # type: ignore
+            sock = context.socket(zmq.DEALER)  # type: ignore
 
             logger.debug("ping dp proxy start, DP_RANK:%s", 0)
             # logger.debug("ping dp proxy start, DP_RANK:%s", dp_rank)
@@ -184,7 +184,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             for _ in range(10):
                 sock.send(msgpack.dumps(data))
 
-            self.notify_socket = context.socket(zmq.PUSH)
+            self.notify_socket = context.socket(zmq.PUSH)  # type: ignore
             self.notify_socket.connect(f"tcp://{self.dp_proxy_monitor_addr}")
 
     def sleep(self, level: int = 1) -> None:

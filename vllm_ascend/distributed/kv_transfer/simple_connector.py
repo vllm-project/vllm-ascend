@@ -33,7 +33,6 @@ if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 
-
 class SimpleConnector(KVConnectorBase):
 
     def __init__(
@@ -55,9 +54,8 @@ class SimpleConnector(KVConnectorBase):
         self.producer_data_pipe: Optional[SimplePipe]
         self.consumer_data_pipe: Optional[SimplePipe]
 
-        self.producer_buffer: Optional[SimpleBuffer] = None
-        self.consumer_buffer: Optional[SimpleBuffer] = None
-        self.dp_group = get_dp_group().cpu_group
+        self.producer_buffer: Optional[SimpleBuffer]
+        self.consumer_buffer: Optional[SimpleBuffer]
 
         if self.config.kv_transfer_config.is_kv_producer:
             self.producer_data_pipe = SimplePipe(
@@ -210,7 +208,7 @@ class SimpleConnector(KVConnectorBase):
         # get model config
         start_layer = model_executable.model.start_layer
         end_layer = model_executable.model.end_layer
-        num_heads = int(model_config.num_key_value_heads / self.tp_size)
+        num_heads, head_dim = kv_caches[0].shape[-2:]
         hidden_size = model_config.hidden_size
         num_attention_heads = model_config.num_attention_heads
         num_layers = end_layer - start_layer
@@ -227,17 +225,18 @@ class SimpleConnector(KVConnectorBase):
                 "head_dim",
                 int(hidden_size // num_attention_heads),
             )
-        self.consumer_buffer.num_heads = num_heads
-        self.consumer_buffer.num_layers = num_layers
-        self.consumer_buffer.head_size = head_size
-        self.consumer_buffer.dtype = kv_caches[0].dtype
-        self.consumer_buffer.hidden_size = hidden_size
+        self.consumer_buffer.num_heads = num_heads  # type: ignore
+        self.consumer_buffer.num_layers = num_layers  # type: ignore
+        self.consumer_buffer.head_size = head_size  # type: ignore
+        self.consumer_buffer.dtype = kv_caches[0].dtype  # type: ignore
+        self.consumer_buffer.hidden_size = hidden_size  # type: ignore
 
         input_tokens_tensor = model_input.input_tokens
         seq_lens = model_input.attn_metadata.seq_lens
         num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
         slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
 
+        total_tokens = model_input.attn_metadata.num_prefill_tokens + model_input.attn_metadata.num_decode_tokens
         hidden_or_intermediate_states_for_one_req = []
 
         input_tokens_list = []
@@ -280,7 +279,6 @@ class SimpleConnector(KVConnectorBase):
             keys: torch.Tensor = ret[0]
             values: torch.Tensor = ret[1]
             hidden: torch.Tensor = ret[2]
-            roi: torch.Tensor = ret[3]
 
             num_computed_tokens = keys.shape[1]
             num_computed_tokens_list.append(num_computed_tokens)
@@ -290,16 +288,6 @@ class SimpleConnector(KVConnectorBase):
             if not all([(num_computed_tokens == num_tokens), hidden is not None
                         ]):
                 bypass_model_exec = False
-
-            bypass_model_exec_tensor = torch.tensor(
-                1) if bypass_model_exec else torch.tensor(0)
-            torch.distributed.all_reduce(bypass_model_exec_tensor,
-                                         op=torch.distributed.ReduceOp.MIN,
-                                         group=self.dp_group)
-            # If there is any group have not receive the necessary hidden states or kv_cache, we force all the dp group execute.
-            if bypass_model_exec_tensor.item() == 0:
-                bypass_model_exec = False
-                break
 
             # update the end position based on how many tokens are cached.
             end_pos = start_pos + num_computed_tokens
@@ -341,12 +329,21 @@ class SimpleConnector(KVConnectorBase):
             # Here we will fall back to normal model forwarding
             # But optionally you can adjust model_input so that you only do
             # prefilling on those tokens that are missing KV caches.
-            logger.warning(
-                "[rank%d]: Failed to receive all KVs and hidden "
-                "states, redo model forwarding.",
-                torch.distributed.get_rank(),
-            )
-            hidden_or_intermediate_states = None
+            if get_dp_group().world_size > 1:
+                bypass_model_exec = True
+                hidden_or_intermediate_states = torch.empty(
+                    [total_tokens, hidden_size],
+                    dtype=kv_caches[0].dtype,
+                    device=kv_caches[0].device)
+                logger.warning(
+                    "[Detect there is more one DP rank in this decode node, in this scenario, no recompute is expected when kv cache dose not received.]"
+                )
+            else:
+                logger.warning(
+                    "[rank%d]: Failed to receive all KVs and hidden "
+                    "states, redo model forwarding.",
+                    torch.distributed.get_rank())
+                hidden_or_intermediate_states = None
         else:
             logger.debug(
                 "[rank%d]: Successfully received all KVs and hidden "
@@ -373,7 +370,7 @@ class SimpleConnector(KVConnectorBase):
         return hidden_or_intermediate_states, bypass_model_exec, model_input
 
     def close(self):
-        self.producer_data_pipe.close()
-        self.consumer_data_pipe.close()
-        self.producer_buffer.close()
-        self.consumer_buffer.close()
+        self.producer_data_pipe.close()  # type: ignore
+        self.consumer_data_pipe.close()  # type: ignore
+        self.producer_buffer.close()  # type: ignore
+        self.consumer_buffer.close()  # type: ignore

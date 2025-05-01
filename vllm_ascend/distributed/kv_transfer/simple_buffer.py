@@ -42,11 +42,11 @@ class SimpleBuffer(KVLookupBufferBase):
     def __init__(self, data_pipe: SimplePipe):
         self.data_pipe = data_pipe
         # Consumer buffer need these information to construct receiving buffer.
-        self.num_layers: int = None
-        self.num_heads: int = None
-        self.head_size: int = None
-        self.dtype: torch.dtype = None
-        self.hidden_size: int = None
+        self.num_layers = None
+        self.num_heads = None
+        self.head_size = None
+        self.dtype = None
+        self.hidden_size = None
         self.key_buffer = None
         self.value_buffer = None
         self.hidden_buffer = None
@@ -177,9 +177,13 @@ class SimpleBuffer(KVLookupBufferBase):
 
         # Deallocate buffer allocated in last round.
         if self.key_buffer:
-            self.data_pipe.deallocate_buffer(self.key_buffer)
-            self.data_pipe.deallocate_buffer(self.value_buffer)
-            self.data_pipe.deallocate_buffer(self.hidden_buffer)
+            try:
+                self.data_pipe.deallocate_buffer(self.key_buffer)
+                self.data_pipe.deallocate_buffer(self.value_buffer)
+                self.data_pipe.deallocate_buffer(self.hidden_buffer)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to free kv cache buffer, Error code: {str(e)}")
 
         try:
             self.key_buffer, key = self.data_pipe.recv_tensor(

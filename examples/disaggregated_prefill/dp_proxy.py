@@ -1,15 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import copy
 import logging
 import os
 import threading
 import time
-import copy
 import uuid
 
 import aiohttp
-import msgpack
+import msgpack  # type: ignore
 import zmq
 from quart import Quart, make_response, request
 
@@ -97,7 +97,7 @@ def metadata_collect_trigger(poller, router_socket):
                         # Send idle token to client in case of single dp rank run solo and block on the CCL part
                         asyncio.run_coroutine_threadsafe(
                             send_idle_token_to_client(schedule_dict),
-                            _idle_send_loop)
+                            _idle_send_loop)  # type: ignore
                         # Note: Reset start time prevent consistently send idle token to client
                         # We only reset start time here, for some of the client may loss the idle token send from this proxy
                         # and we only exit this while loop when we make sure all the client are exactly start inference in this
@@ -133,9 +133,9 @@ def metadata_collect_trigger(poller, router_socket):
                         logger.error(
                             f"Error processing message from {http_addr}: {e}. Message: {data}"
                         )
-        except zmq.ZMQError as e:
+        except zmq.ZMQError as e:  # type: ignore
             logger.error(f"ZMQ Error in monitor thread: {e}")
-            if e.errno == zmq.ETERM:
+            if e.errno == zmq.ETERM:  # type: ignore
                 logger.error(
                     "Monitor thread terminating due to context termination.")
                 break
@@ -197,10 +197,10 @@ def _listen_for_d_register(poller, router_socket):
                         f"DP Decode Proxy: Unexpected error processing D Node registration from {remote_id.decode()}: {e}"
                     )
 
-        except zmq.ZMQError as e:
+        except zmq.ZMQError as e:  # type: ignore
             logger.error(
                 f"DP Decode Proxy: ZMQ Error in D Node listener thread: {e}")
-            if e.errno == zmq.ETERM:
+            if e.errno == zmq.ETERM:  # type: ignore
                 logger.info(
                     "DP Decode Proxy: D Node Listener thread terminating.")
                 break
@@ -220,12 +220,12 @@ def _register_to_pd_proxy(pd_proxy_zmq_addr, my_http_addr, my_zmq_addr):
     while True:
         try:
             if context is None:
-                context = zmq.Context()
+                context = zmq.Context()  # type: ignore
             if sock is None:
-                sock = context.socket(zmq.DEALER)
+                sock = context.socket(zmq.DEALER)  # type: ignore
                 identity = f"dp_proxy_{my_http_addr}".encode('utf-8')
-                sock.setsockopt(zmq.IDENTITY, identity)
-                sock.setsockopt(zmq.LINGER, 0)
+                sock.setsockopt(zmq.IDENTITY, identity)  # type: ignore
+                sock.setsockopt(zmq.LINGER, 0)  # type: ignore
                 logger.info(
                     f"DP Decode Proxy: Attempting to connect to PD Proxy at {pd_proxy_zmq_addr}..."
                 )
@@ -245,7 +245,7 @@ def _register_to_pd_proxy(pd_proxy_zmq_addr, my_http_addr, my_zmq_addr):
             sock.send(msgpack.dumps(data))
             time.sleep(5)
 
-        except zmq.ZMQError as e:
+        except zmq.ZMQError as e:  # type: ignore
             logger.error(
                 f"DP Decode Proxy: ZMQ Error connecting/sending to PD Proxy ({pd_proxy_zmq_addr}): {e}"
             )
@@ -271,20 +271,20 @@ def start_zmq_thread(hostname, port, socket_type, target_func, thread_name):
     """Generic ZMQ thread starter for ROUTER or PULL."""
     if not hostname:
         hostname = "0.0.0.0"
-    context = zmq.Context.instance()
+    context = zmq.Context.instance()  # type: ignore
     socket = context.socket(socket_type)
-    socket.setsockopt(zmq.LINGER, 0)
+    socket.setsockopt(zmq.LINGER, 0)  # type: ignore
     try:
         socket.bind(f"tcp://{hostname}:{port}")
-    except zmq.ZMQError as e:
+    except zmq.ZMQError as e:  # type: ignore
         logger.error(
             f"DP Decode Proxy: Error binding ZMQ {socket_type} socket to tcp://{hostname}:{port}: {e}"
         )
         socket.close()
         raise
 
-    poller = zmq.Poller()
-    poller.register(socket, zmq.POLLIN)
+    poller = zmq.Poller()  # type: ignore
+    poller.register(socket, zmq.POLLIN)  # type: ignore
 
     thread = threading.Thread(target=target_func,
                               args=(poller, socket),
@@ -297,7 +297,7 @@ def start_zmq_thread(hostname, port, socket_type, target_func, thread_name):
 def start_thread_with_event_loop():
     global _idle_send_loop
     asyncio.set_event_loop(_idle_send_loop)
-    _idle_send_loop.run_forever()
+    _idle_send_loop.run_forever()  # type: ignore
 
 
 async def forward_request_internal(url, data, request_id):
@@ -410,12 +410,18 @@ async def handle_request():
 
 if __name__ == '__main__':
     d_listener_thread, d_reg_socket = start_zmq_thread(
-        "0.0.0.0", DP_PROXY_ZMQ_REG_PORT, zmq.ROUTER, _listen_for_d_register,
+        "0.0.0.0",
+        DP_PROXY_ZMQ_REG_PORT,
+        zmq.ROUTER,
+        _listen_for_d_register,  # type: ignore
         "DP_DNodeListenerThread")
 
     metadata_thread, notify_socket = start_zmq_thread(
-        "0.0.0.0", DP_PROXY_ZMQ_NOTIFY_PORT, zmq.PULL,
-        metadata_collect_trigger, "DP_MetadataMonitorThread")
+        "0.0.0.0",
+        DP_PROXY_ZMQ_NOTIFY_PORT,
+        zmq.PULL,  # type: ignore
+        metadata_collect_trigger,
+        "DP_MetadataMonitorThread")
 
     _idle_send_loop = asyncio.new_event_loop()
     idle_loop_thread = threading.Thread(target=start_thread_with_event_loop,
@@ -434,7 +440,7 @@ if __name__ == '__main__':
     logger.info(
         f"DP Decode Proxy: Starting Quart web server on http://0.0.0.0:{DP_PROXY_HTTP_PORT}"
     )
-    zmq_context = zmq.Context.instance()
+    zmq_context = zmq.Context.instance()  # type: ignore
     try:
         app.run(host='0.0.0.0', port=DP_PROXY_HTTP_PORT)
     except KeyboardInterrupt:
@@ -447,8 +453,11 @@ if __name__ == '__main__':
             logger.info("DP Decode Proxy: Stopping idle send loop...")
             _idle_send_loop.call_soon_threadsafe(_idle_send_loop.stop)
 
-        if d_reg_socket: d_reg_socket.close()
-        if notify_socket: notify_socket.close()
-        if zmq_context: zmq_context.term()
+        if d_reg_socket:
+            d_reg_socket.close()
+        if notify_socket:
+            notify_socket.close()
+        if zmq_context:
+            zmq_context.term()
 
         logger.info("DP Decode Proxy: Shutdown complete.")

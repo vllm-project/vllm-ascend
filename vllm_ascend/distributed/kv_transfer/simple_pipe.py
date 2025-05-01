@@ -87,7 +87,9 @@ class SimplePipe(KVPipeBase):
         if self.role == llm_datadist.LLMRole.DECODER:
             self.cluster = self._make_cluster()
             _, ret = self.data_dist.link_clusters([self.cluster], 20000)
-            logger.info(f"rank {self.rank}, local_rank {self.local_rank} link, ret={ret}")
+            logger.info(
+                f"rank {self.rank}, local_rank {self.local_rank} link, ret={ret}"
+            )
 
         # If `proxy_ip` or `proxy_port` is `""`,
         # then the ping thread will not be enabled.
@@ -112,8 +114,9 @@ class SimplePipe(KVPipeBase):
             # Each card corresponds to a ZMQ address.
             self.zmq_address = f"{self._hostname}:{self._port}"
 
-            self.context = zmq.Context()
-            self.router_socket = self.context.socket(zmq.ROUTER)
+            self.context = zmq.Context()  # type: ignore
+            self.router_socket = self.context.socket(
+                zmq.ROUTER)  # type: ignore
             self.router_socket.bind(f"tcp://{self.zmq_address}")
             # The `http_port` must be consistent with the serving port of OpenAI.
             self.http_address = (
@@ -128,12 +131,12 @@ class SimplePipe(KVPipeBase):
             "llm.SyncKvCacheWaitTime": envs.LLMDATADIST_SYNC_CACHE_WAIT_TIME,
         }
         if self.role == llm_datadist.LLMRole.PROMPT:
-            options["ge.exec.deviceId"] = str(self.rank)
+            options["ge.exec.deviceId"] = str(self.local_rank)
             options["llm.listenIpInfo"] = (
                 f"{self.prompt_ip_list[self.p_device_rank]}:{self.llmdatadist_comm_port}"
             )
         else:
-            options["ge.exec.deviceId"] = str(self.rank)
+            options["ge.exec.deviceId"] = str(self.local_rank)
         print(f"prepare datadist, options: {options}")
         self.data_dist.init(options)
         self.kv_transfer = self.data_dist.kv_cache_manager
@@ -149,8 +152,8 @@ class SimplePipe(KVPipeBase):
         return cluster
 
     def _register_to_proxy(self):
-        sock = self.context.socket(zmq.DEALER)
-        sock.setsockopt_string(zmq.IDENTITY, self.zmq_address)
+        sock = self.context.socket(zmq.DEALER)  # type: ignore
+        sock.setsockopt_string(zmq.IDENTITY, self.zmq_address)  # type: ignore
         logger.debug("ping start, zmq_address:%s", self.zmq_address)
         sock.connect(f"tcp://{self.proxy_address}")
         data = {
@@ -167,13 +170,14 @@ class SimplePipe(KVPipeBase):
         tensor: Optional[torch.Tensor],
         tensor_desc: llm_datadist.CacheDesc,
         tensor_key: llm_datadist.CacheKey,
-    ) -> None:
+    ) -> llm_datadist.Cache:
         buffer = self.kv_transfer.allocate_cache(tensor_desc, [tensor_key])
         buffer_addr = buffer.per_device_tensor_addrs[0]
         data_tensor = torchair.llm_datadist.create_npu_tensors(
-            tensor_desc.shape, tensor.dtype, buffer_addr)[0]
-        update_indices = torch.tensor([0] * tensor.shape[0],
-                                      dtype=torch.int64).npu()
+            tensor_desc.shape, tensor.dtype, buffer_addr)[0]  # type: ignore
+        update_indices = torch.tensor(
+            [0] * tensor.shape[0],  # type: ignore
+            dtype=torch.int64).npu()
         torch_npu.scatter_update_(data_tensor, update_indices, tensor, axis=-1)
         # Free cache_id of buffer, actual deallocate will happen after consumer performing pull_cache.
         self.kv_transfer.deallocate_cache(buffer)
