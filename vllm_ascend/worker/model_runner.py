@@ -72,7 +72,7 @@ ENCODER_NUM = 0
 # if True, allow tensor initialization and casting with internal format (e.g., NZ)
 torch.npu.config.allow_internal_format = True
 
-
+# this is a test
 @dataclass(frozen=True)
 class ModelInputForNPU(ModelRunnerInputBase):
     """

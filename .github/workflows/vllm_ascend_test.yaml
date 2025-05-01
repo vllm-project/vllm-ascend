@@ -136,6 +136,7 @@ jobs:
         id: filter_spec_decode
         uses: dorny/paths-filter@v3
         with:
+          # speculative decode seem will cause oom in ci, disable it now to prevent ci blocking
           filters: |
             speculative_tests_changed:
               - "tests/singlecard/spec_decode/**"
