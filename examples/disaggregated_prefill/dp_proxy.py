@@ -412,7 +412,7 @@ if __name__ == '__main__':
     d_listener_thread, d_reg_socket = start_zmq_thread(
         "0.0.0.0",
         DP_PROXY_ZMQ_REG_PORT,
-        zmq.ROUTER,
+        zmq.ROUTER,  # type: ignore
         _listen_for_d_register,  # type: ignore
         "DP_DNodeListenerThread")
 
