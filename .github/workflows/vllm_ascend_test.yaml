@@ -138,7 +138,7 @@ jobs:
         with:
           # speculative decode seems will cause oom issue, disable it now on ci test
           filters: |
-            speculative_tests_changed: false
+            speculative_tests_changed: 'false'
 
       - name: Run vllm-project/vllm-ascend Speculative Decode test
         if: steps.filter_spec_decode.outputs.speculative_tests_changed == 'true' || github.event_name == 'schedule'
