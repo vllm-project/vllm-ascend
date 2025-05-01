@@ -1330,15 +1330,16 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                     kv_caches=kv_caches
                 )
 
-        bypass_model_exec_tensor = torch.tensor(
-            1, dtype=torch.int32) if bypass_model_exec else torch.tensor(
-                0, dtype=torch.int32)
-        torch.distributed.all_reduce(bypass_model_exec_tensor,
-                                     op=torch.distributed.ReduceOp.MIN,
-                                     group=get_dp_group().cpu_group)
-        # If there is any group have not receive the necessary hidden states or kv_cache, we force all the dp group execute.
-        if bypass_model_exec_tensor.item() == 0:
-            bypass_model_exec = False
+        if get_dp_group().world_size > 1:
+            bypass_model_exec_tensor = torch.tensor(
+                1, dtype=torch.int32) if bypass_model_exec else torch.tensor(
+                    0, dtype=torch.int32)
+            torch.distributed.all_reduce(bypass_model_exec_tensor,
+                                        op=torch.distributed.ReduceOp.MIN,
+                                        group=get_dp_group().cpu_group)
+            # If there is any group have not receive the necessary hidden states or kv_cache, we force all the dp group execute.
+            if bypass_model_exec_tensor.item() == 0:
+                bypass_model_exec = False
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
         seqlen_agnostic_kwargs = {
