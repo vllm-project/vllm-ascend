@@ -1335,8 +1335,8 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                 1, dtype=torch.int32) if bypass_model_exec else torch.tensor(
                     0, dtype=torch.int32)
             torch.distributed.all_reduce(bypass_model_exec_tensor,
-                                        op=torch.distributed.ReduceOp.MIN,
-                                        group=get_dp_group().cpu_group)
+                                         op=torch.distributed.ReduceOp.MIN,
+                                         group=get_dp_group().cpu_group)
             # If there is any group have not receive the necessary hidden states or kv_cache, we force all the dp group execute.
             if bypass_model_exec_tensor.item() == 0:
                 bypass_model_exec = False
