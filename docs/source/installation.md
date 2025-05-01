@@ -134,15 +134,6 @@ pip install vllm==|pip_vllm_version|
 pip install vllm-ascend==|pip_vllm_ascend_version| --extra-index https://download.pytorch.org/whl/cpu/
 ```
 
-**Optional**
-Install MindIE Turbo for Performance acceleration:
-
-```{code-block} bash
-   :substitutions:
-# Install MindIE Turbo
-pip install vllm-ascend[mindie_turbo]==|pip_vllm_ascend_version| --extra-index https://download.pytorch.org/whl/cpu/
-```
-
 :::{dropdown} Click here to see "Build from source code"
 or build from **source code**:
 
@@ -158,15 +149,6 @@ VLLM_TARGET_DEVICE=empty pip install . --extra-index https://download.pytorch.or
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 pip install -e . --extra-index https://download.pytorch.org/whl/cpu/
-```
-
-**Optional**
-Install MindIE Turbo for Performance acceleration:
-
-```{code-block} bash
-   :substitutions:
-# Install MindIE Turbo
-pip install mindie_turbo
 ```
 :::
 
@@ -212,6 +194,16 @@ The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/v
 ::::
 
 :::::
+
+## (Optional) Install MindIE Turbo
+
+Install MindIE Turbo for performance acceleration:
+
+```{code-block} bash
+   :substitutions:
+
+pip install mindie_turbo==|pip_mindie_turbo_version|
+```
 
 ## Extra information
 

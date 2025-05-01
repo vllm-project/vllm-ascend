@@ -33,6 +33,16 @@ docker run --rm \
 
 The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)(`pip install -e`) to help developer immediately take place changes without requiring a new installation.
 
+## (Optional) Install MindIE Turbo
+
+Install MindIE Turbo for performance acceleration:
+
+```{code-block} bash
+   :substitutions:
+
+pip install mindie_turbo==|pip_mindie_turbo_version|
+```
+
 ## Usage
 
 You can use Modelscope mirror to speed up download:

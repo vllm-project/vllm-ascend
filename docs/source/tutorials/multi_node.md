@@ -30,10 +30,13 @@ docker run --rm \
 -it quay.io/ascend/vllm-ascend:|vllm_ascend_version| bash
 ```
 
-```{note}
-**Optional**: Install MindIE Turbo for Performance acceleration: `pip install mindie_turbo==|pip_vllm_ascend_version|`
-```
+(Optional) Install MindIE Turbo for performance acceleration:
 
+```{code-block} bash
+   :substitutions:
+
+pip install mindie_turbo==|pip_mindie_turbo_version|
+```
 
 Choose one machine as head node, the other are worker nodes, then start ray on each machine:
 
