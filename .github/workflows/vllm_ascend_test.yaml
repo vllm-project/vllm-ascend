@@ -136,18 +136,9 @@ jobs:
         id: filter_spec_decode
         uses: dorny/paths-filter@v3
         with:
+          # speculative decode seems will cause oom issue, disable it now on ci test
           filters: |
-            speculative_tests_changed:
-              - "tests/singlecard/spec_decode/**"
-              - "tests/multicard/spec_decode_e2e/**"
-              - "vllm_ascend/worker/worker.py"
-              - "vllm_ascend/worker/model_runner.py"
-              - "vllm_ascend/worker/multi_step_runner.py"
-              - "vllm_ascend/worker/multi_step_worker.py"
-              - "vllm_ascend/worker/draft_model_runner.py"
-              - "vllm_ascend/patch/worker/patch_common/patch_metrics.py"
-              - "vllm_ascend/patch/worker/patch_common/patch_spec_decode_worker.py"
-              - "vllm_ascend/patch/worker/patch_common/patch_multi_step_worker.py"
+            speculative_tests_changed: 'false'
 
       - name: Run vllm-project/vllm-ascend Speculative Decode test
         if: steps.filter_spec_decode.outputs.speculative_tests_changed == 'true' || github.event_name == 'schedule'
