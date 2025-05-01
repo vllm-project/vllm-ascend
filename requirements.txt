@@ -13,3 +13,7 @@ torch-npu==2.5.1
 torch>=2.5.1
 torchvision<0.21.0
 wheel
+
+# requirements for disaggregated prefill
+msgpack
+quart

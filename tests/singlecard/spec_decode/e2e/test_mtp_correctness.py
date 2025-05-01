@@ -123,7 +123,7 @@ def test_mtp_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
         "model_name": QUANT_MODEL,
 
         # GPU memory utilization
-        "gpu_memory_utilization": 0.85
+        "gpu_memory_utilization": 0.8
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -169,7 +169,7 @@ def test_mtp_e2e_quant_greedy_correctness(vllm_runner, common_llm_kwargs,
         "model_name": FLOAT_MODEL,
 
         # GPU memory utilization
-        "gpu_memory_utilization": 0.85
+        "gpu_memory_utilization": 0.8
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -230,7 +230,7 @@ def test_mtp_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
 
         # Main model
         "model_name": FLOAT_MODEL,
-        "gpu_memory_utilization": 0.85
+        "gpu_memory_utilization": 0.8
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -274,7 +274,7 @@ def test_mtp_e2e_greedy_correctness_torchair_graph(
 
         # Main model
         "model_name": QUANT_MODEL,
-        "gpu_memory_utilization": 0.85
+        "gpu_memory_utilization": 0.8
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -322,7 +322,7 @@ def test_mtp_e2e_quant_greedy_correctness_torchair_graph(
         "model_name": FLOAT_MODEL,
 
         # GPU memory utilization
-        "gpu_memory_utilization": 0.9
+        "gpu_memory_utilization": 0.8
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -369,7 +369,7 @@ def test_mtp_e2e_greedy_correctness_with_preemption(
         "model_name": FLOAT_MODEL,
 
         # GPU memory utilization
-        "gpu_memory_utilization": 0.9
+        "gpu_memory_utilization": 0.8
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -420,7 +420,7 @@ def test_mtp_different_k(vllm_runner, common_llm_kwargs,
         "model_name": FLOAT_MODEL,
 
         # GPU memory utilization
-        "gpu_memory_utilization": 0.9
+        "gpu_memory_utilization": 0.8
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])

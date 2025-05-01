@@ -2,11 +2,21 @@
  This file demonstrates the example usage of disaggregated prefilling
  We will launch 2 vllm instances (NPU 0,1 for prefill and NPU 2,3 for decode),
  and then transfer the KV cache between them.
+ prompy_device_ips denotes device ip of NPU 0,1
+ decode_device_ips denotes device ip of NPU 2,3
+ The device ips of all NPUs in current server can be found through
+ examples/disaggregated_prefill/find_device_ips.py
  """
 import multiprocessing as mp
 import os
 import time
 from multiprocessing import Event, Process
+
+kv_connector_extra_config = {
+    "prompt_device_ips": ["1.2.3.1", "1.2.3.2"],
+    "decode_device_ips": ["1.2.3.9", "1.2.3.10"],
+    "llmdatadist_comm_port": 26000,
+}
 
 
 def clean_up():
@@ -34,11 +44,10 @@ def run_prefill(prefill_done, process_close):
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
 
     ktc = KVTransferConfig.from_cli(
-        '{"kv_connector":"AscendHcclConnector","kv_buffer_device":"npu","kv_role":"kv_producer", "kv_parallel_size":2}'
+        '{"kv_connector":"AscendSimpleConnector","kv_buffer_device":"npu","kv_role":"kv_producer", "kv_parallel_size":2}'
     )
-
-    # Set GPU memory utilization to 0.8 for an A6000 GPU with 40GB
-    # memory. You may need to adjust the value to fit your GPU.
+    global kv_connector_extra_config
+    ktc.kv_connector_extra_config = kv_connector_extra_config
     llm = LLM(model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
               kv_transfer_config=ktc,
               max_model_len=2000,
@@ -69,15 +78,16 @@ def run_decode(prefill_done):
     from vllm.config import KVTransferConfig
 
     prompts = [
-        "Hello, how are you today?", "Hi, what is your name?",
-        "Tell me a very long story.", "what is your favourite book?"
+        "Hello, how are you today?",
+        "Hi, what is your name?",
     ]
     sampling_params = SamplingParams(temperature=0, top_p=0.95)
 
     ktc = KVTransferConfig.from_cli(
-        '{"kv_connector":"AscendHcclConnector","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_parallel_size":2}'
+        '{"kv_connector":"AscendSimpleConnector","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_parallel_size":2}'
     )
-
+    global kv_connector_extra_config
+    ktc.kv_connector_extra_config = kv_connector_extra_config
     llm = LLM(model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
               kv_transfer_config=ktc,
               max_model_len=2000,
