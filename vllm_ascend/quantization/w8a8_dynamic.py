@@ -62,38 +62,38 @@ def apply_mlp(x: torch.Tensor,
         h = x
         pertoken_scale = dynamic_scale
 
-    output_dtype = torch.bfloat16 if w1_scale.dtype == torch.bfloat16 else \
-        torch.float16
-
     # gmm1: gate_up_proj
-    gate_up_out_list = torch_npu.npu_grouped_matmul(
-        x=[h],
-        weight=[w1],
-        scale=[w1_scale],
-        per_token_scale=[pertoken_scale],
-        split_item=3,
-        group_list_type=group_list_type,
-        group_type=0,
-        group_list=group_list,
-        output_dtype=output_dtype)
-    gate_up_out = gate_up_out_list[0]
+    gate_up_out = torch_npu.npu_grouped_matmul(x=[h],
+                                               weight=[w1],
+                                               split_item=3,
+                                               group_list_type=group_list_type,
+                                               group_type=0,
+                                               group_list=group_list,
+                                               output_dtype=torch.int32)[0]
 
-    # swiglu
-    swiglu_out = torch_npu.npu_swiglu(gate_up_out)
-    swiglu_out, swiglu_out_scale = torch_npu.npu_dynamic_quant(swiglu_out)
+    swiglu_out, swiglu_out_scale = torch_npu.npu_dequant_swiglu_quant(
+        x=gate_up_out,
+        weight_scale=w1_scale,
+        activation_scale=pertoken_scale,
+        bias=None,
+        quant_scale=None,
+        quant_offset=None,
+        group_index=group_list,
+        activate_left=True,
+        quant_mode=1,
+    )
 
     # down_proj
-    down_out_list = torch_npu.npu_grouped_matmul(
-        x=[swiglu_out],
-        weight=[w2],
-        scale=[w2_scale],
-        per_token_scale=[swiglu_out_scale],
-        split_item=3,
-        group_list_type=group_list_type,
-        group_type=0,
-        group_list=group_list,
-        output_dtype=output_dtype)
-    return down_out_list[0]
+    down_out = torch_npu.npu_grouped_matmul(x=[swiglu_out],
+                                            weight=[w2],
+                                            scale=[w2_scale],
+                                            per_token_scale=[swiglu_out_scale],
+                                            split_item=2,
+                                            group_list_type=group_list_type,
+                                            group_type=0,
+                                            group_list=group_list,
+                                            output_dtype=w2_scale.dtype)[0]
+    return down_out
 
 
 def fused_experts_with_mc2(
@@ -363,7 +363,10 @@ class AscendW8A8DynamicLinearMethod:
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
             layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
+        # cast quantized weight tensors in NZ format (29) for higher inference speed
+        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, 29)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
+        layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
         layer.weight_offset.data = layer.weight_offset.data.flatten()
 
 
@@ -508,7 +511,7 @@ class AscendW8A8DynamicFusedMoEMethod:
             layer.w2_weight.data = layer.w2_weight.data.transpose(
                 1, 2).contiguous()
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
-            layer.w13_weight_scale.data.shape[0], -1)
+            layer.w13_weight_scale.data.shape[0], -1).to(torch.float32)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(
             layer.w13_weight_offset.data.shape[0], -1)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(

@@ -221,10 +221,16 @@ def _set_cos_sin_cache(self, seq_len, device, dtype):
     t = torch.arange(seq_len, device=device, dtype=torch.float32)
 
     freqs = torch.outer(t, inv_freq)
+    cos_cached = torch.cat([freqs, freqs], dim=-1).cos() * self.mscale
+    sin_cached = torch.cat([freqs, freqs], dim=-1).sin() * self.mscale
+    cos_cached = cos_cached.to(dtype)
+    sin_cached = sin_cached.to(dtype)
     cache = torch.cat([freqs.cos() * self.mscale,
                        freqs.sin() * self.mscale],
                       dim=-1).to(dtype)
     self.register_buffer("cos_sin_cache", cache, persistent=False)
+    self.register_buffer("cos_cached", cos_cached, persistent=False)
+    self.register_buffer("sin_cached", sin_cached, persistent=False)
 
 
 def deepseek_rope_init_func(
