@@ -590,14 +590,14 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
                                 self.input_builder.chunked_prefill_enabled)
 
         device = self.runner.device
-        use_torchair_graph = graph_pad_size != -1
+        use_npu_graph = graph_pad_size != -1
 
         max_query_len = max(query_lens)
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
         max_decode_seq_len = max(self.curr_seq_lens, default=0)
         num_decode_tokens = self.num_decode_tokens
 
-        if self.num_prefills == 0 and use_torchair_graph:
+        if self.num_prefills == 0 and use_npu_graph:
             num_seqs = len(seq_lens)
             self.slot_mapping.extend([PAD_SLOT_ID] * graph_pad_size)
             self.block_tables.extend([[]] * graph_pad_size)
@@ -915,7 +915,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv = kv.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
 
-        k_pe, k_nope = torch.ops.npu_inference.npu_kv_rmsnorm_rope_cache(
+        k_pe, k_nope, _, _ = torch.ops.npu_inference.npu_kv_rmsnorm_rope_cache(
             kv,
             self.kv_a_layernorm.weight,
             cos,
@@ -1123,9 +1123,17 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         elif attn_metadata.decode_metadata:
             assert kv_cache is not None
             if self.enable_graph_mode:
-                # TorchAir's shape is [bs, num_heads_per_rank, seq_len, dim]
+                # shape of query for npu graph mode should be:
+                # [bs, num_heads_per_rank, seq_len, dim]
                 q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1)
                 q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
+                # shape of knope/k_pe for npu graph mode should be:
+                # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
+                block_size = kv_cache[0].shape[1]
+                k_nope = k_nope.view(-1, self.num_kv_heads, block_size,
+                                     self.kv_lora_rank)
+                k_pe = k_pe.view(-1, self.num_kv_heads, block_size,
+                                 self.qk_rope_head_dim)
                 attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
                     q_nope,
                     k_nope,
@@ -1133,14 +1141,14 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                     query_rope=q_pe,
                     key_rope=k_pe,
                     num_heads=self.num_heads,
-                    num_key_value_heads=1,
+                    num_key_value_heads=self.num_kv_heads,
                     input_layout="BNSD",
                     atten_mask=attn_metadata.attn_mask,
                     scale=self.scale,
                     antiquant_mode=0,
                     antiquant_scale=None,
                     block_table=attn_metadata.block_tables,
-                    block_size=kv_cache[0].shape[1],
+                    block_size=block_size,
                     actual_seq_lengths_kv=attn_metadata.seq_lens,
                 )
                 attn_output = attn_output.view(num_tokens, -1,
