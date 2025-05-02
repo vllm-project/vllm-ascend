@@ -37,8 +37,8 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 - 硬件：Atlas 800I A2 Inference系列、Atlas A2 Training系列
 - 操作系统：Linux
 - 软件：
-  * Python >= 3.9
-  * CANN >= 8.0.RC2
+  * Python >= 3.9, < 3.12
+  * CANN >= 8.1.RC1
   * PyTorch >= 2.5.1, torch-npu >= 2.5.1
   * vLLM (与vllm-ascend版本一致)
 

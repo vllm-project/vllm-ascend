@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10
+FROM quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG COMPILE_CUSTOM_KERNELS=1
