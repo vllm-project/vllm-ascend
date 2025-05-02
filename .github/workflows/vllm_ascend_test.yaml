@@ -45,7 +45,8 @@ jobs:
     name: vLLM Ascend test v0.7.3-dev
     runs-on: linux-arm64-npu-1
     container:
-      image: quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10
+      # TODO(yikun): Remove m.daocloud.io prefix when infra proxy ready
+      image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
       env:
         HF_ENDPOINT: https://hf-mirror.com
         HF_TOKEN: ${{ secrets.HF_TOKEN }}

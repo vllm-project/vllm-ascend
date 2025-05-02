@@ -31,6 +31,8 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
+The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)(`pip install -e`) to help developer immediately take place changes without requiring a new installation.
+
 ## Usage
 
 You can use Modelscope mirror to speed up download:

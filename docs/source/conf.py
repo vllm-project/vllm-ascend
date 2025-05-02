@@ -73,7 +73,7 @@ myst_substitutions = {
     'pip_vllm_ascend_version': "0.7.3rc2",
     'pip_vllm_version': "0.7.3",
     # CANN image tag
-    'cann_image_tag': "8.0.0-910b-ubuntu22.04-py3.10",
+    'cann_image_tag': "8.1.rc1-910b-ubuntu22.04-py3.10",
 }
 
 # Add any paths that contain templates here, relative to this directory.
