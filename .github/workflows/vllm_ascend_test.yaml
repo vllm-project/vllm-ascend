@@ -136,12 +136,23 @@ jobs:
         id: filter_spec_decode
         uses: dorny/paths-filter@v3
         with:
-          # speculative decode seems will cause oom issue, disable it now on ci test
           filters: |
-            speculative_tests_changed: 'false'
+            speculative_tests_changed:
+              - ".github/workflows/vllm_ascend_test.yaml"
+              - "tests/singlecard/spec_decode/**"
+              - "tests/multicard/spec_decode_e2e/**"
+              - "vllm_ascend/worker/worker.py"
+              - "vllm_ascend/worker/model_runner.py"
+              - "vllm_ascend/worker/multi_step_runner.py"
+              - "vllm_ascend/worker/multi_step_worker.py"
+              - "vllm_ascend/worker/draft_model_runner.py"
+              - "vllm_ascend/patch/worker/patch_common/patch_metrics.py"
+              - "vllm_ascend/patch/worker/patch_common/patch_spec_decode_worker.py"
+              - "vllm_ascend/patch/worker/patch_common/patch_multi_step_worker.py"
 
       - name: Run vllm-project/vllm-ascend Speculative Decode test
-        if: steps.filter_spec_decode.outputs.speculative_tests_changed == 'true' || github.event_name == 'schedule'
+        # speculative decode seems will cause oom issue, only disable it now on ci test with vLLM main
+        if: matrix.vllm_verison == 'v0.8.5' && steps.filter_spec_decode.outputs.speculative_tests_changed == 'true' || github.event_name == 'schedule'
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
             pytest -sv tests/singlecard/spec_decode/e2e/test_mtp_correctness.py  # it needs a clean process
