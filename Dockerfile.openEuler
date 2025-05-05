@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:8.0.0-910b-openeuler22.03-py3.10
+FROM quay.io/ascend/cann:8.1.rc1-910b-openeuler22.03-py3.10
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG COMPILE_CUSTOM_KERNELS=1
@@ -30,7 +30,7 @@ RUN pip config set global.index-url ${PIP_INDEX_URL}
 
 WORKDIR /workspace
 
-COPY . /vllm-workspace/vllm-ascend/  
+COPY . /vllm-workspace/vllm-ascend/
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
