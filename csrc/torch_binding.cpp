@@ -98,6 +98,80 @@ std::tuple<at::Tensor, at::Tensor> rotary_embedding(at::Tensor &positions, at::T
     cmd.Run();
     return {query_dst, key_dst};
 }
+
+std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
+    at::Tensor &input,
+    const int64_t org_vocab_start_index,
+    const int64_t org_vocab_end_index,
+    const int64_t num_org_vocab_padding,
+    const int64_t added_vocab_start_index,
+    const int64_t added_vocab_end_index) 
+{
+    // Input validation
+    TORCH_CHECK(input.dim() >= 1, "input must have at least 1 dimension");
+
+    std::cout << "Values: " << input << std::endl;
+
+    // Get total number of elements
+    int64_t size = input.numel();
+    std::cout << "size:" << size << std::endl;
+    
+    // Create output tensors
+    at::Tensor masked_input = at::empty_like(input);
+    //at::Tensor masked_input = at::empty(input.sizes(), input.options().dtype(input.dtype()));
+
+    at::Tensor mask = at::empty(input.sizes(), input.options().dtype(at::kBool));
+    
+    // Get data pointers
+    void *input_ptr = input.data_ptr();
+    void *masked_input_ptr = masked_input.data_ptr();
+    void *mask_ptr = mask.data_ptr();
+    
+    // Get current stream
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
+    
+    // Get scalar type
+    at::ScalarType scalar_type = input.scalar_type();
+    
+    // Create and configure OpCommand
+    at_npu::native::OpCommand cmd;
+    cmd.Name("get_masked_input_and_mask");
+    cmd.SetCustomHandler([scalar_type, size, stream, 
+                         input_ptr, masked_input_ptr, mask_ptr,
+                         org_vocab_start_index, org_vocab_end_index,
+                         num_org_vocab_padding, added_vocab_start_index,
+                         added_vocab_end_index]() -> int {
+        // Get platform info
+        fe::PlatFormInfos platform_infos;
+        int device_id = 0;
+        fe::PlatformInfoManager::GeInstance().GetRuntimePlatformInfosByDevice(device_id, platform_infos);
+        uint32_t aivNum = platform_infos.GetCoreNumByType("aiv");
+        uint32_t loop_cnt = (size + aivNum - 1) / aivNum;
+        std::cout << "loop_cnt:" << loop_cnt << std::endl;
+        std::cout << "aivNum:" << aivNum << std::endl;
+        
+        // Call implementation
+        get_masked_input_and_mask_impl(
+            stream,
+            input_ptr,
+            masked_input_ptr, 
+            mask_ptr,
+            org_vocab_start_index,
+            org_vocab_end_index,
+            num_org_vocab_padding,
+            added_vocab_start_index,
+            added_vocab_end_index,
+            size,
+            loop_cnt,
+            aivNum);
+            
+        return 0;
+    });
+    // Run the operation
+    cmd.Run();
+    return {masked_input, mask};
+}
+
 } // namespace vllm_ascend
 
 TORCH_LIBRARY_EXPAND(_C, ops)
@@ -113,6 +187,16 @@ TORCH_LIBRARY_EXPAND(_C, ops)
         "                 Tensor! key, int head_size,"
         "                 Tensor cos_sin_cache, bool is_neox) -> (Tensor query, Tensor key)");
     ops.impl("rotary_embedding", torch::kPrivateUse1, &vllm_ascend::rotary_embedding);
+
+    ops.def(
+        "get_masked_input_and_mask(Tensor input, "
+        "                         int org_vocab_start_index, "
+        "                         int org_vocab_end_index, "
+        "                         int num_org_vocab_padding, "
+        "                         int added_vocab_start_index, "
+        "                         int added_vocab_end_index) -> (Tensor masked_input, Tensor mask)");
+    ops.impl("get_masked_input_and_mask", torch::kPrivateUse1, &vllm_ascend::get_masked_input_and_mask);
+
 }
 
 REGISTER_EXTENSION(_C)
