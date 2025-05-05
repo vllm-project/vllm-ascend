@@ -48,7 +48,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-arm64-npu-1, linux-arm64-npu-4]
-        vllm_verison: [main, v0.8.5]
+        vllm_verison: [main, v0.8.5.post1]
     concurrency:
       group: >
         ${{ 
@@ -153,7 +153,7 @@ jobs:
 
       - name: Run vllm-project/vllm-ascend Speculative Decode test
         # speculative decode seems will cause oom issue, only disable it now on ci test with vLLM main
-        if: matrix.vllm_verison == 'v0.8.5' && steps.filter_spec_decode.outputs.speculative_tests_changed == 'true' || github.event_name == 'schedule'
+        if: matrix.vllm_verison == 'v0.8.5.post1' && steps.filter_spec_decode.outputs.speculative_tests_changed == 'true' || github.event_name == 'schedule'
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
             pytest -sv tests/singlecard/spec_decode/e2e/test_mtp_correctness.py  # it needs a clean process
