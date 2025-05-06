@@ -80,6 +80,7 @@ Following is the Release Compatibility Matrix for vLLM Ascend Plugin:
 
 | vllm-ascend  | vLLM         | Python         | Stable CANN | PyTorch/torch_npu |
 |--------------|--------------|----------------| --- | --- |
+| v0.8.5rc1 | v0.8.5.post1 | >= 3.9, < 3.12 | 8.1.RC1 |  2.5.1 / 2.5.1 |
 | v0.8.4rc2 | v0.8.4 | >= 3.9, < 3.12 | 8.0.0   |  2.5.1 / 2.5.1 |
 | v0.8.4rc1 | v0.8.4 | >= 3.9, < 3.12 | 8.0.0   |  2.5.1 / 2.5.1.dev20250320 |
 | v0.7.3rc2 | v0.7.3 | >= 3.9, < 3.12 | 8.0.0   |  2.5.1 / 2.5.1.dev20250320 |
@@ -92,7 +93,8 @@ Following is the Release Compatibility Matrix for vLLM Ascend Plugin:
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
-| End of 2025.04 | v0.7.x Final release, v0.7.3          |
+| Early of 2025.05 | v0.7.x Final release, v0.7.3        |
+| 2025.05.06 | Release candidates, v0.8.5rc1             |
 | 2025.04.28 | Release candidates, v0.8.4rc2             |
 | 2025.04.18 | Release candidates, v0.8.4rc1             |
 | 2025.03.28 | Release candidates, v0.7.3rc2             |
