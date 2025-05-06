@@ -159,14 +159,3 @@
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm and vllm-ascend.
 #
-# ** File: worker/patch_main/patch_tritonplaceholder.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `triton` Module
-#    Why:
-#       Triton is not supported on npu currently, importing triton will break vllm-ascend
-#    How：
-#       ditto
-#    Related PR (if no, explain why): vllm haven't support yet
-#       TritonPlaceholder is only available in vllm>0.8.5.post1
-#    Future Plan:
-#       https://github.com/vllm-project/vllm/pull/17446

@@ -22,5 +22,5 @@ if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
     from vllm_ascend.patch.worker import patch_0_8_5  # noqa: F401
     from vllm_ascend.patch.worker import patch_common  # noqa: F401
 else:
-    from vllm_ascend.patch.worker import patch_main  # noqa: F401 # isort:skip
     from vllm_ascend.patch.worker import patch_common  # noqa: F401
+    from vllm_ascend.patch.worker import patch_main  # noqa: F401
