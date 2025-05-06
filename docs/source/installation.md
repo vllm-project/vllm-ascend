@@ -11,7 +11,7 @@ This document describes how to install vllm-ascend manually.
 
     | Software  | Supported version | Note                                   |
     |-----------|-------------------|----------------------------------------| 
-    | CANN      | >= 8.1.rc1        | Required for vllm-ascend and torch-npu |
+    | CANN      | >= 8.1.RC1        | Required for vllm-ascend and torch-npu |
     | torch-npu | >= 2.5.1          | Required for vllm-ascend               |
     | torch     | >= 2.5.1          | Required for torch-npu and vllm        |
 
@@ -135,21 +135,10 @@ Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
    :substitutions:
 
 # Install vllm-project/vllm from pypi
-# (v0.8.4 aarch64 is unsupported see detail in below note)
-# pip install vllm==|pip_vllm_version|
-# Install vLLM
-git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
-cd vllm
-VLLM_TARGET_DEVICE=empty pip install -v -e .
-cd ..
+pip install vllm==|pip_vllm_version|
 
 # Install vllm-project/vllm-ascend from pypi.
 pip install vllm-ascend==|pip_vllm_ascend_version|
-```
-
-```{note}
-There was a installation bug on vLLM v0.8.4 aarch64: [No matching distribution found for triton](https://github.com/vllm-project/vllm-ascend/issues/581).
-If you failed to install vLLM due to it, please build from source code.
 ```
 
 :::{dropdown} Click here to see "Build from source code"
