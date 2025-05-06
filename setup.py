@@ -143,7 +143,7 @@ class cmake_build_ext(build_ext):
                                  sys.executable)
 
         # find PYTHON_INCLUDE_PATH
-        check_or_set_default_env(cmake_args, "PYHTON_INCLUDE_PATH",
+        check_or_set_default_env(cmake_args, "PYTHON_INCLUDE_PATH",
                                  get_paths()["include"])
 
         # ccache and ninja can not be applied at ascendc kernels now
