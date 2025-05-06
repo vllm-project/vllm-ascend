@@ -2,10 +2,10 @@
 
 ## v0.8.5rc1
 
-This is the 1st release candidate of v0.8.5 for vllm-ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to start the journey.
+This is the 1st release candidate of v0.8.5 for vllm-ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to start the journey. Now you can enable V1 egnine by setting the environment variable `VLLM_USE_V1=1`, see the feature support status of vLLM Ascend in [here](https://vllm-ascend.readthedocs.io/en/latest/user_guide/suppoted_features.html).
 
 ### Highlights
-- Upgrade CANN version to 8.1.RC1 [#747](https://github.com/vllm-project/vllm-ascend/pull/747)
+- Upgrade CANN version to 8.1.RC1 to support chunked prefill and automatic prefix caching (`--enable_prefix_caching`) when V1 is enabled [#747](https://github.com/vllm-project/vllm-ascend/pull/747)
 - Optimize Qwen2 VL and Qwen 2.5 VL [#701](https://github.com/vllm-project/vllm-ascend/pull/701)
 - Improve Deepseek V3 eager mode and graph mode performance, now you can use --additional_config={'enable_graph_mode': True} to enable graph mode. [#598](https://github.com/vllm-project/vllm-ascend/pull/598) [#719](https://github.com/vllm-project/vllm-ascend/pull/719)
 
