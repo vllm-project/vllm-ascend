@@ -135,7 +135,7 @@ class AttentionMaskBuilder:
                       context_len:] = self.splitfuse_mask_value
             right_tensor = attn_mask[current_row:current_row + q_len,
                                      context_len:seq_len]
-            right_tensor.mask_fill_(
+            right_tensor.masked_fill_(
                 right_tensor.tril() == self.splitfuse_mask_value, 0)
             current_row += q_len
 
