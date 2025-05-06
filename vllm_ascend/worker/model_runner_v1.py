@@ -32,6 +32,8 @@ import torch.nn as nn
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
@@ -54,17 +56,6 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.platform import NPUPlatform
-
-if vllm_version_is("0.8.4"):
-    from vllm.distributed import get_kv_transfer_group
-
-    def has_kv_transfer_group() -> bool:
-        # vLLM 0.8.4 does not support disaggregated prefill. This function is
-        # added to ensure compatibility with vLLM 0.8.4.
-        return False
-else:
-    from vllm.distributed.kv_transfer import (  # type: ignore
-        get_kv_transfer_group, has_kv_transfer_group)
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
