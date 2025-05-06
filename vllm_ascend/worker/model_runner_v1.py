@@ -79,17 +79,6 @@ from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.utils import ProfileExecuteDuration
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 
-if vllm_version_is("0.8.4"):
-    from vllm.distributed import get_kv_transfer_group
-
-    def has_kv_transfer_group() -> bool:
-        # vLLM 0.8.4 does not support disaggregated prefill. This function is
-        # added to ensure compatibility with vLLM 0.8.4.
-        return False
-else:
-    from vllm.distributed.kv_transfer import (  # type: ignore
-        get_kv_transfer_group, has_kv_transfer_group)
-
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import SchedulerOutput
