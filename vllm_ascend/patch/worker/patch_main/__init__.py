@@ -14,4 +14,3 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import vllm_ascend.patch.worker.patch_main.patch_tritonplaceholder  # noqa
