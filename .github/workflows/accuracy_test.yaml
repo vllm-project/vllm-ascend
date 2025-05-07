@@ -1,0 +1,203 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: Accuracy Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      vllm-version:
+        description: 'what vllm version to accuracy test?'
+        required: true
+        type: string
+      vllm-ascend-version:
+        description: 'what vllm-ascend version to accuracy test?'
+        required: true
+        type: string
+      models:
+        description: 'choose model(all/Qwen2.5-7B-Instruct/Llama-3.1-8B-Instruct/Qwen2.5-VL-7B-Instruct/Qwen3-8B)'
+        required: true
+        type: choice
+        options:
+          - all
+          - Qwen/Qwen2.5-7B-Instruct
+          - meta-llama/Llama-3.1-8B-Instruct
+          - Qwen/Qwen2.5-VL-7B-Instruct
+          - Qwen/Qwen3-8B
+        default: 'all'
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  model_tests:
+    name: Model Test - ${{ matrix.model_name }}
+    runs-on: 'linux-arm64-npu-2'
+    strategy:
+      matrix:
+        include: ${{ fromJSON(
+          (github.event.inputs.models == 'all' && '[{"model_name":"Qwen/Qwen2.5-7B-Instruct","output_file":"Qwen2.5-7B-Instruct"},{"model_name":"meta-llama/Llama-3.1-8B-Instruct","output_file":"Llama-3.1-8B-Instruct"},{"model_name":"Qwen/Qwen2.5-VL-7B-Instruct","output_file":"Qwen2.5-VL-7B-Instruct"}, {"model_name":"Qwen/Qwen3-8B","output_file":"Qwen3-8B"}]') ||
+          (github.event.inputs.models == 'Qwen/Qwen2.5-7B-Instruct' && '[{"model_name":"Qwen/Qwen2.5-7B-Instruct","output_file":"Qwen2.5-7B-Instruct"}]') ||
+          (github.event.inputs.models == 'meta-llama/Llama-3.1-8B-Instruct' && '[{"model_name":"meta-llama/Llama-3.1-8B-Instruct","output_file":"Llama-3.1-8B-Instruct"}]') ||
+          (github.event.inputs.models == 'Qwen/Qwen2.5-VL-7B-Instruct' && '[{"model_name":"Qwen/Qwen2.5-VL-7B-Instruct","output_file":"Qwen2.5-VL-7B-Instruct"}]') ||
+          (github.event.inputs.models == 'Qwen/Qwen3-8B' && '[{"model_name":"Qwen/Qwen3-8B","output_file":"Qwen3-8B"}]')
+         ) }}
+      fail-fast: false
+
+    container:
+      image: quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10
+      env:
+        HF_ENDPOINT: https://hf-mirror.com
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        DATASET_SOURCE: ModelScope
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+          apt-get update -y
+          apt install git -y
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev
+
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          path: ./vllm-empty
+          ref: ${{ github.event.inputs.vllm-version }}
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: VLLM_TARGET_DEVICE=empty pip install -e .
+      
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm-ascend
+          path: ./vllm-ascend
+          ref: ${{ github.event.inputs.vllm-ascend-version }}
+          fetch-depth: 0
+
+      - name: Install pta
+        run: |
+          if [ ! -d /root/.cache/pta ]; then
+            mkdir -p /root/.cache/pta
+          fi
+          if [ ! -f /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl ]; then
+            cd /root/.cache/pta
+            rm -rf pytorch_v2.5.1_py310*
+            wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
+            tar -zxvf pytorch_v2.5.1_py310.tar.gz
+          fi
+          pip install /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+
+      - name: Install vllm-project/vllm-ascend
+        working-directory: ./vllm-ascend
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -e .
+          
+      - name: Checkout EleutherAI/lm-evaluation-harness repo
+        uses: actions/checkout@v4
+        with:
+          repository: EleutherAI/lm-evaluation-harness
+          path: ./lm-eval
+          fetch-depth: 0
+
+      - name: Install EleutherAI/lm-evaluation-harness
+        working-directory: ./lm-eval
+        run: |
+            pip install -e .
+            pip install ray datasets==2.16.0 transformers==4.50.3 huggingface-hub==0.29.3
+          
+      - name: Collect version info
+        run: |
+          for dir in /usr/local/Ascend/ascend-toolkit/*; do
+            dname=$(basename "$dir")
+            if [ "$dname" != "latest" ]; then
+              TOOLKIT_DIR="$dname"
+              break
+            fi
+          done
+          INFO_FILE="/usr/local/Ascend/ascend-toolkit/${TOOLKIT_DIR}/$(uname -i)-linux/ascend_toolkit_install.info"
+          CANN_VERSION=$(grep "version=" "$INFO_FILE" \
+                           | head -n1 \
+                           | cut -d'=' -f2 \
+                           | tr -d '"')
+          {
+            echo "CANN_VERSION=$CANN_VERSION"
+            pip show torch | grep "Version:" | awk '{print "TORCH_VERSION="$2}'
+            pip show torch_npu | grep "Version:" | awk '{print "TORCH_NPU_VERSION="$2}'
+            pip show vllm | grep "Version:" | awk '{print "VLLM_VERSION="$2}' | sed 's/+.*//'
+          } >> "$GITHUB_ENV"
+      
+      - name: Print versions
+        run: |
+          echo "CANN: ${{ env.CANN_VERSION }}"
+          echo "Torch NPU: ${{ env.TORCH_NPU_VERSION }}"
+          echo "Torch: ${{ env.TORCH_VERSION }}"
+          echo "vLLM: ${{ env.VLLM_VERSION }}"
+
+      - name: Run Accuracy Test for V0
+        working-directory: ./benchmarks
+        env:
+          VLLM_USE_V1: 0
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+        run: |
+          mkdir -p ./accuracy/V0
+          python ./scripts/run_accuracy.py \
+            --model "${{ matrix.model_name }}" \
+            --output "./accuracy/V0/${{ matrix.output_file }}.md" \
+            --vllm_ascend_version "${{ github.event.inputs.vllm-ascend-version }}" \
+            --cann_version "${{ env.CANN_VERSION }}" \
+            --torch_npu_version "${{ env.TORCH_NPU_VERSION }}" \
+            --torch_version "${{ env.TORCH_VERSION }}" \
+            --vllm_version "${{ env.VLLM_VERSION }}"
+
+      - name: Upload Report for V0
+        uses: actions/upload-artifact@v4
+        with:
+          name: "${{ github.event.inputs.vllm-ascend-version }}-${{ matrix.output_file }}-V0-report"
+          path: ./benchmarks/accuracy/V0/${{ matrix.output_file }}.md
+          if-no-files-found: warn
+          retention-days: 90
+          overwrite: true
