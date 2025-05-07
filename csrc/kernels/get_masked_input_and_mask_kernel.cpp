@@ -395,19 +395,21 @@ extern "C" __global__ __aicore__ void get_masked_input_and_mask_kernel(
 {
     GetMaskedInputAndMask<int32_t> op{};
 
-    //for(int64_t i = 0; i < size; i += 1){
-    //    AscendC::printf("get_masked_input_and_mask_kernel input[%lld] = %d\n", (long long)i, input[i]);
-    //}
     for (int64_t i = AscendC::GetBlockIdx(); i < loop_cnt; i += aiv_num) {
+        AscendC::printf("fmt string %s\n", "op.Init start");
         op.Init(input + i * size/loop_cnt, 
                masked_input + i * size/loop_cnt,
                mask_out + i * size/loop_cnt,
                org_vocab_start_index, org_vocab_end_index,
                num_org_vocab_padding, added_vocab_start_index,
                added_vocab_end_index, size/loop_cnt);
+		AscendC::printf("fmt string %s\n", "op.Init end");
             
+		AscendC::printf("fmt string %s\n", "op.Process start");
         op.Process();
+		AscendC::printf("fmt string %s\n", "op.Process end");
     }
+	AscendC::printf("fmt string %s\n", "op.Process end 1111");
 }
 
 namespace vllm_ascend {

@@ -110,17 +110,18 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
     // Input validation
     TORCH_CHECK(input.dim() >= 1, "input must have at least 1 dimension");
 
-    std::cout << "Values: " << input << std::endl;
+    //std::cout << "Values: " << input << std::endl;
 
     // Get total number of elements
     int64_t size = input.numel();
-    std::cout << "size:" << size << std::endl;
+    //std::cout << "size:" << size << std::endl;
     
     // Create output tensors
     at::Tensor masked_input = at::empty_like(input);
     //at::Tensor masked_input = at::empty(input.sizes(), input.options().dtype(input.dtype()));
 
-    at::Tensor mask = at::empty(input.sizes(), input.options().dtype(at::kBool));
+    //at::Tensor mask = at::empty(input.sizes(), input.options().dtype(at::kBool));
+	at::Tensor mask = at::empty_like(input).to(at::kBool);
     
     // Get data pointers
     void *input_ptr = input.data_ptr();
@@ -168,7 +169,9 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
         return 0;
     });
     // Run the operation
+	std::cout << "cmd.Run start" << std::endl;
     cmd.Run();
+	std::cout << "cmd.Run end" << std::endl;
     return {masked_input, mask};
 }
 
