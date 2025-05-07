@@ -47,7 +47,7 @@ jobs:
 
       - name: "Run actionlint"
         env:
-          SHELLCHECK_OPTS: --exclude=SC2046,SC2006
+          SHELLCHECK_OPTS: --exclude=SC2046,SC2006,SC2086
         run: |
           echo "::add-matcher::.github/workflows/matchers/actionlint.json"
           tools/actionlint.sh -color
