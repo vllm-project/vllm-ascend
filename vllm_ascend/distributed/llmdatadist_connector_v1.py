@@ -290,18 +290,15 @@ class KVTransferEngine:
             self.role, self.cluster_id)
 
     def prepare_data_dist(self):
+        # TODO: The maximum size of the mbuf for the llm datadist. We need to
+        # find an appropriate value to minimize memory waste.
         options = {
             "llm.SyncKvCacheWaitTime": envs.LLMDATADIST_SYNC_CACHE_WAIT_TIME,
+            "ge.flowGraphMemMaxSize": f"{(9*1024*1024*1024):d}",
+            "ge.exec.deviceId": str(self.local_rank),
         }
         if self.role == llm_datadist.LLMRole.PROMPT:
-            # TODO: This represents the maximum size of the mbuf for the llm
-            # datadist. We need to find an appropriate value to minimize memory
-            # waste.
-            # options["ge.flowGraphMemMaxSize"] = "1024"  # MB
-            options["ge.exec.deviceId"] = str(self.local_rank)
             options["llm.listenIpInfo"] = f"{self.local_device_ip}:26000"
-        else:
-            options["ge.exec.deviceId"] = str(self.local_rank)
         self.datadist_engine.init(options)
         self.kv_transfer = self.datadist_engine.kv_cache_manager
 
