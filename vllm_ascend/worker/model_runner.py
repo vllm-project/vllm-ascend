@@ -1007,7 +1007,7 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         pattern: Optional[str] = None,
         max_size: Optional[int] = None,
     ) -> None:
-        from vllm.model_executor.model_loader.loader import ShardedStateLoader
+        from vllm.model_executor.model_loader import ShardedStateLoader
         ShardedStateLoader.save_model(
             self.model,
             path,
@@ -1019,7 +1019,7 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         self,
         tensorizer_config: TensorizerConfig,
     ) -> None:
-        from vllm.model_executor.model_loader.loader import TensorizerLoader
+        from vllm.model_executor.model_loader import TensorizerLoader
         TensorizerLoader.save_model(
             self.model,
             tensorizer_config=tensorizer_config,
