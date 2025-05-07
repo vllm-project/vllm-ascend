@@ -73,7 +73,7 @@ class VllmRunner:
         dtype: str = "half",
         disable_log_stats: bool = True,
         tensor_parallel_size: int = 1,
-        block_size: int = 16,
+        block_size: Optional[int] = None,
         enable_chunked_prefill: bool = False,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = False,
