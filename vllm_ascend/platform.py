@@ -175,11 +175,9 @@ class NPUPlatform(Platform):
         if cache_config:
             if cache_config.block_size is None:
                 cache_config.block_size = 128
-            if envs.VLLM_USE_V1 and cache_config.enable_prefix_caching:
-                logger.warning(
-                    "Prefix caching is not supported for V1 now, disable prefix caching"
-                )
-                cache_config.enable_prefix_caching = False
+            if cache_config.enable_prefix_caching and cache_config.block_size != 128:
+                raise ValueError(
+                    "If prefix caching is enabled, block size must be set to 128.")
 
         if envs.VLLM_USE_V1:
             # Activate custom ops for v1.
