@@ -26,6 +26,14 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
+(Optional) Install MindIE Turbo for performance acceleration:
+
+```{code-block} bash
+   :substitutions:
+
+pip install mindie_turbo==|pip_mindie_turbo_version|
+```
+
 Setup environment variables:
 
 ```bash
@@ -90,7 +98,20 @@ docker run --rm \
 -p 8000:8000 \
 -e VLLM_USE_MODELSCOPE=True \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
--it $IMAGE \
+-it $IMAGE bash
+```
+
+(Optional) Install MindIE Turbo for performance acceleration:
+
+```{code-block} bash
+   :substitutions:
+
+pip install mindie_turbo==|pip_mindie_turbo_version|
+```
+
+Run the following script to start the vLLM server:
+
+```
 vllm serve Qwen/Qwen2.5-7B-Instruct --max_model_len 26240
 ```
 

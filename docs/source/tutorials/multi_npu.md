@@ -27,6 +27,14 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
+(Optional) Install MindIE Turbo for performance acceleration:
+
+```{code-block} bash
+   :substitutions:
+
+pip install mindie_turbo==|pip_mindie_turbo_version|
+```
+
 Setup environment variables:
 
 ```bash

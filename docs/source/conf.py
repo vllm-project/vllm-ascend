@@ -72,6 +72,8 @@ myst_substitutions = {
     # This value should be updated when cut down release.
     'pip_vllm_ascend_version': "0.7.3rc2",
     'pip_vllm_version': "0.7.3",
+    # The maching MindIE Turbo for vLLM Ascend
+    'pip_mindie_turbo_version': "2.0rc1",
     # CANN image tag
     'cann_image_tag': "8.1.rc1-910b-ubuntu22.04-py3.10",
 }

@@ -195,6 +195,16 @@ The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/v
 
 :::::
 
+## (Optional) Install MindIE Turbo
+
+Install MindIE Turbo for performance acceleration:
+
+```{code-block} bash
+   :substitutions:
+
+pip install mindie_turbo==|pip_mindie_turbo_version|
+```
+
 ## Extra information
 
 ### Verify installation
@@ -254,3 +264,10 @@ Prompt: 'The president of the United States is', Generated text: ' a very import
 Prompt: 'The capital of France is', Generated text: ' Paris. The oldest part of the city is Saint-Germain-des-Pr'
 Prompt: 'The future of AI is', Generated text: ' not bright\n\nThere is no doubt that the evolution of AI will have a huge'
 ```
+
+### Compile Enhancement
+
+Get more performance gains by optimizing Python and torch-npu with the Bisheng compiler, please follow these official turtorial:
+
+[Optimizing Python with Bisheng](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html)
+[Optimizing torch-npu with Bisheng](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0058.html)

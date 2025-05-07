@@ -20,7 +20,9 @@
 from vllm.logger import logger
 
 
-def try_register_lib(lib_name: str, lib_info: str = ""):
+def try_register_lib(lib_name: str,
+                     lib_info: str = "",
+                     exception_info: str = ""):
     import importlib
     import importlib.util
     try:
@@ -30,4 +32,4 @@ def try_register_lib(lib_name: str, lib_info: str = ""):
             if lib_info:
                 logger.info(lib_info)
     except Exception:
-        pass
+        logger.warning_once(exception_info)
