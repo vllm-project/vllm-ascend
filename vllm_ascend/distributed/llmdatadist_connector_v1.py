@@ -434,19 +434,25 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
                                                     self.local_server_id)
         self.llm_datadist_engine.prepare_data_dist()
         if self.kv_role == llm_datadist.LLMRole.DECODER:
-            while True:
-                try:
-                    # Each decoding rank should correspond to each prefilling rank.
-                    clusters = self.llm_datadist_engine.make_clusters()
-                    _, ret = self.llm_datadist_engine.datadist_engine.link_clusters(
-                        clusters, 20000)
-                    logger.info(f"{local_rank} link, ret={ret}")
-                    break
-                except LLMException as e:
-                    logger.error(
-                        f"Failed to link clusters, local_rank {local_rank}, error: {e}"
-                    )
-                    time.sleep(1)
+            # Each decoding rank should correspond to each prefilling rank.
+            clusters = self.llm_datadist_engine.make_clusters()
+            while len(clusters) > 0:
+                overall_ret, link_rets = \
+                    self.llm_datadist_engine.datadist_engine.link_clusters(
+                    clusters, timeout=3000)
+
+                if overall_ret != LLMStatusCode.LLM_SUCCESS:
+                    logger.warning(f"Failed to link clusters, {overall_ret=}")
+                    continue
+
+                for idx, link_ret in enumerate(link_rets):
+                    if link_ret == LLMStatusCode.LLM_SUCCESS:
+                        clusters.pop(idx)
+
+                if len(clusters) == 0:
+                    logger.info("Successfully linked clusters")
+                else:
+                    logger.warning(f"Still {len(clusters)} clusters to link")
 
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
