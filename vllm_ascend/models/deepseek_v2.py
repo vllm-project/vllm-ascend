@@ -222,9 +222,6 @@ class CustomDeepseekV2MoE(nn.Module):
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        if self.n_shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
-
         if (self.tp_size > 1 and self.enable_mc2 and not is_prefill):
             chunks = torch.chunk(hidden_states,
                                  get_tp_group().world_size,
@@ -248,8 +245,8 @@ class CustomDeepseekV2MoE(nn.Module):
             else:
                 final_hidden_states = tensor_model_parallel_all_reduce(
                     final_hidden_states)
-
-        if shared_output is not None:
+        if self.n_shared_experts is not None:
+            shared_output = self.shared_experts(hidden_states)
             final_hidden_states = final_hidden_states + shared_output
 
         return final_hidden_states.view(num_tokens, hidden_dim)
