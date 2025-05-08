@@ -235,9 +235,16 @@ class SimpleConnector(KVConnectorBase):
         seq_lens = model_input.attn_metadata.seq_lens
         num_prefill_tokens = model_input.attn_metadata.num_prefill_tokens
         slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
+        enable_dummy_run = get_dp_group().world_size > 2
 
         total_tokens = model_input.attn_metadata.num_prefill_tokens + model_input.attn_metadata.num_decode_tokens
         hidden_or_intermediate_states_for_one_req = []
+        if enable_dummy_run:
+            start_pos = 0
+            hidden_or_intermediate_states = torch.empty(
+                [total_tokens, hidden_size],
+                dtype=kv_caches[0].dtype,
+                device=kv_caches[0].device)
 
         input_tokens_list = []
         num_computed_tokens_list = []
@@ -288,6 +295,24 @@ class SimpleConnector(KVConnectorBase):
             if not all([(num_computed_tokens == num_tokens), hidden is not None
                         ]):
                 bypass_model_exec = False
+            if enable_dummy_run:
+                # For the case that actually receive hidden_states
+                if not bypass_model_exec:
+                    hidden_or_intermediate_states[start_pos:start_pos +
+                                                  num_tokens] = hidden
+                # For the case that non hidden_states received, we assume this case is dummy run case, empty tensor
+                # will be created for dummy run case.
+                else:
+                    hidden_or_intermediate_states[start_pos:start_pos +
+                                                  num_tokens] = torch.empty(
+                                                      [
+                                                          total_tokens,
+                                                          hidden_size
+                                                      ],
+                                                      dtype=kv_caches[0].dtype,
+                                                      device=kv_caches[0].
+                                                      device)
+                start_pos += num_tokens
 
             # update the end position based on how many tokens are cached.
             end_pos = start_pos + num_computed_tokens
@@ -324,27 +349,14 @@ class SimpleConnector(KVConnectorBase):
 
             hidden_or_intermediate_states_for_one_req.append(hidden)
 
-        if not bypass_model_exec:
-            # Some of the KV cache is not retrieved
-            # Here we will fall back to normal model forwarding
-            # But optionally you can adjust model_input so that you only do
-            # prefilling on those tokens that are missing KV caches.
-            if get_dp_group().world_size > 1:
-                bypass_model_exec = True
-                hidden_or_intermediate_states = torch.empty(
-                    [total_tokens, hidden_size],
-                    dtype=kv_caches[0].dtype,
-                    device=kv_caches[0].device)
-                logger.warning(
-                    "[Detect there is more one DP rank in this decode node, in this scenario, no recompute is expected when kv cache dose not received.]"
-                )
-            else:
-                logger.warning(
-                    "[rank%d]: Failed to receive all KVs and hidden "
-                    "states, redo model forwarding.",
-                    torch.distributed.get_rank())
-                hidden_or_intermediate_states = None
-        else:
+        # when dummy run enabled bit not all hidden and kv cache received
+        if enable_dummy_run and not bypass_model_exec:
+            bypass_model_exec = True
+            logger.warning(
+                "[Detect there is more one DP rank in this decode node, in this scenario, no recompute is expected when kv cache dose not received.]"
+            )
+        # when all hidden and kv cache received
+        elif bypass_model_exec:
             logger.debug(
                 "[rank%d]: Successfully received all KVs and hidden "
                 "states, skip model forwarding.",
@@ -366,7 +378,12 @@ class SimpleConnector(KVConnectorBase):
             else:
                 hidden_or_intermediate_states = torch.cat(
                     hidden_or_intermediate_states_for_one_req, dim=0)
-
+        # when dummy run is not enabled and some of the kv cache also missed.
+        else:
+            logger.warning(
+                "[rank%d]: Failed to receive all KVs and hidden "
+                "states, redo model forwarding.", torch.distributed.get_rank())
+            hidden_or_intermediate_states = None
         return hidden_or_intermediate_states, bypass_model_exec, model_input
 
     def close(self):
