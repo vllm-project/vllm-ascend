@@ -42,12 +42,18 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import FlexibleArgumentParser, GB_bytes, get_open_port
 
+from vllm_ascend.utils import vllm_version_is
+
 from .model_utils import TextTextLogprobs
+
+if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
+    from vllm.model_executor.model_loader.loader import get_model_loader  # type: ignore[import]  # isort: skip
+else:
+    from vllm.model_executor.model_loader import get_model_loader
 
 VLLM_PATH = Path(__file__).parent.parent
 """Path to root of the vLLM repository."""
