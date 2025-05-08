@@ -1,7 +1,9 @@
+from typing import Tuple
+
 import pytest
 import torch
 import torch_npu  # noqa: F401
-from typing import Tuple
+
 import vllm_ascend.platform  # noqa: F401
 
 # Test parameters
