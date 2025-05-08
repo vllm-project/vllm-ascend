@@ -35,7 +35,6 @@ def benchmark_npu(fn, num_iterations=100, num_warmup_iterations=50):
     elapsed_time = np.amin(times)/1000
     return elapsed_time
 
-'''
 def get_masked_input_and_mask_ref(
     input_: torch.Tensor,
     org_vocab_start_index: int,
@@ -52,50 +51,6 @@ def get_masked_input_and_mask_ref(
     vocab_mask = org_vocab_mask | added_vocab_mask
     masked_input = vocab_mask * (input_ - valid_offset)
     return masked_input, ~vocab_mask
-'''
-
-def get_masked_input_and_mask_ref(
-    input_: torch.Tensor,
-    org_vocab_start_index: int,
-    org_vocab_end_index: int,
-    num_org_vocab_padding: int,
-    added_vocab_start_index: int,
-    added_vocab_end_index: int
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Reference implementation for verification"""
-    input_ = input_.to(torch.int64)
-
-    org_vocab_mask = (input_ >= org_vocab_start_index) & (input_ < org_vocab_end_index)
-    org_vocab_mask = org_vocab_mask.to(torch.int64)
-
-    added_vocab_mask = (input_ >= added_vocab_start_index) & (input_ < added_vocab_end_index)
-    added_vocab_mask = added_vocab_mask.to(torch.int64)
-
-    added_offset = torch.tensor(added_vocab_start_index - (org_vocab_end_index - org_vocab_start_index) - num_org_vocab_padding,
-                              dtype=torch.int64,
-                              device=input_.device)
-
-    valid_offset = torch.where(
-        org_vocab_mask == 1,
-        torch.tensor(org_vocab_start_index, dtype=torch.int64, device=input_.device),
-        torch.tensor(0, dtype=torch.int64, device=input_.device)
-    )
-    valid_offset += torch.where(
-        added_vocab_mask == 1,
-        added_offset,
-        torch.tensor(0, dtype=torch.int64, device=input_.device)
-    )
-
-    vocab_mask = (org_vocab_mask | added_vocab_mask).to(torch.int64)
-
-    masked_input = torch.where(
-        vocab_mask == 1,
-        input_ - valid_offset,
-        torch.tensor(0, dtype=torch.int64, device=input_.device)
-    )
-
-    masked_input = masked_input.to(input_.dtype)
-    return masked_input, ~vocab_mask.to(torch.bool)
 
 DTYPES = [torch.int32]
 SHAPES = [(3, 4, 5)]
@@ -172,3 +127,17 @@ def test_get_masked_input_and_mask(
     print("ref_masked_input:", ref_masked_input)
     print("custom_mask:", custom_mask)
     print("ref_mask:", ref_mask)
+    torch.testing.assert_close(
+        custom_masked_input,
+        ref_masked_input,
+        rtol=1e-5,
+        atol=1e-5,
+        msg=f"Masked input mismatch for case: {test_case}"
+    )
+    torch.testing.assert_close(
+        custom_mask,
+        ref_mask,
+        rtol=1e-5,
+        atol=1e-5,
+        msg=f"Mask mismatch for case: {test_case}"
+    )
