@@ -7,21 +7,21 @@ This document outlines the benchmarking methodology for vllm-ascend, aimed at ev
     - Input length: 32 tokens.
     - Output length: 128 tokens.
     - Batch size: fixed (8).
-    - Models: Meta-Llama-3.1-8B-Instruct, Qwen2.5-7B-Instruct.
+    - Models: Qwen2.5-7B-Instruct, Qwen/Qwen2.5-VL-7B-Instruct.
     - Evaluation metrics: end-to-end latency (mean, median, p99).
 
 - Throughput tests
     - Input length: randomly sample 200 prompts from ShareGPT dataset (with fixed random seed).
     - Output length: the corresponding output length of these 200 prompts.
     - Batch size: dynamically determined by vllm to achieve maximum throughput.
-    - Models: Meta-Llama-3.1-8B-Instruct, Qwen2.5-7B-Instruct.
+    - Models: Qwen2.5-7B-Instruct, Qwen/Qwen2.5-VL-7B-Instruct.
     - Evaluation metrics: throughput.
 - Serving tests
     - Input length: randomly sample 200 prompts from ShareGPT dataset (with fixed random seed).
     - Output length: the corresponding output length of these 200 prompts.
     - Batch size: dynamically determined by vllm and the arrival pattern of the requests.
     - **Average QPS (query per second)**: 1, 4, 16 and inf. QPS = inf means all requests come at once. For other QPS values, the arrival time of each query is determined using a random Poisson process (with fixed random seed).
-    - Models: Meta-Llama-3.1-8B-Instruct, Qwen2.5-7B-Instruct.
+    - Models: Qwen2.5-7B-Instruct, Qwen/Qwen2.5-VL-7B-Instruct.
     - Evaluation metrics: throughput, TTFT (time to the first token, with mean, median and p99), ITL (inter-token latency, with mean, median and p99).
 
 **Benchmarking Duration**: about 800 senond for single model.
