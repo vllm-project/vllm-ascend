@@ -454,6 +454,22 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
                 else:
                     logger.warning(f"Still {len(clusters)} clusters to link")
 
+        # LLMDataDist will deallocate the cache buffer either when the cache
+        # buffer's Python object goes out of scope or when deallocate_cache() is
+        # explicitly called. This can lead to accuracy issues if the cache
+        # buffer is deallocated while still being used in the NPU stream. To
+        # prevent this, we maintain a reference to the cache buffer until the
+        # next round, ensuring it is not prematurely deallocated.
+        self.kv_buffers: List = []
+
+    def _detach_kv_buffers(self):
+        for kv_buffer in self.kv_buffers:
+            self.llm_datadist_engine.kv_transfer.deallocate_cache(kv_buffer)
+        self.kv_buffers.clear()
+
+    def _attach_kv_buffer(self, kv_buffer: torch.Tensor):
+        self.kv_buffers.append(kv_buffer)
+
     def start_load_kv(self, forward_context: "ForwardContext",
                       **kwargs) -> None:
         """
@@ -476,6 +492,9 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
         if self.kv_role == llm_datadist.LLMRole.PROMPT:
             # In the prefilling node, do not need to load KV cache.
             return
+
+        # Release the KV cache buffer from the previous round
+        self._detach_kv_buffers()
 
         # Get the metadata
         metadata = self._get_connector_metadata()
@@ -558,6 +577,7 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
             kv_hidden_dtype = kv_cache_layers[0].dtype
             kv_buffer, pulled_kv_caches = self._create_cache_tensors(
                 self.num_layers, kv_cache_shape, kv_hidden_dtype)
+            self._attach_kv_buffer(kv_buffer)
 
             target_tp_rank = self.tp_rank % min(
                 self.cluster_info.prefill_tp_size,
@@ -589,9 +609,6 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
                 pulled_kv_cache = pulled_kv_caches[layer_id]
                 self._inject_kv_into_layer(kv_cache_layer, pulled_kv_cache,
                                            req_slot_mapping, is_mla)
-
-            # Release the reference count
-            self.llm_datadist_engine.kv_transfer.deallocate_cache(kv_buffer)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """
