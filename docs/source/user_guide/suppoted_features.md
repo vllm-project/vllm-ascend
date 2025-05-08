@@ -35,3 +35,4 @@ MindIE Turbo is an optional performace optimization plugin. Find more informatio
 | Graph Mode                    | 🟡 Planned     | 🟡 Planned     | Will support in v0.8.x                                                 |
 | Sleep Mode                    | 🟢 Functional  | 🟢 Functional  | [Usage Limits][#733](https://github.com/vllm-project/vllm-ascend/issues/733) |
 | MTP                           | 🟢 Functional  | 🟢 Functional  | [Usage Limits][#734](https://github.com/vllm-project/vllm-ascend/issues/734) |
+| Custom Scheduler              | 🟢 Functional  | 🟢 Functional  | [Usage Limits][#788](https://github.com/vllm-project/vllm-ascend/issues/788) |

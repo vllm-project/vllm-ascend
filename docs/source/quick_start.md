@@ -140,3 +140,7 @@ INFO:     Application shutdown complete.
 Finally, you can exit container by using `ctrl-D`.
 ::::
 :::::
+
+### Performance enhancement related environment variables in Mindie Turbo
+
+Currently, some performance enhancement features in MindIE Turbo have certain scenario restrictions. For these features, environment variables are used to control whether to enable them. For related environment variables, see its [official documentation](https://www.hiascend.com/document/detail/zh/mindie/20RC1/AcceleratePlugin/turbodev/mindie-turbo-0010.html).

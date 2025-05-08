@@ -78,7 +78,7 @@ class NPUWorker(WorkerBase):
         try_register_lib(
             "mindie_turbo",
             "MindIE Turbo is installed. vLLM inference will be accelerated with MindIE Turbo.",
-            "MindIE Turbo not found, please check the installation of mindie-turbo if you attempt to use it."
+            "MindIE Turbo is installed but unable to `import mindie_turbo`, skip MindIE Turbo acceleration."
         )
 
         if self.cache_config.cache_dtype == "auto":
