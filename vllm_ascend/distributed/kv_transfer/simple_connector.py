@@ -202,6 +202,7 @@ class SimpleConnector(KVConnectorBase):
     ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
                "ModelInputForGPUWithSamplingMetadata", ]:
         bypass_model_exec = True
+        bypass_single_req = True
 
         model_config = self.model_config
 
@@ -252,6 +253,8 @@ class SimpleConnector(KVConnectorBase):
 
         # enumerate different requests
         for idx, slen in enumerate(seq_lens):
+            if not bypass_single_req:
+                bypass_model_exec = False
             start_pos = sum(seq_lens[:idx])
             end_pos = start_pos + slen
 
@@ -279,7 +282,7 @@ class SimpleConnector(KVConnectorBase):
             )
             if ret[0] is None:
                 # didn't find any match.
-                bypass_model_exec = False
+                bypass_single_req = False
                 num_computed_tokens_list.append(0)
                 continue
 
@@ -294,10 +297,10 @@ class SimpleConnector(KVConnectorBase):
             # If not, need to redo the forwarding to compute missing states
             if not all([(num_computed_tokens == num_tokens), hidden is not None
                         ]):
-                bypass_model_exec = False
+                bypass_single_req = False
             if enable_dummy_run:
                 # For the case that actually receive hidden_states
-                if not bypass_model_exec:
+                if bypass_single_req:
                     hidden_or_intermediate_states[start_pos:start_pos +
                                                   num_tokens] = hidden
                 # For the case that non hidden_states received, we assume this case is dummy run case, empty tensor
