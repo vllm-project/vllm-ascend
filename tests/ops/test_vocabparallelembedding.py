@@ -22,27 +22,11 @@ def get_masked_input_and_mask_ref(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Reference implementation for verification"""
     org_vocab_mask = (input_ >= org_vocab_start_index) & (input_ < org_vocab_end_index)
-    print("input_ >= org_vocab_start_index:", input_ >= org_vocab_start_index)
-    print("input_ < org_vocab_end_index:", input_ < org_vocab_end_index)
-    print("org_vocab_mask:", org_vocab_mask)
     added_vocab_mask = (input_ >= added_vocab_start_index) & (input_ < added_vocab_end_index)
-    print("(input_ >= added_vocab_start_index):", (input_ >= added_vocab_start_index))
-    print("(input_ < added_vocab_end_index):", (input_ < added_vocab_end_index))
-    print("added_vocab_mask:", added_vocab_mask)
     added_offset = added_vocab_start_index - (org_vocab_end_index - org_vocab_start_index) - num_org_vocab_padding
-    print("added_offset:", added_offset)
-    print("(org_vocab_start_index * org_vocab_mask):", (org_vocab_start_index * org_vocab_mask))
-    print("(added_offset * added_vocab_mask):", (added_offset * added_vocab_mask))
     valid_offset = (org_vocab_start_index * org_vocab_mask) + (added_offset * added_vocab_mask)
-    print("(org_vocab_start_index * org_vocab_mask):", (org_vocab_start_index * org_vocab_mask))
-    print("(added_offset * added_vocab_mask):", (added_offset * added_vocab_mask))
-    print("valid_offset:", valid_offset)
     vocab_mask = org_vocab_mask | added_vocab_mask
-    print("vocab_mask:", vocab_mask)
-    print(" (input_ - valid_offset):",  (input_ - valid_offset))
     masked_input = vocab_mask * (input_ - valid_offset)
-    print("masked_input:", masked_input)
-    print(" ~vocab_mask:",  ~vocab_mask)
     return masked_input, ~vocab_mask
 
 @pytest.mark.parametrize("shape", SHAPES)

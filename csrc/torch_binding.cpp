@@ -148,8 +148,6 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
         fe::PlatformInfoManager::GeInstance().GetRuntimePlatformInfosByDevice(device_id, platform_infos);
         uint32_t aivNum = platform_infos.GetCoreNumByType("aiv");
         uint32_t loop_cnt = (size + aivNum - 1) / aivNum;
-        std::cout << "loop_cnt:" << loop_cnt << std::endl;
-        std::cout << "aivNum:" << aivNum << std::endl;
         
         // Call implementation
         get_masked_input_and_mask_impl(
@@ -168,10 +166,7 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
             
         return 0;
     });
-    // Run the operation
-	std::cout << "cmd.Run start" << std::endl;
     cmd.Run();
-	std::cout << "cmd.Run end" << std::endl;
     return {masked_input, mask};
 }
 
