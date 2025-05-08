@@ -633,7 +633,8 @@ class NPUModelRunner:
         # 3. XGrammar logits on CPU only supports float32 dtype.
         logits_dtype = logits.dtype
         logits = logits.to("cpu").float()
-        xgr.apply_token_bitmask_inplace(logits, grammar_bitmask,
+        xgr.apply_token_bitmask_inplace(logits,
+                                        grammar_bitmask,
                                         indices=out_indices)
         return logits.to(self.device).to(logits_dtype)
 
