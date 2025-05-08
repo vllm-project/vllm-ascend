@@ -3,8 +3,8 @@ import torch
 import torch_npu  # noqa: F401
 from typing import Tuple
 import pytest
-import vllm
-import vllm_ascend.platform # noqa: F401
+import vllm  # noqa: F401
+import vllm_ascend.platform  # noqa: F401
 
 
 def benchmark_npu(fn, num_iterations=100, num_warmup_iterations=50):
