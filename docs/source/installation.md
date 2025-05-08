@@ -11,7 +11,7 @@ This document describes how to install vllm-ascend manually.
 
     | Software  | Supported version | Note                                   |
     |-----------|-------------------|----------------------------------------| 
-    | CANN      | >= 8.0.0          | Required for vllm-ascend and torch-npu |
+    | CANN      | >= 8.1.RC1        | Required for vllm-ascend and torch-npu |
     | torch-npu | >= 2.5.1          | Required for vllm-ascend               |
     | torch     | >= 2.5.1          | Required for torch-npu and vllm        |
 
@@ -69,10 +69,6 @@ docker run --rm \
 :animate: fade-in-slide-down
 You can also install CANN manually:
 
-```{note}
-This guide takes aarch64 as an example. If you run on x86, you need to replace `aarch64` with `x86_64` for the package name shown below.
-```
-
 ```bash
 # Create a virtual environment
 python -m venv vllm-ascend-env
@@ -82,19 +78,19 @@ source vllm-ascend-env/bin/activate
 pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs 'numpy<2.0.0' decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
 
 # Download and install the CANN package.
-wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.0.0/Ascend-cann-toolkit_8.0.0_linux-aarch64.run
-chmod +x ./Ascend-cann-toolkit_8.0.0_linux-aarch64.run
-./Ascend-cann-toolkit_8.0.0_linux-aarch64.run --full
+wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.1.RC1/Ascend-cann-toolkit_8.1.RC1_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-toolkit_8.1.RC1_linux-"$(uname -i)".run
+./Ascend-cann-toolkit_8.1.RC1_linux-"$(uname -i)".run --full
 
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
-wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.0.0/Ascend-cann-kernels-910b_8.0.0_linux-aarch64.run
-chmod +x ./Ascend-cann-kernels-910b_8.0.0_linux-aarch64.run
-./Ascend-cann-kernels-910b_8.0.0_linux-aarch64.run --install
+wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.1.RC1/Ascend-cann-kernels-910b_8.1.RC1_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-kernels-910b_8.1.RC1_linux-"$(uname -i)".run
+./Ascend-cann-kernels-910b_8.1.RC1_linux-"$(uname -i)".run --install
 
-wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.0.0/Ascend-cann-nnal_8.0.0_linux-aarch64.run
-chmod +x ./Ascend-cann-nnal_8.0.0_linux-aarch64.run
-./Ascend-cann-nnal_8.0.0_linux-aarch64.run --install
+wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.1.RC1/Ascend-cann-nnal_8.1.RC1_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-nnal_8.1.RC1_linux-"$(uname -i)".run
+./Ascend-cann-nnal_8.1.RC1_linux-"$(uname -i)".run --install
 
 source /usr/local/Ascend/nnal/atb/set_env.sh
 ```
@@ -139,21 +135,10 @@ Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
    :substitutions:
 
 # Install vllm-project/vllm from pypi
-# (v0.8.4 aarch64 is unsupported see detail in below note)
-# pip install vllm==|pip_vllm_version|
-# Install vLLM
-git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
-cd vllm
-VLLM_TARGET_DEVICE=empty pip install -v -e .
-cd ..
+pip install vllm==|pip_vllm_version|
 
 # Install vllm-project/vllm-ascend from pypi.
 pip install vllm-ascend==|pip_vllm_ascend_version|
-```
-
-```{note}
-There was a installation bug on vLLM v0.8.4 aarch64: [No matching distribution found for triton](https://github.com/vllm-project/vllm-ascend/issues/581).
-If you failed to install vLLM due to it, please build from source code.
 ```
 
 :::{dropdown} Click here to see "Build from source code"
@@ -223,6 +208,7 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
+The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)(`pip install -e`) to help developer immediately take place changes without requiring a new installation.
 ::::
 
 :::::
