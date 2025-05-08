@@ -403,6 +403,25 @@ class NPUWorker(LocalOrDistributedWorkerBase):
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
+    def execute_model(self, execute_model_req=None):
+        if self.enable_dummy_run:
+            logger.debug(
+                f"send notify start to the dp proxy: {self.dp_proxy_monitor_addr}"
+            )
+            data = {
+                "info": "notify_step_start",
+                "http_address": self.http_addr
+            }
+            self.notify_socket.send(msgpack.dumps(data))
+        result = super().execute_model(execute_model_req)
+        if self.enable_dummy_run:
+            logger.debug(
+                f"send notify end to the dp proxy: {self.dp_proxy_monitor_addr}"
+            )
+            data = {"info": "notify_step_end", "http_address": self.http_addr}
+            self.notify_socket.send(msgpack.dumps(data))
+        return result
+
     @torch.inference_mode()
     def execute_worker(self, worker_input: WorkerInput) -> None:
         if self.enable_dummy_run:
