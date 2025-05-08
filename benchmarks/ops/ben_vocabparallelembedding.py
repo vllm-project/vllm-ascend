@@ -3,8 +3,8 @@ import torch
 import torch_npu  # noqa: F401
 from typing import Tuple
 import pytest
-import vllm  # noqa: F401
-import vllm_ascend.platform  # noqa: F401
+import vllm # noqa: F401
+import vllm_ascend.platform # noqa: F401
 
 
 def benchmark_npu(fn, num_iterations=100, num_warmup_iterations=50):
@@ -117,7 +117,7 @@ def test_get_masked_input_and_mask(
     custom_time = benchmark_npu(custom_fn)
 
     # Print performance results
-    print(f"\nPerformance Results:")
+    print("\nPerformance Results:")
     print(f"Reference implementation: {ref_time*1000:.3f} ms")
     print(f"Custom implementation: {custom_time*1000:.3f} ms")
     print(f"Speedup: {ref_time/custom_time:.2f}x")
