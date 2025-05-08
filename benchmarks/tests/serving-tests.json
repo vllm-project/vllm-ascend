@@ -1,6 +1,6 @@
 [
   {
-    "test_name": "serving_llama8B_tp1",
+    "test_name": "serving_qwen2_5vl_7B_tp1",
     "qps_list": [
       1,
       4,
@@ -8,7 +8,34 @@
       "inf"
     ],
     "server_parameters": {
-      "model": "LLM-Research/Meta-Llama-3.1-8B-Instruct",
+      "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+      "tensor_parallel_size": 1,
+      "swap_space": 16,
+      "disable_log_stats": "",
+      "disable_log_requests": "",
+      "trust_remote_code": "",
+      "max_model_len": 16384
+    },
+    "client_parameters": {
+      "model": "Qwen/Qwen2.5-VL-7B-Instruct",
+      "backend": "openai-chat",
+      "dataset_name": "hf",
+      "hf_split": "train",
+      "endpoint": "/v1/chat/completions",
+      "dataset_path": "lmarena-ai/vision-arena-bench-v0.1",
+      "num_prompts": 200
+    }
+  },
+  {
+    "test_name": "serving_qwen2_5_7B_tp1",
+    "qps_list": [
+      1,
+      4,
+      16,
+      "inf"
+    ],
+    "server_parameters": {
+      "model": "Qwen/Qwen2.5-7B-Instruct",
       "tensor_parallel_size": 1,
       "swap_space": 16,
       "disable_log_stats": "",
@@ -16,7 +43,7 @@
       "load_format": "dummy"
     },
     "client_parameters": {
-      "model": "LLM-Research/Meta-Llama-3.1-8B-Instruct",
+      "model": "Qwen/Qwen2.5-7B-Instruct",
       "backend": "vllm",
       "dataset_name": "sharegpt",
       "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
