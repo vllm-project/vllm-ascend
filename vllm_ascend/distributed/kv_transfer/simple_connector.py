@@ -283,6 +283,7 @@ class SimpleConnector(KVConnectorBase):
             if ret[0] is None:
                 # didn't find any match.
                 bypass_single_req = False
+                bypass_model_exec = False
                 num_computed_tokens_list.append(0)
                 continue
 
