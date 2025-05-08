@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import argparse
 import json
 import os
 from pathlib import Path
-import argparse
 
 import pandas as pd
 from tabulate import tabulate
-
 
 CUR_PATH = Path(__file__).parent.resolve()
 # latency results and the keys that will be printed into markdown
@@ -72,21 +71,16 @@ if __name__ == "__main__":
         type=str,
         default="../results/",
         help="The folder where the benchmark results are stored.")
-    parser.add_argument(
-        "--markdown_template",
-        type=str,
-        default="./perf_result_template.md",
-        help="The template file for the markdown report.")
-    parser.add_argument(
-        "--tag", 
-        default="main",
-        help="Tag to be used for release message."
-    )
-    parser.add_argument(
-        "--commit_id",
-        default="",
-        help="Commit ID to be used for release message."
-    )
+    parser.add_argument("--markdown_template",
+                        type=str,
+                        default="./perf_result_template.md",
+                        help="The template file for the markdown report.")
+    parser.add_argument("--tag",
+                        default="main",
+                        help="Tag to be used for release message.")
+    parser.add_argument("--commit_id",
+                        default="",
+                        help="Commit ID to be used for release message.")
 
     args = parser.parse_args()
     results_folder = (CUR_PATH / args.results_folder).resolve()
@@ -135,7 +129,7 @@ if __name__ == "__main__":
             # add the result to raw_result
             throughput_results.append(raw_result)
             continue
-        
+
         print(f"Skipping {test_file}")
     serving_results.sort(key=lambda x: (len(x['test_name']), x['test_name']))
 
@@ -177,7 +171,6 @@ if __name__ == "__main__":
                                    headers='keys',
                                    tablefmt='pipe',
                                    showindex=False)
-                                   
 
     # document the result
     print(output_folder)
