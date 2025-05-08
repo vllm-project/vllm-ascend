@@ -62,6 +62,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("C_COMPILER", None),
     "VLLM_VERSION":
     lambda: os.getenv("VLLM_VERSION", None),
+    "HCCN_CONF_PATH":
+    lambda: os.getenv("HCCN_CONF_PATH", "/etc/hccn.conf")
 }
 
 # end-env-vars-definition

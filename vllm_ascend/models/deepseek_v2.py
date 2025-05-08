@@ -536,6 +536,7 @@ class CustomDeepseekV2Model(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
+        self.config = config
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config

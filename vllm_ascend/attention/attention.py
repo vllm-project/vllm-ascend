@@ -16,6 +16,7 @@
 #
 
 from dataclasses import dataclass
+from itertools import accumulate
 from typing import Any, Dict, List, Optional, Tuple, Type
 
 import numpy as np
@@ -267,6 +268,11 @@ class AscendMetadata(AttentionMetadata):
     # seq_lens stored as a tensor.
     seq_lens_tensor: Optional[torch.Tensor]
 
+    # (batch_size + 1,). The cumulative subquery lengths of the sequences in
+    # the batch, used to index into subquery. E.g., if the subquery length
+    # is [4, 6], it is [0, 4, 10].
+    query_start_loc: Optional[torch.Tensor] = None
+
     # (batch_size,). The sequence length per sequence. Sequence length means
     # the computed tokens + new tokens None if it is a decoding.
     seq_lens: Optional[List[int]] = None
@@ -311,6 +317,8 @@ class AscendMetadata(AttentionMetadata):
                 or (self.encoder_seq_lens is not None))
 
         # Compute some attn_metadata fields which default to None.
+        query_start_loc = (None if self.query_start_loc is None else
+                           self.query_start_loc[:self.num_prefills + 1])
         slot_mapping = (None if self.slot_mapping is None else
                         self.slot_mapping[:self.num_prefill_tokens])
         seq_lens = (None if self.seq_lens is None else
@@ -337,6 +345,7 @@ class AscendMetadata(AttentionMetadata):
             encoder_seq_lens=self.encoder_seq_lens,
             encoder_seq_lens_tensor=self.encoder_seq_lens_tensor,
             max_encoder_seq_len=self.max_encoder_seq_len,
+            query_start_loc=query_start_loc,
             multi_modal_placeholder_index_maps=self.
             multi_modal_placeholder_index_maps,
             cross_slot_mapping=self.cross_slot_mapping,
@@ -374,6 +383,12 @@ class AscendMetadata(AttentionMetadata):
             max_query_len=self.max_query_len,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
+            # Batch may be composed of prefill|decodes, adjust query start
+            # indices to refer to the start of decodes. E.g.
+            # in tokens:[3 prefills|6 decodes], query_start_loc=[3,9] => [0,6].
+            query_start_loc=(self.query_start_loc[self.num_prefills:] -
+                             self.query_start_loc[self.num_prefills])
+            if self.query_start_loc is not None else None,
             block_tables=block_tables,
             # Begin encoder & cross attn fields below...
             encoder_seq_lens=self.encoder_seq_lens,
@@ -430,6 +445,9 @@ class AscendMetadata(AttentionMetadata):
         assert self.seq_lens_tensor.shape == (num_seqs, )
         assert self.max_query_len == 1
         assert self.max_prefill_seq_len == 0
+
+        assert self.query_start_loc is not None
+        assert self.query_start_loc.shape == (num_queries + 1, )
 
         assert self.block_tables is not None
         assert self.block_tables.shape[0] == num_seqs
@@ -596,6 +614,7 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
         max_prefill_seq_len = max(self.prefill_seq_lens, default=0)
         max_decode_seq_len = max(self.curr_seq_lens, default=0)
         num_decode_tokens = self.num_decode_tokens
+        query_start_loc = list(accumulate(query_lens, initial=0))
 
         if self.num_prefills == 0 and use_npu_graph:
             num_seqs = len(seq_lens)
@@ -626,6 +645,9 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
                                                device, self.runner.pin_memory)
         seq_lens_tensor = async_tensor_h2d(seq_lens, torch.int, device,
                                            self.runner.pin_memory)
+        query_start_loc_tensor = async_tensor_h2d(query_start_loc, torch.int32,
+                                                  device,
+                                                  self.runner.pin_memory)
         placeholder_index_maps = {
             modality: placeholder_map.index_map()
             for modality, placeholder_map in
@@ -644,6 +666,7 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
             max_query_len=max_query_len,
             max_prefill_seq_len=max_prefill_seq_len,
             max_decode_seq_len=max_decode_seq_len,
+            query_start_loc=query_start_loc_tensor,
             block_tables=block_tables,
             attn_mask=self.attn_mask,
         )
