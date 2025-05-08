@@ -18,6 +18,7 @@
 #
 
 import gc
+import math
 import os
 import time
 import weakref
@@ -273,7 +274,7 @@ class NPUModelRunner:
         self.use_npu_graph = (self.vllm_config.compilation_config.level
                               == CompilationLevel.PIECEWISE
                               and not self.model_config.enforce_eager)
-        self.npugraph_batch_sizes = list(
+        self.aclgraph_batch_sizes = list(
             reversed(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
 
@@ -950,12 +951,15 @@ class NPUModelRunner:
 
         start_time = time.perf_counter()
         start_free_npu_memory = torch.npu.mem_get_info()[0]
+        #  Since vllm aclgraph_batch_sizes is too large,
+        #  we need to adjust its length to proper size.
+        self.verify_adjust_aclgraph_batch_sizes()
 
-        # Trigger NPU graph capture for specific shapes.
+        # Trigger ACL graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
         with graph_capture(device=self.device):
-            for num_tokens in reversed(self.npugraph_batch_sizes):
+            for num_tokens in reversed(self.aclgraph_batch_sizes):
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
                     self._dummy_run(num_tokens)
@@ -968,3 +972,63 @@ class NPUModelRunner:
         # This usually takes 5~20 seconds.
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, npu_graph_size / (1 << 30))
+
+    def verify_adjust_aclgraph_batch_sizes(self) -> None:
+        # Now, vllm-ascend support max capture size is 1920
+        max_capture_size = 1920
+        original_aclgraph_batch_sizes = self.aclgraph_batch_sizes
+        num_hidden_layers = self.vllm_config.model_config.hf_config.num_hidden_layers
+        max_support_len_aclgraph = self.get_max_support_len(
+            max_capture_size, num_hidden_layers)
+
+        if max_support_len_aclgraph < len(original_aclgraph_batch_sizes):
+            self.aclgraph_batch_sizes = self.sample_from_list(
+                max_support_len_aclgraph)
+
+            logger.info(
+                "Model:%s-num_hidden_layers:%d will adjust aclgraph_batch_sizes, pre-adjust-len: %s, post-adjust-len: %s",
+                self.vllm_config.model_config.architectures[0],
+                num_hidden_layers, len(original_aclgraph_batch_sizes),
+                len(self.aclgraph_batch_sizes))
+        else:
+            logger.info(
+                "Model:%s-num_hidden_layers:%d no need adjust aclgraph_batch_sizes, list_len: %s",
+                self.vllm_config.model_config.architectures[0],
+                num_hidden_layers, len(original_aclgraph_batch_sizes))
+
+    def get_max_support_len(self, max_capture_size, num_hidden_layers) -> int:
+        parallel_type_cnt = 0
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        tp_size = self.vllm_config.parallel_config.tensor_parallel_size
+        if dp_size > 1:
+            parallel_type_cnt += 1
+        if tp_size > 1:
+            parallel_type_cnt += 1
+        max_support_len_aclgraph = math.floor(max_capture_size /
+                                              (num_hidden_layers + 1) /
+                                              (parallel_type_cnt + 1))
+        logger.info(
+            "max_capture_size:%s, dp_size:%s, tp_size:%s, parallel_type_cnt:%s, max_support_len_aclgraph: %s:",
+            max_capture_size,
+            dp_size,
+            tp_size,
+            parallel_type_cnt,
+            max_support_len_aclgraph,
+        )
+
+        return max_support_len_aclgraph
+
+    def sample_from_list(self, sample_len) -> list[int]:
+        # we use this function to sample a new list from old list by given length, and maintain uniformity, for example:
+        # original: [1 8 16 24 32 40 48 56 64]
+        # --> sample length = 3: [1 32 64]
+        # --> sample length = 5: [1 16 32 48 64]
+        original_len = len(self.aclgraph_batch_sizes)
+        step = (original_len - 1) / (sample_len - 1)
+        indices = [round(i * step) for i in range(sample_len)]
+        # Align first and last element of the original list and sub-list
+        indices[0] = 0
+        indices[-1] = original_len - 1
+        # Sample new list
+        new_list = [self.aclgraph_batch_sizes[i] for i in indices]
+        return new_list
