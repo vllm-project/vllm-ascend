@@ -2,6 +2,8 @@ import os
 import socket
 import threading
 import uuid
+import argparse
+import random
 
 import aiohttp
 import msgpack  # type: ignore
@@ -106,6 +108,8 @@ async def handle_request():
 
         global prefill_instances
         global prefill_cv
+        global prefill_dp_size
+        global prefill_round_robin_idx
         with prefill_cv:
             if len(prefill_instances) > 1:
                 print(
@@ -130,6 +134,7 @@ async def handle_request():
 
         global decode_instances
         global decode_cv
+        global decode_dp_size
         with decode_cv:
             if len(decode_instances) > 1:
                 print(
@@ -152,7 +157,16 @@ async def handle_request():
                 decode_zmq_addr,
             )
 
-        request_id = f"___prefill_addr_{prefill_addr}___decode_addr_{decode_addr}_{random_uuid()}"
+        with prefill_cv:
+            assert prefill_dp_size <= decode_dp_size
+            prefill_round_robin_idx = (prefill_round_robin_idx + 1) % prefill_dp_size
+
+        with decode_cv:
+            pd_rate = min((decode_dp_size // prefill_dp_size), 1)
+            decode_offset = random.randint(0, pd_rate - 1)
+            decode_rank = (prefill_round_robin_idx + decode_offset * prefill_dp_size) % decode_dp_size
+
+        request_id = f"___prefill_addr_{prefill_addr}___decode_addr_{decode_addr}_{random_uuid()}_{prefill_round_robin_idx}_{decode_rank}"
 
         # finish prefill
         async for _ in forward_request(f"http://{prefill_addr}/v1/completions",
@@ -181,12 +195,30 @@ async def handle_request():
 
 
 if __name__ == "__main__":
-    import argparse
     parser = argparse.ArgumentParser(
-        description="args of disaggregated-prefill proxy")
-    parser.add_argument("--http-port", type=int, default=10001)
-    parser.add_argument("--register-port", type=int, default=10002)
+        description='Arguments of disaggregated-prefill proxy',
+    )
+    parser.add_argument('--http-port',
+                   type=int,
+                   default=10001,
+                   help='The http service port of disaggregated-prefill proxy, used to receive inference requests.')
+    parser.add_argument('--register-port',
+                   type=int,
+                   default=10002,
+                   help='The register port of disaggregated-prefill proxy, used to register different P/D instances.')
+    parser.add_argument('--prefill-dp-size',
+                   type=int,
+                   default=1,
+                   help='The data parallel size of prefill instances')
+    parser.add_argument('--decode-dp-size',
+                   type=int,
+                   default=1,
+                   help='The data parallel size of decode instances')
     args = parser.parse_args()
+
+    prefill_dp_size = args.prefill_dp_size
+    decode_dp_size = args.decode_dp_size
+    prefill_round_robin_idx = 0
 
     t = start_service_discovery("0.0.0.0", args.register_port)
     app.run(host="0.0.0.0", port=args.http_port)

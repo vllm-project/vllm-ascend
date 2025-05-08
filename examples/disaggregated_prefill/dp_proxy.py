@@ -7,30 +7,21 @@ import os
 import threading
 import time
 import uuid
+import argparse
+import socket
 
 import aiohttp
 import msgpack  # type: ignore
 import zmq
 from quart import Quart, make_response, request
 
-DP_PROXY_HTTP_PORT = 10004
-DP_PROXY_ZMQ_REG_PORT = 30006
-DP_PROXY_ZMQ_NOTIFY_PORT = 30005
-
-PD_PROXY_ADDRESS = "127.0.0.1:30002"
-
-MY_HTTP_ADDRESS = f"127.0.0.1:{DP_PROXY_HTTP_PORT}"
-MY_ZMQ_ADDRESS_PLACEHOLDER = f"127.0.0.1:{DP_PROXY_ZMQ_REG_PORT}"
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
 logger = logging.getLogger(__name__)
 
-TIME_INTERVAL_FOR_IDLE_RUN = 5e-4
-DP_SIZE = 2
-
-dp_instances: dict[str, bool] = {}
 dp_cv = threading.Condition()
 round_robin_index = 0
 _idle_send_loop = None
@@ -50,6 +41,27 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 
+def get_ip() -> str:
+    # try ipv4
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
+        return s.getsockname()[0]
+    except Exception:
+        pass
+
+    # try ipv6
+    try:
+        s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        # Google's public DNS server, see
+        # https://developers.google.com/speed/public-dns/docs/using#addresses
+        s.connect(("2001:4860:4860::8888", 80))  # Doesn't need to be reachable
+        return s.getsockname()[0]
+    except Exception:
+        pass
+    return "0.0.0.0"
+
+
 async def send_idle_token_to_client(schedule_dict):
     for key, value in schedule_dict.items():
         if value:
@@ -57,12 +69,13 @@ async def send_idle_token_to_client(schedule_dict):
         request_received_id = random_uuid()
         idle_request_data = make_idle_request()
         forward_request_id = f"dp_idle_{key}_{request_received_id}"
-        target_url = f'http://{key}/v1/completions'
+        target_url = f"http://{key}/v1/completions"
         logger.debug(
             f"DP Decode Proxy: Sending idle token to D node {key} at {target_url}"
         )
-        generator = forward_request_internal(target_url, idle_request_data,
-                                             forward_request_id)
+        generator = forward_request_internal(
+            target_url, idle_request_data, forward_request_id
+        )
         try:
             async for response in generator:
                 logger.debug(
@@ -70,18 +83,19 @@ async def send_idle_token_to_client(schedule_dict):
                 )
         except Exception as e:
             logger.warning(
-                f"DP Decode Proxy: Error sending idle token to {key}: {e}")
+                f"DP Decode Proxy: Error sending idle token to {key}: {e}"
+            )
 
 
 def metadata_collect_trigger(poller, router_socket):
-    global dp_instances
+    global dp_instance_states
     global dp_cv
     global _idle_send_loop
     with dp_cv:
         dp_cv.wait()
     while True:
         try:
-            schedule_dict = copy.deepcopy(dp_instances)
+            schedule_dict = copy.deepcopy(dp_instance_states)
             for key in schedule_dict.keys():
                 schedule_dict[key] = False
             first_start = False
@@ -97,7 +111,8 @@ def metadata_collect_trigger(poller, router_socket):
                         # Send idle token to client in case of single dp rank run solo and block on the CCL part
                         asyncio.run_coroutine_threadsafe(
                             send_idle_token_to_client(schedule_dict),
-                            _idle_send_loop)  # type: ignore
+                            _idle_send_loop,
+                        )  # type: ignore
                         # Note: Reset start time prevent consistently send idle token to client
                         # We only reset start time here, for some of the client may loss the idle token send from this proxy
                         # and we only exit this while loop when we make sure all the client are exactly start inference in this
@@ -137,18 +152,21 @@ def metadata_collect_trigger(poller, router_socket):
             logger.error(f"ZMQ Error in monitor thread: {e}")
             if e.errno == zmq.ETERM:  # type: ignore
                 logger.error(
-                    "Monitor thread terminating due to context termination.")
+                    "Monitor thread terminating due to context termination."
+                )
                 break
             time.sleep(1)
         except Exception as e:
             logger.error(f"Unexpected error in monitor thread: {e}")
             import traceback
+
             traceback.print_exc()
             time.sleep(1)
 
 
 def _listen_for_d_register(poller, router_socket):
-    global dp_instances
+    global dp_instance_states
+    global dp_instance_list
     global dp_cv
     global DP_SIZE
     logger.info(
@@ -165,14 +183,22 @@ def _listen_for_d_register(poller, router_socket):
                     if data.get("type") == "DP":
                         http_addr = data.get("http_address")
                         zmq_addr = data.get("zmq_address")
+                        dp_rank = int(data.get("dp_rank"))
+                        assert dp_rank < DP_SIZE
                         if http_addr:
                             with dp_cv:
-                                if http_addr not in dp_instances:
+                                if http_addr not in dp_instance_states:
                                     logger.info(
                                         f"DP Decode Proxy: Registering D Node instance: http={http_addr}, zmq={zmq_addr}"
                                     )
-                                    dp_instances[http_addr] = True
-                                    if len(dp_instances) >= DP_SIZE:
+                                    dp_instance_states[http_addr] = True
+                                    dp_instance_list[dp_rank] = http_addr
+                                    if len(dp_instance_states) >= DP_SIZE:
+                                        assert len(dp_instance_list) == DP_SIZE
+                                        for i in dp_instance_list:
+                                            assert (
+                                                i
+                                            ), "All dp ranks needed to be registered."
                                         logger.info(
                                             f"DP Decode Proxy: Reached expected D Node count ({DP_SIZE}). Notifying metadata collector."
                                         )
@@ -199,10 +225,12 @@ def _listen_for_d_register(poller, router_socket):
 
         except zmq.ZMQError as e:  # type: ignore
             logger.error(
-                f"DP Decode Proxy: ZMQ Error in D Node listener thread: {e}")
+                f"DP Decode Proxy: ZMQ Error in D Node listener thread: {e}"
+            )
             if e.errno == zmq.ETERM:  # type: ignore
                 logger.info(
-                    "DP Decode Proxy: D Node Listener thread terminating.")
+                    "DP Decode Proxy: D Node Listener thread terminating."
+                )
                 break
             time.sleep(1)
         except Exception as e:
@@ -210,11 +238,12 @@ def _listen_for_d_register(poller, router_socket):
                 f"DP Decode Proxy: Unexpected error in D Node listener thread: {e}"
             )
             import traceback
+
             traceback.print_exc()
             time.sleep(1)
 
 
-def _register_to_pd_proxy(pd_proxy_zmq_addr, my_http_addr, my_zmq_addr):
+def _register_to_pd_proxy(pd_proxy_zmq_addr, my_http_addr, my_zmq_addr, role):
     context = None
     sock = None
     while True:
@@ -223,7 +252,7 @@ def _register_to_pd_proxy(pd_proxy_zmq_addr, my_http_addr, my_zmq_addr):
                 context = zmq.Context()  # type: ignore
             if sock is None:
                 sock = context.socket(zmq.DEALER)  # type: ignore
-                identity = f"dp_proxy_{my_http_addr}".encode('utf-8')
+                identity = f"dp_proxy_{my_http_addr}".encode("utf-8")
                 sock.setsockopt(zmq.IDENTITY, identity)  # type: ignore
                 sock.setsockopt(zmq.LINGER, 0)  # type: ignore
                 logger.info(
@@ -235,9 +264,9 @@ def _register_to_pd_proxy(pd_proxy_zmq_addr, my_http_addr, my_zmq_addr):
                 )
 
             data = {
-                "type": "D",
+                "type": role,
                 "http_address": my_http_addr,
-                "zmq_address": my_zmq_addr
+                "zmq_address": my_zmq_addr,
             }
             logger.debug(
                 f"DP Decode Proxy: Sending registration/heartbeat to PD Proxy: {data}"
@@ -258,6 +287,7 @@ def _register_to_pd_proxy(pd_proxy_zmq_addr, my_http_addr, my_zmq_addr):
                 f"DP Decode Proxy: Unexpected error in PD Proxy registration thread: {e}"
             )
             import traceback
+
             traceback.print_exc()
             if sock:
                 sock.close()
@@ -286,10 +316,9 @@ def start_zmq_thread(hostname, port, socket_type, target_func, thread_name):
     poller = zmq.Poller()  # type: ignore
     poller.register(socket, zmq.POLLIN)  # type: ignore
 
-    thread = threading.Thread(target=target_func,
-                              args=(poller, socket),
-                              daemon=True,
-                              name=thread_name)
+    thread = threading.Thread(
+        target=target_func, args=(poller, socket), daemon=True, name=thread_name
+    )
     thread.start()
     return thread, socket
 
@@ -304,16 +333,17 @@ async def forward_request_internal(url, data, request_id):
     try:
         async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
             headers = {
-                "Authorization":
-                f"Bearer {os.environ.get('OPENAI_API_KEY', '')}",
+                "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY', '')}",
                 "X-Request-Id": request_id,
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
             }
-            async with session.post(url=url, json=data,
-                                    headers=headers) as response:
+            async with session.post(
+                url=url, json=data, headers=headers
+            ) as response:
                 if response.status == 200:
                     async for chunk_bytes in response.content.iter_chunked(
-                            1024):
+                        1024
+                    ):
                         yield chunk_bytes
                 else:
                     error_content = await response.read()
@@ -327,7 +357,8 @@ async def forward_request_internal(url, data, request_id):
             f"DP Decode Proxy: Error forwarding request {request_id} to D node {url}: {e}"
         )
         error_msg = f"Failed to connect or communicate with D node at {url}: {e}".encode(
-            'utf-8')
+            "utf-8"
+        )
         yield error_msg
 
 
@@ -335,11 +366,14 @@ AIOHTTP_TIMEOUT = aiohttp.ClientTimeout(total=6 * 60 * 60)
 app = Quart(__name__)
 
 
-@app.route('/v1/completions', methods=['POST'])
+@app.route("/v1/completions", methods=["POST"])
 async def handle_request():
-    global dp_instances
+    global dp_instance_states
+    global dp_instance_list
     global dp_cv
     global round_robin_index
+    global DP_SIZE
+    global PD_ROLE
 
     request_received_id = request.headers.get("X-Request-Id")
     if not request_received_id:
@@ -360,41 +394,60 @@ async def handle_request():
 
         target_addr = None
         with dp_cv:
-            if not dp_instances:
+            if not dp_instance_states:
                 logger.warning(
                     f"DP Decode Proxy: Request {request_received_id}: No D Node instances available/registered."
                 )
-                return await make_response("No Decode instances available.",
-                                           503)
-
-            dp_addresses = list(dp_instances.keys())
-            if not dp_addresses:
-                logger.error(
-                    f"DP Decode Proxy: Request {request_received_id}: Internal error - dp_instances populated but list is empty."
+                return await make_response(
+                    "No Decode instances available.", 503
                 )
-                return await make_response("Internal Server Error", 500)
 
-            current_selection_index = round_robin_index % len(dp_addresses)
-            target_addr = dp_addresses[current_selection_index]
-            round_robin_index += 1
+            if PD_ROLE == "P":
+                prefill_dp_rank = int(request_received_id.split("_")[-2])
+                assert (
+                    prefill_dp_rank < DP_SIZE
+                ), "Please set the prefill_dp_size parameter in pd-proxy the same as dp_size in prefill's dp-proxy"
+                target_addr = dp_instance_list[prefill_dp_rank]
+                current_selection_index = prefill_dp_rank
+            elif PD_ROLE == "D":
+                decode_dp_rank = int(request_received_id.split("_")[-1])
+                assert (
+                    decode_dp_rank < DP_SIZE
+                ), "Please set the decode_dp_size parameter in pd-proxy the same as dp_size in decode's dp-proxy"
+                target_addr = dp_instance_list[decode_dp_rank]
+                current_selection_index = decode_dp_rank
+            else:
+
+                if not dp_instance_list:
+                    logger.error(
+                        f"DP Decode Proxy: Request {request_received_id}: Internal error - dp_instances populated but list is empty."
+                    )
+                    return await make_response("Internal Server Error", 500)
+
+                current_selection_index = round_robin_index % len(
+                    dp_instance_list
+                )
+                target_addr = dp_instance_list[current_selection_index]
+                round_robin_index += 1
 
         logger.info(
             f"DP Decode Proxy: Request {request_received_id}: Routing Decode to D Node {target_addr} (Index {current_selection_index})"
         )
 
-        target_url = f'http://{target_addr}/v1/completions'
+        target_url = f"http://{target_addr}/v1/completions"
 
-        generator = forward_request_internal(target_url, original_request_data,
-                                             request_received_id)
+        generator = forward_request_internal(
+            target_url, original_request_data, request_received_id
+        )
 
         response = await make_response(generator)
         response.timeout = None
 
         if original_request_data.get("stream", False):
-            response.headers['Content-Type'] = 'text/event-stream'
-            response.headers['Cache-Control'] = 'no-cache'
+            response.headers["Content-Type"] = "text/event-stream"
+            response.headers["Cache-Control"] = "no-cache"
         else:
-            response.headers['Content-Type'] = 'application/json'
+            response.headers["Content-Type"] = "application/json"
 
         logger.debug(
             f"DP Decode Proxy: Request {request_received_id}: Streaming response from D node {target_addr}"
@@ -408,41 +461,115 @@ async def handle_request():
         return await make_response("Internal Server Error", 500)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Arguments of dp proxy",
+    )
+    parser.add_argument(
+        "--dp-size", type=int, required=True, help="Data parallel size."
+    )
+    parser.add_argument(
+        "--http-port",
+        type=int,
+        default=10001,
+        help="The http service port of dp proxy, used to receive inference requests.",
+    )
+    parser.add_argument(
+        "--register-port",
+        type=int,
+        default=10002,
+        help="The register port of dp proxy, used to register different vllm instances.",
+    )
+    parser.add_argument(
+        "--monitor-port",
+        type=int,
+        default=10003,
+        help="The monitor port of dp proxy, used to monitor states of all vllm instances and send dummy requests.",
+    )
+    parser.add_argument(
+        "--pd-proxy",
+        type=str,
+        default="127.0.0.1:30001",
+        help="The ip address of disaggregated-prefill proxy.",
+    )
+    parser.add_argument(
+        "--idel-run-interval",
+        type=float,
+        default=5e-4,
+        help="The time interval for idel run.",
+    )
+
+    parser.add_argument(
+        "--role",
+        type=str,
+        choices=["P", "D", "PD"],
+        default="PD",
+        help="The ip address of disaggregated-prefill proxy.",
+    )
+
+    args = parser.parse_args()
+
+    DP_PROXY_HTTP_PORT = args.http_port
+    DP_PROXY_ZMQ_REG_PORT = args.register_port
+    DP_PROXY_ZMQ_MONITOR_PORT = args.monitor_port
+
+    PD_PROXY_ADDRESS = args.pd_proxy
+
+    TIME_INTERVAL_FOR_IDLE_RUN = args.idel_run_interval
+    DP_SIZE = args.dp_size
+
+    PD_ROLE = args.role
+
+    self_ip = get_ip()
+
+    MY_HTTP_ADDRESS = f"{self_ip}:{DP_PROXY_HTTP_PORT}"
+    MY_ZMQ_ADDRESS = f"{self_ip}:{DP_PROXY_ZMQ_REG_PORT}"
+
+    # map between dp_instances and their running states.
+    dp_instance_states: dict[str, bool] = {}
+    # list of dp_instances ordered by dp_rank.
+    dp_instance_list = [None] * DP_SIZE
+
     d_listener_thread, d_reg_socket = start_zmq_thread(
         "0.0.0.0",
         DP_PROXY_ZMQ_REG_PORT,
         zmq.ROUTER,  # type: ignore
         _listen_for_d_register,  # type: ignore
-        "DP_DNodeListenerThread")
+        "DP_DNodeListenerThread",
+    )
 
     metadata_thread, notify_socket = start_zmq_thread(
         "0.0.0.0",
-        DP_PROXY_ZMQ_NOTIFY_PORT,
+        DP_PROXY_ZMQ_MONITOR_PORT,
         zmq.PULL,  # type: ignore
         metadata_collect_trigger,
-        "DP_MetadataMonitorThread")
+        "DP_MetadataMonitorThread",
+    )
 
     _idle_send_loop = asyncio.new_event_loop()
-    idle_loop_thread = threading.Thread(target=start_thread_with_event_loop,
-                                        daemon=True,
-                                        name="DP_IdleSendLoopThread")
+    idle_loop_thread = threading.Thread(
+        target=start_thread_with_event_loop,
+        daemon=True,
+        name="DP_IdleSendLoopThread",
+    )
     idle_loop_thread.start()
 
-    pd_register_thread = threading.Thread(target=_register_to_pd_proxy,
-                                          args=(PD_PROXY_ADDRESS,
-                                                MY_HTTP_ADDRESS,
-                                                MY_ZMQ_ADDRESS_PLACEHOLDER),
-                                          daemon=True,
-                                          name="DP_PDRegisterThread")
-    pd_register_thread.start()
+    # If current dp group acts as a P/D instance in disaggregated-prefill, register to pd-proxy.
+    if PD_ROLE in {"P", "D"}:
+        pd_register_thread = threading.Thread(
+            target=_register_to_pd_proxy,
+            args=(PD_PROXY_ADDRESS, MY_HTTP_ADDRESS, MY_ZMQ_ADDRESS, PD_ROLE),
+            daemon=True,
+            name="DP_PDRegisterThread",
+        )
+        pd_register_thread.start()
 
     logger.info(
         f"DP Decode Proxy: Starting Quart web server on http://0.0.0.0:{DP_PROXY_HTTP_PORT}"
     )
     zmq_context = zmq.Context.instance()  # type: ignore
     try:
-        app.run(host='0.0.0.0', port=DP_PROXY_HTTP_PORT)
+        app.run(host="0.0.0.0", port=DP_PROXY_HTTP_PORT)
     except KeyboardInterrupt:
         logger.info("DP Decode Proxy: KeyboardInterrupt received, stopping...")
     except Exception as e:

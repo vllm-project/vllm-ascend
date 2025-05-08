@@ -184,7 +184,9 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             # logger.debug("ping dp proxy start, DP_RANK:%s", dp_rank)
 
             sock.connect(f"tcp://{dp_proxy_listener_addr}")
-            data = {"type": "DP", "http_address": self.http_addr}
+            dp_rank = os.getenv("VLLM_DP_RANK", None)
+            assert dp_rank, "Please set VLLM_DP_RANK in DP situation."
+            data = {"type": "DP", "http_address": self.http_addr, "dp_rank": dp_rank}
             for _ in range(10):
                 sock.send(msgpack.dumps(data))
 
