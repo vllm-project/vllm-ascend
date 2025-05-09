@@ -822,12 +822,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 })
 
             with set_forward_context(None, self.vllm_config):
-                hidden_states = model(input_ids=input_ids,
-                                    positions=positions.to(self.device),
-                                    intermediate_tensors=intermediate_tensors,
-                                    inputs_embeds=inputs_embeds)
+                hidden_states = model(
+                    input_ids=input_ids,
+                    positions=positions.to(self.device),
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds)
             return hidden_states
-
 
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
