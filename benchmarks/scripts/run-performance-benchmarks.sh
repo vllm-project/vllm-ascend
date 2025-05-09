@@ -48,9 +48,10 @@ wait_for_server() {
   # wait for vllm server to start
   # return 1 if vllm server crashes
   timeout 1200 bash -c '
-    until curl -X POST localhost:8000/v1/completions; do
+    until curl -s -X POST localhost:8000/v1/completions || curl -s -X POST localhost:8000/v1/chat/completions; do
       sleep 1
     done' && return 0 || return 1
+  
 }
 
 get_cur_npu_id() {
@@ -241,9 +242,8 @@ run_serving_tests() {
 cleanup() {
   rm -rf ./vllm_benchmarks
 }
-
 get_benchmarks_scripts() {
-  git clone -b main --depth=1 git@github.com:vllm-project/vllm.git && \
+  git clone -b main --depth=1 https://ghfast.top/https://github.com/vllm-project/vllm && \
   mv vllm/benchmarks vllm_benchmarks
   rm -rf ./vllm
 }
@@ -287,7 +287,6 @@ main() {
   END_TIME=$(date +%s)
   ELAPSED_TIME=$((END_TIME - START_TIME))
   echo "Total execution time: $ELAPSED_TIME seconds"
-
 }
 
 main "$@"
