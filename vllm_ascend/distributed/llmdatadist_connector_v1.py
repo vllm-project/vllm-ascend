@@ -785,11 +785,12 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
         """
         if is_mla:
             num_heads, head_dim = kv_cache_layer.shape[
-                2], kv_cache_layer.shape[3]
+                -2], kv_cache_layer.shape[-1]
             return kv_cache_layer.view(-1, num_heads, head_dim)[slot_mapping,
                                                                 ...]
 
-        num_heads, head_dim = kv_cache_layer.shape[2], kv_cache_layer.shape[3]
+        num_heads, head_dim = kv_cache_layer.shape[-2], kv_cache_layer.shape[
+            -1]
         return kv_cache_layer.view(2, -1, num_heads, head_dim)[:, slot_mapping,
                                                                ...]
 
