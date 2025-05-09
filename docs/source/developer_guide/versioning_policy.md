@@ -4,7 +4,7 @@ Starting with vLLM 0.7.x, the vLLM Ascend Plugin ([vllm-project/vllm-ascend](htt
 
 ## vLLM Ascend Plugin versions
 
-Each vllm-ascend release will be versioned: `v[major].[minor].[micro][rcN][.postN]` (such as
+Each vLLM Ascend release will be versioned: `v[major].[minor].[micro][rcN][.postN]` (such as
 `v0.7.3rc1`, `v0.7.3`, `v0.7.3.post1`)
 
 - **Final releases**: will typically be released every **3 months**, will take the vLLM upstream release plan and Ascend software product release plan into comprehensive consideration.
@@ -13,12 +13,36 @@ Each vllm-ascend release will be versioned: `v[major].[minor].[micro][rcN][.post
 
 For example:
 - `v0.7.x`: it's the first final release to match the vLLM `v0.7.x` version.
-- `v0.7.3rc1`: will be the first pre version of vllm-ascend.
+- `v0.7.3rc1`: will be the first pre version of vLLM Ascend.
 - `v0.7.3.post1`: will be the post release if the `v0.7.3` release has some minor errors.
+
+## Release Compatibility Matrix
+
+Following is the Release Compatibility Matrix for vLLM Ascend Plugin:
+
+| vLLM Ascend  | vLLM         | Python | Stable CANN | PyTorch/torch_npu | MindIE Turbo |
+|--------------|--------------|----------------| --- | --- |
+| v0.8.5rc1 | v0.8.5.post1 | >= 3.9, < 3.12 | 8.1.RC1 |  2.5.1 / 2.5.1 |
+| v0.8.4rc2 | v0.8.4 | >= 3.9, < 3.12 | 8.0.0   |  2.5.1 / 2.5.1 |
+| v0.7.3    | v0.7.3 | >= 3.9, < 3.12 | 8.1.RC1 |  2.5.1 / 2.5.1 |
+
+## Release cadence
+
+### release window
+
+| Date       | Event                                     |
+|------------|-------------------------------------------|
+| 2025.05.08 | v0.7.x Final release, v0.7.3              |
+| 2025.05.06 | Release candidates, v0.8.5rc1             |
+| 2025.04.28 | Release candidates, v0.8.4rc2             |
+| 2025.04.18 | Release candidates, v0.8.4rc1             |
+| 2025.03.28 | Release candidates, v0.7.3rc2             |
+| 2025.03.14 | Release candidates, v0.7.3rc1             |
+| 2025.02.19 | Release candidates, v0.7.1rc1             |
 
 ## Branch policy
 
-vllm-ascend has main branch and dev branch.
+vLLM Ascend has main branch and dev branch.
 
 - **main**: main branch，corresponds to the vLLM main branch and latest 1 or 2 release version. It is continuously monitored for quality through Ascend CI.
 - **vX.Y.Z-dev**: development branch, created with part of new releases of vLLM. For example, `v0.7.3-dev` is the dev branch for vLLM `v0.7.3` version.
@@ -36,9 +60,9 @@ The branch status will be in one of the following states:
 
 ### Branch state
 
-Note that vllm-ascend will only be released for a certain vLLM release version rather than all versions. Hence, You might see only part of versions have dev branches (such as only `0.7.1-dev` / `0.7.3-dev` but no `0.7.2-dev`), this is as expected.
+Note that vLLM Ascend will only be released for a certain vLLM release version rather than all versions. Hence, You might see only part of versions have dev branches (such as only `0.7.1-dev` / `0.7.3-dev` but no `0.7.2-dev`), this is as expected.
 
-Usually, each minor version of vLLM (such as 0.7) will correspond to a vllm-ascend version branch and support its latest version (for example, we plan to support version 0.7.3) as following shown:
+Usually, each minor version of vLLM (such as 0.7) will correspond to a vLLM Ascend version branch and support its latest version (for example, we plan to support version 0.7.3) as following shown:
 
 | Branch     | Status       | Note                                 |
 |------------|--------------|--------------------------------------|
@@ -48,9 +72,9 @@ Usually, each minor version of vLLM (such as 0.7) will correspond to a vllm-asce
 
 ### Backward compatibility
 
-For main branch, vllm-ascend should works with vLLM main branch and latest 1 or 2 release version. So to ensure the backward compatibility, we will do the following:
+For main branch, vLLM Ascend should works with vLLM main branch and latest 1 or 2 release version. So to ensure the backward compatibility, we will do the following:
 - Both main branch and target vLLM release is tested by Ascend E2E CI. For example, currently, vLLM main branch and vLLM 0.8.4 are tested now.
-- For code changes, we will make sure that the changes are compatible with the latest 1 or 2 vLLM release version as well. In this case, vllm-ascend introduced a version check machinism inner the code. It'll check the version of installed vLLM pacakge first to decide which code logic to use. If users hit the `InvalidVersion` error, it sometimes means that they have installed an dev/editable version of vLLM package. In this case, we provide the env variable `VLLM_VERSION` to let users specify the version of vLLM package to use.
+- For code changes, we will make sure that the changes are compatible with the latest 1 or 2 vLLM release version as well. In this case, vLLM Ascend introduced a version check machinism inner the code. It'll check the version of installed vLLM pacakge first to decide which code logic to use. If users hit the `InvalidVersion` error, it sometimes means that they have installed an dev/editable version of vLLM package. In this case, we provide the env variable `VLLM_VERSION` to let users specify the version of vLLM package to use.
 - For documentation changes, we will make sure that the changes are compatible with the latest 1 or 2 vLLM release version as well. Note should be added if there are any breaking changes.
 
 ## Document Branch Policy
@@ -73,30 +97,3 @@ As shown above:
   every 3 months, a development version (aka the POC version) every month, and a nightly version every day.
   The PyPi stable version **CAN** be used in vLLM Ascend final version, the monthly dev version **ONLY CANN** be used in
   vLLM Ascend RC version for rapid iteration, the nightly version **CANNOT** be used in vLLM Ascend any version and branches.
-
-## Release Compatibility Matrix
-
-Following is the Release Compatibility Matrix for vLLM Ascend Plugin:
-
-| vllm-ascend  | vLLM         | Python         | Stable CANN | PyTorch/torch_npu |
-|--------------|--------------|----------------| --- | --- |
-| v0.8.5rc1 | v0.8.5.post1 | >= 3.9, < 3.12 | 8.1.RC1 |  2.5.1 / 2.5.1 |
-| v0.8.4rc2 | v0.8.4 | >= 3.9, < 3.12 | 8.0.0   |  2.5.1 / 2.5.1 |
-| v0.8.4rc1 | v0.8.4 | >= 3.9, < 3.12 | 8.0.0   |  2.5.1 / 2.5.1.dev20250320 |
-| v0.7.3rc2 | v0.7.3 | >= 3.9, < 3.12 | 8.0.0   |  2.5.1 / 2.5.1.dev20250320 |
-| v0.7.3rc1 | v0.7.3 | >= 3.9, < 3.12 | 8.0.0   |  2.5.1 / 2.5.1.dev20250308 |
-| v0.7.1rc1 | v0.7.1 | >= 3.9, < 3.12 | 8.0.0   |  2.5.1 / 2.5.1.dev20250218 |
-
-## Release cadence
-
-### release window
-
-| Date       | Event                                     |
-|------------|-------------------------------------------|
-| Early of 2025.05 | v0.7.x Final release, v0.7.3        |
-| 2025.05.06 | Release candidates, v0.8.5rc1             |
-| 2025.04.28 | Release candidates, v0.8.4rc2             |
-| 2025.04.18 | Release candidates, v0.8.4rc1             |
-| 2025.03.28 | Release candidates, v0.7.3rc2             |
-| 2025.03.14 | Release candidates, v0.7.3rc1             |
-| 2025.02.19 | Release candidates, v0.7.1rc1             |
