@@ -417,7 +417,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         num_tokens = query.size(0)
         attn_output = None
-        # Here is only 2 possibility of input, ChunkedPrefill or PrefillOnly
+        # Here is only 2 possibility of input, ChunkedPrefill or PrefillNoCache
         if attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
             attn_output = torch.empty(num_tokens,
                                       self.num_heads * self.v_head_dim,
@@ -440,7 +440,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 scale=self.scale,
                 alibi_slopes=None,
                 causal=True)
-        elif attn_metadata.attn_state == AscendAttentionState.PrefillOnly:
+        elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             attn_output = torch.empty(num_tokens,
                                       self.num_heads,
                                       self.padding_head_dim,
@@ -479,7 +479,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 self.padding_head_dim)[:, :, :self.v_head_dim]
         else:
             raise RuntimeError(
-                "Unexpected path reached, AscendMLAImpl should only have PrefillOnly and ChunkedPrefill scenario in forward prefill, please file a bug to vllm-ascend !"
+                "Unexpected path reached, AscendMLAImpl should only have PrefillNoCache and ChunkedPrefill scenario in forward prefill, please file a bug to vllm-ascend !"
             )
         attn_output = attn_output.reshape(
             [num_tokens, self.num_heads * self.v_head_dim])
