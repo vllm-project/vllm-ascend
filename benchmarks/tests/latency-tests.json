@@ -8,5 +8,15 @@
       "num_iters_warmup": 5,
       "num_iters": 15
     }
+  },
+  {
+    "test_name": "latency_qwen2_5_7B_tp1",
+    "parameters": {
+      "model": "Qwen/Qwen2.5-7B-Instruct",
+      "tensor_parallel_size": 1,
+      "load_format": "dummy",
+      "num_iters_warmup": 5,
+      "num_iters": 15
+    }
   }
 ]
