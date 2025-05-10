@@ -134,6 +134,7 @@ jobs:
 
       # only run test on spec decode when the related code changed
       - name: Check for changes in Speculative Decode
+        if: github.event_name != 'schedule'
         id: filter_spec_decode
         uses: dorny/paths-filter@v3
         with:
