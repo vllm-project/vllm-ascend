@@ -294,124 +294,120 @@ def test_mlp_e2e_seeded_correctness(vllm_runner, common_llm_kwargs,
                                       disable_seed=True)
 
 
-# TODO: There is a problem with the preemptive scheduling in the current
-# version, which makes this case fail. Please release this case after the
-# preemptive scheduling problem is solved.
-# @pytest.mark.parametrize(
-#     "common_llm_kwargs",
-#     [{
-#         "block_size": 8,
-#         # 2 for small prompt, 256//8 for generated.
-#         "num_gpu_blocks_override": 2 + 256 // 8,
-#         "max_model_len": (2 + 256 // 8) * 8,
+@pytest.mark.skipif(True, reason="Open it when preempt ready.")
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        "block_size": 16,
+        # 2 for small prompt, 256//8 for generated.
+        "num_gpu_blocks_override": 2 + 256 // 8,
+        "max_model_len": (2 + 256 // 8) * 8,
 
-#         # Skip cuda graph recording for fast test.
-#         "enforce_eager": True,
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
 
-#         # Precision
-#         "dtype": PRECISION,
+        # Precision
+        "dtype": PRECISION,
 
-#         # Main model
-#         "model_name": MAIN_MODEL,
-#     }])
-# @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
-# @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-# @pytest.mark.parametrize("test_llm_kwargs", [
-#     {
-#         "speculative_config": {
-#             "model": SPEC_MODEL,
-#         },
-#     },
-# ])
-# @pytest.mark.parametrize(
-#     "output_len",
-#     [
-#         # Use small output len for fast test.
-#         128,
-#     ])
-# @pytest.mark.parametrize("batch_size", [4])
-# @pytest.mark.parametrize("prefill_chunk_size", PREFILL_CHUNK_SIZE_1)
-# @pytest.mark.parametrize("seed", [1])
-# def test_mlp_e2e_greedy_correctness_with_preemption(
-#         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
-#         baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
-#         prefill_chunk_size: int, seed: int):
-#     """Verify greedy equality, even when some sequences are preempted mid-
-#     generation.
-#     """
-#     maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
-#     run_equality_correctness_test(vllm_runner,
-#                                   common_llm_kwargs,
-#                                   per_test_common_llm_kwargs,
-#                                   baseline_llm_kwargs,
-#                                   test_llm_kwargs,
-#                                   batch_size,
-#                                   max_output_len=output_len,
-#                                   seed=seed,
-#                                   temperature=0.0)
+        # Main model
+        "model_name": MAIN_MODEL,
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_config": {
+            "model": SPEC_MODEL,
+        },
+    },
+])
+@pytest.mark.parametrize(
+    "output_len",
+    [
+        # Use small output len for fast test.
+        128,
+    ])
+@pytest.mark.parametrize("batch_size", [4])
+@pytest.mark.parametrize("prefill_chunk_size", PREFILL_CHUNK_SIZE_1)
+@pytest.mark.parametrize("seed", [1])
+def test_mlp_e2e_greedy_correctness_with_preemption(
+        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
+        prefill_chunk_size: int, seed: int):
+    """Verify greedy equality, even when some sequences are preempted mid-
+    generation.
+    """
+    maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  seed=seed,
+                                  temperature=0.0)
 
-# TODO: There is a problem with the preemptive scheduling in the current
-# version, which makes this case fail. Please release this case after the
-# preemptive scheduling problem is solved.
-# @pytest.mark.parametrize(
-#     "common_llm_kwargs",
-#     [{
-#         "block_size": 8,
-#         # 2 for small prompt, 256//8 for generated.
-#         "num_gpu_blocks_override": 2 + 256 // 8,
-#         "max_model_len": (2 + 256 // 8) * 8,
 
-#         # Skip cuda graph recording for fast test.
-#         "enforce_eager": True,
+@pytest.mark.skipif(True, reason="Open it when preempt ready.")
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        "block_size": 16,
+        # 2 for small prompt, 256//8 for generated.
+        "num_gpu_blocks_override": 2 + 256 // 8,
+        "max_model_len": (2 + 256 // 8) * 8,
 
-#         # Precision
-#         "dtype": PRECISION,
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
 
-#         # Main model
-#         "model_name": MAIN_MODEL,
-#     }])
-# @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
-# @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-# @pytest.mark.parametrize("test_llm_kwargs", [
-#     {
-#         "speculative_config": {
-#             "model": SPEC_MODEL,
-#         },
-#     },
-# ])
-# @pytest.mark.parametrize(
-#     "output_len",
-#     [
-#         # Use small output len for fast test.
-#         128,
-#     ])
-# @pytest.mark.parametrize("batch_size", [4])
-# @pytest.mark.parametrize("seed", [1])
-# @pytest.mark.parametrize("prefill_chunk_size", PREFILL_CHUNK_SIZE_1)
-# def test_mlp_e2e_greedy_correctness_with_padding(
-#         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
-#         baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
-#         prefill_chunk_size: int, seed: int):
-#     """Verify greedy equality when the vocab dimension is padded
-#     """
-#     maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
+        # Precision
+        "dtype": PRECISION,
 
-#     # Default pad_to is 64, test model has vocab_size of 32000
-#     def patched_pad_vocab_size(vocab_size, pad_to=None):
-#         return pad_vocab_size(vocab_size, pad_to=32064)
+        # Main model
+        "model_name": MAIN_MODEL,
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_config": {
+            "model": SPEC_MODEL,
+        },
+    },
+])
+@pytest.mark.parametrize(
+    "output_len",
+    [
+        # Use small output len for fast test.
+        128,
+    ])
+@pytest.mark.parametrize("batch_size", [4])
+@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("prefill_chunk_size", PREFILL_CHUNK_SIZE_1)
+def test_mlp_e2e_greedy_correctness_with_padding(
+        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
+        prefill_chunk_size: int, seed: int):
+    """Verify greedy equality when the vocab dimension is padded
+    """
+    maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
 
-#     # NOTE: Compared with vLLM, the patch method has been modified
-#     from vllm.model_executor.layers.vocab_parallel_embedding import pad_vocab_size
-#     pad_vocab_size = patched_pad_vocab_size
-#     run_equality_correctness_test(vllm_runner,
-#                                   common_llm_kwargs,
-#                                   per_test_common_llm_kwargs,
-#                                   baseline_llm_kwargs,
-#                                   test_llm_kwargs,
-#                                   batch_size,
-#                                   max_output_len=output_len,
-#                                   seed=seed,
-#                                   temperature=0.0)
+    # Default pad_to is 64, test model has vocab_size of 32000
+    def patched_pad_vocab_size(vocab_size, pad_to=None):
+        return pad_vocab_size(vocab_size, pad_to=32064)
+
+    # NOTE: Compared with vLLM, the patch method has been modified
+    pad_vocab_size = patched_pad_vocab_size  # noqa: F811
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  seed=seed,
+                                  temperature=0.0)
 
 
 @pytest.mark.parametrize(
