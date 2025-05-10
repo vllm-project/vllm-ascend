@@ -100,11 +100,11 @@ class SimpleBuffer(KVLookupBufferBase):
         )
 
         req_id = int32_hash(req_id)
-        key_cache_key = llm_datadist.CacheKey(self.data_pipe.cluster_id,
+        key_cache_key = llm_datadist.CacheKey(self.data_pipe.prefill_cluster_id,
                                               req_id, 1)
-        value_cache_key = llm_datadist.CacheKey(self.data_pipe.cluster_id,
+        value_cache_key = llm_datadist.CacheKey(self.data_pipe.prefill_cluster_id,
                                                 req_id, 2)
-        hidden_cache_key = llm_datadist.CacheKey(self.data_pipe.cluster_id,
+        hidden_cache_key = llm_datadist.CacheKey(self.data_pipe.prefill_cluster_id,
                                                  req_id, 3)
 
         # Currently we use hash value of request id as key, so no need to send input_tokens
@@ -168,11 +168,11 @@ class SimpleBuffer(KVLookupBufferBase):
             seq_len_dim_index=-1,
         )
 
-        key_cache_key = llm_datadist.CacheKey(self.data_pipe.cluster_id,
+        key_cache_key = llm_datadist.CacheKey(self.data_pipe.prefill_cluster_id,
                                               req_id, 1)
-        value_cache_key = llm_datadist.CacheKey(self.data_pipe.cluster_id,
+        value_cache_key = llm_datadist.CacheKey(self.data_pipe.prefill_cluster_id,
                                                 req_id, 2)
-        hidden_cache_key = llm_datadist.CacheKey(self.data_pipe.cluster_id,
+        hidden_cache_key = llm_datadist.CacheKey(self.data_pipe.prefill_cluster_id,
                                                  req_id, 3)
 
         # Deallocate buffer allocated in last round.
