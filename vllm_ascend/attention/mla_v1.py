@@ -6,6 +6,8 @@ import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
+from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.utils import direct_register_custom_op
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                LinearBase, RowParallelLinear,
                                                UnquantizedLinearMethod)
@@ -524,80 +526,129 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: M,
         output: Optional[torch.Tensor] = None,
+        trace_flag: bool = True,
     ) -> torch.Tensor:
-
         assert output is not None, "Output tensor must be provided."
 
-        if attn_metadata is None:
-            # Profiling run.
-            return output
+        if trace_flag:
+            torch.ops.vllm.unified_ascend_mla_attention_with_output(
+                query=hidden_states_or_q_c,
+                key=k_c_normed,
+                value=k_pe,
+                output=output,
+                layer_name=layer.layer_name)
+        else:
+            if attn_metadata is None:
+                # Profiling run.
+                return output
 
-        num_actual_toks = attn_metadata.num_actual_tokens
+            num_actual_toks = attn_metadata.num_actual_tokens
 
-        # Inputs and outputs may be padded for CUDA graphs
-        output_padded = output
-        output = output[:num_actual_toks, ...]
-        hidden_states_or_q_c = hidden_states_or_q_c[:num_actual_toks, ...]
-        k_c_normed = k_c_normed[:num_actual_toks, ...]
-        k_pe = k_pe[:num_actual_toks, ...]
+            # Inputs and outputs may be padded for CUDA graphs
+            output_padded = output
+            output = output[:num_actual_toks, ...]
+            hidden_states_or_q_c = hidden_states_or_q_c[:num_actual_toks, ...]
+            k_c_normed = k_c_normed[:num_actual_toks, ...]
+            k_pe = k_pe[:num_actual_toks, ...]
 
-        # Restore head dim (for rotary embedding)
-        k_pe = k_pe.unsqueeze(1)
+            # Restore head dim (for rotary embedding)
+            k_pe = k_pe.unsqueeze(1)
 
-        assert attn_metadata.num_decodes is not None and \
-            attn_metadata.num_prefills is not None and \
-            attn_metadata.num_decode_tokens is not None
+            assert attn_metadata.num_decodes is not None and \
+                attn_metadata.num_prefills is not None and \
+                attn_metadata.num_decode_tokens is not None
 
-        has_decode = attn_metadata.num_decodes > 0
-        has_prefill = attn_metadata.num_prefills > 0
-        num_decode_tokens = attn_metadata.num_decode_tokens
+            has_decode = attn_metadata.num_decodes > 0
+            has_prefill = attn_metadata.num_prefills > 0
+            num_decode_tokens = attn_metadata.num_decode_tokens
 
-        decode_hs_or_q_c = hidden_states_or_q_c[:num_decode_tokens]
-        decode_k_pe = k_pe[:num_decode_tokens]
+            decode_hs_or_q_c = hidden_states_or_q_c[:num_decode_tokens]
+            decode_k_pe = k_pe[:num_decode_tokens]
 
-        prefill_hs_or_q_c = hidden_states_or_q_c[num_decode_tokens:]
-        prefill_k_pe = k_pe[num_decode_tokens:]
-        prefill_k_c_normed = k_c_normed[num_decode_tokens:]
+            prefill_hs_or_q_c = hidden_states_or_q_c[num_decode_tokens:]
+            prefill_k_pe = k_pe[num_decode_tokens:]
+            prefill_k_c_normed = k_c_normed[num_decode_tokens:]
 
-        if has_decode:
-            assert attn_metadata.decode is not None
-            decode_ql_nope, decode_q_pe = \
-                self._q_proj_and_k_up_proj(decode_hs_or_q_c)
-            decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
-                attn_metadata.decode.input_positions,
-                decode_q_pe.contiguous(),
-                decode_k_pe,
-                max_seq_len=attn_metadata.decode.max_seq_lens)
+            if has_decode:
+                assert attn_metadata.decode is not None
+                decode_ql_nope, decode_q_pe = \
+                    self._q_proj_and_k_up_proj(decode_hs_or_q_c)
+                decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
+                    attn_metadata.decode.input_positions,
+                    decode_q_pe.contiguous(),
+                    decode_k_pe,
+                    max_seq_len=attn_metadata.decode.max_seq_lens)
 
-        if has_prefill:
-            assert attn_metadata.prefill is not None
-            prefill_q = self.q_proj(prefill_hs_or_q_c)[0]\
-                .view(-1, self.num_heads, self.qk_head_dim)
-            prefill_q_pe = prefill_q[..., self.qk_nope_head_dim:]
+            if has_prefill:
+                assert attn_metadata.prefill is not None
+                prefill_q = self.q_proj(prefill_hs_or_q_c)[0]\
+                    .view(-1, self.num_heads, self.qk_head_dim)
+                prefill_q_pe = prefill_q[..., self.qk_nope_head_dim:]
 
-            prefill_q_pe[...], prefill_k_pe[...] = self.rotary_emb(
-                attn_metadata.prefill.input_positions,
-                prefill_q_pe.contiguous(),
-                prefill_k_pe,
-                max_seq_len=attn_metadata.prefill.max_seq_lens)
+                prefill_q_pe[...], prefill_k_pe[...] = self.rotary_emb(
+                    attn_metadata.prefill.input_positions,
+                    prefill_q_pe.contiguous(),
+                    prefill_k_pe,
+                    max_seq_len=attn_metadata.prefill.max_seq_lens)
 
-        if kv_cache.numel() > 0:
-            key = torch.cat([
-                k_c_normed.view([num_actual_toks, self.num_kv_heads, -1]), k_pe
-            ],
-                            dim=2)
-            torch_npu._npu_reshape_and_cache_siso(
-                key=key,
-                key_cache=kv_cache,
-                slot_indices=attn_metadata.slot_mapping.flatten())
+            if kv_cache.numel() > 0:
+                key = torch.cat([
+                    k_c_normed.view([num_actual_toks, self.num_kv_heads, -1]), k_pe
+                ],
+                                dim=2)
+                torch_npu._npu_reshape_and_cache_siso(
+                    key=key,
+                    key_cache=kv_cache,
+                    slot_indices=attn_metadata.slot_mapping.flatten())
 
-        if has_prefill:
-            output[num_decode_tokens:] = self._forward_prefill(
-                prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache,
-                attn_metadata)
+            if has_prefill:
+                output[num_decode_tokens:] = self._forward_prefill(
+                    prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache,
+                    attn_metadata)
 
-        if has_decode:
-            output[:num_decode_tokens] = self._forward_decode(
-                decode_ql_nope, decode_q_pe, kv_cache, attn_metadata)
+            if has_decode:
+                output[:num_decode_tokens] = self._forward_decode(
+                    decode_ql_nope, decode_q_pe, kv_cache, attn_metadata)
 
-        return output_padded
+            return output_padded
+
+
+def unified_ascend_mla_attention_with_output(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    forward_context: ForwardContext = get_forward_context()
+    attn_metadata = forward_context.attn_metadata
+    self = forward_context.no_compile_layers[layer_name]
+    kv_cache = self.kv_cache[forward_context.virtual_engine]
+    self.impl.forward(self,
+                      query,
+                      key,
+                      value,
+                      kv_cache,
+                      attn_metadata,
+                      output,
+                      trace_flag=False)
+    return
+
+
+def unified_mla_attention_with_output_fake(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    output: torch.Tensor,
+    layer_name: str,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="unified_ascend_mla_attention_with_output",
+    op_func=unified_ascend_mla_attention_with_output,
+    mutates_args=["output"],
+    fake_impl=unified_mla_attention_with_output_fake,
+    dispatch_key="PrivateUse1",
+)

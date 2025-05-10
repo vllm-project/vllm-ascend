@@ -143,7 +143,8 @@ class NPUPlatform(Platform):
                 "using only ACL Graph mode")
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(
-                ["vllm.unified_ascend_attention_with_output"])
+                ["vllm.unified_ascend_attention_with_output",
+                 "vllm.unified_ascend_mla_attention_with_output"])
 
         if vllm_config.additional_config is not None:
             enable_graph_mode = vllm_config.additional_config.get(
