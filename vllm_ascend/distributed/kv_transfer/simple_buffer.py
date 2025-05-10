@@ -39,7 +39,7 @@ def int32_hash(data):
 
 class SimpleBuffer(KVLookupBufferBase):
 
-    def __init__(self, data_pipe: SimplePipe):
+    def __init__(self, data_pipe: SimplePipe, buffer_size = 6):
         self.data_pipe = data_pipe
         # Consumer buffer need these information to construct receiving buffer.
         self.num_layers = None
@@ -50,6 +50,14 @@ class SimpleBuffer(KVLookupBufferBase):
         self.key_buffer = None
         self.value_buffer = None
         self.hidden_buffer = None
+        self.buffer_size = buffer_size
+        self.buffer_list = []
+
+    def insert_buffer_list(self, buffer: llm_datadist.Cache):
+        if len(self.buffer_list) >= self.buffer_size:
+            first_buffer = self.buffer_list.pop(0)
+            self.data_pipe.deallocate_buffer(first_buffer)
+        self.buffer_list.append(buffer)
 
     def insert(
         self,
@@ -100,20 +108,23 @@ class SimpleBuffer(KVLookupBufferBase):
         )
 
         req_id = int32_hash(req_id)
-        key_cache_key = llm_datadist.CacheKey(self.data_pipe.cluster_id,
-                                              req_id, 1)
-        value_cache_key = llm_datadist.CacheKey(self.data_pipe.cluster_id,
-                                                req_id, 2)
-        hidden_cache_key = llm_datadist.CacheKey(self.data_pipe.cluster_id,
-                                                 req_id, 3)
+        key_cache_key = llm_datadist.BlocksCacheKey(self.data_pipe.prefill_cluster_id,
+                                              req_id + 1)
+        value_cache_key = llm_datadist.BlocksCacheKey(self.data_pipe.prefill_cluster_id,
+                                                req_id + 2)
+        hidden_cache_key = llm_datadist.BlocksCacheKey(self.data_pipe.prefill_cluster_id,
+                                                 req_id + 3)
 
         # Currently we use hash value of request id as key, so no need to send input_tokens
-        self.key_buffer = self.data_pipe.send_tensor(key, key_desc,
+        key_buffer = self.data_pipe.send_tensor(key, key_desc,
                                                      key_cache_key)
-        self.value_buffer = self.data_pipe.send_tensor(value, value_desc,
+        value_buffer = self.data_pipe.send_tensor(value, value_desc,
                                                        value_cache_key)
-        self.hidden_buffer = self.data_pipe.send_tensor(
+        hidden_buffer = self.data_pipe.send_tensor(
             hidden, hidden_desc, hidden_cache_key)
+        self.insert_buffer_list(key_buffer)
+        self.insert_buffer_list(value_buffer)
+        self.insert_buffer_list(hidden_buffer)
 
     def drop_select(
         self,
@@ -168,30 +179,23 @@ class SimpleBuffer(KVLookupBufferBase):
             seq_len_dim_index=-1,
         )
 
-        key_cache_key = llm_datadist.CacheKey(self.data_pipe.cluster_id,
-                                              req_id, 1)
-        value_cache_key = llm_datadist.CacheKey(self.data_pipe.cluster_id,
-                                                req_id, 2)
-        hidden_cache_key = llm_datadist.CacheKey(self.data_pipe.cluster_id,
-                                                 req_id, 3)
-
-        # Deallocate buffer allocated in last round.
-        if self.key_buffer:
-            try:
-                self.data_pipe.deallocate_buffer(self.key_buffer)
-                self.data_pipe.deallocate_buffer(self.value_buffer)
-                self.data_pipe.deallocate_buffer(self.hidden_buffer)
-            except Exception as e:
-                logger.warning(
-                    f"Failed to free kv cache buffer, Error code: {str(e)}")
+        key_cache_key = llm_datadist.BlocksCacheKey(self.data_pipe.prefill_cluster_id,
+                                              req_id + 1)
+        value_cache_key = llm_datadist.BlocksCacheKey(self.data_pipe.prefill_cluster_id,
+                                                req_id + 2)
+        hidden_cache_key = llm_datadist.BlocksCacheKey(self.data_pipe.prefill_cluster_id,
+                                                 req_id + 3)
 
         try:
-            self.key_buffer, key = self.data_pipe.recv_tensor(
+            key_buffer, key = self.data_pipe.recv_tensor(
                 key_desc, key_cache_key)
-            self.value_buffer, value = self.data_pipe.recv_tensor(
+            value_buffer, value = self.data_pipe.recv_tensor(
                 value_desc, value_cache_key)
-            self.hidden_buffer, hidden = self.data_pipe.recv_tensor(
+            hidden_buffer, hidden = self.data_pipe.recv_tensor(
                 hidden_desc, hidden_cache_key)
+            self.insert_buffer_list(key_buffer)
+            self.insert_buffer_list(value_buffer)
+            self.insert_buffer_list(hidden_buffer)
             key = key.view(self.num_layers, num_tokens, self.num_heads,
                            self.head_size)
             value = value.view(self.num_layers, num_tokens, self.num_heads,
@@ -206,4 +210,5 @@ class SimpleBuffer(KVLookupBufferBase):
         return [key, value, hidden, roi]
 
     def close(self):
-        pass
+        for buf in self.buffer_list:
+            self.data_pipe.deallocate_buffer(buf)
