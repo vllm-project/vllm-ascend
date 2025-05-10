@@ -173,71 +173,69 @@ def test_ngram_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
         ["disable_logprobs"])
 
 
-# TODO: There is a problem with the preemptive scheduling in the current
-# version, which makes this case fail. Please release this case after the
-# preemptive scheduling problem is solved.
-# @pytest.mark.parametrize(
-#     "common_llm_kwargs",
-#     [{
-#         "block_size": 8,
-#         # 2 for small prompt, 256//8 for generated.
-#         "num_gpu_blocks_override": 2 + 256 // 8,
-#         "max_model_len": (2 + 256 // 8) * 8,
+@pytest.mark.skipif(True, reason="Open it when preempt ready.")
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        "block_size": 16,
+        # 2 for small prompt, 256//8 for generated.
+        "num_gpu_blocks_override": 2 + 256 // 8,
+        "max_model_len": (2 + 256 // 8) * 8,
 
-#         # Skip cuda graph recording for fast test.
-#         "enforce_eager": True,
-#     }])
-# @pytest.mark.parametrize("per_test_common_llm_kwargs", [
-#     {
-#         "model_name": "JackFram/llama-160m",
-#     },
-# ])
-# @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-# @pytest.mark.parametrize("test_llm_kwargs", [
-#     {
-#         "speculative_config": {
-#             "method": "ngram",
-#             "num_speculative_tokens": 5,
-#             "prompt_lookup_max": 3,
-#         },
-#         "enable_chunked_prefill": False,
-#     },
-#     {
-#         "speculative_config": {
-#             "method": "ngram",
-#             "num_speculative_tokens": 5,
-#             "prompt_lookup_max": 3,
-#             "disable_mqa_scorer": True,
-#         },
-#         "enable_chunked_prefill": True,
-#         "max_num_batched_tokens": 4,
-#         "max_num_seqs": 4
-#     },
-# ])
-# @pytest.mark.parametrize(
-#     "output_len",
-#     [
-#         # Use small output len for fast test.
-#         256,
-#     ])
-# @pytest.mark.parametrize("batch_size", [4])
-# @pytest.mark.parametrize("seed", [1])
-# def test_ngram_e2e_greedy_correctness_with_preemption(
-#         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
-#         baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
-#         seed: int):
-#     """Verify greedy equality, even when some sequences are preempted mid-
-#     generation.
-#     """
-#     run_equality_correctness_test(vllm_runner,
-#                                   common_llm_kwargs,
-#                                   per_test_common_llm_kwargs,
-#                                   baseline_llm_kwargs,
-#                                   test_llm_kwargs,
-#                                   batch_size,
-#                                   max_output_len=output_len,
-#                                   temperature=0,
-#                                   seed=seed)
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [
+    {
+        "model_name": "JackFram/llama-160m",
+    },
+])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_config": {
+            "method": "ngram",
+            "num_speculative_tokens": 5,
+            "prompt_lookup_max": 3,
+        },
+        "enable_chunked_prefill": False,
+    },
+    {
+        "speculative_config": {
+            "method": "ngram",
+            "num_speculative_tokens": 5,
+            "prompt_lookup_max": 3,
+            "disable_mqa_scorer": True,
+        },
+        "enable_chunked_prefill": True,
+        "max_num_batched_tokens": 4,
+        "max_num_seqs": 4
+    },
+])
+@pytest.mark.parametrize(
+    "output_len",
+    [
+        # Use small output len for fast test.
+        256,
+    ])
+@pytest.mark.parametrize("batch_size", [4])
+@pytest.mark.parametrize("seed", [1])
+def test_ngram_e2e_greedy_correctness_with_preemption(
+        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
+        seed: int):
+    """Verify greedy equality, even when some sequences are preempted mid-
+    generation.
+    """
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  temperature=0,
+                                  seed=seed)
 
 
 @pytest.mark.parametrize(

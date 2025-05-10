@@ -307,7 +307,7 @@ def test_mtp_e2e_quant_greedy_correctness_torchair_graph(
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        "block_size": 8,
+        "block_size": 16,
         # 2 for small prompt, 256//8 for generated.
         "num_gpu_blocks_override": 2 + 256 // 8,
         "max_model_len": (2 + 256 // 8) * 8,
