@@ -50,6 +50,7 @@ class SimpleConnector(KVConnectorBase):
         self.use_mla_opt = not vllm_envs.VLLM_MLA_DISABLE
         self.n_layer = self.config.model_config.get_num_layers(
             self.config.parallel_config)
+        max_num_seqs = config.scheduler_config.max_num_seqs
 
         self.producer_data_pipe: Optional[SimplePipe]
         self.consumer_data_pipe: Optional[SimplePipe]
@@ -65,7 +66,7 @@ class SimpleConnector(KVConnectorBase):
                 hostname="",
                 port_offset=rank,
             )
-            self.producer_buffer = SimpleBuffer(self.producer_data_pipe)
+            self.producer_buffer = SimpleBuffer(self.producer_data_pipe, max_num_seqs * 3)
         else:
             self.consumer_data_pipe = SimplePipe(
                 rank=rank,
@@ -74,7 +75,7 @@ class SimpleConnector(KVConnectorBase):
                 hostname="",
                 port_offset=rank,
             )
-            self.consumer_buffer = SimpleBuffer(self.consumer_data_pipe)
+            self.consumer_buffer = SimpleBuffer(self.consumer_data_pipe, max_num_seqs * 3)
 
     def select(
         self,
@@ -182,6 +183,9 @@ class SimpleConnector(KVConnectorBase):
             keys = torch.cat(keys, dim=0)
             values = torch.cat(values, dim=0)
             cur_req_id = list(model_input.request_ids_to_seq_ids.keys())[idx]
+            # bypass idel run of DP.
+            if "dp_idle" in cur_req_id:
+                continue
             # Currently we haven't considered situation of roi, pass None here.
             self.insert(
                 current_tokens,
@@ -264,6 +268,12 @@ class SimpleConnector(KVConnectorBase):
             start_pos_list.append(start_pos)
 
             cur_req_id = list(model_input.request_ids_to_seq_ids.keys())[idx]
+            # bypass idel run of DP.
+            if "dp_idle" in cur_req_id:
+                bypass_single_req = False
+                bypass_model_exec = False
+                num_computed_tokens_list.append(0)
+                continue
 
             ret = self.select(
                 current_tokens,

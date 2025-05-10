@@ -17,6 +17,7 @@
 
 import threading
 import time
+import json
 from typing import Optional
 
 import llm_datadist  # type: ignore
@@ -26,30 +27,27 @@ import torch_npu
 import torchair  # type: ignore
 import zmq  # type: ignore
 from vllm.distributed.kv_transfer.kv_pipe.base import KVPipeBase
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils import get_ip
 
 import vllm_ascend.envs as envs
 from vllm_ascend.distributed.kv_transfer.utils import NPU_DTYPE_TO_TORCH_DTYPE
 
-logger = init_logger(__name__)
-
 
 class SimplePipe(KVPipeBase):
 
     def __init__(
-            self,
-            rank,
-            local_rank,
-            kv_transfer_config,
-            hostname: str = "",
-            port_offset: int = 0,  # NPU offset in current P/D instance.
+        self,
+        rank,
+        local_rank,
+        kv_transfer_config,
+        hostname: str = "",
+        port_offset: int = 0,  # NPU offset in current P/D instance.
     ):
         self.rank = rank
         self.local_rank = local_rank
         # Currently for 1P1D situation, we use cluster_id=0 for both Prefill and Decode
         # Will change here in the future to support xPyD.
-        self.cluster_id = 0
         self.config = kv_transfer_config
         kv_connector_extra_config = kv_transfer_config.kv_connector_extra_config
         kv_role = kv_transfer_config.kv_role
@@ -59,37 +57,32 @@ class SimplePipe(KVPipeBase):
             self.role = llm_datadist.LLMRole.DECODER
         else:
             raise NotImplementedError(
-                "kv_role should be inside [kv_producer, kv_consumer]")
+                "kv_role should be inside [kv_producer, kv_consumer]"
+            )
 
-        prefill_device_ips = kv_connector_extra_config.get(
-            "prefill_device_ips", None)
-        decode_device_ips = kv_connector_extra_config.get(
-            "decode_device_ips", None)
-        if prefill_device_ips is None or decode_device_ips is None:
-            raise ValueError(
-                "Please specify prefill_device_ips and decode_device_ips"
-                "in kv_transfer_config.kv_connector_extra_config")
-        p_device_num = len(prefill_device_ips)
-        d_device_num = len(decode_device_ips)
+        self.llmdatadist_comm_port = kv_connector_extra_config.get(
+            "llmdatadist_comm_port", 26000
+        )
+        global_rank_table = self._read_rank_table()
+        p_device_num = len(global_rank_table["prefill_device_list"])
+        d_device_num = len(global_rank_table["decode_device_list"])
         # When number of devices in P and D is not equal,
         # we assume that device in D can be mapped to any device in P.
         self.p_device_rank = self.rank % p_device_num
         self.d_device_rank = self.rank % d_device_num
-
-        self.prompt_ip_list = prefill_device_ips
-        self.decode_ip_list = decode_device_ips
-        self.llmdatadist_comm_port = kv_connector_extra_config.get(
-            "llmdatadist_comm_port", 26000)
+        prefill_cluster_id = global_rank_table["prefill_device_list"][self.p_device_rank]["cluster_id"]
+        decode_cluster_id = global_rank_table["decode_device_list"][self.d_device_rank]["cluster_id"]
+        self.prefill_cluster_id = int(prefill_cluster_id)
+        self.decode_cluster_id = int(decode_cluster_id)
+        if self.role == llm_datadist.LLMRole.PROMPT:
+            self.cluster_id = self.prefill_cluster_id
+        else:
+            self.cluster_id = self.decode_cluster_id
         # LLMDataDist initializing.
         self.data_dist = llm_datadist.LLMDataDist(self.role, self.cluster_id)
         self._prepare_data_dist()
-        # Decoder needs to initialize and link cluster
-        if self.role == llm_datadist.LLMRole.DECODER:
-            self.cluster = self._make_cluster()
-            _, ret = self.data_dist.link_clusters([self.cluster], 20000)
-            logger.info(
-                f"rank {self.rank}, local_rank {self.local_rank} link, ret={ret}"
-            )
+        
+        self.comm_id = self._make_cluster(global_rank_table)
 
         # If `proxy_ip` or `proxy_port` is `""`,
         # then the ping thread will not be enabled.
@@ -127,29 +120,132 @@ class SimplePipe(KVPipeBase):
             self._register_thread.start()
 
     def _prepare_data_dist(self):
-        options = {
-            "llm.SyncKvCacheWaitTime": envs.LLMDATADIST_SYNC_CACHE_WAIT_TIME,
-        }
-        if self.role == llm_datadist.LLMRole.PROMPT:
-            options["ge.exec.deviceId"] = str(self.local_rank)
-            options["llm.listenIpInfo"] = (
-                f"{self.prompt_ip_list[self.p_device_rank]}:{self.llmdatadist_comm_port}"
-            )
-        else:
-            options["ge.exec.deviceId"] = str(self.local_rank)
+        llm_config = llm_datadist.LLMConfig()
+        llm_config.device_id = self.local_rank
+        llm_config.enable_switch_role = True
+        llm_config.enable_cache_manager = True
+        llm_config.sync_kv_timeout = envs.LLMDATADIST_SYNC_CACHE_WAIT_TIME
+        llm_config.enable_remote_cache_accessible = True
+        llm_config.mem_pool_cfg = "{\"memory_size\": 18737418240, \"page_shift\": 16}"
+        options = llm_config.generate_options()
         print(f"prepare datadist, options: {options}")
         self.data_dist.init(options)
-        self.kv_transfer = self.data_dist.kv_cache_manager
+        self.cache_manager = self.data_dist.cache_manager
         print(f"{self.rank} rank data dist is ready")
 
-    def _make_cluster(self):
-        cluster = llm_datadist.LLMClusterInfo()
-        cluster.remote_cluster_id = self.cluster_id
-        local_ip = self.decode_ip_list[self.d_device_rank]
-        remote_ip = self.prompt_ip_list[self.p_device_rank]
-        cluster.append_local_ip_info(local_ip, 0)
-        cluster.append_remote_ip_info(remote_ip, self.llmdatadist_comm_port)
-        return cluster
+    def _read_rank_table(self):
+        assert (
+            envs.DISAGGREGATED_RPEFILL_RANK_TABLE_PATH
+        ), "Please set path of rank_table to env variable DISAGGREGATED_RPEFILL_RANK_TABLE_PATH"
+        rank_table_path = envs.DISAGGREGATED_RPEFILL_RANK_TABLE_PATH
+        with open(rank_table_path, "r", encoding="utf-8") as f:
+            global_rank_table = json.load(f)
+        # global_rank_table = json.dumps(global_rank_table)
+        return global_rank_table
+
+    def _prepare_link_info(self, global_rank_table):
+        # This function reads global rank table file and generates
+        # local rank_table needed for link cluster
+        decode_device_list = global_rank_table["decode_device_list"]
+        prefill_device_list = global_rank_table["prefill_device_list"]
+        decode_device_info = decode_device_list[self.d_device_rank]
+        prefill_device_info = prefill_device_list[self.p_device_rank]
+        decode_device_ip = decode_device_info["device_ip"]
+        prefill_device_ip = prefill_device_info["device_ip"]
+        # Communation range name.
+        comm_name = f"pd_comm_{prefill_device_ip}_{decode_device_ip}"
+        cluster_rank_info = {
+            self.prefill_cluster_id: 0,
+            self.decode_cluster_id: 1,
+        }
+        rank_table = {}
+        version = "1.2"
+        server_count = (
+            1
+            if prefill_device_info["server_id"]
+            == decode_device_info["server_id"]
+            else 2
+        )
+        rank_table["version"] = version
+        rank_table["server_count"] = str(server_count)
+        rank_table["status"] = "completed"
+        prefill_server_device_info = {
+            "device": [
+                {
+                    "device_id": prefill_device_info["device_id"],
+                    "device_ip": prefill_device_info["device_ip"],
+                    "super_device_id": prefill_device_info["super_device_id"],
+                    "rank_id": "0",
+                }
+            ],
+            "server_id": prefill_device_info["server_id"],
+        }
+        rank_table["server_list"] = [prefill_server_device_info]
+        if server_count == 2:
+            decode_server_device_info = {
+                "device": [
+                    {
+                        "device_id": decode_device_info["device_id"],
+                        "device_ip": decode_device_info["device_ip"],
+                        "super_device_id": decode_device_info["super_device_id"],
+                        "rank_id": "1",
+                    }
+                ],
+                "server_id": decode_device_info["server_id"],
+            }
+            rank_table["server_list"].append(decode_server_device_info)
+        else:
+            decode_device_server_info = {
+                "device_id": decode_device_info["device_id"],
+                "device_ip": decode_device_info["device_ip"],
+                "super_device_id": decode_device_info["super_device_id"],
+                "rank_id": "1",
+            }
+            rank_table["server_list"][0]["device"].append(
+                decode_device_server_info
+            )
+        if version == "1.2":
+            super_pod_list = []
+            prefill_super_pod_info = {
+                "super_pod_id": prefill_device_info["super_pod_id"],
+                "server_list": [
+                    {"server_id": prefill_device_info["server_id"]}
+                ],
+            }
+            super_pod_list.append(prefill_super_pod_info)
+            if (
+                decode_device_info["super_pod_id"]
+                == prefill_device_info["super_pod_id"]
+            ):
+                if server_count == 2:
+                    super_pod_list[0]["server_list"].append(
+                        {"server_id": decode_device_info["server_id"]}
+                    )
+            else:
+                decode_super_pod_info = {
+                    "super_pod_id": decode_device_info["super_pod_id"],
+                    "server_list": [
+                        {"server_id": decode_device_info["server_id"]}
+                    ],
+                }
+                super_pod_list.append(decode_super_pod_info)
+            rank_table["super_pod_list"] = super_pod_list
+        return comm_name, cluster_rank_info, rank_table
+
+    def _make_cluster(self, global_rank_table):
+        comm_name, cluster_rank_info, rank_table = self._prepare_link_info(global_rank_table)
+        comm_id = self.data_dist.link(comm_name, cluster_rank_info, json.dumps(rank_table))
+        while True:
+            ret = self.data_dist.query_register_mem_status(comm_id)
+            if ret == llm_datadist.RegisterMemStatus.OK:
+                logger.info(f"init link suc, comm_id: {comm_id}")
+                break
+            elif ret == llm_datadist.RegisterMemStatus.FAILED:
+                logger.error(f"init link failed, comm_id: {comm_id}")
+                raise RuntimeError("link failed")
+            logger.info("Check query_register_mem_status again...")
+            time.sleep(1)
+        return comm_id
 
     def _register_to_proxy(self):
         sock = self.context.socket(zmq.DEALER)  # type: ignore
@@ -169,41 +265,41 @@ class SimplePipe(KVPipeBase):
         self,
         tensor: Optional[torch.Tensor],
         tensor_desc: llm_datadist.CacheDesc,
-        tensor_key: llm_datadist.CacheKey,
+        tensor_key: llm_datadist.BlocksCacheKey,
     ) -> llm_datadist.Cache:
-        buffer = self.kv_transfer.allocate_cache(tensor_desc, [tensor_key])
-        buffer_addr = buffer.per_device_tensor_addrs[0]
+        buffer_of_blocks = self.cache_manager.allocate_blocks_cache(tensor_desc, tensor_key)
+        buffer_addr = buffer_of_blocks.tensor_addrs
         data_tensor = torchair.llm_datadist.create_npu_tensors(
-            tensor_desc.shape, tensor.dtype, buffer_addr)[0]  # type: ignore
+            tensor_desc.shape, tensor.dtype, buffer_addr
+        )[
+            0
+        ]  # type: ignore
         update_indices = torch.tensor(
-            [0] * tensor.shape[0],  # type: ignore
-            dtype=torch.int64).npu()
+            [0] * tensor.shape[0], dtype=torch.int64  # type: ignore
+        ).npu()
         torch_npu.scatter_update_(data_tensor, update_indices, tensor, axis=-1)
-        # Free cache_id of buffer, actual deallocate will happen after consumer performing pull_cache.
-        self.kv_transfer.deallocate_cache(buffer)
-        return buffer
+        return buffer_of_blocks
 
     def recv_tensor(
         self,
         tensor_desc: llm_datadist.CacheDesc,
-        tensor_key: llm_datadist.CacheKey,
+        tensor_key: llm_datadist.BlocksCacheKey,
     ) -> llm_datadist.Cache:
         """Note that this function only creates empty tensor on buffer addr and returns it."""
-        tmp_buffer = self.kv_transfer.allocate_cache(tensor_desc)
-        buffer_addr = tmp_buffer.per_device_tensor_addrs[0]
+        tmp_blocks_buffer = self.cache_manager.allocate_blocks_cache(tensor_desc)
+        buffer_addr = tmp_blocks_buffer.tensor_addrs
         data_tensor = torchair.llm_datadist.create_npu_tensors(
             tensor_desc.shape,
             NPU_DTYPE_TO_TORCH_DTYPE[tensor_desc.data_type],
             buffer_addr,
         )[0]
-        self.kv_transfer.pull_cache(tensor_key, tmp_buffer, 0)
-        # tmp_buffer is allocated without key and will be deallocated here immediately.
-        # Free buffer here will cause accuracy problem.
-        # self.kv_transfer.deallocate_cache(tmp_buffer)
-        return tmp_buffer, data_tensor
+        num_blocks = tensor_desc.shape[0]
+        block_ids = list(range(num_blocks))
+        self.cache_manager.pull_blocks(tensor_key, tmp_blocks_buffer, block_ids, block_ids)
+        return tmp_blocks_buffer, data_tensor
 
     def deallocate_buffer(self, buffer: llm_datadist.Cache):
-        self.kv_transfer.deallocate_cache(buffer)
+        self.cache_manager.deallocate_blocks_cache(buffer)
 
     def close(self):
-        self.data_dist.unlink_clusters([self.cluster], 5000)
+        self.data_dist.unlink(self.comm_id)

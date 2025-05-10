@@ -133,6 +133,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value to False to disable the optimized model.
     "USE_OPTIMIZED_MODEL":
     lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
+    "DISAGGREGATED_RPEFILL_RANK_TABLE_PATH":
+    lambda: os.getenv("DISAGGREGATED_RPEFILL_RANK_TABLE_PATH", None)
 }
 
 # end-env-vars-definition
