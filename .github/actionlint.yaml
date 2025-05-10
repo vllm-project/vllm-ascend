@@ -4,3 +4,4 @@ self-hosted-runner:
     - linux-arm64-npu-1
     - linux-arm64-npu-2
     - linux-arm64-npu-4
+    - ubuntu-24.04-arm
