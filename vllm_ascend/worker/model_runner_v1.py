@@ -188,7 +188,6 @@ class NPUModelRunner:
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}
         # Persistent batch.
-        # Persistent batch.
         input_batch_kwargs = {
             "max_num_reqs": self.max_num_reqs,
             "max_model_len": self.model_config.max_model_len,
