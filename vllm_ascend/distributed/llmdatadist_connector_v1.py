@@ -445,7 +445,8 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
                     logger.warning(f"Failed to link clusters, {overall_ret=}")
                     continue
 
-                for idx, link_ret in enumerate(link_rets):
+                for idx in range(len(link_rets) - 1, -1, -1):
+                    link_ret = link_rets[idx]
                     if link_ret == LLMStatusCode.LLM_SUCCESS:
                         clusters.pop(idx)
 
