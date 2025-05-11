@@ -199,8 +199,7 @@ class NPUModelRunner:
         # For version compatibility and consistency with the latest vllm code
         if "max_num_batched_tokens" in inspect.signature(
                 InputBatch).parameters:
-            input_batch_kwargs[
-                "max_num_batched_tokens"] = self.max_num_tokens
+            input_batch_kwargs["max_num_batched_tokens"] = self.max_num_tokens
         self.input_batch = InputBatch(**input_batch_kwargs)
 
         self.input_ids = torch.zeros(self.max_num_tokens,
