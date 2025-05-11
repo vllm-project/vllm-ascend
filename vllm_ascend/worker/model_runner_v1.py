@@ -18,6 +18,7 @@
 #
 
 import gc
+import inspect
 import math
 import os
 import time
@@ -187,16 +188,21 @@ class NPUModelRunner:
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}
         # Persistent batch.
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            max_num_batched_tokens=self.scheduler_config.
-            max_num_batched_tokens,
-            max_model_len=self.model_config.max_model_len,
-            max_num_blocks_per_req=self.max_num_blocks_per_req,
-            device=self.device,
-            pin_memory=True,
-            vocab_size=self.model_config.get_vocab_size(),
-        )
+        # Persistent batch.
+        input_batch_kwargs = {
+            "max_num_reqs": self.max_num_reqs,
+            "max_model_len": self.model_config.max_model_len,
+            "max_num_blocks_per_req": self.max_num_blocks_per_req,
+            "device": self.device,
+            "pin_memory": True,
+            "vocab_size": self.model_config.get_vocab_size(),
+        }
+        # For version compatibility and consistency with the latest vllm code
+        if "max_num_batched_tokens" in inspect.signature(
+                InputBatch).parameters:
+            input_batch_kwargs[
+                "max_num_batched_tokens"] = self.scheduler_config.max_num_batched_tokens
+        self.input_batch = InputBatch(**input_batch_kwargs)
 
         self.input_ids = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int32,
