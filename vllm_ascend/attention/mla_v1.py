@@ -670,19 +670,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         attn_metadata: M,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-
         assert output is not None, "Output tensor must be provided."
-
         if attn_metadata is None:
             # Profiling run.
             return output
         self.running_in_graph = self.enable_graph_mode and attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-
         num_actual_toks = attn_metadata.num_actual_tokens
-
-        # Inputs and outputs may be padded for CUDA graphs
-        output_padded = output
-        output = output[:num_actual_toks, ...]
         if k_pe is None and not self.running_in_graph:
             kv_c, k_pe = self.kv_a_proj_with_mqa(
                 hidden_states_or_kv_c_normed)[0].split(
@@ -690,15 +683,18 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
         else:
             kv_c_normed = hidden_states_or_kv_c_normed
-
         assert attn_metadata.num_decodes is not None and \
-            attn_metadata.num_prefills is not None and \
-            attn_metadata.num_decode_tokens is not None
-
+        attn_metadata.num_prefills is not None and \
+        attn_metadata.num_decode_tokens is not None
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
-
+        if not self.running_in_graph:
+            # Inputs and outputs may be padded for CUDA graphs
+            output_padded = output
+            output = output[:num_actual_toks, ...]
+            kv_c_normed = kv_c_normed[:num_actual_toks, ...]
+            prefill_k_c_normed = kv_c_normed[num_decode_tokens:]
         if not self.running_in_graph:
             hidden_states_or_q_c = hidden_states_or_q_c[:num_actual_toks, ...]
             decode_hs_or_q_c = hidden_states_or_q_c[:num_decode_tokens]
@@ -709,7 +705,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             prefill_k_pe = k_pe[num_decode_tokens:]
         else:
             decode_hs_or_q_c = hidden_states_or_q_c
-
         if has_decode:
             decode_k_nope = None
             assert attn_metadata.decode is not None
@@ -725,12 +720,10 @@ class AscendMLAImpl(MLAAttentionImpl):
                 sin = sin[attn_metadata.decode.input_positions]
                 cos = cos[:, None, None, :]
                 sin = sin[:, None, None, :]
-
                 decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
                 decode_k_pe, decode_k_nope = self.exec_kv(
                     hidden_states_or_kv_c_normed, cos, sin, kv_cache,
                     attn_metadata.slot_mapping)
-
             else:
                 decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
                     attn_metadata.decode.input_positions,
@@ -768,13 +761,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                     prefill_q_pe.contiguous(),
                     prefill_k_pe,
                     max_seq_len=attn_metadata.prefill.max_seq_lens)
-
-        kv_c_normed = kv_c_normed[:num_actual_toks, ...]
-        prefill_k_c_normed = kv_c_normed[num_decode_tokens:]
-
         if self.enable_graph_mode:
             if len(kv_cache) > 0 and kv_cache[0].numel(
-            ) > 0 and attn_metadata.attn_state == AscendAttentionState.PrefillOnly:
+            ) > 0 and attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
                 slots = attn_metadata.slot_mapping
                 # NOTE: Separate the kv cache in advance to avoid OOM or other issues
                 torch_npu._npu_reshape_and_cache(key=kv_c_normed.view(
@@ -793,12 +782,10 @@ class AscendMLAImpl(MLAAttentionImpl):
                 key=key,
                 key_cache=kv_cache,
                 slot_indices=attn_metadata.slot_mapping.flatten())
-
         if has_prefill:
             output[num_decode_tokens:] = self._forward_prefill(
                 prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache,
                 attn_metadata)
-
         if has_decode:
             if self.running_in_graph:
                 return self._forward_decode(decode_ql_nope, decode_q_pe,
@@ -808,5 +795,4 @@ class AscendMLAImpl(MLAAttentionImpl):
                 output[:num_decode_tokens] = self._forward_decode(
                     decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe,
                     kv_cache, attn_metadata)
-
         return output_padded
