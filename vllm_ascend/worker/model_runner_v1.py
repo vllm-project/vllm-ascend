@@ -203,7 +203,7 @@ class NPUModelRunner:
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=self.model_config.max_model_len,
                 max_num_blocks_per_req=self.max_num_blocks_per_req,
-                max_num_batched_tokens = self.max_num_tokens,
+                max_num_batched_tokens=self.max_num_tokens,
                 device=self.device,
                 pin_memory=True,
                 vocab_size=self.model_config.get_vocab_size(),
