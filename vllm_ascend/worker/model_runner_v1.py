@@ -317,11 +317,14 @@ class NPUModelRunner:
 
         self.sampler = Sampler()
         self.enable_torchair_graph_mode = False
+        self.use_cached_npu_graph = False
         additional_config = vllm_config.additional_config
         if additional_config:
             self.enable_torchair_graph_mode = additional_config.get(
                 "enable_graph_mode",
                 False) and self.vllm_config.model_config.use_mla
+            self.use_cached_npu_graph = additional_config.get(
+                "use_cached_npu_graph", False)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -944,12 +947,20 @@ class NPUModelRunner:
             config.experimental_config.frozen_parameter = True
             config.experimental_config.tiling_schedule_optimize = True
             torch.npu.set_compile_mode(jit_compile=False)
-            self.compile_model = torchair.inference.cache_compile(
-                self.model.forward,
-                dynamic=True,
-                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                config=config,
-                ge_cache=False)
+            if not self.use_cached_npu_graph:
+                npu_backend = torchair.get_npu_backend(compiler_config=config)
+                self.compile_model = torch.compile(
+                    self.model,
+                    dynamic=True,
+                    fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    backend=npu_backend)
+            else:
+                self.compile_model = torchair.inference.cache_compile(
+                    self.model.forward,
+                    dynamic=True,
+                    fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    config=config,
+                    ge_cache=False)
 
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
