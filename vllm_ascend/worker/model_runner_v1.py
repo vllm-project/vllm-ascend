@@ -189,6 +189,7 @@ class NPUModelRunner:
         # Persistent batch.
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
+            max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
             max_model_len=self.model_config.max_model_len,
             max_num_blocks_per_req=self.max_num_blocks_per_req,
             device=self.device,
