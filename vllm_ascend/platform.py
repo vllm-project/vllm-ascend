@@ -24,6 +24,7 @@ import vllm.envs as envs
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 from vllm.utils import supports_dynamo
+from vllm_ascend.utils import is_310p, communication_adaptation_310p
 
 CUSTOM_OP_ENABLED = False
 try:
@@ -73,6 +74,10 @@ class NPUPlatform(Platform):
 
         from vllm_ascend.quantization.quant_config import \
             AscendQuantConfig  # noqa: F401
+
+        if is_310p():
+            logger.info("patch torch communication while using Ascend 310P")
+            communication_adaptation_310p()
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0):

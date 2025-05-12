@@ -17,10 +17,128 @@
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 import torch
+import torch_npu
 from packaging.version import InvalidVersion, Version
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs
+
+# 310P3 202, 910B4 224
+SOC_VERSION = None
+SOC_VERSION_310P = 202
+
+ACL_FORMAT_FRACTAL_ND = 2
+ACL_FORMAT_FRACTAL_NZ = 29
+
+def is_310p():
+    global SOC_VERSION
+    if SOC_VERSION is None:
+        torch.npu.get_device_name()
+        SOC_VERSION = torch_npu._C._npu_get_soc_version()
+    return SOC_VERSION == SOC_VERSION_310P
+
+
+class NullHandle:
+
+    def __init__(self):
+        pass
+
+    def wait(self):
+        pass
+
+
+def _round_up(x: int, align: int):
+    if align == 0:
+        return -1
+    return (x + align - 1) // align * align
+
+
+def _custom_pad(x, pad_dims):
+    return torch.nn.functional.pad(x, pad_dims)
+
+
+def _custom_reshape(x, target_shape):
+    return x.reshape(target_shape)
+
+
+def _custom_transpose(x, dim1, dim2):
+    return x.transpose(dim1, dim2)
+
+
+def nd_to_nz_2d(in_tensor: torch.Tensor) -> torch.Tensor:
+    aux_dims = [0, 0, 0, 0]
+    aux_dims[0] = 1
+    aux_dims[1] = _round_up(in_tensor.size(0), 16)
+
+    pad_dims = [0, 0, 0, 0]
+    pad_dims[3] = _round_up(in_tensor.size(0), 16) - in_tensor.size(0)
+
+    aux_dims[2] = _round_up(in_tensor.size(1), 16) // 16
+    aux_dims[3] = 16
+    pad_dims[1] = _round_up(in_tensor.size(1), 16) - in_tensor.size(1)
+
+    return _custom_transpose(
+        _custom_reshape(_custom_pad(in_tensor, pad_dims), aux_dims), 1, 2
+    ).contiguous()
+
+
+def communication_adaptation_310p():
+
+    def broadcast310p(tensor, src, group=None, async_op=False):
+        rank = torch.distributed.get_rank(group)
+        world_size = torch.distributed.get_world_size(group)
+        tensor_list = [torch.empty_like(tensor) for _ in range(world_size)]
+        tensor_list[rank] = tensor
+        torch.distributed.all_gather(tensor_list, tensor, group=group)
+        tensor[...] = tensor_list[src]
+        if async_op:
+            return NullHandle()
+        else:
+            return None
+
+    torch.distributed.broadcast = broadcast310p
+
+    def all_reduce_wrapper_310p(fn):
+
+        def all_reduce(
+            tensor,
+            op=torch.distributed.ReduceOp.SUM,
+            group=None,
+            async_op=False,
+        ):
+            if tensor.dtype != torch.int64:
+                return fn(tensor, op, group, async_op)
+            rank = torch.distributed.get_rank(group)
+            world_size = torch.distributed.get_world_size(group)
+            tensor_list = [torch.empty_like(tensor) for _ in range(world_size)]
+            tensor_list[rank] = tensor
+            torch.distributed.all_gather(tensor_list, tensor, group=group)
+            if op == torch.distributed.ReduceOp.SUM:
+                return torch.stack(tensor_list).sum(0)
+            elif op == torch.distributed.ReduceOp.MAX:
+                return torch.tensor(
+                    torch.stack(tensor_list).cpu().numpy().max(0),
+                    device=tensor.device,
+                )
+            else:
+                raise RuntimeError(f"not implement op {op}")
+
+        return all_reduce
+
+    torch.distributed.all_reduce = all_reduce_wrapper_310p(
+        torch.distributed.all_reduce
+    )
+
+    def reduce_scatter_310p(output_tensor, input_tensor, group=None):
+        rank = torch.distributed.get_rank(group)
+        world_size = torch.distributed.get_world_size(group)
+        torch.distributed.all_reduce(
+            input_tensor, torch.distributed.ReduceOp.SUM, group, async_op=False
+        )
+        interval = input_tensor.shape[0] // world_size
+        output_tensor[:] = input_tensor[rank * interval : (rank + 1) * interval]
+
+    torch.distributed._reduce_scatter_base = reduce_scatter_310p
 
 
 def try_register_lib(lib_name: str, lib_info: str = ""):
