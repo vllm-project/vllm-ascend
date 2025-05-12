@@ -74,7 +74,7 @@ Usually, each minor version of vLLM (such as 0.7) will correspond to a vLLM Asce
 
 For main branch, vLLM Ascend should works with vLLM main branch and latest 1 or 2 release version. So to ensure the backward compatibility, we will do the following:
 - Both main branch and target vLLM release is tested by Ascend E2E CI. For example, currently, vLLM main branch and vLLM 0.8.4 are tested now.
-- For code changes, we will make sure that the changes are compatible with the latest 1 or 2 vLLM release version as well. In this case, vLLM Ascend introduced a version check machinism inner the code. It'll check the version of installed vLLM pacakge first to decide which code logic to use. If users hit the `InvalidVersion` error, it sometimes means that they have installed an dev/editable version of vLLM package. In this case, we provide the env variable `VLLM_VERSION` to let users specify the version of vLLM package to use.
+- For code changes, we will make sure that the changes are compatible with the latest 1 or 2 vLLM release version as well. In this case, vLLM Ascend introduced a version check machinism inner the code. It'll check the version of installed vLLM package first to decide which code logic to use. If users hit the `InvalidVersion` error, it sometimes means that they have installed an dev/editable version of vLLM package. In this case, we provide the env variable `VLLM_VERSION` to let users specify the version of vLLM package to use.
 - For documentation changes, we will make sure that the changes are compatible with the latest 1 or 2 vLLM release version as well. Note should be added if there are any breaking changes.
 
 ## Document Branch Policy

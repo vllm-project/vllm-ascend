@@ -84,7 +84,7 @@ Currently, only 1P1D is supported by vllm. For vllm-ascend, it'll be done by [th
 
 ### 10. Does vllm-ascend support quantization method?
 
-Currently, w8a8 quantization is already supported by vllm-ascend originally on v0.8.4rc2 or heigher, If you're using vllm 0.7.3 version, w8a8 quantization is supporeted with the integration of vllm-ascend and mindie-turbo, please use `pip install vllm-ascend[mindie-turbo]`.
+Currently, w8a8 quantization is already supported by vllm-ascend originally on v0.8.4rc2 or higher, If you're using vllm 0.7.3 version, w8a8 quantization is supporeted with the integration of vllm-ascend and mindie-turbo, please use `pip install vllm-ascend[mindie-turbo]`.
 
 ### 11. How to run w8a8 DeepSeek model?
 
