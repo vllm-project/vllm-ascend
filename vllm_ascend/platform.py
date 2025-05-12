@@ -25,6 +25,8 @@ from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 from vllm.utils import supports_dynamo
 
+from vllm_ascend.utils import update_aclgraph_sizes
+
 CUSTOM_OP_ENABLED = False
 try:
     # register custom ops into torch_library here
@@ -144,6 +146,7 @@ class NPUPlatform(Platform):
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(
                 ["vllm.unified_ascend_attention_with_output"])
+            update_aclgraph_sizes(vllm_config)
 
         if vllm_config.additional_config is not None:
             enable_graph_mode = vllm_config.additional_config.get(
