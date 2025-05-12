@@ -6,7 +6,6 @@ import vllm
 
 from tests.lora.utils import do_sample
 
-os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 MODEL_PATH = "baichuan-inc/Baichuan-7B"
 
 
