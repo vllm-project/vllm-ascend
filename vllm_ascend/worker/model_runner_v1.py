@@ -43,8 +43,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LayerBlockType, LazyLoader, cdiv,
-                        is_pin_memory_available)
+                        LayerBlockType, LazyLoader, cdiv)
 from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
@@ -940,9 +939,7 @@ class NPUModelRunner:
             import torchair  # type: ignore
             from torchair import patch_for_hcom  # type: ignore
 
-            # 通信算子成图
             patch_for_hcom()
-            # 设置npu的config，如果不设置config，可以使用默认的，那可以设置npu_backend="npu"
             config = torchair.CompilerConfig()
             config.experimental_config.frozen_parameter = True
             config.experimental_config.tiling_schedule_optimize = True
@@ -993,20 +990,18 @@ class NPUModelRunner:
                         kv_cache_spec.num_kv_heads, kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
                     if self.enable_torchair_graph_mode:
-                        pin_memory = is_pin_memory_available(
-                        ) if self.device == "cpu" else False
                         layer_kv_cache_nope = torch.zeros(
                             kv_cache_shape[:-1] +
                             (self.model_config.hf_text_config.kv_lora_rank, ),
                             dtype=self.dtype,
-                            pin_memory=pin_memory,
+                            pin_memory=True,
                             device=self.device)
                         layer_kv_cache_pe = torch.zeros(
                             kv_cache_shape[:-1] +
                             (self.model_config.hf_text_config.qk_rope_head_dim,
                              ),
                             dtype=self.dtype,
-                            pin_memory=pin_memory,
+                            pin_memory=True,
                             device=self.device)
                         kv_caches[layer_name] = (layer_kv_cache_nope,
                                                  layer_kv_cache_pe)
