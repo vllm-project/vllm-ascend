@@ -34,6 +34,10 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("CMAKE_BUILD_TYPE"),
     "COMPILE_CUSTOM_KERNELS":
     lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
+    "VLLM_ENABLE_MC2":
+    lambda: bool(int(os.getenv("VLLM_ENABLE_MC2", '0'))),
+    "USING_LCCL_COM":
+    lambda: bool(int(os.getenv("USING_LCCL_COM", '0'))),
     "SOC_VERSION":
     lambda: os.getenv("SOC_VERSION", "ASCEND910B1"),
     # If set, vllm-ascend will print verbose logs during compilation
