@@ -6,6 +6,7 @@ from tests.lora.utils import do_sample
 
 MODEL_PATH = "baichuan-inc/Baichuan-7B"
 
+
 @pytest.mark.parametrize("fully_sharded", [True, False])
 def test_baichuan_tensor_parallel_equality(baichuan_lora_files,
                                            num_gpus_available, fully_sharded):

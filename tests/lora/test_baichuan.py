@@ -6,6 +6,7 @@ from tests.lora.utils import do_sample
 
 MODEL_PATH = "baichuan-inc/Baichuan-7B"
 
+
 def test_baichuan_lora(baichuan_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,
