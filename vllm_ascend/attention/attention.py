@@ -36,6 +36,7 @@ from vllm.config import get_current_vllm_config
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 from vllm_ascend.ops.cache import concat_and_cache_mla
+from vllm_ascend.utils import is_310p, nd_to_nz_2d, ACL_FORMAT_FRACTAL_NZ
 from vllm_ascend.worker.model_runner import (
     ModelInputForNPUBuilder, ModelInputForNPUWithSamplingMetadata)
 
@@ -167,7 +168,10 @@ class AscendAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        if is_310p():
+            return (2, num_blocks, num_kv_heads * head_size // 16, block_size, 16)
+        else:
+            return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def swap_blocks(
@@ -640,6 +644,10 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
                 # normal mask
                 self.attn_mask = AscendMetadataBuilder._attn_mask_builder.get_attn_mask(  # type: ignore
                     max_prefill_seq_len, dtype, device)
+                if is_310p():
+                    mask_nz = nd_to_nz_2d(self.attn_mask)
+                    mask_nz = torch_npu.npu_format_cast(mask_nz.contiguous(), ACL_FORMAT_FRACTAL_NZ)
+                    self.attn_mask = mask_nz
             elif self.num_decode_tokens == 0 and not self.input_builder.chunked_prefill_enabled:
                 # compress mask for prefix cache
                 self.compress_mask = AscendMetadataBuilder._attn_mask_builder.get_attn_mask(  # type: ignore
@@ -919,6 +927,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.seq_lens_tensor_cpu = torch.from_numpy(
                     np.array(attn_metadata.decode_metadata.seq_lens).astype(
                         np.int32))
+                if is_310p():
+                    self.seq_lens_tensor_cpu = self.seq_lens_tensor_cpu.to(device=self.key_cache.device)
                 block_tables = attn_metadata.decode_metadata.block_tables
                 torch_npu._npu_paged_attention(
                     query=query,
