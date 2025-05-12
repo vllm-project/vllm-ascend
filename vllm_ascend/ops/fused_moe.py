@@ -629,8 +629,7 @@ class AscendFusedMoE(FusedMoE):
                    ) == 1 and not is_prefill:
                 ...
         else:
-            if int(os.environ.get("USING_LCCL_COM",
-                                    '0')) == 1:  # type: ignore
+            if int(os.environ.get("USING_LCCL_COM", '0')) == 1:  # type: ignore
                 hidden_states = get_dp_group().all_gather(
                     hidden_states, 0, False)
                 router_logits = get_dp_group().all_gather(
