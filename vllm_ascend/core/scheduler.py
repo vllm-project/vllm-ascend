@@ -74,7 +74,7 @@ class AscendScheduler(Scheduler):
 
         # Schedule prefill requests first.
         while self.waiting and token_budget > 0:
-            if len(scheduled_new_reqs) == self.max_num_running_reqs:
+            if len(self.running) == self.max_num_running_reqs:
                 break
 
             request = self.waiting[0]
@@ -96,7 +96,7 @@ class AscendScheduler(Scheduler):
             # Get already-cached tokens.
             computed_blocks, num_computed_tokens = (
                 self.kv_cache_manager.get_computed_blocks(request))
-            num_new_tokens = request.num_prompt_tokens - num_computed_tokens
+            num_new_tokens = request.num_tokens - num_computed_tokens
             if (0 < self.scheduler_config.long_prefill_token_threshold <
                     num_new_tokens):
                 num_new_tokens = (
