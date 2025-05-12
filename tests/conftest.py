@@ -30,6 +30,7 @@ from vllm.inputs import ExplicitEncoderDecoderPrompt, TextPrompt, TokensPrompt
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import is_list_of
+from huggingface_hub import snapshot_download
 
 from tests.model_utils import (PROMPT_TEMPLATES, TokensTextLogprobs,
                                TokensTextLogprobsPromptLogprobs)
@@ -349,3 +350,7 @@ def vllm_runner():
 @pytest.fixture(params=list(PROMPT_TEMPLATES.keys()))
 def prompt_template(request):
     return PROMPT_TEMPLATES[request.param]
+
+@pytest.fixture(scope="session")
+def baichuan_lora_files():
+    return snapshot_download(repo_id="jeeejeee/baichuan7b-text2sql-spider")
