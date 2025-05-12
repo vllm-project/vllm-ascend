@@ -1,6 +1,7 @@
 # Should be mirrored in pyporject.toml
 cmake>=3.26
 decorator
+einops
 numpy<2.0.0
 packaging
 pip

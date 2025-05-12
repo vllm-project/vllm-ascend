@@ -105,7 +105,7 @@ def metadata_collect_trigger(poller, router_socket):
                         start_time = time.time()
                 socks = dict(poller.poll(timeout=500))  # timeout in 500ms
                 if socks:
-                    logger.debug("receive socks from moniter threads: ", socks)
+                    logger.debug("receive socks from monitor threads: ", socks)
                 if router_socket in socks:
                     messages = router_socket.recv_multipart()
                     try:
