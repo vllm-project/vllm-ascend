@@ -805,7 +805,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.uses_mrope:
                 positions = self.mrope_positions[:, :num_tokens]
             else:
-                positions = self.input_positions_cpu[:num_tokens]
+                positions = self.positions[:num_tokens]
 
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
