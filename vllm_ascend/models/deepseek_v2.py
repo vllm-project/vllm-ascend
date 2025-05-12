@@ -215,14 +215,6 @@ class CustomDeepseekV2MoE(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
-<<<<<<< HEAD
-        if attn_metadata is None:
-            # for profile run
-            is_prefill = True
-        else:
-            is_prefill = attn_metadata.num_prefills > 0
-=======
->>>>>>> a0abdeb (fix dp _dummy_run() bug)
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -234,15 +226,8 @@ class CustomDeepseekV2MoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-<<<<<<< HEAD
-
-=======
-        if attn_metadata is None:
-            is_prefill = True
-        else:
-            is_prefill = True if attn_metadata.num_prefills > 0 else False
-        # is_prefill = attn_metadata.num_prefills > 0
->>>>>>> a0abdeb (fix dp _dummy_run() bug)
+        is_prefill = True if attn_metadata is None \ 
+                        or attn_metadata.num_prefills > 0 else False
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
