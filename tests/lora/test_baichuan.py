@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import os
-
 import vllm
 
 from tests.lora.utils import do_sample

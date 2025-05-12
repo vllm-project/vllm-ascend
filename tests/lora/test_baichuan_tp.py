@@ -1,5 +1,3 @@
-import os
-
 import pytest
 import vllm
 from vllm.distributed import cleanup_dist_env_and_memory
@@ -10,11 +8,7 @@ MODEL_PATH = "baichuan-inc/Baichuan-7B"
 
 
 @pytest.mark.parametrize("fully_sharded", [True, False])
-def test_baichuan_tensor_parallel_equality(baichuan_lora_files,
-                                           num_gpus_available, fully_sharded):
-    if num_gpus_available < 4:
-        pytest.skip(f"Not enough GPUs for tensor parallelism {4}")
-
+def test_baichuan_tensor_parallel_equality(baichuan_lora_files, fully_sharded):
     # Because of single card npu memory limit, comment following single card test
     # llm_tp1 = vllm.LLM(MODEL_PATH,
     #                    enable_lora=True,
