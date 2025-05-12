@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import vllm
+
 from tests.lora.utils import do_sample
 
 MODEL_PATH = "baichuan-inc/Baichuan-7B"

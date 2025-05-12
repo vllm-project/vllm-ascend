@@ -1,7 +1,7 @@
 import pytest
-
 import vllm
 from vllm.distributed import cleanup_dist_env_and_memory
+
 from tests.lora.utils import do_sample
 
 MODEL_PATH = "baichuan-inc/Baichuan-7B"
