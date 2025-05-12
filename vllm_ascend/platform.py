@@ -16,7 +16,6 @@
 #
 
 import logging
-import math
 import os
 from typing import TYPE_CHECKING, Optional, Tuple
 
@@ -25,6 +24,8 @@ import vllm.envs as envs
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 from vllm.utils import supports_dynamo
+
+from vllm_ascend.utils import update_aclgraph_sizes
 
 CUSTOM_OP_ENABLED = False
 try:
@@ -145,7 +146,7 @@ class NPUPlatform(Platform):
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(
                 ["vllm.unified_ascend_attention_with_output"])
-            cls.update_aclgraph_sizes(vllm_config)
+            update_aclgraph_sizes(vllm_config)
 
         if vllm_config.additional_config is not None:
             enable_graph_mode = vllm_config.additional_config.get(
@@ -199,65 +200,6 @@ class NPUPlatform(Platform):
                 ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
                     vllm_config.scheduler_config, additional_scheduler_config)
                 vllm_config.scheduler_config = ascend_scheduler_config
-
-    @classmethod
-    def update_aclgraph_sizes(cls, vllm_config: VllmConfig) -> None:
-        """Update ACL graph capture sizes based on hardware limitations"""
-        # NOTE: Currently, we can only capture 1920 graphs at most,
-        # due to the limitation of ACL graph.
-
-        # Maximum number of graphs that can be captured by ACL Graph
-        MAX_CAPTURE_SIZE = 1920
-
-        # Store original configuration and temporarily clear it
-        compilation_config = vllm_config.compilation_config
-        original_sizes, compilation_config.cudagraph_capture_sizes = \
-            compilation_config.cudagraph_capture_sizes, None
-
-        # Calculate parallel configuration factor (increases with DP or TP)
-        # TODO(Yizhou): This is a temporary solution, need to be improved
-        # in the future, taking into account the other parallel configurations.
-        num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
-        parallel_config = vllm_config.parallel_config
-        parallel_factor = 1 + sum(size > 1 for size in [
-            parallel_config.data_parallel_size,
-            parallel_config.tensor_parallel_size
-        ])
-
-        # Calculate maximum supported batch sizes considering model architecture
-        max_num_batch_sizes = math.floor(
-            MAX_CAPTURE_SIZE / (num_hidden_layers + 1) / parallel_factor)
-        logger.info(
-            "Calculated maximum supported batch sizes for ACL graph: %s",
-            max_num_batch_sizes)
-
-        # If original sizes exceed maximum, sample a representative subset
-        if max_num_batch_sizes < len(original_sizes):
-            # Sample uniformly from original sizes
-            step = (len(original_sizes) - 1) / (max_num_batch_sizes - 1)
-            indices = [round(i * step) for i in range(max_num_batch_sizes)]
-
-            # Ensure first and last elements are preserved
-            indices[0], indices[-1] = 0, len(original_sizes) - 1
-
-            sampled_sizes = [original_sizes[i] for i in indices]
-            compilation_config.init_with_cudagraph_sizes(sampled_sizes)
-
-            logger.info(
-                "Adjusted ACL graph batch sizes for %s model (layers: %d): %d → %d sizes",
-                vllm_config.model_config.architectures[0],
-                num_hidden_layers,
-                len(original_sizes),
-                len(compilation_config.
-                    cudagraph_capture_sizes  # type: ignore[arg-type]
-                    ))
-        else:
-            # No adjustment needed
-            compilation_config.cudagraph_capture_sizes = original_sizes
-            logger.info(
-                "No adjustment needed for ACL graph batch sizes: %s model (layers: %d) with %d sizes",
-                vllm_config.model_config.architectures[0], num_hidden_layers,
-                len(original_sizes))
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
