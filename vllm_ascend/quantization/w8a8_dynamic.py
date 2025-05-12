@@ -565,6 +565,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = True,
+        enable_force_load_balance: bool = True,
         dp_size: int = 1,
         **kwargs,
     ) -> torch.Tensor:
@@ -599,6 +600,9 @@ class AscendW8A8DynamicFusedMoEMethod:
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias,
             )
+        
+        if enable_force_load_balance:
+            topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
         if os.environ.get("VLLM_ENABLE_MC2", '0') == "1" and not is_prefill:
             return fused_experts_with_mc2(

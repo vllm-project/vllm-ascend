@@ -615,6 +615,7 @@ class AscendFusedMoE(FusedMoE):
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
                 is_prefill: bool,
+                enable_force_load_balance: bool = False,
                 top_k=None):
         assert self.quant_method is not None
 
@@ -628,7 +629,7 @@ class AscendFusedMoE(FusedMoE):
                    ) == 1 and not is_prefill:
                 ...
         else:
-            elif int(os.environ.get("USING_LCCL_COM",
+            if int(os.environ.get("USING_LCCL_COM",
                                     '0')) == 1:  # type: ignore
                 hidden_states = get_dp_group().all_gather(
                     hidden_states, 0, False)
@@ -654,6 +655,7 @@ class AscendFusedMoE(FusedMoE):
             scoring_func=self.scoring_func,
             e_score_correction_bias=self.e_score_correction_bias,
             is_prefill=is_prefill,
+            enable_force_load_balance=enable_force_load_balance,
             dp_size=self.dp_size)
 
         if self.dp_size > 1:

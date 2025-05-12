@@ -215,11 +215,13 @@ class CustomDeepseekV2MoE(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
-        if attn_metadata is None:
+        if attn_metadata is None or attn_metadata.slot_mapping[-1] < 0:
             # for profile run
             is_prefill = True
+            enable_force_load_balance = True
         else:
             is_prefill = attn_metadata.num_prefills > 0
+            enable_force_load_balance = False
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -236,7 +238,9 @@ class CustomDeepseekV2MoE(nn.Module):
             hidden_states=hidden_states,
             router_logits=router_logits,
             is_prefill=is_prefill,
-            top_k=CustomDeepseekV2MoE.top_k) * self.routed_scaling_factor
+            top_k=CustomDeepseekV2MoE.top_k,
+            enable_force_load_balance=enable_force_load_balance,
+        ) * self.routed_scaling_factor
 
         if self.tp_size > 1:
             if self.enable_mc2 and not is_prefill:
