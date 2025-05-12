@@ -627,6 +627,7 @@ class AscendFusedMoE(FusedMoE):
             if int(os.environ.get("VLLM_ENABLE_MC2", '0')  # type: ignore
                    ) == 1 and not is_prefill:
                 ...
+        else:
             elif int(os.environ.get("USING_LCCL_COM",
                                     '0')) == 1:  # type: ignore
                 hidden_states = get_dp_group().all_gather(
@@ -652,18 +653,19 @@ class AscendFusedMoE(FusedMoE):
             custom_routing_function=self.custom_routing_function,
             scoring_func=self.scoring_func,
             e_score_correction_bias=self.e_score_correction_bias,
-            is_prefill=is_prefill)
+            is_prefill=is_prefill,
+            dp_size=self.dp_size)
 
         if self.dp_size > 1:
             if int(os.environ.get("VLLM_ENABLE_MC2", '0')  # type: ignore
                    ) == 1 and not is_prefill:
                 ...
-            else:
-                final_hidden_states = dist._functional_collectives.reduce_scatter_tensor(
-                    final_hidden_states,
-                    "sum",
-                    scatter_dim=0,
-                    group=get_dp_group().device_group)
+        else:
+            final_hidden_states = dist._functional_collectives.reduce_scatter_tensor(
+                final_hidden_states,
+                "sum",
+                scatter_dim=0,
+                group=get_dp_group().device_group)
 
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
             final_hidden_states = tensor_model_parallel_all_reduce(

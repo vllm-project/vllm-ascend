@@ -317,6 +317,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = True,
+        dp_size: int = 1
         **kwargs,
     ) -> torch.Tensor:
         return self.quant_method.apply(layer, x, router_logits, top_k,
@@ -324,7 +325,8 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
                                        global_num_experts, expert_map,
                                        topk_group, num_expert_group,
                                        custom_routing_function, scoring_func,
-                                       e_score_correction_bias, is_prefill)
+                                       e_score_correction_bias, is_prefill,
+                                       dp_size)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
