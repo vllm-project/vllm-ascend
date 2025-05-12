@@ -153,9 +153,9 @@ class NPUPlatform(Platform):
                     "enable_graph_mode is not supported because the version of torch is too low, forcing close enable_graph_mode"
                 )
                 vllm_config.additional_config["enable_graph_mode"] = False
-            if enable_graph_mode and envs.VLLM_USE_V1:
+            if enable_graph_mode and envs.VLLM_USE_V1 and envs.VLLM_MLA_DISABLE:
                 logger.warning(
-                    "NPU graph mode is still experimental and not supported for V1 currently, "
+                    "NPU graph mode is still experimental and not supported for V1 without mla currently, "
                     "it has been disabled automatically.")
                 vllm_config.additional_config["enable_graph_mode"] = False
 
