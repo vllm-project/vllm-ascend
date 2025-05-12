@@ -186,110 +186,109 @@ def test_medusa_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
         ["disable_logprobs"])
 
 
-# TODO: Open it when vllm-ascend support graph mode and
-# @pytest.mark.parametrize(
-#     "common_llm_kwargs",
-#     [{
-#         "enforce_eager": False,
+@pytest.mark.skipif(True, reason="Open it when graph mode ready.")
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        "enforce_eager": False,
 
-#         # Print spec metrics.
-#         "disable_log_stats": False,
+        # Print spec metrics.
+        "disable_log_stats": False,
 
-#         # Precision
-#         "dtype": PRECISION,
+        # Precision
+        "dtype": PRECISION,
 
-#         # Main model
-#         "model_name": MAIN_MODEL,
-#     }])
-# @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
-# @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-# @pytest.mark.parametrize("test_llm_kwargs", [
-#     {
-#         "speculative_config": {
-#             "model": SPEC_MODEL,
-#             "num_speculative_tokens": MAX_SPEC_TOKENS,
-#         },
-#     },
-# ])
-# @pytest.mark.parametrize("output_len", [
-#     128,
-# ])
-# @pytest.mark.parametrize("batch_size", [1, 32])
-# @pytest.mark.parametrize("seed", [1])
-# @pytest.mark.parametrize("prefill_chunk_size", PREFILL_CHUNK_SIZE)
-# def test_medusa_e2e_greedy_correctness_cuda_graph(
-#         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
-#         baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
-#         seed: int, prefill_chunk_size: int):
-#     """Verify greedy equality with cuda graph enabled and different
-#     batch sizes."""
-#     maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
-#     run_equality_correctness_test(vllm_runner,
-#                                   common_llm_kwargs,
-#                                   per_test_common_llm_kwargs,
-#                                   baseline_llm_kwargs,
-#                                   test_llm_kwargs,
-#                                   batch_size,
-#                                   max_output_len=output_len,
-#                                   seed=seed,
-#                                   temperature=0.0)
+        # Main model
+        "model_name": MAIN_MODEL,
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_config": {
+            "model": SPEC_MODEL,
+            "num_speculative_tokens": MAX_SPEC_TOKENS,
+        },
+    },
+])
+@pytest.mark.parametrize("output_len", [
+    128,
+])
+@pytest.mark.parametrize("batch_size", [1, 32])
+@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("prefill_chunk_size", PREFILL_CHUNK_SIZE)
+def test_medusa_e2e_greedy_correctness_cuda_graph(
+        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
+        seed: int, prefill_chunk_size: int):
+    """Verify greedy equality with cuda graph enabled and different
+    batch sizes."""
+    maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  seed=seed,
+                                  temperature=0.0)
 
-# TODO: There is a problem with the preemptive scheduling in the current
-# version, which makes this case fail. Please release this case after the
-# preemptive scheduling problem is solved.
-# @pytest.mark.parametrize(
-#     "common_llm_kwargs",
-#     [{
-#         "block_size": 8,
-#         # 2 for small prompt, 256//8 for generated.
-#         "num_gpu_blocks_override": 2 + 256 // 8,
-#         "max_model_len": (2 + 256 // 8) * 8,
 
-#         # Skip cuda graph recording for fast test.
-#         "enforce_eager": True,
+@pytest.mark.skipif(True, reason="Open it when preempt ready.")
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        "block_size": 16,
+        # 2 for small prompt, 256//8 for generated.
+        "num_gpu_blocks_override": 2 + 256 // 8,
+        "max_model_len": (2 + 256 // 8) * 8,
 
-#         # Precision
-#         "dtype": PRECISION,
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
 
-#         # Main model
-#         "model_name": MAIN_MODEL,
-#     }])
-# @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
-# @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-# @pytest.mark.parametrize("test_llm_kwargs", [
-#     {
-#         "speculative_config": {
-#             "model": SPEC_MODEL,
-#             "num_speculative_tokens": MAX_SPEC_TOKENS,
-#         },
-#     },
-# ])
-# @pytest.mark.parametrize(
-#     "output_len",
-#     [
-#         # Use small output len for fast test.
-#         128,
-#     ])
-# @pytest.mark.parametrize("batch_size", [4])
-# @pytest.mark.parametrize("seed", [1])
-# @pytest.mark.parametrize("prefill_chunk_size", PREFILL_CHUNK_SIZE)
-# def test_medusa_e2e_greedy_correctness_with_preemption(
-#         vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
-#         baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
-#         seed: int, prefill_chunk_size: int):
-#     """Verify greedy equality, even when some sequences are preempted mid-
-#     generation.
-#     """
-#     maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
-#     run_equality_correctness_test(vllm_runner,
-#                                   common_llm_kwargs,
-#                                   per_test_common_llm_kwargs,
-#                                   baseline_llm_kwargs,
-#                                   test_llm_kwargs,
-#                                   batch_size,
-#                                   max_output_len=output_len,
-#                                   seed=seed,
-#                                   temperature=0.0)
+        # Precision
+        "dtype": PRECISION,
+
+        # Main model
+        "model_name": MAIN_MODEL,
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_config": {
+            "model": SPEC_MODEL,
+            "num_speculative_tokens": MAX_SPEC_TOKENS,
+        },
+    },
+])
+@pytest.mark.parametrize(
+    "output_len",
+    [
+        # Use small output len for fast test.
+        128,
+    ])
+@pytest.mark.parametrize("batch_size", [4])
+@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("prefill_chunk_size", PREFILL_CHUNK_SIZE)
+def test_medusa_e2e_greedy_correctness_with_preemption(
+        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
+        seed: int, prefill_chunk_size: int):
+    """Verify greedy equality, even when some sequences are preempted mid-
+    generation.
+    """
+    maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  seed=seed,
+                                  temperature=0.0)
 
 
 @pytest.mark.parametrize(

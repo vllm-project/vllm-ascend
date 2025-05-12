@@ -693,15 +693,23 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
         # this may be larger than the sequence length if chunked
         # prefill is enabled.
         prefix_cache_len = len(computed_block_nums) * self.block_size
+
+        # The total number of prompt tokens in this sequence.
+        # When chunked prefill is enabled, this is the token number of
+        # computed chunks + current chunk.
+        seq_len = inter_data.seq_lens[seq_idx]
+
+        # When full hit, compute the last block rather than the last token,
+        # due to the requirements of prefix operator.
+        if seq_len <= prefix_cache_len:
+            prefix_cache_len -= self.block_size
+
         seq_group_metadata.seq_data[inter_data.seq_ids[
             seq_idx]].update_num_cached_tokens(prefix_cache_len)
 
         # The number of so far computed prompt tokens in this sequence.
         context_len = inter_data.context_lens[seq_idx]
-        # The total number of prompt tokens in this sequence.
-        # When chunked prefill is enabled, this is the token number of
-        # computed chunks + current chunk.
-        seq_len = inter_data.seq_lens[seq_idx]
+
         if prefix_cache_len <= context_len:
             # We already passed the cache hit region,
             # so do normal computation.

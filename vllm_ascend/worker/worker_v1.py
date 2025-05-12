@@ -229,6 +229,9 @@ class NPUWorker(WorkerBase):
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_runner.pin_lora(lora_id)
 
+    def execute_dummy_batch(self) -> None:
+        self.model_runner._dummy_run(1)
+
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
         additional_config = self.vllm_config.additional_config
