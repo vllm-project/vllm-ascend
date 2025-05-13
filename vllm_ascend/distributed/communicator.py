@@ -14,7 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-from typing import Optional, List
+from typing import List, Optional
 
 import torch
 import torch.distributed as dist

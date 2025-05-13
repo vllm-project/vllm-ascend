@@ -16,17 +16,17 @@
 # limitations under the License.
 # Adapted from vllm/model_executor/models/qwen2_vl.py
 # This file is a part of the vllm-ascend project.
-from typing import Optional, List
+from typing import List, Optional
 
 import torch
+import vllm
+import vllm.distributed
 from torch.distributed import ProcessGroup
 from torch.distributed.distributed_c10d import (Backend, PrefixStore,
                                                 _get_default_timeout,
                                                 is_nccl_available)
 from torch.distributed.rendezvous import rendezvous
-import vllm
 from vllm.config import ParallelConfig
-import vllm.distributed
 from vllm.distributed.parallel_state import GroupCoordinator
 
 

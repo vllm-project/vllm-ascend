@@ -19,9 +19,10 @@ import os
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
-import torch_npu
 import torch.distributed as dist
+import torch_npu
 from vllm.distributed import GroupCoordinator
+
 from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import select_experts
 
