@@ -353,5 +353,5 @@ def prompt_template(request):
 
 
 @pytest.fixture(scope="session")
-def baichuan_lora_files():
-    return snapshot_download(repo_id="jeeejeee/baichuan7b-text2sql-spider")
+def tinyllama_lora_files():
+    return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
