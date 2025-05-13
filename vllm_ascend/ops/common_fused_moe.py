@@ -55,13 +55,15 @@ def forward_oot(
         e_score_correction_bias=e_score_correction_bias,
     )
 
-    return fused_experts(hidden_states=x,
-                         w1=layer.w13_weight,
-                         w2=layer.w2_weight,
-                         topk_weights=topk_weights,
-                         topk_ids=topk_ids,
-                         top_k=top_k,
-                         expert_map=expert_map)
+    return fused_experts(
+        hidden_states=x,
+        w1=layer.w13_weight,
+        w2=layer.w2_weight,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+        top_k=top_k,
+        expert_map=expert_map,
+        apply_router_weight_on_input=apply_router_weight_on_input)
 
 
 UnquantizedFusedMoEMethod.forward_oot = forward_oot
