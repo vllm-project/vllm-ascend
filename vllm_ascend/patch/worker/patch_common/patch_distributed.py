@@ -45,15 +45,5 @@ class GroupCoordinatorPatch(GroupCoordinator):
                                                    gather_dim, scatter_sizes,
                                                    gather_sizes)
 
-    def reduce_scatter(self,
-                       input_: torch.Tensor,
-                       scatter_dim: int = 0) -> torch.Tensor:
-        if self.world_size == 1:
-            return input_
-        assert -input_.dim() <= scatter_dim < input_.dim(), (
-            f"Invalid scatter dim ({scatter_dim}) for input tensor with shape {input_.size()}"
-        )
-        return self.device_communicator.reduce_scatter(input_, scatter_dim)
-
 
 vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch  # Note: check the GroupCoordinator with online serving
