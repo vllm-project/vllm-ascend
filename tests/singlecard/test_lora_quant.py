@@ -1,5 +1,6 @@
 # Adapted from
 # https://github.com/fmmoret/vllm/blob/fm-support-lora-on-quantized-models/tests/lora/test_llama.py
+import os
 from dataclasses import dataclass
 from typing import Union
 
@@ -27,6 +28,9 @@ MODELS = [
     #     model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
     #     quantization="GPTQ"),
 ]
+
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
+os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 
 def do_sample(llm: vllm.LLM,
