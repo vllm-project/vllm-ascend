@@ -53,7 +53,7 @@ def test_single_generation_multi_step(
 
     seq_lens_data = [6]
     seq_lens_ascendc = torch.tensor(seq_lens_data, device='npu:0', dtype=torch.int32)
-    seq_lens_python = torch.tensor(seq_lens_data, device='npu:0', dtype=torch.int32);
+    seq_lens_python = torch.tensor(seq_lens_data, device='npu:0', dtype=torch.int32)
 
     slot_mapping_data = [5]
     slot_mapping_ascendc = torch.tensor(slot_mapping_data, device='npu:0', dtype=torch.int32)
@@ -116,7 +116,7 @@ def test_multi_result_generation_multi_step(
 
     seq_lens_data = [6, 8, 6, 6]
     seq_lens_ascendc = torch.tensor(seq_lens_data, device='npu:0', dtype=torch.int32)
-    seq_lens_python = torch.tensor(seq_lens_data, device='npu:0', dtype=torch.int32);
+    seq_lens_python = torch.tensor(seq_lens_data, device='npu:0', dtype=torch.int32)
 
     slot_mapping_data = [  5, 135, 261, 389]
     slot_mapping_ascendc = torch.tensor(slot_mapping_data, device='npu:0', dtype=torch.int32)

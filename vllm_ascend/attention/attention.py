@@ -453,7 +453,7 @@ class AscendMetadata(AttentionMetadata):
                                                     input_positions = model_input.input_positions,
                                                     seq_lens = self.seq_lens_tensor,
                                                     slot_mapping = self.slot_mapping,
-                                                    block_tables = self.block_tables);
+                                                    block_tables = self.block_tables)
 
 
 class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
