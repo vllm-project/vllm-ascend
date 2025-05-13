@@ -226,11 +226,13 @@ class CustomDeepseekV2MoE(nn.Module):
             enable_force_load_balance = False
         num_tokens, hidden_dim = hidden_states.shape
 
+        if self.n_shared_experts is not None:
+            shared_output = self.shared_experts(hidden_states)
+
         if self.tp_size > 1:
             # pass
             num_tokens, hidden_size = hidden_states.shape
-            need_padding = num_tokens < self.tp_size
-            if need_padding:
+            if num_tokens < self.tp_size:
                 target_size = self.tp_size
                 new_hidden_states = torch.empty([target_size, hidden_size],
                                                 dtype=hidden_states.dtype,
@@ -259,11 +261,12 @@ class CustomDeepseekV2MoE(nn.Module):
             dist.all_gather(list(chunk_hidden_states), router_hidden_states,
                             self.tp_group)
             final_hidden_states = torch.cat(chunk_hidden_states, dim=0)
+            if num_tokens < self.tp_size:
+                final_hidden_states = final_hidden_states[:num_tokens]
         else:
             final_hidden_states = router_hidden_states
 
-        if self.n_shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
+        if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
 
         return final_hidden_states.view(num_tokens, hidden_dim)

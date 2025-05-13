@@ -16,7 +16,6 @@
 # limitations under the License.
 # Adapted from vllm/model_executor/models/qwen2_vl.py
 # This file is a part of the vllm-ascend project.
-from typing import List, Optional
 
 import torch
 import vllm
@@ -27,7 +26,6 @@ from torch.distributed.distributed_c10d import (Backend, PrefixStore,
                                                 is_nccl_available)
 from torch.distributed.rendezvous import rendezvous
 from vllm.config import ParallelConfig
-from vllm.distributed.parallel_state import GroupCoordinator
 
 
 def ascend_destroy_model_parallel():
@@ -189,41 +187,6 @@ def ascend_stateless_init_dp_group(self) -> "ProcessGroup":
     return dp_group
 
 
-class GroupCoordinatorPatch(GroupCoordinator):
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def all_to_all(self,
-                   input_: torch.Tensor,
-                   scatter_dim: int = 0,
-                   gather_dim: int = -1,
-                   scatter_sizes: Optional[List[int]] = None,
-                   gather_sizes: Optional[List[int]] = None) -> torch.Tensor:
-        if self.world_size == 1:
-            return input_
-        assert -input_.dim() <= scatter_dim < input_.dim(), (
-            f"Invalid scatter dim ({scatter_dim}) for input tensor with shape {input_.size()}"
-        )
-        assert -input_.dim() <= gather_dim < input_.dim(), (
-            f"Invalid gather dim ({gather_dim}) for input tensor with shape {input_.size()}"
-        )
-        return self.device_communicator.all_to_all(input_, scatter_dim,
-                                                   gather_dim, scatter_sizes,
-                                                   gather_sizes)
-
-    def reduce_scatter(self,
-                       input_: torch.Tensor,
-                       scatter_dim: int = 0) -> torch.Tensor:
-        if self.world_size == 1:
-            return input_
-        assert -input_.dim() <= scatter_dim < input_.dim(), (
-            f"Invalid scatter dim ({scatter_dim}) for input tensor with shape {input_.size()}"
-        )
-        return self.device_communicator.reduce_scatter(input_, scatter_dim)
-
-
-vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch  # Note: check the GroupCoordinator with online serving
 vllm.distributed.parallel_state.destroy_model_parallel = ascend_destroy_model_parallel
 ParallelConfig.get_next_dp_init_port = parallel_config_get_dp_port
 ParallelConfig.stateless_init_dp_group = ascend_stateless_init_dp_group
