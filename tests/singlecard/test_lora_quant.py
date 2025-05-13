@@ -18,16 +18,15 @@ class ModelWithQuantization:
 
 MODELS: list[ModelWithQuantization]
 MODELS = [
-        ModelWithQuantization(
-            model_path="TinyLlama/TinyLlama-1.1B-Chat-v0.3",
-            quantization=None),
-        # ModelWithQuantization(
-        #     model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ",
-        #     quantization="AWQ"),  #AWQ quantization is currently not supported in ROCm. (Ref: https://github.com/vllm-project/vllm/blob/f6518b2b487724b3aa20c8b8224faba5622c4e44/tests/lora/test_quant_model.py#L23)
-        # ModelWithQuantization(
-        #     model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
-        #     quantization="GPTQ"),
-    ]
+    ModelWithQuantization(model_path="TinyLlama/TinyLlama-1.1B-Chat-v0.3",
+                          quantization=None),
+    # ModelWithQuantization(
+    #     model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ",
+    #     quantization="AWQ"),  #AWQ quantization is currently not supported in ROCm. (Ref: https://github.com/vllm-project/vllm/blob/f6518b2b487724b3aa20c8b8224faba5622c4e44/tests/lora/test_quant_model.py#L23)
+    # ModelWithQuantization(
+    #     model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
+    #     quantization="GPTQ"),
+]
 
 
 def do_sample(llm: vllm.LLM,
@@ -117,30 +116,30 @@ def test_quant_model_lora(tinyllama_lora_files, model):
                     max_num_seqs=16) as vllm_model:
         print("no lora")
         output = do_sample(vllm_model,
-                        tinyllama_lora_files,
-                        lora_id=0,
-                        max_tokens=max_tokens)
+                           tinyllama_lora_files,
+                           lora_id=0,
+                           max_tokens=max_tokens)
         expect_match(output, expected_no_lora_output)
 
         print("lora 1")
         output = do_sample(vllm_model,
-                        tinyllama_lora_files,
-                        lora_id=1,
-                        max_tokens=max_tokens)
+                           tinyllama_lora_files,
+                           lora_id=1,
+                           max_tokens=max_tokens)
         expect_match(output, expected_lora_output)
 
         print("no lora")
         output = do_sample(vllm_model,
-                        tinyllama_lora_files,
-                        lora_id=0,
-                        max_tokens=max_tokens)
+                           tinyllama_lora_files,
+                           lora_id=0,
+                           max_tokens=max_tokens)
         expect_match(output, expected_no_lora_output)
 
         print("lora 2")
         output = do_sample(vllm_model,
-                        tinyllama_lora_files,
-                        lora_id=2,
-                        max_tokens=max_tokens)
+                           tinyllama_lora_files,
+                           lora_id=2,
+                           max_tokens=max_tokens)
         expect_match(output, expected_lora_output)
 
         print("removing lora")
