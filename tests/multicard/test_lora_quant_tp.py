@@ -1,5 +1,4 @@
 import pytest
-from vllm.distributed import cleanup_dist_env_and_memory
 
 from tests.conftest import VllmRunner
 from tests.singlecard.test_lora_quant import MODELS, do_sample
@@ -15,10 +14,7 @@ def test_quant_model_tp_equality(tinyllama_lora_files, model):
                     max_loras=4,
                     gpu_memory_utilization=0.7,
                     max_num_seqs=16) as vllm_model_tp1:
-        output_tp1 = do_sample(vllm_model_tp1, tinyllama_lora_files, lora_id=1)
-
-    del vllm_model_tp1
-    cleanup_dist_env_and_memory()
+        output_tp1 = do_sample(vllm_model_tp1.model, tinyllama_lora_files, lora_id=1)
 
     with VllmRunner(model_name=model.model_path,
                     quantization=model.quantization,
@@ -27,9 +23,6 @@ def test_quant_model_tp_equality(tinyllama_lora_files, model):
                     tensor_parallel_size=2,
                     gpu_memory_utilization=0.7,
                     max_num_seqs=16) as vllm_model_tp2:
-        output_tp2 = do_sample(vllm_model_tp2, tinyllama_lora_files, lora_id=1)
-
-    del vllm_model_tp2
-    cleanup_dist_env_and_memory()
+        output_tp2 = do_sample(vllm_model_tp2.model, tinyllama_lora_files, lora_id=1)
 
     assert output_tp1 == output_tp2

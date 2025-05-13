@@ -5,7 +5,6 @@ from typing import Union
 
 import pytest
 import vllm
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
 
 from tests.conftest import VllmRunner
@@ -116,34 +115,31 @@ def test_quant_model_lora(tinyllama_lora_files, model):
                     gpu_memory_utilization=0.7,
                     max_num_seqs=16) as vllm_model:
         print("no lora")
-        output = do_sample(vllm_model,
+        output = do_sample(vllm_model.model,
                            tinyllama_lora_files,
                            lora_id=0,
                            max_tokens=max_tokens)
         expect_match(output, expected_no_lora_output)
 
         print("lora 1")
-        output = do_sample(vllm_model,
+        output = do_sample(vllm_model.model,
                            tinyllama_lora_files,
                            lora_id=1,
                            max_tokens=max_tokens)
         expect_match(output, expected_lora_output)
 
         print("no lora")
-        output = do_sample(vllm_model,
+        output = do_sample(vllm_model.model,
                            tinyllama_lora_files,
                            lora_id=0,
                            max_tokens=max_tokens)
         expect_match(output, expected_no_lora_output)
 
         print("lora 2")
-        output = do_sample(vllm_model,
+        output = do_sample(vllm_model.model,
                            tinyllama_lora_files,
                            lora_id=2,
                            max_tokens=max_tokens)
         expect_match(output, expected_lora_output)
 
         print("removing lora")
-
-    del vllm_model
-    cleanup_dist_env_and_memory()
