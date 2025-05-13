@@ -1,6 +1,7 @@
 # Adapted from
 # https://github.com/fmmoret/vllm/blob/fm-support-lora-on-quantized-models/tests/lora/test_llama.py
 from dataclasses import dataclass
+from typing import Union
 
 import pytest
 import vllm
@@ -13,7 +14,7 @@ from tests.conftest import VllmRunner
 @dataclass
 class ModelWithQuantization:
     model_path: str
-    quantization: str
+    quantization: Union[str, None]
 
 
 MODELS: list[ModelWithQuantization]
