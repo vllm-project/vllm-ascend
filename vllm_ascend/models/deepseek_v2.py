@@ -25,7 +25,6 @@
 # # vllm-project/vllm/vllm/model_executor/models/deepseek_v2.py
 # """Inference-only DeepseekV2/DeepseekV3 model."""
 
-import os
 from typing import Any, Dict, List, Optional, Union
 
 import torch
@@ -213,8 +212,8 @@ class CustomDeepseekV2MoE(nn.Module):
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
-        # when profile runs, force experts load balance to avoid high memory
-        # consumption from 1 rank.
+        # when profile runs, force experts to load balanced tokens
+        # to avoid high memory consumption on a single rank.
         # TODO: need a better flag to indicate whether in profile run or not.
         if attn_metadata is None or attn_metadata.slot_mapping[-1] < 0:
             # for profile run

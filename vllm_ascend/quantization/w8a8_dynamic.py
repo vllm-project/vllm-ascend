@@ -15,7 +15,6 @@
 # limitations under the License.
 #
 
-import os
 from typing import Any, Callable, Dict, List, Optional
 
 import torch
@@ -23,8 +22,8 @@ import torch.distributed as dist
 import torch_npu
 from vllm.distributed import GroupCoordinator
 
-from vllm_ascend.distributed.parallel_state import get_ep_group
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import select_experts
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
@@ -200,6 +199,8 @@ def fused_experts_with_mc2(
     return hidden_states
 
 
+# currently expert parallelism implemented with all2all
+# is under-optimized.
 def fused_experts_with_all2all(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -616,6 +617,9 @@ class AscendW8A8DynamicFusedMoEMethod:
                 e_score_correction_bias=e_score_correction_bias,
             )
 
+        # this is a naive implementation for experts load balance so as
+        # to avoid accumulating too much tokens on a single rank.
+        # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
