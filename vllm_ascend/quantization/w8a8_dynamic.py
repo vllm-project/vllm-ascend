@@ -24,7 +24,10 @@ import torch_npu
 from vllm.distributed import GroupCoordinator
 
 from vllm_ascend.distributed.parallel_state import get_ep_group
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ops.fused_moe import select_experts
+
+VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 
 
 def apply_mlp(hidden_states_wrapper: List[torch.Tensor],
@@ -616,7 +619,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         if enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
-        if os.environ.get("VLLM_ENABLE_MC2", '0') == "1" and not is_prefill:
+        if VLLM_ENABLE_MC2 and not is_prefill:
             return fused_experts_with_mc2(
                 hidden_states=x,
                 w1=layer.w13_weight,

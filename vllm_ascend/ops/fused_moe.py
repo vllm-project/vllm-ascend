@@ -627,8 +627,7 @@ class AscendFusedMoE(FusedMoE):
         else:
             real_top_k = self.top_k
 
-        if int(os.environ.get("VLLM_ENABLE_MC2", '0')  # type: ignore
-               ) == 1 and not is_prefill:
+        if VLLM_ENABLE_MC2 and not is_prefill:
             ...
 
         # Matrix multiply.
@@ -650,8 +649,7 @@ class AscendFusedMoE(FusedMoE):
             enable_force_load_balance=enable_force_load_balance,
             dp_size=self.dp_size)
 
-        if int(os.environ.get("VLLM_ENABLE_MC2", '0')  # type: ignore
-               ) == 1 and not is_prefill:
+        if VLLM_ENABLE_MC2 and not is_prefill:
             ...
 
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):

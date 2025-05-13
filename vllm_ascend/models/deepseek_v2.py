@@ -207,7 +207,6 @@ class CustomDeepseekV2MoE(nn.Module):
         CustomDeepseekV2MoE.top_k = config.num_experts_per_tok
 
         self.dp_size = get_dp_group().world_size
-        self.enable_mc2 = int(os.environ.get("VLLM_ENABLE_MC2", '0')) == 1
 
         self.tp_group = get_tp_group().device_group
         self.tp_rank = get_tp_group().rank_in_group
