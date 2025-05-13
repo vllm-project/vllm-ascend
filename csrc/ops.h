@@ -58,5 +58,4 @@ namespace vllm_ascend {
         int32_t* slot_mapping_ptr,
         int32_t* block_tables_ptr,
         int64_t block_tables_stride);
-    }
 }
