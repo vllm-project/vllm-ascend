@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/kernels/test_moe.py
 
+import os
 from typing import Callable, Optional
 
 import torch
@@ -627,7 +628,7 @@ class AscendFusedMoE(FusedMoE):
             real_top_k = self.top_k
 
         if int(os.environ.get("VLLM_ENABLE_MC2", '0')  # type: ignore
-                ) == 1 and not is_prefill:
+               ) == 1 and not is_prefill:
             ...
 
         # Matrix multiply.
@@ -650,7 +651,7 @@ class AscendFusedMoE(FusedMoE):
             dp_size=self.dp_size)
 
         if int(os.environ.get("VLLM_ENABLE_MC2", '0')  # type: ignore
-                ) == 1 and not is_prefill:
+               ) == 1 and not is_prefill:
             ...
 
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
