@@ -203,15 +203,11 @@ class CustomDeepseekV2MoE(nn.Module):
             )
         CustomDeepseekV2MoE.top_k = config.num_experts_per_tok
 
-        vllm_config = get_current_vllm_config()
         self.dp_size = get_dp_group().world_size
-        batch_size = vllm_config.scheduler_config.max_num_seqs
         self.enable_mc2 = int(os.environ.get("VLLM_ENABLE_MC2", '0')) == 1
 
-        params_dtype = torch.get_default_dtype()
-        self.final_hidden_states = torch.zeros(
-            [batch_size, config.hidden_size], dtype=params_dtype, device="npu")
         self.tp_group = get_tp_group().device_group
+        self.tp_rank = get_tp_group().rank_in_group
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
@@ -223,19 +219,30 @@ class CustomDeepseekV2MoE(nn.Module):
             is_prefill = attn_metadata.num_prefills > 0
             enable_force_load_balance = False
         num_tokens, hidden_dim = hidden_states.shape
-        hidden_states = hidden_states.view(-1, hidden_dim)
 
-        if (self.tp_size > 1 and self.enable_mc2 and not is_prefill):
-            chunks = torch.chunk(hidden_states,
-                                 get_tp_group().world_size,
-                                 dim=0)
-            hidden_states = chunks[get_tp_group().rank_in_group]
+        if self.tp_size > 1:
+            # pass
+            num_tokens, hidden_size = hidden_states.shape
+            need_padding = num_tokens % 4 == 0
+            if need_padding:
+                target_size = (num_tokens + 3) // 4 * 4
+                new_hidden_states = torch.empty([target_size, hidden_size],
+                                                dtype=hidden_states.dtype,
+                                                device=hidden_states.device)
+                new_hidden_states[:num_tokens] = hidden_states
+                hidden_states = new_hidden_states
+            chunk_hidden_states = torch.tensor_split(hidden_states,
+                                                     self.tp_size,
+                                                     dim=0)
+            local_hidden_states = chunk_hidden_states[self.tp_rank]
+        else:
+            local_hidden_states = hidden_states
 
         # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
+        router_logits, _ = self.gate(local_hidden_states)
 
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states,
+        router_hidden_states = self.experts(
+            hidden_states=local_hidden_states,
             router_logits=router_logits,
             is_prefill=is_prefill,
             top_k=CustomDeepseekV2MoE.top_k,
@@ -243,13 +250,12 @@ class CustomDeepseekV2MoE(nn.Module):
         ) * self.routed_scaling_factor
 
         if self.tp_size > 1:
-            if self.enable_mc2 and not is_prefill:
-                dist.all_gather_into_tensor(self.final_hidden_states,
-                                            final_hidden_states, self.tp_group)
-                final_hidden_states = self.final_hidden_states
-            else:
-                final_hidden_states = tensor_model_parallel_all_reduce(
-                    final_hidden_states)
+            dist.all_gather(list(chunk_hidden_states), router_hidden_states,
+                            self.tp_group)
+            final_hidden_states = torch.cat(chunk_hidden_states, dim=0)
+        else:
+            final_hidden_states = router_hidden_states
+
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
             final_hidden_states = final_hidden_states + shared_output
