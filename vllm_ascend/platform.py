@@ -121,8 +121,7 @@ class NPUPlatform(Platform):
             enforce_eager = getattr(vllm_config.model_config, "enforce_eager",
                                     False)
 
-        # TODO(Yizhou): Override the value of enforce_eager to True before
-        # the CANN and torch_npu support NPU compilation.
+        # TODO: revert me when the fallback of aclgraph is done.
         enforce_eager = True
         logger.warning(
             "NPU compilation support pending. Will be available in future CANN and "
@@ -237,3 +236,10 @@ class NPUPlatform(Platform):
         model configuration.
         """
         return True
+
+    @classmethod
+    def get_piecewise_backend_cls(cls) -> str:
+        """
+        Get piecewise backend class for piecewise graph.
+        """
+        return "vllm_ascend.compilation.piecewise_backend.NPUPiecewiseBackend"  # noqa
