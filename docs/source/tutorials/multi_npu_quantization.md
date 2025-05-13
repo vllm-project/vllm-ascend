@@ -1,4 +1,4 @@
-# Multi-NPU (deepseek-v2-lite-w8a8)
+# Multi-NPU (QwQ 32B W8A8)
 
 ## Run docker container:
 :::{note}
@@ -31,27 +31,26 @@ docker run --rm \
 ## Install modelslim and convert model
 :::{note}
 You can choose to convert the model yourself or use the quantized model we uploaded, 
-see https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V2-Lite-w8a8
+see https://www.modelscope.cn/models/vllm-ascend/QwQ-32B-W8A8
 :::
 
 ```bash
-git clone https://gitee.com/ascend/msit
+# (Optional)This tag is recommended and has been verified
+git clone https://gitee.com/ascend/msit -b modelslim-VLLM-8.1.RC1.b020
 
-# (Optional)This commit has been verified
-git checkout a396750f930e3bd2b8aa13730401dcbb4bc684ca
 cd msit/msmodelslim
 # Install by run this script
 bash install.sh
 pip install accelerate
 
-cd /msit/msmodelslim/example/DeepSeek
+cd example/Qwen
 # Original weight path, Replace with your local model path
-MODEL_PATH=/home/weight/DeepSeek-V2-Lite
+MODEL_PATH=/home/models/QwQ-32B
 # Path to save converted weight, Replace with your local path
-SAVE_PATH=/home/weight/DeepSeek-V2-Lite-w8a8
-mkdir -p $SAVE_PATH
+SAVE_PATH=/home/models/QwQ-32B-w8a8
+
 # In this conversion process, the npu device is not must, you can also set --device_type cpu to have a conversion
-python3 quant_deepseek.py --model_path $MODEL_PATH --save_directory $SAVE_PATH --device_type npu --act_method 2 --w_bit 8 --a_bit 8  --is_dynamic True
+python3 quant_qwen.py --model_path $MODEL_PATH --save_directory $SAVE_PATH --calib_file ../common/boolq.jsonl --w_bit 8 --a_bit 8 --device_type npu --anti_method m1 --trust_remote_code True
 ```
 
 ## Verify the quantized model
@@ -59,23 +58,18 @@ The converted model files looks like:
 ```bash
 .
 |-- config.json
-|-- configuration_deepseek.py
-|-- fusion_result.json
+|-- configuration.json
 |-- generation_config.json
-|-- quant_model_description_w8a8_dynamic.json
-|-- quant_model_weight_w8a8_dynamic-00001-of-00004.safetensors
-|-- quant_model_weight_w8a8_dynamic-00002-of-00004.safetensors
-|-- quant_model_weight_w8a8_dynamic-00003-of-00004.safetensors
-|-- quant_model_weight_w8a8_dynamic-00004-of-00004.safetensors
-|-- quant_model_weight_w8a8_dynamic.safetensors.index.json
-|-- tokenization_deepseek_fast.py
+|-- quant_model_description.json
+|-- quant_model_weight_w8a8.safetensors
+|-- README.md
 |-- tokenizer.json
 `-- tokenizer_config.json
 ```
 
 Run the following script to start the vLLM server with quantize model:
 ```bash
-vllm serve /home/weight/DeepSeek-V2-Lite-w8a8  --tensor-parallel-size 4 --trust-remote-code --served-model-name "dpsk-w8a8" --max-model-len 4096
+vllm serve /home/models/QwQ-32B-w8a8  --tensor-parallel-size 4 --served-model-name "qwq-32b-w8a8" --max-model-len 4096 --quantization ascend
 ```
 
 Once your server is started, you can query the model with input prompts
@@ -83,8 +77,8 @@ Once your server is started, you can query the model with input prompts
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "dpsk-w8a8",
-        "prompt": "what is deepseek？",
+        "model": "qwq-32b-w8a8",
+        "prompt": "what is large language model?",
         "max_tokens": "128",
         "top_p": "0.95",
         "top_k": "40",
