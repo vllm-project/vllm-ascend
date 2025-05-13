@@ -9,7 +9,7 @@ from tests.singlecard.test_lora_quant import MODELS, do_sample
 def test_quant_model_tp_equality(tinyllama_lora_files, model):
     if model.quantization == "GPTQ":
         pytest.skip("GPTQ lora outputs are just incredibly unstable")
-    with VllmRunner(model=model.model_path,
+    with VllmRunner(model_name=model.model_path,
                     quantization=model.quantization,
                     enable_lora=True,
                     max_loras=4,
@@ -20,7 +20,7 @@ def test_quant_model_tp_equality(tinyllama_lora_files, model):
     del vllm_model_tp1
     cleanup_dist_env_and_memory()
 
-    with VllmRunner(model=model.model_path,
+    with VllmRunner(model_name=model.model_path,
                     quantization=model.quantization,
                     enable_lora=True,
                     max_loras=4,
