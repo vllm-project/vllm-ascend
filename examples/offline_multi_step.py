@@ -30,20 +30,20 @@ prompts = [
 # Create a sampling params object.
 sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 # Create an LLM.
-llm = LLM(model="Qwen/Qwen2.5-0.5B",
-          block_size=128,
-          max_model_len=1024,  # max length of prompt
-          tensor_parallel_size=1,  # number of NPUs to be used
-          max_num_seqs=26,  # max batch number
-          enforce_eager=True,  # disable CUDA graph mode
-          trust_remote_code=True, # If the model is a cuscd tom model not yet available in the HuggingFace transformers library
-          num_scheduler_steps=8,
-          gpu_memory_utilization=0.5
-          )
+llm = LLM(
+    model="Qwen/Qwen2.5-0.5B",
+    block_size=128,
+    max_model_len=1024,  # max length of prompt
+    tensor_parallel_size=1,  # number of NPUs to be used
+    max_num_seqs=26,  # max batch number
+    enforce_eager=True,  # disable CUDA graph mode
+    trust_remote_code=
+    True,  # If the model is a cuscd tom model not yet available in the HuggingFace transformers library
+    num_scheduler_steps=8,
+    gpu_memory_utilization=0.5)
 
 outputs = llm.generate(prompts, sampling_params)
 for output in outputs:
     prompt = output.prompt
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-

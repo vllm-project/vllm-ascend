@@ -443,17 +443,17 @@ class AscendMetadata(AttentionMetadata):
         for i in range(num_queries):
             self.seq_lens[i] += 1
         self.max_decode_seq_len = max(self.seq_lens)
-
         """Advance a step on NPU for existing inputs for a multi-step runner"""
-        torch.ops._C.advance_step_flashattn_ascendc(num_seqs = num_seqs,
-                                                    num_queries = num_queries,
-                                                    block_size = block_size,
-                                                    input_tokens = model_input.input_tokens,
-                                                    sampled_token_ids = sampled_token_ids,
-                                                    input_positions = model_input.input_positions,
-                                                    seq_lens = self.seq_lens_tensor,
-                                                    slot_mapping = self.slot_mapping,
-                                                    block_tables = self.block_tables)
+        torch.ops._C.advance_step_flashattn_ascendc(
+            num_seqs=num_seqs,
+            num_queries=num_queries,
+            block_size=block_size,
+            input_tokens=model_input.input_tokens,
+            sampled_token_ids=sampled_token_ids,
+            input_positions=model_input.input_positions,
+            seq_lens=self.seq_lens_tensor,
+            slot_mapping=self.slot_mapping,
+            block_tables=self.block_tables)
 
 
 class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):

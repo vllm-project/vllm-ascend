@@ -1,4 +1,4 @@
- # Copyright (c) China Merchants Bank Co., Ltd. 2025. All rights reserved.
+# Copyright (c) China Merchants Bank Co., Ltd. 2025. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #/
-
-
 
 # to run this test, you need to cd to the upper package which is 'tests',
 # and run with command 'pytest -s ops/test_multi_step.py'
@@ -32,14 +30,12 @@ DEVICES = [f"npu:{0}"]
 DEFAULT_ATOL = 0
 DEFAULT_RTOL = 0
 
-
 # adapted from https://github.com/vllm-project/vllm/vllm/model_executor/layers/rotary_embedding.py
+
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @torch.inference_mode()
-def test_single_generation_multi_step(
-        is_neox_style: bool
-) -> None:
+def test_single_generation_multi_step(is_neox_style: bool) -> None:
     input_tokens_data = [2926]
     input_tokens_ascendc = torch.tensor(input_tokens_data, device='npu:0')
     input_tokens_python = torch.tensor(input_tokens_data, device='npu:0')
@@ -48,30 +44,40 @@ def test_single_generation_multi_step(
     sampled_token_ids = torch.tensor(sampled_token_ids_data, device='npu:0')
 
     input_positions_data = [5]
-    input_positions_ascendc = torch.tensor(input_positions_data, device='npu:0')
+    input_positions_ascendc = torch.tensor(input_positions_data,
+                                           device='npu:0')
     input_positions_python = torch.tensor(input_positions_data, device='npu:0')
 
     seq_lens_data = [6]
-    seq_lens_ascendc = torch.tensor(seq_lens_data, device='npu:0', dtype=torch.int32)
-    seq_lens_python = torch.tensor(seq_lens_data, device='npu:0', dtype=torch.int32)
+    seq_lens_ascendc = torch.tensor(seq_lens_data,
+                                    device='npu:0',
+                                    dtype=torch.int32)
+    seq_lens_python = torch.tensor(seq_lens_data,
+                                   device='npu:0',
+                                   dtype=torch.int32)
 
     slot_mapping_data = [5]
-    slot_mapping_ascendc = torch.tensor(slot_mapping_data, device='npu:0', dtype=torch.int32)
-    slot_mapping_python = torch.tensor(slot_mapping_data, device='npu:0', dtype=torch.int32)
+    slot_mapping_ascendc = torch.tensor(slot_mapping_data,
+                                        device='npu:0',
+                                        dtype=torch.int32)
+    slot_mapping_python = torch.tensor(slot_mapping_data,
+                                       device='npu:0',
+                                       dtype=torch.int32)
 
     block_tables_data = [[0]]
 
-    block_tables = torch.tensor(block_tables_data, device='npu:0', dtype=torch.int32)
+    block_tables = torch.tensor(block_tables_data,
+                                device='npu:0',
+                                dtype=torch.int32)
 
-    torch.ops._C.advance_step_flashattn_ascendc(1, 1, 128, input_tokens_ascendc,
-                                                sampled_token_ids,
-                                                input_positions_ascendc, seq_lens_ascendc,
-                                                slot_mapping_ascendc, block_tables)
+    torch.ops._C.advance_step_flashattn_ascendc(
+        1, 1, 128, input_tokens_ascendc, sampled_token_ids,
+        input_positions_ascendc, seq_lens_ascendc, slot_mapping_ascendc,
+        block_tables)
 
-    normal(1, 1, 128, input_tokens_python,
-           sampled_token_ids,
-           input_positions_python, seq_lens_python,
-           slot_mapping_python, block_tables)
+    normal(1, 1, 128, input_tokens_python, sampled_token_ids,
+           input_positions_python, seq_lens_python, slot_mapping_python,
+           block_tables)
 
     # Compare the results.
     torch.testing.assert_close(input_tokens_ascendc,
@@ -97,47 +103,49 @@ def test_single_generation_multi_step(
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @torch.inference_mode()
-def test_multi_result_generation_multi_step(
-        is_neox_style: bool
-) -> None:
-    input_tokens_data = [ 2926,   279, 12095,  1588]
+def test_multi_result_generation_multi_step(is_neox_style: bool) -> None:
+    input_tokens_data = [2926, 279, 12095, 1588]
     input_tokens_ascendc = torch.tensor(input_tokens_data, device='npu:0')
     input_tokens_python = torch.tensor(input_tokens_data, device='npu:0')
 
-    sampled_token_ids_data = [[  13],
-        [1968],
-        [  13],
-        [  13]]
+    sampled_token_ids_data = [[13], [1968], [13], [13]]
     sampled_token_ids = torch.tensor(sampled_token_ids_data, device='npu:0')
 
     input_positions_data = [5, 7, 5, 5]
-    input_positions_ascendc = torch.tensor(input_positions_data, device='npu:0')
+    input_positions_ascendc = torch.tensor(input_positions_data,
+                                           device='npu:0')
     input_positions_python = torch.tensor(input_positions_data, device='npu:0')
 
     seq_lens_data = [6, 8, 6, 6]
-    seq_lens_ascendc = torch.tensor(seq_lens_data, device='npu:0', dtype=torch.int32)
-    seq_lens_python = torch.tensor(seq_lens_data, device='npu:0', dtype=torch.int32)
+    seq_lens_ascendc = torch.tensor(seq_lens_data,
+                                    device='npu:0',
+                                    dtype=torch.int32)
+    seq_lens_python = torch.tensor(seq_lens_data,
+                                   device='npu:0',
+                                   dtype=torch.int32)
 
-    slot_mapping_data = [  5, 135, 261, 389]
-    slot_mapping_ascendc = torch.tensor(slot_mapping_data, device='npu:0', dtype=torch.int32)
-    slot_mapping_python = torch.tensor(slot_mapping_data, device='npu:0', dtype=torch.int32)
+    slot_mapping_data = [5, 135, 261, 389]
+    slot_mapping_ascendc = torch.tensor(slot_mapping_data,
+                                        device='npu:0',
+                                        dtype=torch.int32)
+    slot_mapping_python = torch.tensor(slot_mapping_data,
+                                       device='npu:0',
+                                       dtype=torch.int32)
 
-    block_tables_data = [[0],
-        [1],
-        [2],
-        [3]]
+    block_tables_data = [[0], [1], [2], [3]]
 
-    block_tables = torch.tensor(block_tables_data, device='npu:0', dtype=torch.int32)
+    block_tables = torch.tensor(block_tables_data,
+                                device='npu:0',
+                                dtype=torch.int32)
 
-    torch.ops._C.advance_step_flashattn_ascendc(4, 4, 128, input_tokens_ascendc,
-                                                sampled_token_ids,
-                                                input_positions_ascendc, seq_lens_ascendc,
-                                                slot_mapping_ascendc, block_tables)
+    torch.ops._C.advance_step_flashattn_ascendc(
+        4, 4, 128, input_tokens_ascendc, sampled_token_ids,
+        input_positions_ascendc, seq_lens_ascendc, slot_mapping_ascendc,
+        block_tables)
 
-    normal(4, 4, 128, input_tokens_python,
-           sampled_token_ids,
-           input_positions_python, seq_lens_python,
-           slot_mapping_python, block_tables)
+    normal(4, 4, 128, input_tokens_python, sampled_token_ids,
+           input_positions_python, seq_lens_python, slot_mapping_python,
+           block_tables)
 
     # Compare the results.
     torch.testing.assert_close(input_tokens_ascendc,
@@ -161,13 +169,10 @@ def test_multi_result_generation_multi_step(
                                rtol=DEFAULT_RTOL)
 
 
-
 def normal(num_seqs: int, num_queries: int, block_size: int,
-           input_tokens: torch.Tensor,
-           sampled_token_ids: torch.Tensor,
-           input_positions: torch.Tensor,
-           seq_lens_tensor: torch.Tensor, slot_mapping: torch.Tensor,
-           block_tables: torch.Tensor) -> None:
+           input_tokens: torch.Tensor, sampled_token_ids: torch.Tensor,
+           input_positions: torch.Tensor, seq_lens_tensor: torch.Tensor,
+           slot_mapping: torch.Tensor, block_tables: torch.Tensor) -> None:
     sampled_token_ids_list = sampled_token_ids[:num_queries].squeeze(-1)
     input_tokens[:num_queries] = sampled_token_ids_list
 
@@ -178,13 +183,14 @@ def normal(num_seqs: int, num_queries: int, block_size: int,
 
     # update seq_lens and input_positions
     seq_lens_tensor[:num_queries] = next_seq_lens
-    input_positions[: num_queries] = next_input_pos  # type: ignore
+    input_positions[:num_queries] = next_input_pos  # type: ignore
 
     # get block index and offset
     block_idx = next_input_pos // block_size
     block_offset = next_input_pos % block_size
 
-    current_block_table = block_tables.gather(1, block_idx.unsqueeze(-1)).squeeze(-1)
+    current_block_table = block_tables.gather(
+        1, block_idx.unsqueeze(-1)).squeeze(-1)
     slot_num = current_block_table * block_size + block_offset
 
     # update slot_mapping
