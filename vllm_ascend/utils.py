@@ -113,7 +113,7 @@ def vllm_version_is(target_vllm_version: str):
         raise ValueError(
             f"Invalid vllm version {vllm_version} found. A dev version of vllm "
             "is installed probably. Set the environment variable VLLM_VERSION "
-            "to control it by hand. And please make sure the vaule follows the "
+            "to control it by hand. And please make sure the value follows the "
             "format of x.y.z.")
 
 

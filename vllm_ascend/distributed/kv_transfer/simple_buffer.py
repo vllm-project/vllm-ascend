@@ -199,7 +199,7 @@ class SimpleBuffer(KVLookupBufferBase):
             hidden = hidden.view(num_tokens, self.hidden_size)
         except Exception as e:
             logger.warning(
-                f"Faile to receive kv cache and hidden states of request: {orig_req_id} "
+                f"Fail to receive kv cache and hidden states of request: {orig_req_id} "
                 f"Error is {str(e)}")
             return [None, None, None, None]
 
