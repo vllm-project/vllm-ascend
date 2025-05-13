@@ -19,7 +19,6 @@ import os
 from typing import Callable, Optional
 
 import torch
-import torch.distributed as dist
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import tensor_model_parallel_all_reduce
@@ -624,19 +623,9 @@ class AscendFusedMoE(FusedMoE):
         else:
             real_top_k = self.top_k
 
-        if self.dp_size > 1:
-            if int(os.environ.get("VLLM_ENABLE_MC2", '0')  # type: ignore
-                   ) == 1 and not is_prefill:
-                ...
-        else:
-            if int(os.environ.get("USING_LCCL_COM", '0')) == 1:  # type: ignore
-                hidden_states = get_dp_group().all_gather(
-                    hidden_states, 0, False)
-                router_logits = get_dp_group().all_gather(
-                    router_logits, 0, False)
-            else:
-                hidden_states = get_dp_group().all_gather(hidden_states, 0)
-                router_logits = get_dp_group().all_gather(router_logits, 0)
+        if int(os.environ.get("VLLM_ENABLE_MC2", '0')  # type: ignore
+                ) == 1 and not is_prefill:
+            ...
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
@@ -657,16 +646,9 @@ class AscendFusedMoE(FusedMoE):
             enable_force_load_balance=enable_force_load_balance,
             dp_size=self.dp_size)
 
-        if self.dp_size > 1:
-            if int(os.environ.get("VLLM_ENABLE_MC2", '0')  # type: ignore
-                   ) == 1 and not is_prefill:
-                ...
-        else:
-            final_hidden_states = dist._functional_collectives.reduce_scatter_tensor(
-                final_hidden_states,
-                "sum",
-                scatter_dim=0,
-                group=get_dp_group().device_group)
+        if int(os.environ.get("VLLM_ENABLE_MC2", '0')  # type: ignore
+                ) == 1 and not is_prefill:
+            ...
 
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
             final_hidden_states = tensor_model_parallel_all_reduce(
