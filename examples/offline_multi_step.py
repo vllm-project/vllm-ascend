@@ -1,5 +1,5 @@
 #
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright (c) 2025 China Merchants Bank Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/examples/offline_inference/basic.py
 # Copyright 2023 The vLLM team.
@@ -18,8 +18,6 @@
 #
 
 from vllm import LLM, SamplingParams
-import torch
-import torch_npu
 
 prompts = [
     "Hello, my name is",

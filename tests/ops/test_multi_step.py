@@ -1,12 +1,25 @@
+ # Copyright (c) China Merchants Bank Co., Ltd. 2025. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#/
+
+
+
 # to run this test, you need to cd to the upper package which is 'tests',
 # and run with command 'pytest -s ops/test_multi_step.py'
 
-
-from typing import Optional, Tuple, Union
-
 import pytest
 import torch
-import torch.nn as nn
 import torch_npu  # noqa: F401
 
 import vllm_ascend.platform  # noqa: F401
@@ -22,7 +35,6 @@ DEFAULT_RTOL = 0
 
 # adapted from https://github.com/vllm-project/vllm/vllm/model_executor/layers/rotary_embedding.py
 
-# test with leading dimension and merge seqlen and batch_size as num_tokens
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @torch.inference_mode()
 def test_single_generation_multi_step(
