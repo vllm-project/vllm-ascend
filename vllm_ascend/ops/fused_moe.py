@@ -615,32 +615,19 @@ class AscendFusedMoE(FusedMoE):
         self.expert_map = None
         self.activation = activation
 
-        if self.ep_size > 1:
-            # Create a tensor of size num_experts filled with -1
-            self.local_num_experts, self.expert_map = determine_expert_map(
-                self.ep_size,
-                get_ep_group().rank_in_group, self.global_num_experts)
-            if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
-                self.tp_rank = get_etp_group().rank_in_group
-                self.ep_rank = get_ep_group().rank_in_group
-            else:
-                self.moe_parallel_config.tp_rank = get_etp_group(
-                ).rank_in_group
-                self.moe_parallel_config.ep_rank = get_ep_group().rank_in_group
-
+        # Create a tensor of size num_experts filled with -1
+        self.local_num_experts, self.expert_map = determine_expert_map(
+            self.ep_size,
+            get_ep_group().rank_in_group, self.global_num_experts)
+        if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
+            self.tp_rank = get_etp_group().rank_in_group
+            self.ep_rank = get_ep_group().rank_in_group
         else:
-            # Adjust TP size for DP attention
-            # haven't test its functionality yet, may remove in the future
-            if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
-                self.tp_rank = self.tp_size * self.dp_rank
-                self.ep_rank = 0
-                self.tp_size = self.tp_size * self.dp_size
-                self.ep_size = 1
-            else:
-                self.moe_parallel_config.tp_rank = self.tp_size * self.dp_rank
-                self.moe_parallel_config.ep_rank = 0
-                self.moe_parallel_config.tp_size = self.tp_size * self.dp_size
-                self.moe_parallel_config.ep_size = 1
+            self.moe_parallel_config.tp_rank = get_etp_group(
+            ).rank_in_group
+            self.moe_parallel_config.ep_rank = get_ep_group().rank_in_group
+
+        
 
             self.local_num_experts, self.expert_map = (self.global_num_experts,
                                                        None)
