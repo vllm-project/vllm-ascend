@@ -215,7 +215,7 @@ class CustomDeepseekV2MoE(nn.Module):
         # when profile runs, force experts to load balanced tokens
         # to avoid high memory consumption on a single rank.
         # TODO: need a better flag to indicate whether in profile run or not.
-        if attn_metadata is None or attn_metadata.slot_mapping[-1] < 0:
+        if attn_metadata is None:
             # for profile run
             is_prefill = True
             enable_force_load_balance = True
