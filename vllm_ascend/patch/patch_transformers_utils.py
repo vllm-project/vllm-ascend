@@ -19,9 +19,9 @@ from typing import TYPE_CHECKING, Any, Optional, Union
 
 from transformers.processing_utils import ProcessorMixin
 from typing_extensions import TypeVar
-
 from vllm.transformers_utils import processor
-from vllm.transformers_utils.processor import (cached_get_processor, _merge_mm_kwargs)
+from vllm.transformers_utils.processor import (_merge_mm_kwargs,
+                                               cached_get_processor)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
