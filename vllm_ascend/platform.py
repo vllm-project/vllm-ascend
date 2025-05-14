@@ -105,6 +105,18 @@ class NPUPlatform(Platform):
         # RayWorkerWrapper monkey patch when setup
         from vllm_ascend.patch import ray_patch  # noqa: F401
 
+        if vllm_config.additional_config and vllm_config.additional_config.get(
+                "enable_mla_chunked_prefill", False):
+            logger.info("MLA is enabled on NPU platform; restoring chunked "
+                        "prefill to be enabled.")
+            from vllm.config import _DEFAULT_MAX_NUM_BATCHED_TOKENS
+            scheduler_config = vllm_config.scheduler_config
+            scheduler_config.enable_chunked_prefill = True
+            scheduler_config.chunked_prefill_enabled = True
+            if scheduler_config.num_scheduler_steps == 1:
+                scheduler_config.max_num_batched_tokens = (
+                    _DEFAULT_MAX_NUM_BATCHED_TOKENS)
+
         compilation_config = vllm_config.compilation_config
         if compilation_config and compilation_config.level != CompilationLevel.NO_COMPILATION:
             logger.warning(
@@ -152,6 +164,9 @@ class NPUPlatform(Platform):
                     "ascend_scheduler_config", None) is not None:
                 additional_scheduler_config = additional_config.get(
                     "ascend_scheduler_config")
+                if vllm_config.scheduler_config.enable_chunked_prefill:
+                    additional_scheduler_config[
+                        "enable_chunked_prefill"] = True
                 from vllm_ascend.core.schedule_config import \
                     AscendSchedulerConfig
                 ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
