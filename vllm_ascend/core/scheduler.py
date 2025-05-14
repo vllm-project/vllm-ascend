@@ -132,7 +132,7 @@ class AscendScheduler(Scheduler):
                 continue
 
             new_blocks = self.kv_cache_manager.allocate_slots(
-                request, num_new_tokens, computed_blocks)
+                request, num_new_tokens, num_computed_tokens, computed_blocks)
             if new_blocks is None:
                 # The request cannot be scheduled.
                 break
@@ -151,7 +151,7 @@ class AscendScheduler(Scheduler):
             if self.lora_config and request.lora_request:
                 scheduled_loras.add(request.lora_request.lora_int_id)
             req_to_new_block_ids[request.request_id] = [
-                b.block_id for b in computed_blocks + new_blocks
+                b.block_id for b in computed_blocks.blocks + new_blocks.blocks
             ]
             # Update request info.
             num_scheduled_tokens[request.request_id] = num_new_tokens
@@ -211,7 +211,7 @@ class AscendScheduler(Scheduler):
                 scheduled_running_reqs.append(request)
                 self.scheduled_req_ids.add(request.request_id)
                 req_to_new_block_ids[request.request_id] = [
-                    b.block_id for b in new_blocks
+                    b.block_id for b in new_blocks.blocks
                 ]
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
@@ -307,7 +307,7 @@ class AscendScheduler(Scheduler):
                                      num_new_tokens,
                                      computed_blocks,
                                      watermark=0.01):
-        computed_blocks = computed_blocks or []
+        computed_blocks = computed_blocks.blocks() or []
         watermark_blocks = self.kv_cache_config.num_blocks * watermark
         num_computed_tokens = (request.num_computed_tokens +
                                len(computed_blocks) * self.block_size)
