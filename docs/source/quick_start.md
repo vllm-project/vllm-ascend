@@ -68,6 +68,7 @@ The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/v
 
 You can use Modelscope mirror to speed up download:
 
+<!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 ```bash
 export VLLM_USE_MODELSCOPE=true
 ```
@@ -81,6 +82,7 @@ With vLLM installed, you can start generating texts for list of input prompts (i
 
 Try to run below Python script directly or use `python3` shell to generate texts:
 
+<!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 ```python
 from vllm import LLM, SamplingParams
 
@@ -108,6 +110,7 @@ vLLM can also be deployed as a server that implements the OpenAI API protocol. R
 the following command to start the vLLM server with the
 [Qwen/Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) model:
 
+<!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 ```bash
 # Deploy vLLM server (The first run will take about 3-5 mins (10 MB/s) to download models)
 vllm serve Qwen/Qwen2.5-0.5B-Instruct &
@@ -125,12 +128,14 @@ Congratulations, you have successfully started the vLLM server!
 
 You can query the list the models:
 
+<!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 ```bash
 curl http://localhost:8000/v1/models | python3 -m json.tool
 ```
 
 You can also query the model with input prompts:
 
+<!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 ```bash
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
@@ -145,10 +150,10 @@ curl http://localhost:8000/v1/completions \
 vLLM is serving as background process, you can use `kill -2 $VLLM_PID` to stop the background process gracefully,
 it's equal to `Ctrl-C` to stop foreground vLLM process:
 
+<!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
 ```bash
-ps -ef | grep "/.venv/bin/vllm serve" | grep -v grep
-VLLM_PID=`ps -ef | grep "/.venv/bin/vllm serve" | grep -v grep | awk '{print $2}'`
-kill -2 $VLLM_PID
+  VLLM_PID=$(pgrep -f "vllm serve")
+  kill -2 "$VLLM_PID"
 ```
 
 You will see output as below:
