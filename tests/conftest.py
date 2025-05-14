@@ -354,4 +354,4 @@ def prompt_template(request):
 
 @pytest.fixture(scope="session")
 def tinyllama_lora_files():
-    return snapshot_download(repo_id="jashing/tinyllama-colorist-lora")
+    return snapshot_download(repo_id="vllm-ascend/tinyllama-colorist-lora")
