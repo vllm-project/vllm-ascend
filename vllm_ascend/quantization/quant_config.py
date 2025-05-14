@@ -15,6 +15,10 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+# By using quantization case, this file is called before worker patch achieve,
+# we need to import patch_utils here first to make sure the patch is applied.
+import vllm_ascend.patch.worker.patch_common.patch_utils  # type: ignore[import]  # isort: skip  # noqa
+
 from types import MappingProxyType
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
