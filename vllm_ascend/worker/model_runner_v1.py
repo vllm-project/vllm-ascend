@@ -55,6 +55,7 @@ from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import vllm_version_is
+import vllm_ascend.envs as envs
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
