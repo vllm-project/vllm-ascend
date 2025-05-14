@@ -888,7 +888,7 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
                 meta.add_request(
                     request_id=cached_req.req_id,
                     token_ids=token_ids,
-                    block_ids=new_req.block_ids,
+                    block_ids=cached_req.block_ids,
                     block_size=self._block_size,
                     is_store=False,
                 )
