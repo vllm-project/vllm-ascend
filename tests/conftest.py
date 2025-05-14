@@ -23,7 +23,7 @@ from typing import List, Optional, Tuple, TypeVar, Union
 import numpy as np
 import pytest
 import torch
-from huggingface_hub import snapshot_download
+from modelscope.hub.snapshot_download import snapshot_download
 from PIL import Image
 from vllm import LLM, SamplingParams
 from vllm.config import TaskOption
