@@ -9,7 +9,6 @@ from typing import Optional, Tuple, Union
 import pytest
 import torch
 import torch.nn as nn
-import torch_npu  # noqa: F401
 
 import vllm_ascend.platform  # noqa: F401
 
@@ -136,11 +135,6 @@ class RotaryEmbedding(nn.Module):
 
 
 # test with leading dimension and merge seqlen and batch_size as num_tokens
-# TODO(ganyi): open this test in the future
-@pytest.mark.skip(
-    reason=
-    "skip this test by default for now because of ci issue, will enable it in the future"
-)
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
 @pytest.mark.parametrize("seq_len", SEQ_LENS)

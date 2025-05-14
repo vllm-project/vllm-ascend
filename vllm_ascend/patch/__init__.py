@@ -24,9 +24,9 @@
 #           each worker's `__init__` function.
 #
 # Then in each kind of patch, there are three folders:
-# - patch_0_8_4: contains the patches applied when vllm version is 0.8.4.
+# - patch_0_8_5: contains the patches applied when vllm version is 0.8.5.
 # - patch_main: contains the patches applied when vllm version is main branch.
-# - patch_common: contains the patches applied in both 0.8.4 and main branch.
+# - patch_common: contains the patches applied in both 0.8.5 and main branch.
 #
 # In the future, with the vllm version upgrade, the new patch folder such as
 # patch_0_8_5, patch_0_8_6, etc. will be added to manage the patch for different
@@ -42,18 +42,6 @@
 # --------------------------------
 # * Platform Patch:
 # =================
-# ** File: platform/patch_0_8_4/patch_config.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.config.ModelConfig.__init__()`
-#    Why:
-#       It is hard coded for sleep mode to support cuda platform only
-#    How：
-#       Using a new method to check if sleep mode is available
-#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
-#       https://github.com/vllm-project/vllm/pull/16562
-#    Future Plan:
-#       This patch is only used for 084 and can't be revert. just keep as it is.
-#
 # ** File: platform/patch_common/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.parallel_state.destroy_model_parallel()`
@@ -62,7 +50,7 @@
 #       inside of the repo, and needs a common interface to destroy them, this patch add the interface of destroy
 #       platform owned `CoordinatorGroup` to make sure all the CoordinateGroup can be properly destroyed
 #    How：
-#       Call platform method `destroy_platform_model_parallel` to destroy all the `CoordinateGroup`
+#       Call `vllm_ascend.distributed.parallel_state method `destroy_platform_model_parallel` to destroy all the `CoordinateGroup`
 #    Related PR (if no, explain why): no related PR, we want add this ability into vllm
 #    Future Plan:
 #       Remove those patch when vllm merged them
@@ -73,7 +61,7 @@
 #       call to the `stateless_init_torch_distributed_process_group`, to enable other platform which may support
 #       stateless process group initialize method
 #    How：
-#       Call platform method `platform_has_backend_register` to judge if there is a stateless process group initialize
+#       rewrite stateless_init_torch_distributed_process_group to judge if there is a stateless process group initialize
 #       method and call platform method `platform_register_backend` to initialize them
 #    Related PR (if no, explain why): no related PR, we want add this ability into vllm
 #    Future Plan:
@@ -96,22 +84,10 @@
 #    Related PR (if no, explain why): no related PR, we want add this ability into vllm
 #    Future Plan:
 #       Remove those patch when vllm merged them
+#
+#
 # * Worker Patch:
 # ===============
-# ** File: worker/patch_0_8_4/patch_metrics.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.spec_decode.metrics.AsyncMetricsCollector.init_tensors` and
-#       `vllm.spec_decode.metrics.AsyncMetricsCollector._copy_rejsample_metrics_async`
-#    Why:
-#       There are cuda hard code (torch.cuda.Stream) in `AsyncMetricsCollector.init_tensors` and
-#       `AsyncMetricsCollector._copy_rejsample_metrics_async`
-#    How：
-#       Replace it with the corresponding npu method
-#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
-#       https://github.com/vllm-project/vllm/pull/14411
-#    Future Plan:
-#       Revert it when the related pr is merged in vllm.
-#
 # ** File: worker/patch_common/patch_metrics.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.spec_decode.metrics.AsyncMetricsCollector.maybe_collect_rejsample_metrics`
@@ -124,6 +100,20 @@
 #       https://github.com/vllm-project/vllm/pull/14411
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm.
+#
+# ** File: worker/patch_common/patch_minicpm.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.models.minicpm.MiniCPMAttention.forward`
+#    Why:
+#       The forward func of MiniCPMAttention in vllm do a datatype convert
+#       (original datatype --> float32) to ensure the precision on cuda.
+#       However float32 is not supported in cann rope op, thus we keep this patch
+#    How：
+#       Removed the dtype convert operations in forward
+#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
+#       NO, only for npu due to rope op.
+#    Future Plan:
+#       Keep this patch in vllm-ascend.
 #
 # ** File: worker/patch_common/patch_multi_step_worker.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -142,7 +132,19 @@
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm and vllm-ascend.
 #
-# ** File: worker/patch_common/patch_multi_step_worker.py **
+#   2. `vllm.spec_decode.multi_step_worker.MultiStepWorker.set_include_gpu_probs_tensor` and
+#       `vllm.spec_decode.multi_step_worker.MultiStepWorker.set_should_modify_greedy_probs_inplace`
+#    Why:
+#       vLLM `Remove Sampler from Model Code` so vllm-ascend needs adapt to this change.
+#    How：
+#       Use vLLM 0.8.4 method to patch it.
+#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
+#       - https://github.com/vllm-project/vllm/pull/15195
+#       - https://github.com/vllm-project/vllm-ascend/pull/395
+#    Future Plan:
+#       Remove it when we identify the reasons clearly.
+#
+# ** File: worker/patch_common/patch_spec_decode_worker.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.spec_decode.spec_decode_worker.SpecDecodeWorker.create_worker`
 #    Why:
@@ -156,3 +158,4 @@
 #       - https://github.com/vllm-project/vllm-ascend/pull/395
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm and vllm-ascend.
+#

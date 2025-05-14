@@ -5,15 +5,15 @@ This document describes how to install vllm-ascend manually.
 ## Requirements
 
 - OS: Linux
-- Python: 3.9 or higher
+- Python: >= 3.9, < 3.12
 - A hardware with Ascend NPU. It's usually the Atlas 800 A2 series.
 - Software:
 
-    | Software     | Supported version | Note |
-    | ------------ | ----------------- | ---- | 
-    | CANN         | >= 8.0.0          | Required for vllm-ascend and torch-npu |
-    | torch-npu    | >= 2.5.1.dev20250320       | Required for vllm-ascend |
-    | torch        | >= 2.5.1          | Required for torch-npu and vllm |
+    | Software  | Supported version | Note                                   |
+    |-----------|-------------------|----------------------------------------| 
+    | CANN      | >= 8.1.RC1        | Required for vllm-ascend and torch-npu |
+    | torch-npu | >= 2.5.1          | Required for vllm-ascend               |
+    | torch     | >= 2.5.1          | Required for torch-npu and vllm        |
 
 You have 2 way to install:
 - **Using pip**: first prepare env manually or via CANN image, then install `vllm-ascend` using pip.
@@ -69,10 +69,6 @@ docker run --rm \
 :animate: fade-in-slide-down
 You can also install CANN manually:
 
-```{note}
-This guide takes aarch64 as an example. If you run on x86, you need to replace `aarch64` with `x86_64` for the package name shown below.
-```
-
 ```bash
 # Create a virtual environment
 python -m venv vllm-ascend-env
@@ -82,19 +78,19 @@ source vllm-ascend-env/bin/activate
 pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs 'numpy<2.0.0' decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
 
 # Download and install the CANN package.
-wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.0.0/Ascend-cann-toolkit_8.0.0_linux-aarch64.run
-chmod +x ./Ascend-cann-toolkit_8.0.0_linux-aarch64.run
-./Ascend-cann-toolkit_8.0.0_linux-aarch64.run --full
+wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.1.RC1/Ascend-cann-toolkit_8.1.RC1_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-toolkit_8.1.RC1_linux-"$(uname -i)".run
+./Ascend-cann-toolkit_8.1.RC1_linux-"$(uname -i)".run --full
 
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 
-wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.0.0/Ascend-cann-kernels-910b_8.0.0_linux-aarch64.run
-chmod +x ./Ascend-cann-kernels-910b_8.0.0_linux-aarch64.run
-./Ascend-cann-kernels-910b_8.0.0_linux-aarch64.run --install
+wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.1.RC1/Ascend-cann-kernels-910b_8.1.RC1_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-kernels-910b_8.1.RC1_linux-"$(uname -i)".run
+./Ascend-cann-kernels-910b_8.1.RC1_linux-"$(uname -i)".run --install
 
-wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.0.0/Ascend-cann-nnal_8.0.0_linux-aarch64.run
-chmod +x ./Ascend-cann-nnal_8.0.0_linux-aarch64.run
-./Ascend-cann-nnal_8.0.0_linux-aarch64.run --install
+wget https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.1.RC1/Ascend-cann-nnal_8.1.RC1_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-nnal_8.1.RC1_linux-"$(uname -i)".run
+./Ascend-cann-nnal_8.1.RC1_linux-"$(uname -i)".run --install
 
 source /usr/local/Ascend/nnal/atb/set_env.sh
 ```
@@ -124,31 +120,10 @@ First install system dependencies:
 
 ```bash
 apt update  -y
-apt install -y gcc g++ cmake libnuma-dev wget
+apt install -y gcc g++ cmake libnuma-dev wget git
 ```
 
-Current version depends on a unreleased `torch-npu`, you need to install manually:
-
-```
-# Once the packages are installed, you need to install `torch-npu` manually,
-# because that vllm-ascend relies on an unreleased version of torch-npu.
-# This step will be removed in the next vllm-ascend release.
-# 
-# Here we take python 3.10 on aarch64 as an example. Feel free to install the correct version for your environment. See:
-#
-# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py39.tar.gz
-# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
-# https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py311.tar.gz
-#
-mkdir pta
-cd pta
-wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
-tar -xvf pytorch_v2.5.1_py310.tar.gz
-pip install ./torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
-cd ..
-```
-
-**[Optinal]** Config the extra-index of `pip` if you are working on a **x86** machine, so that the torch with cpu could be found:
+**[Optional]** Config the extra-index of `pip` if you are working on a **x86** machine, so that the torch with cpu could be found:
 
 ```bash
 pip config set global.extra-index-url https://download.pytorch.org/whl/cpu/
@@ -160,16 +135,10 @@ Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
    :substitutions:
 
 # Install vllm-project/vllm from pypi
-# There was a vLLM v0.8.4 installation bug, please use "Build from source code"
-# https://github.com/vllm-project/vllm-ascend/issues/581
 pip install vllm==|pip_vllm_version|
 
 # Install vllm-project/vllm-ascend from pypi.
 pip install vllm-ascend==|pip_vllm_ascend_version|
-```
-
-```{note}
-If you failed to install vllm due to no triton version could be installed, please build from source code.
 ```
 
 :::{dropdown} Click here to see "Build from source code"
@@ -181,13 +150,13 @@ or build from **source code**:
 # Install vLLM
 git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
 cd vllm
-VLLM_TARGET_DEVICE=empty pip install .
+VLLM_TARGET_DEVICE=empty pip install -v -e .
 cd ..
 
 # Install vLLM Ascend
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
-python setup.py develop
+pip install -v -e .
 cd ..
 ```
 
@@ -239,6 +208,7 @@ docker run --rm \
     -it $IMAGE bash
 ```
 
+The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/vllm-workspace` and installed in [development mode](https://setuptools.pypa.io/en/latest/userguide/development_mode.html)(`pip install -e`) to help developer immediately take place changes without requiring a new installation.
 ::::
 
 :::::

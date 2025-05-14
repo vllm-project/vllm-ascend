@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-FROM quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10
+FROM quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
 
 ARG PIP_INDEX_URL="https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple"
 ARG COMPILE_CUSTOM_KERNELS=1
@@ -31,29 +31,29 @@ RUN apt-get update -y && \
 
 WORKDIR /workspace
 
-COPY . /workspace/vllm-ascend/
+COPY . /vllm-workspace/vllm-ascend/
 
 RUN pip config set global.index-url ${PIP_INDEX_URL}
 
 # Install vLLM
 ARG VLLM_REPO=https://github.com/vllm-project/vllm.git
-ARG VLLM_TAG=v0.8.4
-RUN git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /workspace/vllm
-RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install /workspace/vllm/ --extra-index https://download.pytorch.org/whl/cpu/
+ARG VLLM_TAG=v0.8.5.post1
+RUN git clone --depth 1 $VLLM_REPO --branch $VLLM_TAG /vllm-workspace/vllm
 # In x86, triton will be installed by vllm. But in Ascend, triton doesn't work correctly. we need to uninstall it.
-RUN python3 -m pip uninstall -y triton
-
-# Install torch-npu
-RUN bash /workspace/vllm-ascend/pta_install.sh
+RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -v -e /vllm-workspace/vllm/ --extra-index https://download.pytorch.org/whl/cpu/ && \
+    python3 -m pip uninstall -y triton && \
+    python3 -m pip cache purge
 
 # Install vllm-ascend
+# Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
 RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     source /usr/local/Ascend/nnal/atb/set_env.sh && \
-    export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib:$LD_LIBRARY_PATH && \
-    export LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/lib64:$LIBRARY_PATH && \
-    python3 -m pip install -v /workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/
+    export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib && \
+    python3 -m pip install -v -e /vllm-workspace/vllm-ascend/ --extra-index https://download.pytorch.org/whl/cpu/ && \
+    python3 -m pip cache purge
 
 # Install modelscope (for fast download) and ray (for multinode)
-RUN python3 -m pip install modelscope ray
+RUN python3 -m pip install modelscope ray && \
+    python3 -m pip cache purge
 
 CMD ["/bin/bash"]

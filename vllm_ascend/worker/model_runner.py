@@ -28,13 +28,13 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set,
 import numpy as np
 import torch
 import torch.nn as nn
-import torch_npu
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_dp_group, get_pp_group
+from vllm.distributed.kv_transfer import get_kv_transfer_group
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import logger
@@ -43,7 +43,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata, SamplingMetadataCache
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models import supports_lora, supports_multimodal
@@ -66,16 +66,13 @@ from vllm.worker.model_runner_base import (
 
 from vllm_ascend.utils import vllm_version_is
 
-if vllm_version_is("0.8.4"):
-    from vllm.distributed import get_kv_transfer_group
-else:
-    from vllm.distributed.kv_transfer import get_kv_transfer_group
-
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
 TModelInputForNPU = TypeVar('TModelInputForNPU', bound="ModelInputForNPU")
 ENCODER_NUM = 0
+# if True, allow tensor initialization and casting with internal format (e.g., NZ)
+torch.npu.config.allow_internal_format = True
 
 
 @dataclass(frozen=True)
@@ -696,15 +693,23 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
         # this may be larger than the sequence length if chunked
         # prefill is enabled.
         prefix_cache_len = len(computed_block_nums) * self.block_size
+
+        # The total number of prompt tokens in this sequence.
+        # When chunked prefill is enabled, this is the token number of
+        # computed chunks + current chunk.
+        seq_len = inter_data.seq_lens[seq_idx]
+
+        # When full hit, compute the last block rather than the last token,
+        # due to the requirements of prefix operator.
+        if seq_len <= prefix_cache_len:
+            prefix_cache_len -= self.block_size
+
         seq_group_metadata.seq_data[inter_data.seq_ids[
             seq_idx]].update_num_cached_tokens(prefix_cache_len)
 
         # The number of so far computed prompt tokens in this sequence.
         context_len = inter_data.context_lens[seq_idx]
-        # The total number of prompt tokens in this sequence.
-        # When chunked prefill is enabled, this is the token number of
-        # computed chunks + current chunk.
-        seq_len = inter_data.seq_lens[seq_idx]
+
         if prefix_cache_len <= context_len:
             # We already passed the cache hit region,
             # so do normal computation.
@@ -871,10 +876,13 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
             self.vllm_config.compilation_config.max_capture_size
 
         self.enable_graph_mode = False
+        self.use_cached_npu_graph = False
         additional_config = vllm_config.additional_config
         if additional_config:
             self.enable_graph_mode = additional_config.get(
                 "enable_graph_mode", False)
+            self.use_cached_npu_graph = additional_config.get(
+                "use_cached_npu_graph", False)
 
         self.has_inner_state = model_config.has_inner_state
 
@@ -936,12 +944,7 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         self.sampling_metadata_cache: SamplingMetadataCache = \
               SamplingMetadataCache() \
                 if self.parallel_config.pipeline_parallel_size == 1 else None
-
-        if vllm_version_is("0.8.4"):
-            self.sampler = None
-        else:
-            from vllm.model_executor.layers.sampler import get_sampler
-            self.sampler = get_sampler()
+        self.sampler = get_sampler()
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -993,12 +996,20 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
             config.experimental_config.frozen_parameter = True
             config.experimental_config.tiling_schedule_optimize = True
             torch.npu.set_compile_mode(jit_compile=False)
-            self.compile_model = torchair.inference.cache_compile(
-                self.model.forward,
-                dynamic=True,
-                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                config=config,
-                ge_cache=False)
+            if not self.use_cached_npu_graph:
+                npu_backend = torchair.get_npu_backend(compiler_config=config)
+                self.compile_model = torch.compile(
+                    self.model,
+                    dynamic=True,
+                    fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    backend=npu_backend)
+            else:
+                self.compile_model = torchair.inference.cache_compile(
+                    self.model.forward,
+                    dynamic=True,
+                    fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    config=config,
+                    ge_cache=False)
 
     def save_sharded_state(
         self,
@@ -1006,7 +1017,10 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         pattern: Optional[str] = None,
         max_size: Optional[int] = None,
     ) -> None:
-        from vllm.model_executor.model_loader.loader import ShardedStateLoader
+        if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
+            from vllm.model_executor.model_loader.loader import ShardedStateLoader  # type: ignore[import]  # isort: skip  # noqa
+        else:
+            from vllm.model_executor.model_loader import ShardedStateLoader
         ShardedStateLoader.save_model(
             self.model,
             path,
@@ -1018,7 +1032,12 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         self,
         tensorizer_config: TensorizerConfig,
     ) -> None:
-        from vllm.model_executor.model_loader.loader import TensorizerLoader
+        if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
+            from vllm.model_executor.model_loader.loader import \
+                TensorizerLoader  # type: ignore  # noqa
+        else:
+            from vllm.model_executor.model_loader import \
+                TensorizerLoader  # type: ignore  # noqa
         TensorizerLoader.save_model(
             self.model,
             tensorizer_config=tensorizer_config,
@@ -1145,7 +1164,7 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
                     device=self.device)
 
             self.execute_model(model_input, kv_caches, intermediate_tensors)
-            torch_npu.npu.synchronize()
+            torch.npu.synchronize()
             return
 
     def remove_all_loras(self):
@@ -1342,6 +1361,17 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                     kv_caches=kv_caches
                 )
 
+        if get_dp_group().world_size > 1:
+            bypass_model_exec_tensor = torch.tensor(
+                1, dtype=torch.int32) if bypass_model_exec else torch.tensor(
+                    0, dtype=torch.int32)
+            torch.distributed.all_reduce(bypass_model_exec_tensor,
+                                         op=torch.distributed.ReduceOp.MIN,
+                                         group=get_dp_group().cpu_group)
+            # If there is any group have not receive the necessary hidden states or kv_cache, we force all the dp group execute.
+            if bypass_model_exec_tensor.item() == 0:
+                bypass_model_exec = False
+
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
         seqlen_agnostic_kwargs = {
             "finished_requests_ids": model_input.finished_requests_ids,
@@ -1357,8 +1387,8 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
-            model_forward_start = torch_npu.npu.Event(enable_timing=True)
-            model_forward_end = torch_npu.npu.Event(enable_timing=True)
+            model_forward_start = torch.npu.Event(enable_timing=True)
+            model_forward_end = torch.npu.Event(enable_timing=True)
             model_forward_start.record()
 
         if not bypass_model_exec:
@@ -1398,10 +1428,21 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                             torch.tensor(model_forward_time +
                                          orig_model_forward_time))
                 return hidden_or_intermediate_states
-            # TODO: remove the synchronize here
-            torch.npu.synchronize()
-            logits = self.model.compute_logits(hidden_or_intermediate_states,
-                                               model_input.sampling_metadata)
+
+        logits = self.model.compute_logits(hidden_or_intermediate_states,
+                                           model_input.sampling_metadata)
+
+        # Sending KV cache in distributed KV cache transfer setting
+        if self.need_send_kv(model_input, kv_caches):
+            get_kv_transfer_group().send_kv_caches_and_hidden_states(
+                # model_executable is used to know which layer the current
+                # worker is working on, so that we can send KV for only those
+                # layers.
+                model_executable,
+                model_input,
+                kv_caches,
+                hidden_or_intermediate_states,
+            )
 
         if not self.is_driver_worker:
             return []
@@ -1410,17 +1451,10 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
             model_input.async_callback()
 
         # Sample the next token.
-        if vllm_version_is("0.8.4"):
-            output = self.model.sample(
-                logits=logits,
-                sampling_metadata=model_input.sampling_metadata,
-            )
-        else:
-            assert self.sampler is not None
-            output = self.sampler(
-                logits=logits,
-                sampling_metadata=model_input.sampling_metadata,
-            )
+        output = self.sampler(
+            logits=logits,
+            sampling_metadata=model_input.sampling_metadata,
+        )
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time
                 and output is not None):

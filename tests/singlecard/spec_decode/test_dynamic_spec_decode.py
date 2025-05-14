@@ -29,7 +29,6 @@ from vllm.spec_decode.top1_proposer import Top1Proposer
 
 from tests.singlecard.spec_decode.test_utils import mock_spec_decode_sampler
 from tests.singlecard.spec_decode.utils import create_batch, mock_worker
-from vllm_ascend.patch.worker import patch_common  # noqa: F401
 
 
 @pytest.mark.parametrize('queue_size', [4])

@@ -116,6 +116,7 @@ format_all() {
     yapf --in-place "${YAPF_FLAGS[@]}" "${YAPF_EXCLUDES[@]}" .
 }
 
+echo 'vllm-ascend yapf:'
 ## This flag formats individual files. --files *must* be the first command line
 ## arg to use this option.
 if [[ "$1" == '--files' ]]; then
@@ -128,12 +129,12 @@ else
    # Format only the files that changed in last commit.
    format_changed
 fi
-echo 'vLLM yapf: Done'
+echo 'vllm-ascend yapf: Done'
 
 # Run mypy
-echo 'vLLM mypy:'
+echo 'vllm-ascend mypy:'
 tools/mypy.sh
-echo 'vLLM mypy: Done'
+echo 'vllm-ascend mypy: Done'
 
 
 # If git diff returns a file that is in the skip list, the file may be checked anyway:
@@ -172,6 +173,7 @@ spell_check_changed() {
     fi
 }
 
+echo 'vllm-ascend codespell:'
 # Run Codespell
 ## This flag runs spell check of individual files. --files *must* be the first command line
 ## arg to use this option.
@@ -185,7 +187,7 @@ else
    # Check spelling only of the files that changed in last commit.
    spell_check_changed
 fi
-echo 'vLLM codespell: Done'
+echo 'vllm-ascend codespell: Done'
 
 
 # Lint specified files
@@ -211,6 +213,7 @@ lint_changed() {
 
 }
 
+echo 'vllm-ascend ruff:'
 # Run Ruff
 ### This flag lints individual files. --files *must* be the first command line
 ### arg to use this option.
@@ -224,7 +227,7 @@ else
    # Format only the files that changed in last commit.
    lint_changed
 fi
-echo 'vLLM ruff: Done'
+echo 'vllm-ascend ruff: Done'
 
 # check spelling of specified files
 isort_check() {
@@ -251,6 +254,7 @@ isort_check_changed() {
     fi
 }
 
+echo 'vllm-ascend isort:'
 # Run Isort
 # This flag runs spell check of individual files. --files *must* be the first command line
 # arg to use this option.
@@ -264,18 +268,13 @@ else
    # Check spelling only of the files that changed in last commit.
    isort_check_changed
 fi
-echo 'vLLM isort: Done'
+echo 'vllm-ascend isort: Done'
 
 # Clang-format section
 # Exclude some files for formatting because they are vendored
 # NOTE: Keep up to date with .github/workflows/clang-format.yml
 CLANG_FORMAT_EXCLUDES=(
-    'csrc/moe/topk_softmax_kernels.cu'
-    'csrc/quantization/gguf/ggml-common.h'
-    'csrc/quantization/gguf/dequantize.cuh'
-    'csrc/quantization/gguf/vecdotq.cuh'
-    'csrc/quantization/gguf/mmq.cuh'
-    'csrc/quantization/gguf/mmvq.cuh'
+    'csrc/kernels/pos_encoding_kernels.cpp'
 )
 
 # Format specified files with clang-format
@@ -315,15 +314,15 @@ elif [[ "$1" == '--all' ]]; then
 else
    clang_format_changed
 fi
-echo 'vLLM clang-format: Done'
+echo 'vllm-ascend clang-format: Done'
 
-echo 'vLLM actionlint:'
+echo 'vllm-ascend actionlint:'
 tools/actionlint.sh -color
-echo 'vLLM actionlint: Done'
+echo 'vllm-ascend actionlint: Done'
 
-echo 'vLLM shellcheck:'
+echo 'vllm-ascend shellcheck:'
 tools/shellcheck.sh
-echo 'vLLM shellcheck: Done'
+echo 'vllm-ascend shellcheck: Done'
 
 echo 'excalidraw png check:'
 tools/png-lint.sh

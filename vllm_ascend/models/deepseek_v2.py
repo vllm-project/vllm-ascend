@@ -25,11 +25,12 @@
 # # vllm-project/vllm/vllm/model_executor/models/deepseek_v2.py
 # """Inference-only DeepseekV2/DeepseekV3 model."""
 
-import os
 from typing import Any, Dict, List, Optional, Union
 
 import torch
 import torch.distributed as dist
+import torch_npu
+import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
@@ -39,10 +40,13 @@ from vllm.distributed import (get_dp_group, get_pp_group,
                               get_tensor_model_parallel_world_size,
                               get_tp_group, tensor_model_parallel_all_reduce)
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,
                                                ReplicatedLinear,
-                                               RowParallelLinear)
+                                               RowParallelLinear,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -55,15 +59,87 @@ from vllm.model_executor.models.deepseek_v2 import \
     yarn_get_mscale  # ruff: noqa: E501
 from vllm.model_executor.models.deepseek_v2 import (DeepseekV2Attention,
                                                     DeepseekV2DecoderLayer,
-                                                    DeepseekV2MLAAttention,
-                                                    DeepseekV2MLP)
+                                                    DeepseekV2MLAAttention)
 from vllm.model_executor.models.utils import (
     PPMissingLayer, make_empty_intermediate_tensors_factory, make_layers,
     maybe_prefix)
-# >>>>>>> dcd5c73 (Feat: Graph mode for deepseek v2/v3.)
 from vllm.sequence import IntermediateTensors
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
+from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+
+VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
+
+
+class CustomDeepseekV2MLP(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: Optional[QuantizationConfig] = None,
+        reduce_results: bool = True,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size, [intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj")
+        self.down_proj = RowParallelLinear(intermediate_size,
+                                           hidden_size,
+                                           bias=False,
+                                           quant_config=quant_config,
+                                           reduce_results=reduce_results,
+                                           prefix=f"{prefix}.down_proj")
+        if hidden_act != "silu":
+            raise ValueError(f"Unsupported activation: {hidden_act}. "
+                             "Only silu is supported for now.")
+        self.act_fn = SiluAndMul()
+
+        # NOTE: `torch_npu.npu_dequant_swiglu_quant` can only be enabled in dynamic quant
+        self.is_dynamic_quant = not isinstance(
+            self.gate_up_proj.quant_method,
+            UnquantizedLinearMethod) and isinstance(
+                self.gate_up_proj.quant_method.quant_method,
+                AscendW8A8DynamicLinearMethod)
+
+    def forward(self, x):
+        if self.is_dynamic_quant:
+            x, dynamic_scale = torch_npu.npu_dynamic_quant(x)
+            x = torch_npu.npu_quant_matmul(
+                x,
+                self.gate_up_proj.weight,
+                self.gate_up_proj.weight_scale,
+                output_dtype=torch.int32,
+            )
+            x, dynamic_scale = torch_npu.npu_dequant_swiglu_quant(
+                x=x,
+                weight_scale=self.gate_up_proj.weight_scale_fp32,
+                activation_scale=dynamic_scale,
+                bias=None,
+                quant_scale=None,
+                quant_offset=None,
+                group_index=None,
+                activate_left=True,
+                quant_mode=1)
+            x = torch_npu.npu_quant_matmul(
+                x,
+                self.down_proj.weight,
+                self.down_proj.weight_scale,
+                pertoken_scale=dynamic_scale,
+                output_dtype=torch.bfloat16,
+            )
+            if self.down_proj.reduce_results and self.down_proj.tp_size > 1:
+                x = tensor_model_parallel_all_reduce(x)
+            return x
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
 
 
 class CustomDeepseekV2MoE(nn.Module):
@@ -119,7 +195,7 @@ class CustomDeepseekV2MoE(nn.Module):
         if config.n_shared_experts is not None:
             intermediate_size = (config.moe_intermediate_size *
                                  config.n_shared_experts)
-            self.shared_experts = DeepseekV2MLP(
+            self.shared_experts = CustomDeepseekV2MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
@@ -132,7 +208,6 @@ class CustomDeepseekV2MoE(nn.Module):
         vllm_config = get_current_vllm_config()
         self.dp_size = get_dp_group().world_size
         batch_size = vllm_config.scheduler_config.max_num_seqs
-        self.enable_mc2 = int(os.environ.get("VLLM_ENABLE_MC2", '0')) == 1
 
         params_dtype = torch.get_default_dtype()
         self.final_hidden_states = torch.zeros(
@@ -143,15 +218,13 @@ class CustomDeepseekV2MoE(nn.Module):
         attn_metadata = get_forward_context().attn_metadata
         if attn_metadata is None:
             # for profile run
-            return hidden_states
+            is_prefill = True
+        else:
+            is_prefill = attn_metadata.num_prefills > 0
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
-        if self.n_shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
-
-        if (self.tp_size > 1 and self.enable_mc2
-                and attn_metadata.num_prefills == 0):
+        if (self.tp_size > 1 and VLLM_ENABLE_MC2 and not is_prefill):
             chunks = torch.chunk(hidden_states,
                                  get_tp_group().world_size,
                                  dim=0)
@@ -159,8 +232,7 @@ class CustomDeepseekV2MoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
-        is_prefill = True if attn_metadata.num_prefills > 0 else False
-        # is_prefill = attn_metadata.num_prefills > 0
+
         final_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
@@ -168,15 +240,15 @@ class CustomDeepseekV2MoE(nn.Module):
             top_k=CustomDeepseekV2MoE.top_k) * self.routed_scaling_factor
 
         if self.tp_size > 1:
-            if self.enable_mc2 and not is_prefill:
+            if VLLM_ENABLE_MC2 and not is_prefill:
                 dist.all_gather_into_tensor(self.final_hidden_states,
                                             final_hidden_states, self.tp_group)
                 final_hidden_states = self.final_hidden_states
             else:
                 final_hidden_states = tensor_model_parallel_all_reduce(
                     final_hidden_states)
-
-        if shared_output is not None:
+        if self.n_shared_experts is not None:
+            shared_output = self.shared_experts(hidden_states)
             final_hidden_states = final_hidden_states + shared_output
 
         return final_hidden_states.view(num_tokens, hidden_dim)
@@ -326,10 +398,22 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         else:
             hidden_states_or_q_c = hidden_states
         if self.enable_graph_mode:
-            return self.mla_attn.impl.forward(self.mla_attn,
-                                              hidden_states_or_q_c,
-                                              hidden_states, None, kv_cache,
-                                              attn_metadata)
+            forward_kwargs = {}
+            if envs.VLLM_USE_V1:
+                output_shape = hidden_states.shape
+                output = torch.empty(output_shape,
+                                     dtype=hidden_states_or_q_c.dtype,
+                                     device=hidden_states_or_q_c.device)
+                forward_kwargs['output'] = output
+
+            output = self.mla_attn.impl.forward(self.mla_attn,
+                                                hidden_states_or_q_c,
+                                                hidden_states, None, kv_cache,
+                                                attn_metadata,
+                                                **forward_kwargs)
+            if envs.VLLM_USE_V1:
+                output = output.view(-1, output_shape[-1])
+            return output
         else:
             kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
@@ -392,7 +476,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 prefix=f"{prefix}.mlp",
             )
         else:
-            self.mlp = DeepseekV2MLP(
+            self.mlp = CustomDeepseekV2MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
@@ -442,8 +526,9 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
 
-        if isinstance(self.mlp,
-                      DeepseekV2MLP) and hidden_states.dtype == torch.float16:
+        if isinstance(
+                self.mlp,
+                CustomDeepseekV2MLP) and hidden_states.dtype == torch.float16:
             # Fix FP16 overflow
             # Scaling the DeepseekV2MLP output, it is the input of
             # input_layernorm of next decoder layer.

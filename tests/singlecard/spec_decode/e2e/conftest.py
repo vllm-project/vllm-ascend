@@ -17,7 +17,9 @@
 # limitations under the License.
 #
 
+import shutil
 from itertools import cycle
+from pathlib import Path
 from typing import List, Optional, Sequence, Tuple, Union
 
 import pytest
@@ -177,6 +179,12 @@ def _check_logprobs_when_output_disabled(
         assert spec_pos_logprob_token_id in baseline_pos_logprobs
 
 
+def _clean_torchair_cache():
+    cache_path = Path.cwd() / '.torchair_cache'
+    if cache_path.exists() and cache_path.is_dir():
+        shutil.rmtree(cache_path)
+
+
 def run_equality_correctness_test(
         vllm_runner,
         common_llm_kwargs,
@@ -219,10 +227,20 @@ def run_equality_correctness_test(
                                      logprobs=logprobs,
                                      prompt_logprobs=prompt_logprobs)
 
+    # TODO current torchair graph mode needs clean torchair cache.
+    # if do not clean, it will raise error
+    additional_config = common_llm_kwargs.get("additional_config")
+    enable_graph_mode = additional_config.get(
+        "enable_graph_mode") if additional_config else False
+
     with vllm_runner(**org_args) as vllm_model:
+        if enable_graph_mode:
+            _clean_torchair_cache()
         org_outputs = vllm_model.generate_w_logprobs(prompts, sampling_params)
 
     with vllm_runner(**sd_args) as vllm_model:
+        if enable_graph_mode:
+            _clean_torchair_cache()
         if ensure_all_accepted or expected_acceptance_rate is not None:
             # Force log interval to be 0 to catch all metrics.
             stat_logger = vllm_model.model.llm_engine.stat_loggers[

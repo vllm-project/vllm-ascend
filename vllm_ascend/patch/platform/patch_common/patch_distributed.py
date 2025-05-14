@@ -42,11 +42,12 @@ def ascend_destroy_model_parallel():
     if _DP:
         _DP.destroy()
     _DP = None
-    from vllm.platforms import current_platform
-    current_platform.destroy_platform_model_parallel()
+    from vllm_ascend.distributed.parallel_state import \
+        destory_ascend_model_parallel
+    destory_ascend_model_parallel()
 
 
-def ascend_stateless_init_torch_distributed_process_group(
+def stateless_init_torch_distributed_process_group(
         host: str, port: int, rank: int, world_size: int,
         backend: str) -> ProcessGroup:
     """
@@ -95,12 +96,17 @@ def ascend_stateless_init_torch_distributed_process_group(
     # different systems (e.g. RPC) in case the store is multi-tenant.
     prefix_store = PrefixStore(init_method, store)
 
+    # TODO(Yizhou): The reason we need to set options while vllm does not
+    # seems to be related to the version of PyTorch. In the latest version,
+    # there is no need to set options. While in the older version, 2.5.1
+    # specifically, we need to set options.
+    options = ProcessGroup.Options(backend=backend)
     pg: ProcessGroup = ProcessGroup(
         prefix_store,
         group_rank,
         group_size,
+        options,
     )
-    from vllm.platforms import current_platform
     if backend == "gloo":
         from torch.distributed.distributed_c10d import ProcessGroupGloo
         backend_class = ProcessGroupGloo(prefix_store,
@@ -120,13 +126,26 @@ def ascend_stateless_init_torch_distributed_process_group(
                                          backend_options)
         backend_type = ProcessGroup.BackendType.NCCL
         device = torch.device("cuda")
-    elif current_platform.platform_has_backend_register():
-        current_platform.platform_register_backend()
+    elif backend == "hccl":
+        from torch.distributed import is_hccl_available
+        assert is_hccl_available()
+        from torch_npu._C._distributed_c10d import ProcessGroupHCCL
+        backend_options = ProcessGroupHCCL.Options()
+        backend_options._timeout = timeout
+        backend_class = ProcessGroupHCCL(prefix_store, group_rank, group_size,
+                                         backend_options)
+        device = torch.device("npu")
+        backend_class._set_sequence_number_for_group()
+        backend_type = ProcessGroup.BackendType.CUSTOM
+        pg._register_backend(device, backend_type, backend_class)
         return pg
     else:
         raise RuntimeError(f"Unsupported torch distributed backend: {backend}")
 
-    pg._set_default_backend(backend_type)
+    # TODO(Yizhou): Like we mentioned above, _set_default_backend is not
+    # implemented in the 2.5.1 version of PyTorch. But we need to set it
+    # after the latest version is released.
+    # pg._set_default_backend(backend_type)
     backend_class._set_sequence_number_for_group()
 
     pg._register_backend(device, backend_type, backend_class)
@@ -153,20 +172,21 @@ def parallel_config_get_dp_port(self) -> int:
 
 
 def ascend_stateless_init_dp_group(self) -> "ProcessGroup":
-    from vllm.distributed.utils import \
-        stateless_init_torch_distributed_process_group
-
+    # TODO(Yizhou): Currently we have to set the backend to gloo
+    # because in vllm.config.ParallelConfig.has_unfinished_dp the
+    # device is set to cpu. We need to fix this in the future.
+    # We need to compare the performance of gloo and hccl and then
+    # decide which one to use.
     dp_group = stateless_init_torch_distributed_process_group(
         self.data_parallel_master_ip,
         self.get_next_dp_init_port(),
         self.data_parallel_rank,
         self.data_parallel_size,
-        backend="hccl")
+        backend="gloo")
 
     return dp_group
 
 
 vllm.distributed.parallel_state.destroy_model_parallel = ascend_destroy_model_parallel
-vllm.distributed.stateless_init_torch_distributed_process_group = ascend_stateless_init_torch_distributed_process_group
 ParallelConfig.get_next_dp_init_port = parallel_config_get_dp_port
 ParallelConfig.stateless_init_dp_group = ascend_stateless_init_dp_group

@@ -18,6 +18,8 @@
 name: 'e2e test'
 
 on:
+  schedule:
+    - cron: '0 23 * * *'
   pull_request:
     branches:
       - 'main'
@@ -46,7 +48,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-arm64-npu-1, linux-arm64-npu-4]
-        vllm_verison: [main, v0.8.4]
+        vllm_verison: [main, v0.8.5.post1]
     concurrency:
       group: >
         ${{ 
@@ -59,7 +61,8 @@ jobs:
     name: vLLM Ascend test
     runs-on: ${{ matrix.os }}
     container:
-      image: quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py3.10
+      # TODO(yikun): Remove m.daocloud.io prefix when infra proxy ready
+      image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
       env:
         HF_ENDPOINT: https://hf-mirror.com
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -97,25 +100,10 @@ jobs:
         run: |
           VLLM_TARGET_DEVICE=empty pip install -e .
 
-      - name: Install pta
-        run: |
-          if [ ! -d /root/.cache/pta ]; then
-            mkdir -p /root/.cache/pta
-          fi
-
-          if [ ! -f /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl ]; then
-            cd /root/.cache/pta
-            rm -rf pytorch_v2.5.1_py310*
-            wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
-            tar -zxvf pytorch_v2.5.1_py310.tar.gz
-          fi
-
-          pip install /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
-
       - name: Install vllm-project/vllm-ascend
         run: |
           pip install -r requirements-dev.txt
-          pip install -v --no-build-isolation -e .
+          pip install -v -e .
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         env:
@@ -127,7 +115,7 @@ jobs:
             pytest -sv tests/ops
             pytest -sv tests/compile
           else
-            pytest -sv tests/multicard/test_offline_inference_distributed.py
+            pytest -sv -k "QwQ" tests/multicard/test_offline_inference_distributed.py
             pytest -sv tests/ops
             pytest -sv tests/compile
           fi
@@ -140,27 +128,33 @@ jobs:
             pytest -sv tests/singlecard/test_offline_inference.py
             pytest -sv tests/ops
           else
-            pytest -sv tests/multicard/test_offline_inference_distributed.py
+            pytest -sv -k "QwQ" tests/multicard/test_offline_inference_distributed.py
+            pytest -sv -k "DeepSeek" tests/multicard/test_offline_inference_distributed.py
             pytest -sv tests/ops
           fi
 
       # only run test on spec decode when the related code changed
       - name: Check for changes in Speculative Decode
+        if: github.event_name != 'schedule'
         id: filter_spec_decode
         uses: dorny/paths-filter@v3
         with:
           filters: |
             speculative_tests_changed:
+              - ".github/workflows/vllm_ascend_test.yaml"
               - "tests/singlecard/spec_decode/**"
               - "tests/multicard/spec_decode_e2e/**"
+              - "vllm_ascend/worker/worker.py"
+              - "vllm_ascend/worker/model_runner.py"
               - "vllm_ascend/worker/multi_step_runner.py"
               - "vllm_ascend/worker/multi_step_worker.py"
-              - "vllm_ascend/patch/patch_rejection_sampler.py"
-              - "vllm_ascend/patch/patch_spec_decode_worker.py"
-              - "vllm_ascend/patch/patch_multi_step_worker.py"
+              - "vllm_ascend/worker/draft_model_runner.py"
+              - "vllm_ascend/patch/worker/patch_common/patch_metrics.py"
+              - "vllm_ascend/patch/worker/patch_common/patch_spec_decode_worker.py"
+              - "vllm_ascend/patch/worker/patch_common/patch_multi_step_worker.py"
 
       - name: Run vllm-project/vllm-ascend Speculative Decode test
-        if: steps.filter_spec_decode.outputs.speculative_tests_changed == 'true'
+        if: steps.filter_spec_decode.outputs.speculative_tests_changed == 'true' || github.event_name == 'schedule'
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
             pytest -sv tests/singlecard/spec_decode/e2e/test_mtp_correctness.py  # it needs a clean process

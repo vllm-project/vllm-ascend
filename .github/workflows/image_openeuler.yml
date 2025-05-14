@@ -88,12 +88,12 @@ jobs:
       uses: docker/build-push-action@v6
       with:
         platforms: linux/amd64,linux/arm64
+        # use the current repo path as the build context, ensure .git is contained
+        context: .
         # only trigger when tag, branch/main push
         push: ${{ github.event_name == 'push' && github.repository_owner == 'vllm-project' }}
         labels: ${{ steps.meta.outputs.labels }}
         tags: ${{ steps.meta.outputs.tags }}
         file: Dockerfile.openEuler
-        # TODO: support and enable custom ops build for openEuler
         build-args: |
           PIP_INDEX_URL=https://pypi.org/simple
-          COMPILE_CUSTOM_KERNELS=0

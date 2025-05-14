@@ -20,26 +20,24 @@ import os
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
-import torch_npu  # noqa: F401
 import vllm.envs as envs
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 from vllm.utils import supports_dynamo
+
+from vllm_ascend.utils import update_aclgraph_sizes
 
 CUSTOM_OP_ENABLED = False
 try:
     # register custom ops into torch_library here
     import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
 
-except ImportError as e:
-    if not str(
-            e
-    ) == "dynamic module does not define module export function (PyInit_vllm_ascend_C)":
-        logging.warning(
-            "Warning: Failed to register custom ops, all custom ops will be disabled"
-        )
-    else:
-        CUSTOM_OP_ENABLED = True
+except ImportError:
+    logging.warning(
+        "Warning: Failed to register custom ops, all custom ops will be disabled"
+    )
+else:
+    CUSTOM_OP_ENABLED = True
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -128,7 +126,10 @@ class NPUPlatform(Platform):
         enforce_eager = True
         logger.warning(
             "NPU compilation support pending. Will be available in future CANN and "
-            "torch_npu releases. Using default: enforce_eager=True")
+            "torch_npu releases. NPU graph mode is currently experimental and disabled "
+            "by default. You can just adopt additional_config={'enable_graph_mode': True} "
+            "to serve deepseek models with NPU graph mode on vllm-ascend with V0 engine. "
+        )
 
         if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:
             logger.info("Compilation disabled, using eager mode by default")
@@ -145,6 +146,7 @@ class NPUPlatform(Platform):
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(
                 ["vllm.unified_ascend_attention_with_output"])
+            update_aclgraph_sizes(vllm_config)
 
         if vllm_config.additional_config is not None:
             enable_graph_mode = vllm_config.additional_config.get(
@@ -153,6 +155,11 @@ class NPUPlatform(Platform):
                 logger.warning(
                     "enable_graph_mode is not supported because the version of torch is too low, forcing close enable_graph_mode"
                 )
+                vllm_config.additional_config["enable_graph_mode"] = False
+            if enable_graph_mode and envs.VLLM_USE_V1 and envs.VLLM_MLA_DISABLE:
+                logger.warning(
+                    "NPU graph mode is still experimental and not supported for V1 without mla currently, "
+                    "it has been disabled automatically.")
                 vllm_config.additional_config["enable_graph_mode"] = False
 
         parallel_config = vllm_config.parallel_config
@@ -171,18 +178,19 @@ class NPUPlatform(Platform):
         if cache_config:
             if cache_config.block_size is None:
                 cache_config.block_size = 128
-            if envs.VLLM_USE_V1 and cache_config.enable_prefix_caching:
+            if cache_config.enable_prefix_caching and cache_config.block_size != 128:
                 logger.warning(
-                    "Prefix caching is not supported for V1 now, disable prefix caching"
+                    "If prefix caching is enabled, block size must be set to 128."
                 )
-                cache_config.enable_prefix_caching = False
+                cache_config.block_size = 128
 
         if envs.VLLM_USE_V1:
             # Activate custom ops for v1.
             vllm_config.compilation_config.custom_ops = ["all"]
-            additional_config = vllm_config.additional_config
             # If ascend_scheduler_config exists in additional_config,
             # extents original scheduler_config to use AscendScheduler.
+
+            additional_config = vllm_config.additional_config
             if additional_config and additional_config.get(
                     "ascend_scheduler_config", None) is not None:
                 additional_scheduler_config = additional_config.get(
@@ -229,30 +237,3 @@ class NPUPlatform(Platform):
         model configuration.
         """
         return True
-
-    @classmethod
-    def destroy_platform_model_parallel(cls) -> None:
-        from vllm_ascend.distributed.parallel_state import \
-            destory_ascend_model_parallel
-        destory_ascend_model_parallel()
-
-    @classmethod
-    def platform_has_backend_register(cls) -> bool:
-        return True
-
-    @classmethod
-    def platform_register_backend(cls, pg, prefix_store, group_rank,
-                                  group_size, backend_options,
-                                  timeout) -> None:
-        from torch.distributed import ProcessGroup, is_hccl_available
-        assert is_hccl_available()
-        import torch_npu  # noqa
-        from torch_npu._C._distributed_c10d import ProcessGroupHCCL
-        backend_options = ProcessGroupHCCL.Options()
-        backend_options._timeout = timeout
-        backend_class = ProcessGroupHCCL(prefix_store, group_rank, group_size,
-                                         backend_options)
-        device = torch.device("npu")
-        backend_class._set_sequence_number_for_group()
-        backend_type = ProcessGroup.BackendType.CUSTOM
-        pg._register_backend(device, backend_type, backend_class)

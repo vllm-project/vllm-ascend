@@ -3,6 +3,7 @@
 requires = [
     "cmake>=3.26",
     "decorator",
+    "einops",
     "numpy<2.0.0",
     "packaging",
     "pip",
@@ -11,8 +12,9 @@ requires = [
     "scipy",
     "setuptools>=64",
     "setuptools-scm>=8",
-    "torch_npu==2.5.1rc1",
+    "torch-npu==2.5.1",
     "torch>=2.5.1",
     "torchvision<0.21.0",
+    "wheel",
 ]
 build-backend = "setuptools.build_meta"

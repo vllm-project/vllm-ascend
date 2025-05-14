@@ -57,8 +57,10 @@ def get_device_ips():
                               universal_newlines=True)
     if npu_info.returncode != 0 or not os.path.exists(HCCN_TOOL_PATH):
         raise RuntimeError("No npu-smi/hccn_tool tools provided for NPU.")
-    npu_start_idx = int(
-        re.match(r'.*\n\t([0-9]+).*', npu_info.stdout).group(1))
+    re_result = re.match(r'.*\n\t([0-9]+).*', npu_info.stdout)
+    if re_result is None:
+        raise RuntimeError("Can't find npu start index")
+    npu_start_idx = int(re_result.group(1))
     device_ip_list = []
     for ip_offset in range(world_size):
         cmd = [
@@ -68,7 +70,10 @@ def get_device_ips():
                                         stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE,
                                         universal_newlines=True)
-        device_ip = re.match(r'ipaddr:(.*)\n', device_ip_info.stdout).group(1)
+        re_result = re.match(r'ipaddr:(.*)\n', device_ip_info.stdout)
+        if re_result is None:
+            raise RuntimeError("Can't find npu ip")
+        device_ip = re_result.group(1)
         device_ip_list.append(device_ip)
     return device_ip_list
 

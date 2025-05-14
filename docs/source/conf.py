@@ -23,7 +23,8 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
-# import os
+import os
+
 # import sys
 # sys.path.insert(0, os.path.abspath('.'))
 
@@ -63,17 +64,17 @@ myst_substitutions = {
     # the branch of vllm, used in vllm clone
     # - main branch: 'main'
     # - vX.Y.Z branch: 'vX.Y.Z'
-    'vllm_version': 'v0.8.4',
+    'vllm_version': 'v0.8.5.post1',
     # the branch of vllm-ascend, used in vllm-ascend clone and image tag
     # - main branch: 'main'
     # - vX.Y.Z branch: latest vllm-ascend release tag
-    'vllm_ascend_version': 'v0.8.4rc1',
+    'vllm_ascend_version': 'v0.8.5rc1',
     # the newest release version of vllm-ascend and matched vLLM, used in pip install.
     # This value should be updated when cut down release.
-    'pip_vllm_ascend_version': "0.8.4rc1",
-    'pip_vllm_version': "0.8.4",
+    'pip_vllm_ascend_version': "0.8.5rc1",
+    'pip_vllm_version': "0.8.5.post1",
     # CANN image tag
-    'cann_image_tag': "8.0.0-910b-ubuntu22.04-py3.10",
+    'cann_image_tag': "8.1.rc1-910b-ubuntu22.04-py3.10",
 }
 
 # Add any paths that contain templates here, relative to this directory.
@@ -118,6 +119,16 @@ html_theme_options = {
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
 # html_static_path = ['_static']
+
+READTHEDOCS_VERSION_TYPE = os.environ.get('READTHEDOCS_VERSION_TYPE')
+if READTHEDOCS_VERSION_TYPE == "tag":
+    # remove the warning banner if the version is a tagged release
+    header_file = os.path.join(os.path.dirname(__file__),
+                               "_templates/sections/header.html")
+    # The file might be removed already if the build is triggered multiple times
+    # (readthedocs build both HTML and PDF versions separately)
+    if os.path.exists(header_file):
+        os.remove(header_file)
 
 
 def setup(app):
