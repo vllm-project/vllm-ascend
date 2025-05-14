@@ -557,7 +557,6 @@ def get_expert_map(expert_map_path, moe_instance_id, ep_rank, num_replicas):
 
     layer_expert_map = eplb_maps[moe_instance_id]
     expert_map = layer_expert_map[ep_rank].to(torch.npu.current_device())
-    print(f'expert_map ={expert_map}')
     local_num_experts = torch.sum(torch.ne(expert_map, -1)).item()
     return local_num_experts, expert_map
 
