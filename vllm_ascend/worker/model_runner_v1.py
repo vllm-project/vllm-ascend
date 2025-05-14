@@ -55,6 +55,7 @@ from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import vllm_version_is
+import vllm_ascend.envs as ascend_envs
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -903,7 +904,7 @@ class NPUModelRunner:
         # only need to set bs*1, but for mtp case and future
         # compatibility just set to 100
         # FIXME: adjust the correct value if something wrong
-        if envs.MODEL_INSTANCE_ROLE is not None and envs.MODEL_INSTANCE_ROLE == "decode":
+        if ascend_envs.MODEL_INSTANCE_ROLE is not None and ascend_envs.MODEL_INSTANCE_ROLE == "decode":
             num_tokens = 100 if num_reqs < 100 else num_reqs
         min_tokens_per_req = num_tokens // num_reqs
 
