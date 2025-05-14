@@ -125,7 +125,7 @@ def run_decode(
         max_model_len=40,
     )
 
-    # Wait for the producer to start the comsumer
+    # Wait for the producer to start the consumer
     print("[Decode] Waiting for prefill node to finish...")
     prefill_done.wait()
 

@@ -669,7 +669,7 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
         indices = torch.tensor([0], dtype=torch.int64, device="npu")
 
         prefill_info_input = {}
-        # kv cache should be transfered by request
+        # kv cache should be transferred by request
         for _, request in enumerate(metadata.requests):
             if not request.is_store:
                 continue
@@ -820,7 +820,7 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
         # NOTE: only request in waiting queue will come here. we use datadist
         # pull cache to do transfer, so we don't align to block_size in prefill,
         # we won't have extra new matched tokens; in decode, new request kv
-        # cache will be transfered from prefill, so num_computed_tokens = 0, and
+        # cache will be transferred from prefill, so num_computed_tokens = 0, and
         # extra new matched tokens should be len(request.prompt_token_ids) - 1
         if self.kv_role == llm_datadist.LLMRole.PROMPT:
             return 0
