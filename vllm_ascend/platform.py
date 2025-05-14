@@ -63,8 +63,9 @@ class NPUPlatform(Platform):
     def pre_register_and_update(cls,
                                 parser: Optional[FlexibleArgumentParser] = None
                                 ) -> None:
-        import vllm_ascend.patch_config  # noqa: F401
+        import vllm_ascend.patch_model_config  # noqa: F401
         import vllm_ascend.patch_outputs  # noqa: F401
+        import vllm_ascend.patch_vllm_config  # noqa: F401
         from vllm_ascend.quantization.quant_config import \
             AscendQuantConfig  # noqa: F401
 
@@ -152,6 +153,9 @@ class NPUPlatform(Platform):
                     "ascend_scheduler_config", None) is not None:
                 additional_scheduler_config = additional_config.get(
                     "ascend_scheduler_config")
+                if vllm_config.scheduler_config.enable_chunked_prefill:
+                    additional_scheduler_config[
+                        "enable_chunked_prefill"] = True
                 from vllm_ascend.core.schedule_config import \
                     AscendSchedulerConfig
                 ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
