@@ -5,7 +5,6 @@ import pytest
 from tests.conftest import VllmRunner
 from tests.singlecard.test_lora_quant import MODELS, do_sample
 
-os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 
