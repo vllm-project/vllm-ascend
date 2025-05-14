@@ -21,8 +21,10 @@ import gc
 import os
 import time
 import weakref
+
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 
 import numpy as np
@@ -54,7 +56,9 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.platform import NPUPlatform
+
 from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.core.context import get_global_context_manager
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -312,6 +316,7 @@ class NPUModelRunner:
                                  int(mask_len))
         self.attn_mask_builder = AttentionMaskBuilder.initialize_from_len(
             self.attn_mask_len, self.dtype)
+        self.thread_pool_executor = ThreadPoolExecutor(max_workers=2)
 
         self.sampler = Sampler()
         self.enable_torchair_graph_mode = False
@@ -771,6 +776,168 @@ class NPUModelRunner:
             prompt_logprobs_dict={},
         )
         return model_runner_output
+
+    def process_metadata_dual_stream(
+        self,
+        scheduler_output: "SchedulerOutput",
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+    ) -> torch.Tensor:
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        assert total_num_scheduled_tokens > 0
+        num_reqs = self.input_batch.num_reqs
+        assert num_reqs > 0
+        scheduler_output_ret = []
+        intermediate_tensors_ret = []
+
+        modified_batch = self.attn_metadata_builder.reorder_batch(
+            self.input_batch, scheduler_output)
+        if modified_batch:
+            self.input_batch.refresh_sampling_metadata()
+
+        # OPTIMIZATION: Start copying the block table first.
+        # This way, we can overlap the copy with the following CPU operations.
+        self.input_batch.block_table.commit(num_reqs)
+
+        # Get the number of scheduled tokens for each request.
+        # TODO: The Python loop can be slow. Optimize.
+        num_scheduled_tokens = np.empty(num_reqs, dtype=np.int32)
+        max_num_scheduled_tokens = 0
+        for i, req_id in enumerate(self.input_batch.req_ids):
+            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            num_scheduled_tokens[i] = num_tokens
+            max_num_scheduled_tokens = max(max_num_scheduled_tokens,
+                                           num_tokens)
+
+        # Prepare positions
+        req_indices = np.repeat(self.arange_np[:num_reqs],
+                                num_scheduled_tokens)
+        cu_num_tokens = np.cumsum(num_scheduled_tokens)
+        cumsums_offsets = np.repeat(cu_num_tokens - num_scheduled_tokens,
+                                    num_scheduled_tokens)
+        sample_indices = cu_num_tokens - 1
+        sample_indices = torch.from_numpy(sample_indices).to(self.device,
+                                                             non_blocking=True)
+        arange = self.arange_np[:total_num_scheduled_tokens] - cumsums_offsets
+
+        positions_np = self.positions_np[:total_num_scheduled_tokens]
+        np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
+               arange,
+               out=positions_np)
+
+        self.positions[:total_num_scheduled_tokens].copy_(
+            self.positions_cpu[:total_num_scheduled_tokens], non_blocking=True)
+        positions = self.positions[:total_num_scheduled_tokens]
+        self.query_lens = torch.from_numpy(num_scheduled_tokens)
+
+        self.seq_lens_np[:num_reqs] = (
+            self.input_batch.num_computed_tokens_cpu[:num_reqs] +
+            num_scheduled_tokens)
+        seq_lens = self.seq_lens_cpu[:num_reqs]
+
+        block_table_indices = (req_indices * self.max_num_blocks_per_req +
+                               positions_np // self.block_size)
+        block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
+        block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
+        block_offsets = positions_np % self.block_size
+        np.add(block_numbers * self.block_size,
+               block_offsets,
+               out=self.slot_mapping_np[:total_num_scheduled_tokens])
+
+        attn_state = AscendAttentionState.ChunkedPrefill
+        if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
+            attn_state = AscendAttentionState.PrefillOnly
+        elif np.all(num_scheduled_tokens == 1):
+            attn_state = AscendAttentionState.DecodeOnly
+        else:
+            attn_state = AscendAttentionState.ChunkedPrefill
+
+        attn_mask = self._make_attention_mask(seq_lens=seq_lens,
+                                              query_lens=num_scheduled_tokens,
+                                              position=positions,
+                                              attn_state=attn_state)
+        self.attn_mask = attn_mask
+        self.attn_state = attn_state  # type: ignore
+
+        attn_metadata = self.attn_metadata_builder.build(  # type: ignore
+            num_reqs=num_reqs,
+            num_actual_tokens=total_num_scheduled_tokens,
+            max_query_len=max_num_scheduled_tokens,
+            common_prefix_len=None,
+        )
+
+        # Prepare input_ids
+        token_indices = (positions_np +
+                         req_indices * self.input_batch.token_ids_cpu.shape[1])
+        torch.index_select(self.input_batch.token_ids_cpu_tensor.flatten(),
+                           0,
+                           torch.from_numpy(token_indices),
+                           out=self.input_ids_cpu[:total_num_scheduled_tokens])
+        # Copy the tensors to the NPU.
+        self.input_ids[:total_num_scheduled_tokens].copy_(
+            self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
+        input_ids = self.input_ids[:total_num_scheduled_tokens]
+
+
+
+    def _process_reqs_dual_stream(
+        self,
+        scheduler_output: "SchedulerOutput",
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+    ) -> torch.Tensor:
+
+        attn_metadatas, input_ids, positions, intermediate_tensors, sample_indices = self.process_metadata_dual_stream(scheduler_output, intermediate_tensors)
+        attn_metadata1, attn_metadata2 = attn_metadatas
+        input_ids1, input_ids2 = input_ids
+        positions1, positions2 = positions
+        intermediate_tensors1, intermediate_tensors2 = intermediate_tensors
+        micro_batch_1_args = {
+            "stream_name": "micro_batch_1",
+            "wait_event": False,
+            "input_ids": input_ids1,
+            "positions": positions1,
+            "attn_metadata": attn_metadata1,
+            "intermediate_tensors": intermediate_tensors1,
+            "input_embeds": None
+        }
+        micro_batch_1_future = self.thread_pool_executor.submit(self.launch_model_with_stream, **micro_batch_1_args)
+        micro_batch_2_args = {
+            "stream_name": "micro_batch_2",
+            "wait_event": True,
+            "input_ids": input_ids2,
+            "positions": positions2,
+            "attn_metadata": attn_metadata2,
+            "intermediate_tensors": intermediate_tensors2,
+            "input_embeds": None
+        }
+        micro_batch_2_future = self.thread_pool_executor.submit(self.launch_model_with_stream, **micro_batch_2_args)
+        batch_1_result = micro_batch_1_future.result()
+        batch_2_result = micro_batch_2_future.result()
+        return torch.cat([batch_1_result, batch_2_result], dim=0)[sample_indices]
+
+
+    def launch_model_with_stream(
+        self,
+        stream_name,
+        wait_event,
+        input_ids,
+        positions,
+        attn_metadata,
+        intermediate_tensors,
+        micro_batch_idx,
+        input_embeds,
+    ) -> torch.Tensor:
+        global_context_manager = get_global_context_manager()
+        with global_context_manager.get_stream_context[stream_name]:
+            with set_forward_context(attn_metadata, self.vllm_config):
+                if wait_event:
+                    global_context_manager.wait_event()
+                hidden_states = self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    input_embeds=input_embeds)
+        return hidden_states
+
 
     def _profile_multimodal(self) -> None:
         # TODO: handle encoder-decoder models once we support them.
