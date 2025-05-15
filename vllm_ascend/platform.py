@@ -25,6 +25,8 @@ from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 from vllm.utils import supports_dynamo
 
+from vllm_ascend.utils import update_aclgraph_sizes
+
 CUSTOM_OP_ENABLED = False
 try:
     # register custom ops into torch_library here
@@ -144,6 +146,7 @@ class NPUPlatform(Platform):
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(
                 ["vllm.unified_ascend_attention_with_output"])
+            update_aclgraph_sizes(vllm_config)
 
         if vllm_config.additional_config is not None:
             enable_graph_mode = vllm_config.additional_config.get(
@@ -153,9 +156,9 @@ class NPUPlatform(Platform):
                     "enable_graph_mode is not supported because the version of torch is too low, forcing close enable_graph_mode"
                 )
                 vllm_config.additional_config["enable_graph_mode"] = False
-            if enable_graph_mode and envs.VLLM_USE_V1:
+            if enable_graph_mode and envs.VLLM_USE_V1 and envs.VLLM_MLA_DISABLE:
                 logger.warning(
-                    "NPU graph mode is still experimental and not supported for V1 currently, "
+                    "NPU graph mode is still experimental and not supported for V1 without mla currently, "
                     "it has been disabled automatically.")
                 vllm_config.additional_config["enable_graph_mode"] = False
 
@@ -175,11 +178,11 @@ class NPUPlatform(Platform):
         if cache_config:
             if cache_config.block_size is None:
                 cache_config.block_size = 128
-            if envs.VLLM_USE_V1 and cache_config.enable_prefix_caching:
+            if cache_config.enable_prefix_caching and cache_config.block_size != 128:
                 logger.warning(
-                    "Prefix caching is not supported for V1 now, disable prefix caching"
+                    "If prefix caching is enabled, block size must be set to 128."
                 )
-                cache_config.enable_prefix_caching = False
+                cache_config.block_size = 128
 
         if envs.VLLM_USE_V1:
             # Activate custom ops for v1.

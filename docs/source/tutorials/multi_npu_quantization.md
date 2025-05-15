@@ -2,7 +2,7 @@
 
 ## Run docker container:
 :::{note}
-w8a8 quantization feature is supported by v0.8.4rc2 or highter
+w8a8 quantization feature is supported by v0.8.4rc2 or higher
 :::
 
 ```{code-block} bash

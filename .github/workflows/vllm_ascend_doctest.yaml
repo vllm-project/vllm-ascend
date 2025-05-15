@@ -1,0 +1,102 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+name: 'e2e test / doctest'
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - 'main'
+      - '*-dev'
+    paths:
+      # If we are changing the doctest we should do a PR test
+      - '.github/workflows/vllm_ascend_doctest.yaml'
+      - 'tests/e2e/doctests/**'
+      - 'tests/e2e/common.sh'
+      - 'tests/e2e/run_doctests.sh'
+  schedule:
+    # Runs every 4 hours
+    - cron:  '0 */4 * * *'
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  test:
+    strategy:
+      # Each version should be tested
+      fail-fast: false
+      matrix:
+        vllm_verison: [main, v0.7.3-dev, main-openeuler, v0.7.3-dev-openeuler]
+    name: vLLM Ascend test
+    runs-on: linux-arm64-npu-1
+    container:
+      image: m.daocloud.io/quay.io/ascend/vllm-ascend:${{ matrix.vllm_verison }}
+    steps:
+      - name: Check NPU/CANN and git info
+        run: |
+          echo "====> Print NPU/CANN info"
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+          echo "====> Print vllm-ascend git info"
+          cd /vllm-workspace/vllm-ascend
+          git --no-pager log -1 || true
+          echo "====> Print vllm git info"
+          cd /vllm-workspace/vllm
+          git --no-pager log -1 || true
+
+      - name: Config OS mirrors - Ubuntu
+        if: ${{ !endsWith(matrix.vllm_verison, '-openeuler') }}
+        run: |
+          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+          apt-get update -y
+          apt install git curl -y
+
+      - name: Config OS mirrors - openEuler
+        if: ${{ endsWith(matrix.vllm_verison, '-openeuler') }}
+        run: |
+          yum update -y
+          yum install git curl -y
+
+      - name: Config pip mirrors
+        run: |
+          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v4
+
+      - name: Run vllm-ascend/tests/e2e/run_doctests.sh
+        run: |
+          # PWD: /__w/vllm-ascend/vllm-ascend
+          # Address old branch like v0.7.3:
+          if [ ! -d /vllm-workspace/vllm-ascend/tests/e2e ]; then
+            echo "Warning: the doctest path doesn't exists, copy now"
+            cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
+          fi
+
+          # Simulate container to enter directory
+          cd /workspace
+
+          # Run real test
+          echo "Test:"
+          /vllm-workspace/vllm-ascend/tests/e2e/run_doctests.sh

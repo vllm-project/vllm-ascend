@@ -15,11 +15,9 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/kernels/test_moe.py
 
-import os
 from typing import Callable, Optional
 
 import torch
-import torch.distributed as dist
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import tensor_model_parallel_all_reduce
@@ -29,7 +27,11 @@ from vllm.model_executor.layers.fused_moe.layer import (
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizeMethodBase
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
+
+VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
+USING_LCCL_COM: bool = envs_ascend.USING_LCCL_COM
 
 
 def fused_experts_with_mc2(
@@ -150,6 +152,7 @@ def fused_experts(
     topk_ids: torch.Tensor,
     top_k: int,
     expert_map: torch.Tensor = None,
+    apply_router_weight_on_input: bool = False,
 ) -> torch.Tensor:
     """
     Fused experts with top-k routing.
@@ -187,6 +190,15 @@ def fused_experts(
     device = hidden_states.device
     # assert dtype in [torch.float32, torch.float16, torch.bfloat16
     #                  ], "Only float32, float16, and bfloat16 are supported"
+
+    if apply_router_weight_on_input:
+        assert (topk_weights.dim() == 2
+                ), "`topk_weights` should be in shape (num_tokens, topk)"
+        _, topk = topk_weights.shape
+        assert (
+            topk == 1
+        ), "Only support topk=1 when `apply_router_weight_on_input` is True"
+        hidden_states = hidden_states * topk_weights.to(hidden_states.dtype)
 
     if expert_map is not None:
         # Generate token indices and flatten
@@ -289,6 +301,8 @@ def fused_experts(
             torch.zeros_like(weighted_down_out)).to(dtype)
         final_hidden_states.index_add_(0, sorted_token_indices, valid_output)
     else:
+        scales = torch.ones_like(
+            topk_weights) if apply_router_weight_on_input else topk_weights
         # TODO: Reorder device memory 2 times here, replace the current
         # implementation here when suitable operators become available.
         final_hidden_states = torch_npu.npu_moe_finalize_routing(
@@ -296,7 +310,7 @@ def fused_experts(
             skip1=None,
             skip2=None,
             bias=None,
-            scales=topk_weights,
+            scales=scales,
             expanded_src_to_dst_row=expanded_row_idx,
             export_for_source_row=topk_ids,
         )
@@ -363,9 +377,6 @@ def select_experts(
     Raises:
         ValueError: If an unsupported scoring function is provided.
     """
-    if custom_routing_function is not None:
-        raise NotImplementedError(
-            "Custom routing function is not supported now")
 
     if scoring_func == "softmax":
         # NOTE: vLLM use dtype=torch.float here
@@ -402,9 +413,18 @@ def select_experts(
                                                 k=top_k,
                                                 dim=-1,
                                                 sorted=False)
-    else:
+    elif custom_routing_function is None:
         topk_weights, topk_ids = topk_weights.topk(top_k, dim=-1)
         topk_weights = topk_weights.to(hidden_states.dtype)
+    else:
+        topk_weights, topk_ids = custom_routing_function(
+            hidden_states=hidden_states,
+            gating_output=router_logits,
+            topk=top_k,
+            renormalize=renormalize)
+        # Required by npu_moe_init_routing
+        topk_ids = topk_ids.to(torch.int32)
+        return topk_weights, topk_ids
 
     # Required by npu_moe_init_routing
     topk_ids = topk_ids.to(torch.int32)
@@ -493,7 +513,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 e_score_correction_bias=e_score_correction_bias,
             )
 
-        if os.environ.get("VLLM_ENABLE_MC2", '0') == "1" and not is_prefill:
+        if VLLM_ENABLE_MC2 and not is_prefill:
             return fused_experts_with_mc2(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -615,6 +635,7 @@ class AscendFusedMoE(FusedMoE):
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
                 is_prefill: bool,
+                enable_force_load_balance: bool = False,
                 top_k=None):
         assert self.quant_method is not None
 
@@ -623,19 +644,8 @@ class AscendFusedMoE(FusedMoE):
         else:
             real_top_k = self.top_k
 
-        if self.dp_size > 1:
-            if int(os.environ.get("VLLM_ENABLE_MC2", '0')  # type: ignore
-                   ) == 1 and not is_prefill:
-                ...
-            elif int(os.environ.get("USING_LCCL_COM",
-                                    '0')) == 1:  # type: ignore
-                hidden_states = get_dp_group().all_gather(
-                    hidden_states, 0, False)
-                router_logits = get_dp_group().all_gather(
-                    router_logits, 0, False)
-            else:
-                hidden_states = get_dp_group().all_gather(hidden_states, 0)
-                router_logits = get_dp_group().all_gather(router_logits, 0)
+        if VLLM_ENABLE_MC2 and not is_prefill:
+            ...
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
@@ -652,18 +662,12 @@ class AscendFusedMoE(FusedMoE):
             custom_routing_function=self.custom_routing_function,
             scoring_func=self.scoring_func,
             e_score_correction_bias=self.e_score_correction_bias,
-            is_prefill=is_prefill)
+            is_prefill=is_prefill,
+            enable_force_load_balance=enable_force_load_balance,
+            dp_size=self.dp_size)
 
-        if self.dp_size > 1:
-            if int(os.environ.get("VLLM_ENABLE_MC2", '0')  # type: ignore
-                   ) == 1 and not is_prefill:
-                ...
-            else:
-                final_hidden_states = dist._functional_collectives.reduce_scatter_tensor(
-                    final_hidden_states,
-                    "sum",
-                    scatter_dim=0,
-                    group=get_dp_group().device_group)
+        if VLLM_ENABLE_MC2 and not is_prefill:
+            ...
 
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
             final_hidden_states = tensor_model_parallel_all_reduce(

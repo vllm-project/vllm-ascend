@@ -64,6 +64,8 @@ from vllm.worker.model_runner_base import (
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
 
+from vllm_ascend.utils import vllm_version_is
+
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
@@ -691,15 +693,23 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
         # this may be larger than the sequence length if chunked
         # prefill is enabled.
         prefix_cache_len = len(computed_block_nums) * self.block_size
+
+        # The total number of prompt tokens in this sequence.
+        # When chunked prefill is enabled, this is the token number of
+        # computed chunks + current chunk.
+        seq_len = inter_data.seq_lens[seq_idx]
+
+        # When full hit, compute the last block rather than the last token,
+        # due to the requirements of prefix operator.
+        if seq_len <= prefix_cache_len:
+            prefix_cache_len -= self.block_size
+
         seq_group_metadata.seq_data[inter_data.seq_ids[
             seq_idx]].update_num_cached_tokens(prefix_cache_len)
 
         # The number of so far computed prompt tokens in this sequence.
         context_len = inter_data.context_lens[seq_idx]
-        # The total number of prompt tokens in this sequence.
-        # When chunked prefill is enabled, this is the token number of
-        # computed chunks + current chunk.
-        seq_len = inter_data.seq_lens[seq_idx]
+
         if prefix_cache_len <= context_len:
             # We already passed the cache hit region,
             # so do normal computation.
@@ -1007,7 +1017,10 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         pattern: Optional[str] = None,
         max_size: Optional[int] = None,
     ) -> None:
-        from vllm.model_executor.model_loader.loader import ShardedStateLoader
+        if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
+            from vllm.model_executor.model_loader.loader import ShardedStateLoader  # type: ignore[import]  # isort: skip  # noqa
+        else:
+            from vllm.model_executor.model_loader import ShardedStateLoader
         ShardedStateLoader.save_model(
             self.model,
             path,
@@ -1019,7 +1032,12 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         self,
         tensorizer_config: TensorizerConfig,
     ) -> None:
-        from vllm.model_executor.model_loader.loader import TensorizerLoader
+        if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
+            from vllm.model_executor.model_loader.loader import \
+                TensorizerLoader  # type: ignore  # noqa
+        else:
+            from vllm.model_executor.model_loader import \
+                TensorizerLoader  # type: ignore  # noqa
         TensorizerLoader.save_model(
             self.model,
             tensorizer_config=tensorizer_config,
