@@ -18,7 +18,6 @@
 from typing import Callable, Optional
 
 import torch
-import torch.distributed as dist
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import tensor_model_parallel_all_reduce
@@ -636,6 +635,7 @@ class AscendFusedMoE(FusedMoE):
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
                 is_prefill: bool,
+                enable_force_load_balance: bool = False,
                 top_k=None):
         assert self.quant_method is not None
 
@@ -644,17 +644,8 @@ class AscendFusedMoE(FusedMoE):
         else:
             real_top_k = self.top_k
 
-        if self.dp_size > 1:
-            if VLLM_ENABLE_MC2 and not is_prefill:
-                ...
-            elif USING_LCCL_COM:  # type: ignore
-                hidden_states = get_dp_group().all_gather(
-                    hidden_states, 0, False)
-                router_logits = get_dp_group().all_gather(
-                    router_logits, 0, False)
-            else:
-                hidden_states = get_dp_group().all_gather(hidden_states, 0)
-                router_logits = get_dp_group().all_gather(router_logits, 0)
+        if VLLM_ENABLE_MC2 and not is_prefill:
+            ...
 
         # Matrix multiply.
         final_hidden_states = self.quant_method.apply(
@@ -671,17 +662,12 @@ class AscendFusedMoE(FusedMoE):
             custom_routing_function=self.custom_routing_function,
             scoring_func=self.scoring_func,
             e_score_correction_bias=self.e_score_correction_bias,
-            is_prefill=is_prefill)
+            is_prefill=is_prefill,
+            enable_force_load_balance=enable_force_load_balance,
+            dp_size=self.dp_size)
 
-        if self.dp_size > 1:
-            if VLLM_ENABLE_MC2 and not is_prefill:
-                ...
-            else:
-                final_hidden_states = dist._functional_collectives.reduce_scatter_tensor(
-                    final_hidden_states,
-                    "sum",
-                    scatter_dim=0,
-                    group=get_dp_group().device_group)
+        if VLLM_ENABLE_MC2 and not is_prefill:
+            ...
 
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
             final_hidden_states = tensor_model_parallel_all_reduce(
