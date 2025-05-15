@@ -1,6 +1,7 @@
 import os
 
 import pytest
+from modelscope.hub.snapshot_download import snapshot_download
 
 from tests.conftest import VllmRunner
 from tests.singlecard.test_lora_quant import MODELS, do_sample
@@ -12,6 +13,8 @@ os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 def test_quant_model_tp_equality(tinyllama_lora_files, model):
     if model.quantization == "GPTQ":
         pytest.skip("GPTQ lora outputs are just incredibly unstable")
+
+    model.model_path = snapshot_download(repo_id=model.model_path)
     with VllmRunner(model_name=model.model_path,
                     quantization=model.quantization,
                     enable_lora=True,

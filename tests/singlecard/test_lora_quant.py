@@ -6,6 +6,7 @@ from typing import Union
 
 import pytest
 import vllm
+from modelscope.hub.snapshot_download import snapshot_download
 from vllm.lora.request import LoRARequest
 
 from tests.conftest import VllmRunner
@@ -19,7 +20,7 @@ class ModelWithQuantization:
 
 MODELS: list[ModelWithQuantization]
 MODELS = [
-    ModelWithQuantization(model_path="TinyLlama/TinyLlama-1.1B-Chat-v0.3",
+    ModelWithQuantization(model_path="vllm-ascend/TinyLlama-1.1B-Chat-v0.3",
                           quantization=None),
     # ModelWithQuantization(
     #     model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ",
@@ -110,6 +111,7 @@ def test_quant_model_lora(tinyllama_lora_files, model):
     max_tokens = 10
 
     print("creating lora adapter")
+    model.model_path = snapshot_download(repo_id=model.model_path)
     with VllmRunner(model_name=model.model_path,
                     quantization=model.quantization,
                     enable_lora=True,
