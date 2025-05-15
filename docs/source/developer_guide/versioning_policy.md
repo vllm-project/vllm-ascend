@@ -20,11 +20,11 @@ For example:
 
 Following is the Release Compatibility Matrix for vLLM Ascend Plugin:
 
-| vLLM Ascend  | vLLM         | Python | Stable CANN | PyTorch/torch_npu | MindIE Turbo |
-|--------------|--------------|----------------| --- | --- |
-| v0.8.5rc1 | v0.8.5.post1 | >= 3.9, < 3.12 | 8.1.RC1 |  2.5.1 / 2.5.1 |
-| v0.8.4rc2 | v0.8.4 | >= 3.9, < 3.12 | 8.0.0   |  2.5.1 / 2.5.1 |
-| v0.7.3    | v0.7.3 | >= 3.9, < 3.12 | 8.1.RC1 |  2.5.1 / 2.5.1 |
+| vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  | MindIE Turbo |
+|-------------|--------------|------------------|-------------|--------------------|--------------|
+| v0.8.5rc1   | v0.8.5.post1 | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1      |              |
+| v0.8.4rc2   | v0.8.4       | >= 3.9, < 3.12   | 8.0.0       | 2.5.1 / 2.5.1      |              |
+| v0.7.3      | v0.7.3       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1      |              |
 
 ## Release cadence
 
