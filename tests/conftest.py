@@ -355,3 +355,18 @@ def prompt_template(request):
 @pytest.fixture(scope="session")
 def tinyllama_lora_files():
     return snapshot_download(repo_id="vllm-ascend/tinyllama-colorist-lora")
+
+
+@pytest.fixture(scope="session")
+def tinyllama_chat():
+    return snapshot_download(repo_id="vllm-ascend/TinyLlama-1.1B-Chat-v0.3")
+
+
+# LoRA based on AWQ/GPTQ quantization model. (Ref: https://github.com/vllm-project/vllm/blob/f6518b2b487724b3aa20c8b8224faba5622c4e44/tests/lora/test_quant_model.py#L23)
+# @pytest.fixture(scope="session")
+# def tinyllama_chat_awq():
+#     return snapshot_download(repo_id="TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ")
+
+# @pytest.fixture(scope="session")
+# def tinyllama_chat_gptq():
+#     return snapshot_download(repo_id="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ")

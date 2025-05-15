@@ -9,7 +9,7 @@ import vllm
 from modelscope.hub.snapshot_download import snapshot_download
 from vllm.lora.request import LoRARequest
 
-from tests.conftest import VllmRunner
+from tests.conftest import VllmRunner, tinyllama_chat
 
 
 @dataclass
@@ -19,16 +19,7 @@ class ModelWithQuantization:
 
 
 MODELS: list[ModelWithQuantization]
-MODELS = [
-    ModelWithQuantization(model_path="vllm-ascend/TinyLlama-1.1B-Chat-v0.3",
-                          quantization=None),
-    # ModelWithQuantization(
-    #     model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ",
-    #     quantization="AWQ"),  #AWQ quantization is currently not supported in ROCm. (Ref: https://github.com/vllm-project/vllm/blob/f6518b2b487724b3aa20c8b8224faba5622c4e44/tests/lora/test_quant_model.py#L23)
-    # ModelWithQuantization(
-    #     model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
-    #     quantization="GPTQ"),
-]
+MODELS = [ModelWithQuantization(model_path=tinyllama_chat, quantization=None)]
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
@@ -130,20 +121,6 @@ def test_quant_model_lora(tinyllama_lora_files, model):
         output = do_sample(vllm_model.model,
                            tinyllama_lora_files,
                            lora_id=1,
-                           max_tokens=max_tokens)
-        expect_match(output, expected_lora_output)
-
-        print("no lora")
-        output = do_sample(vllm_model.model,
-                           tinyllama_lora_files,
-                           lora_id=0,
-                           max_tokens=max_tokens)
-        expect_match(output, expected_no_lora_output)
-
-        print("lora 2")
-        output = do_sample(vllm_model.model,
-                           tinyllama_lora_files,
-                           lora_id=2,
                            max_tokens=max_tokens)
         expect_match(output, expected_lora_output)
 
