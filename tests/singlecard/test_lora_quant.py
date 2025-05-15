@@ -6,7 +6,6 @@ from typing import Union
 
 import pytest
 import vllm
-from modelscope.hub.snapshot_download import snapshot_download
 from vllm.lora.request import LoRARequest
 
 from tests.conftest import VllmRunner, tinyllama_chat

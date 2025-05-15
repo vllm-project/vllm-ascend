@@ -1,7 +1,6 @@
 import os
 
 import pytest
-from modelscope.hub.snapshot_download import snapshot_download
 
 from tests.conftest import VllmRunner
 from tests.singlecard.test_lora_quant import MODELS, do_sample
