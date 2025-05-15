@@ -17,7 +17,6 @@
 # Adapted from vllm-project/vllm/blob/main/tests/conftest.py
 #
 
-import os
 import gc
 from typing import List, Optional, Tuple, TypeVar, Union
 
@@ -81,10 +80,6 @@ class VllmRunner:
         enforce_eager: Optional[bool] = False,
         **kwargs,
     ) -> None:
-        if (os.environ.get("VLLM_USE_MODELSCOPE", "False").lower() == "true"):
-            print("VLLM_USE_MODELSCOPE: True")
-        else:
-            print("VLLM_USE_MODELSCOPE: False")
         self.model = LLM(
             model=model_name,
             task=task,
