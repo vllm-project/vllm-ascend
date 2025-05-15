@@ -19,7 +19,7 @@ class ModelWithQuantization:
 
 MODELS: list[ModelWithQuantization]
 MODELS = [
-    ModelWithQuantization(model_path="vllm-ascend/TinyLlama-1.1B-Chat-v0.3",
+    ModelWithQuantization(model_path="TinyLlama/TinyLlama-1.1B-Chat-v0.3",
                           quantization=None),
     # ModelWithQuantization(
     #     model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ",
