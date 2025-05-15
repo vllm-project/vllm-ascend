@@ -535,7 +535,10 @@ class NPUModelRunner:
 
         block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                positions_np // self.block_size)
-        block_table_cpu = self.input_batch.block_table[0].get_cpu_tensor()
+        if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
+            block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
+        else:
+            block_table_cpu = self.input_batch.block_table[0].get_cpu_tensor()
         block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
         block_offsets = positions_np % self.block_size
         np.add(block_numbers * self.block_size,
@@ -949,16 +952,16 @@ class NPUModelRunner:
         """
         import torch_npu
         kv_caches: Dict[str, torch.Tensor] = {}
-        self.kv_cache_config = kv_cache_config
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.model_config.max_model_len,
-            max_num_batched_tokens=self.max_num_tokens,
-            device=self.device,
-            pin_memory=True,
-            vocab_size=self.model_config.get_vocab_size(),
-            kv_cache_config=kv_cache_config,
-        )
+        if not (vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1")):
+            self.input_batch = InputBatch(
+                max_num_reqs=self.max_num_reqs,
+                max_model_len=self.model_config.max_model_len,
+                max_num_batched_tokens=self.max_num_tokens,
+                device=self.device,
+                pin_memory=True,
+                vocab_size=self.model_config.get_vocab_size(),
+                kv_cache_config=kv_cache_config,
+            )
 
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
