@@ -20,10 +20,12 @@ from typing import Callable, Optional
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
-from vllm.distributed import tensor_model_parallel_all_reduce, get_tensor_model_parallel_world_size
+from vllm.distributed import (get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import get_dp_group
-from vllm.model_executor.layers.fused_moe.layer import (MoEConfig,FusedMoEParallelConfig,
-    FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
+from vllm.model_executor.layers.fused_moe.layer import (
+    FusedMoE, FusedMoEParallelConfig, MoEConfig, UnquantizedFusedMoEMethod,
+    determine_expert_map)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 
@@ -437,7 +439,7 @@ def select_experts(
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
-    def __init__(self, moe: MoEConfig):
+    def __init__(self, moe: MoEConfig = None):
         super().__init__(moe=moe)
         vllm_config = get_current_vllm_config()
 
@@ -534,6 +536,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
 
 class AscendFusedMoE(FusedMoE):
+
     def __init__(
         self,
         num_experts: int,  # Global number of experts
@@ -613,7 +616,6 @@ class AscendFusedMoE(FusedMoE):
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
-
         moe = MoEConfig(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,

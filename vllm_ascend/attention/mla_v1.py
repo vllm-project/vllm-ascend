@@ -238,8 +238,8 @@ class AscendMLAMetadataBuilder:
         # function. We should avoid GPU -> CPU sync as much as possible because
         # it blocks on all previous kernels.
         device = self.runner.device
-        block_table = (
-            self.runner.input_batch.block_table[0].get_device_tensor()[:num_reqs])
+        block_table = (self.runner.input_batch.block_table[0].
+                       get_device_tensor()[:num_reqs])
         slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
             device, non_blocking=True)
         input_positions = self.runner.positions_cpu[:num_actual_tokens].to(

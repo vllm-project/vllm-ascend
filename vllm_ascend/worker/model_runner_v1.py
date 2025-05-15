@@ -29,10 +29,6 @@ import numpy as np
 import numpy.typing as npt
 import torch
 import torch.nn as nn
-from vllm.v1.worker.block_table import BlockTable
-from vllm.v1.kv_cache_interface import (AttentionSpec, FullAttentionSpec,
-                                        KVCacheConfig, KVCacheSpec,
-                                        SlidingWindowSpec)
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
@@ -56,7 +52,7 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend.attention.attention import AttentionMaskBuilder
-from vllm_ascend.attention.attention_v1 import AscendAttentionState, AscendAttentionMetadataBuilder, AscendAttentionBackend
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import vllm_version_is
 
@@ -115,11 +111,9 @@ class NPUModelRunner:
         self.scheduler_config = vllm_config.scheduler_config
         self.chunked_prefill_enabled = vllm_config.scheduler_config.chunked_prefill_enabled
         self.device = device
-        self.pin_memory = True
 
         self.is_multimodal_model = self.model_config.is_multimodal_model
         self.block_size = vllm_config.cache_config.block_size
-        self.max_model_len = self.model_config.max_model_len
 
         self.max_num_blocks_per_req = cdiv(self.model_config.max_model_len,
                                            self.block_size)
@@ -143,8 +137,7 @@ class NPUModelRunner:
         else:
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 cache_config.cache_dtype]
-        self.attn_metadata_builders: list[AscendAttentionMetadataBuilder] = []
-        self.attn_backends: list[type[AscendAttentionBackend]] = []
+
         self.head_size = self.model_config.get_head_size()
         self.attn_backend = get_attn_backend(
             self.head_size,
@@ -476,7 +469,6 @@ class NPUModelRunner:
         # Decode-only situation.
         else:
             return None
-
 
     def _process_reqs(
         self,
@@ -960,10 +952,10 @@ class NPUModelRunner:
         self.kv_cache_config = kv_cache_config
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
-            max_model_len=self.max_model_len,
+            max_model_len=self.model_config.max_model_len,
             max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
-            pin_memory=self.pin_memory,
+            pin_memory=True,
             vocab_size=self.model_config.get_vocab_size(),
             kv_cache_config=kv_cache_config,
         )
