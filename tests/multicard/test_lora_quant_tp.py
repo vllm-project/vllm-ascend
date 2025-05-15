@@ -14,7 +14,6 @@ def test_quant_model_tp_equality(tinyllama_lora_files, model):
     if model.quantization == "GPTQ":
         pytest.skip("GPTQ lora outputs are just incredibly unstable")
 
-    model.model_path = snapshot_download(repo_id=model.model_path)
     with VllmRunner(model_name=model.model_path,
                     quantization=model.quantization,
                     enable_lora=True,

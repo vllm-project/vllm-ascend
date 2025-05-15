@@ -102,7 +102,6 @@ def test_quant_model_lora(tinyllama_lora_files, model):
     max_tokens = 10
 
     print("creating lora adapter")
-    model.model_path = snapshot_download(repo_id=model.model_path)
     with VllmRunner(model_name=model.model_path,
                     quantization=model.quantization,
                     enable_lora=True,
