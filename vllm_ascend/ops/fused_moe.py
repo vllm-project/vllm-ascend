@@ -29,7 +29,10 @@ from vllm.model_executor.layers.fused_moe.layer import (
 from vllm_ascend.utils import vllm_version_is
 
 if not (vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1")):
-    from vllm.model_executor.layers.fused_moe.layer import FusedMoEParallelConfig, MoEConfig
+    from vllm.model_executor.layers.fused_moe.layer import (
+        FusedMoEParallelConfig, MoEConfig)
+else:
+    MoEConfig = None
 
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
@@ -659,8 +662,7 @@ class AscendFusedMoE(FusedMoE):
             )
 
             if quant_config is None:
-                self.quant_method: Optional[QuantizeMethodBase] = (
-                    AscendUnquantizedFusedMoEMethod(moe))
+                self.quant_method = AscendUnquantizedFusedMoEMethod(moe)
             else:
                 self.quant_method = quant_config.get_quant_method(self, prefix)
 
