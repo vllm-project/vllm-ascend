@@ -27,6 +27,7 @@ from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import select_experts
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
+VLLM_FUSED_EXPERTS_SEQ_SPLIT_LENGTH: int = envs_ascend.VLLM_FUSED_EXPERTS_SEQ_SPLIT_LENGTH
 
 
 def apply_mlp(hidden_states_wrapper: List[torch.Tensor],
@@ -636,15 +637,24 @@ class AscendW8A8DynamicFusedMoEMethod:
                 expert_map=expert_map,
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name)
         elif dp_size == 1:
-            return fused_experts(hidden_states=x,
-                                 w1=layer.w13_weight,
-                                 w1_scale=layer.w13_weight_scale,
-                                 w2=layer.w2_weight,
-                                 w2_scale=layer.w2_weight_scale,
-                                 topk_weights=topk_weights,
-                                 topk_ids=topk_ids,
-                                 top_k=top_k,
-                                 expert_map=expert_map)
+            x_list = x.split(VLLM_FUSED_EXPERTS_SEQ_SPLIT_LENGTH)
+            topk_weights_list = topk_weights.split(
+                VLLM_FUSED_EXPERTS_SEQ_SPLIT_LENGTH)
+            topk_ids_list = topk_ids.split(VLLM_FUSED_EXPERTS_SEQ_SPLIT_LENGTH)
+            final_hidden_states_list = []
+            for i in range(len(x_list)):
+                final_hidden_states = fused_experts(
+                    hidden_states=x_list[i],
+                    w1=layer.w13_weight,
+                    w1_scale=layer.w13_weight_scale,
+                    w2=layer.w2_weight,
+                    w2_scale=layer.w2_weight_scale,
+                    topk_weights=topk_weights_list[i],
+                    topk_ids=topk_ids_list[i],
+                    top_k=top_k,
+                    expert_map=expert_map)
+                final_hidden_states_list.append(final_hidden_states)
+            return torch.concat(final_hidden_states_list)
         else:
             return fused_experts_with_all2all(hidden_states=x,
                                               w1=layer.w13_weight,
