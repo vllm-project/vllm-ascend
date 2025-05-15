@@ -1314,10 +1314,6 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
             torch._dynamo.mark_static(model_input.input_positions)
             torch._dynamo.mark_static(model_input.attn_metadata.block_tables)
             torch._dynamo.mark_static(model_input.attn_metadata.slot_mapping)
-            for kv in kv_caches:
-                if isinstance(kv, tuple):
-                    torch._dynamo.mark_static(kv[0])
-                    torch._dynamo.mark_static(kv[1])
 
         # TODO(andoorve): We can remove this once all
         # virtual engines share the same kv cache.
@@ -1397,7 +1393,24 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                 if model_input.attn_metadata is not None:
                     model_input.attn_metadata.input_positions = model_input.input_positions
                 if self.enable_graph_mode:
-                    model_kwargs["kv_caches"] = kv_caches
+                    if kv_caches[0].numel() == 0:
+                        pe_caches = None
+                    else:
+                        pe_caches = []
+                        for (i, kv) in enumerate(kv_caches):
+                            if self.enable_graph_mode and len(kv.shape) == 4:
+                                (num_blocks, block_size, num_kv_heads, head_size) = kv.shape
+                                flatten_cache = kv.view(-1)
+                                split_index = num_blocks * block_size * num_kv_heads * 512
+                                nope_cache = flatten_cache[:split_index]
+                                rope_cache = flatten_cache[split_index:]
+                                nope_cache = nope_cache.view(num_blocks, block_size, num_kv_heads, 512)
+                                rope_cache = rope_cache.view(num_blocks, block_size, num_kv_heads, 64)
+                                # kv_caches[i] = (nope_cache, rope_cache)
+                                pe_caches.append((nope_cache, rope_cache))
+                                torch._dynamo.mark_static(pe_caches[i][0])
+                                torch._dynamo.mark_static(pe_caches[i][1])
+                    model_kwargs["kv_caches"] = pe_caches
                     model_kwargs["attn_metadata"] = model_input.attn_metadata
                 hidden_or_intermediate_states = model_executable(
                     input_ids=model_input.input_tokens,

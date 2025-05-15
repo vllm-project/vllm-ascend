@@ -302,13 +302,25 @@ class SimpleConnector(KVConnectorBase):
                 layer = model_executable.model.layers[i]
 
                 if self.is_deepseek_mla and self.use_mla_opt:
-                    layer.self_attn.attn = layer.self_attn.mla_attn
-                    key_cache = kv_cache
-                    slots = slot_mapping[start_pos:end_pos]
-                    sliced_key = keys[i - model_executable.model.start_layer]
-                    torch_npu._npu_reshape_and_cache_siso(key=sliced_key,
-                                                          key_cache=key_cache,
-                                                          slot_indices=slots)
+                    if self.enable_graph_mode:
+                        num_blocks, block_size, num_head, head_dim = kv_cache.size()
+                        kv_cache = kv_cache.view(-1)
+                        receive_key = keys[i - model_executable.model.start_layer].view(-1)
+                        slice_receive_size = num_tokens * num_head * 512
+                        slice_paged_size = num_blocks * block_size * num_head * 512
+                        receive_nope = receive_key[:slice_receive_size].view(num_tokens, num_head, 512)
+                        receive_rope = receive_key[slice_receive_size:].view(num_tokens, num_head, 64)
+                        paged_nope = kv_cache[:slice_paged_size].view(num_blocks, block_size, num_head, 512)
+                        paged_rope = kv_cache[slice_paged_size:].view(num_blocks, block_size, num_head, 64)
+                        torch_npu._npu_reshape_and_cache(key=receive_nope, value=receive_rope, key_cache=paged_nope, value_cache=paged_rope, slot_indices=slot_mapping[start_pos:end_pos])
+                    else:
+                        layer.self_attn.attn = layer.self_attn.mla_attn
+                        key_cache = kv_cache
+                        slots = slot_mapping[start_pos:end_pos]
+                        sliced_key = keys[i - model_executable.model.start_layer]
+                        torch_npu._npu_reshape_and_cache_siso(key=sliced_key,
+                                                            key_cache=key_cache,
+                                                            slot_indices=slots)
                 else:
                     key_cache, value_cache = kv_cache[0], kv_cache[1]
                     sliced_key = keys[i - model_executable.model.start_layer]
