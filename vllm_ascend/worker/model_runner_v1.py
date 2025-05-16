@@ -517,6 +517,7 @@ class NPUModelRunner:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 total_num_scheduled_tokens)
         else:
+            # Eager mode.
             num_input_tokens = total_num_scheduled_tokens
 
         modified_batch = self.attn_metadata_builder.reorder_batch(
@@ -604,16 +605,6 @@ class NPUModelRunner:
             common_prefix_len=None,
             **extra_builder_kwargs,
         )
-        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        if (self.use_npu_graph
-                and num_scheduled_tokens <= self.npugraph_batch_sizes[-1]):
-            # Use piecewise NPU graphs.
-            # Add padding to the batch size.
-            num_input_tokens = self.vllm_config.pad_for_npugraph(
-                num_scheduled_tokens)
-        else:
-            # Eager mode.
-            num_input_tokens = num_scheduled_tokens
         attn_metadata.num_input_tokens = num_input_tokens
 
         # Prepare input_ids
@@ -694,7 +685,7 @@ class NPUModelRunner:
             sample_indices = spec_decode_metadata.logits_indices
 
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
-            num_scheduled_tokens, sample_indices)
+            total_num_scheduled_tokens, sample_indices)
 
     def _calc_spec_decode_metadata(
         self,
