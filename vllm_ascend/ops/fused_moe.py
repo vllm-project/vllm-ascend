@@ -448,7 +448,10 @@ def select_experts(
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def __init__(self, moe: MoEConfig = None):
-        super().__init__(moe=moe)
+        if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
+            super().__init__()
+        else:
+            super().__init__(moe=moe)
         vllm_config = get_current_vllm_config()
 
         ep_group = get_ep_group()
