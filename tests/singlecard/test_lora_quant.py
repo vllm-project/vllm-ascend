@@ -18,7 +18,9 @@ class ModelWithQuantization:
 
 
 MODELS: list[ModelWithQuantization]
-MODELS = [ModelWithQuantization(model_path=tinyllama_chat(), quantization=None)]
+MODELS = [
+    ModelWithQuantization(model_path=tinyllama_chat(), quantization=None)
+]
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
