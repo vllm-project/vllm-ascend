@@ -22,11 +22,16 @@ import torch
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 
-from vllm_ascend.platform import CUSTOM_OP_ENABLED
+from vllm_ascend.utils import try_register_lib
 
 
 def custom_rotary_embedding_enabled(query, neox_style, head_size):
-    return query.dtype == torch.float16 and neox_style and head_size % 32 == 0 and CUSTOM_OP_ENABLED
+    try_register_lib(
+        "vllm_ascend.vllm_ascend_C",
+        exc_info=
+        "Warning: Failed to register custom ops, all custom ops will be disabled."
+    )
+    return query.dtype == torch.float16 and neox_style and head_size % 32 == 0
 
 
 def rope_forward_oot(
