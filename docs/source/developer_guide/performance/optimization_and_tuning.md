@@ -15,16 +15,16 @@ cd /tmp/
 wget https://repo.oepkgs.net/ascend/pytorch/vllm/lib/libcrypto.so.1.1
 wget https://repo.oepkgs.net/ascend/pytorch/vllm/lib/libomp.so
 wget https://repo.oepkgs.net/ascend/pytorch/vllm/lib/libssl.so.1.1
-wget https://repo.oepkgs.net/ascend/pytorch/vllm/python/py311_bisheng.tar.gz
+wget https://repo.oepkgs.net/ascend/pytorch/vllm/python/py310_bisheng.tar.gz
 
 mv /tmp/*.so* /usr/local/lib
-tar -zxvf /tmp/py311_bisheng.* -C /usr/local/
-mv /usr/local/py311_bisheng/ /usr/local/python
-sed -i "1c#\!/usr/local/python/bin/python3.11" /usr/local/python/bin/pip3
-sed -i "1c#\!/usr/local/python/bin/python3.11" /usr/local/python/bin/pip3.11
+tar -zxvf /tmp/py310_bisheng.* -C /usr/local/
+mv /usr/local/py310_bisheng/ /usr/local/python
+sed -i "1c#\!/usr/local/python/bin/python3.10" /usr/local/python/bin/pip3
+sed -i "1c#\!/usr/local/python/bin/python3.10" /usr/local/python/bin/pip3.10
 ln -sf /usr/local/python/bin/python3 /usr/bin/python
 ln -sf /usr/local/python/bin/python3 /usr/bin/python3
-ln -sf /usr/local/python/bin/python3.11 /usr/bin/python3.11
+ln -sf /usr/local/python/bin/python3.10 /usr/bin/python3.10
 ln -sf /usr/local/python/bin/pip3 /usr/bin/pip3
 ln -sf /usr/local/python/bin/pip3 /usr/bin/pip
 rm -rf /tmp/*
@@ -41,7 +41,7 @@ Install compiled torch package:
 
 ```bash
 cd /tmp/
-wget https://repo.oepkgs.net/ascend/pytorch/vllm/torch/torch-2.5.1-cp311-cp311-linux_aarch64.whl
+wget https://repo.oepkgs.net/ascend/pytorch/vllm/torch/torch-2.5.1-cp310-cp310-linux_aarch64.whl
 pip install /tmp/torch-2.5.1*.whl --force-reinstall --no-deps
 pip install pandas gevent sacrebleu rouge_score pybind11 pytest
 ```
@@ -54,7 +54,7 @@ Install compiled torch-npu package:
 
 ```bash
 cd /tmp/
-wget https://repo.oepkgs.net/ascend/pytorch/vllm/torch/torch_npu-2.5.1-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+wget https://repo.oepkgs.net/ascend/pytorch/vllm/torch/torch_npu-2.5.1-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 pip install /tmp/torch_npu-*.whl --force-reinstall --no-deps
 pip cache purge
 rm -rf /tmp/*
