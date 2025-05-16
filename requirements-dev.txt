@@ -3,6 +3,7 @@
 modelscope
 openai
 pytest >= 6.0
+pytest-timeout
 pytest-asyncio
 lm-eval
 ray
