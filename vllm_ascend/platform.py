@@ -15,8 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import logging
-import os
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
@@ -27,14 +25,6 @@ from vllm.platforms import Platform, PlatformEnum
 from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD, update_aclgraph_sizes
 
 CUSTOM_OP_ENABLED = False
-try:
-    # register custom ops into torch_library here
-    import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
-    CUSTOM_OP_ENABLED = True
-except ImportError as e:
-    logging.warning(
-        "Failed to import 'vllm_ascend.vllm_ascend_C': %s. All custom ops will be disabled. ",
-        e)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -43,8 +33,6 @@ else:
     ModelConfig = None
     VllmConfig = None
     FlexibleArgumentParser = None
-
-os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
 
 
 class NPUPlatform(Platform):
