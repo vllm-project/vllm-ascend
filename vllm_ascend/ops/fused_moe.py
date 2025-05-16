@@ -198,6 +198,7 @@ def fused_experts(
     num_experts = w1.shape[0]
     dtype = hidden_states.dtype
     device = hidden_states.device
+    topk_weights = topk_weights.to(dtype)
     # assert dtype in [torch.float32, torch.float16, torch.bfloat16
     #                  ], "Only float32, float16, and bfloat16 are supported"
 
