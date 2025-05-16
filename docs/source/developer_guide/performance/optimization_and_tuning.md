@@ -30,7 +30,6 @@ ln -sf /usr/local/python/bin/pip3 /usr/bin/pip
 rm -rf /tmp/*
 
 export PATH=/usr/bin:/usr/local/python/bin:$PATH
-export LANG C.UTF-8
 ```
 
 :::{note}
@@ -140,7 +139,7 @@ Find more details [here](https://www.hiascend.com/document/detail/zh/mindie/20RC
 
 ## Benchmark
 
-### Environmental Preparation
+### Environment Preparation
 
 ```bash
 # Install necessary dependencies
