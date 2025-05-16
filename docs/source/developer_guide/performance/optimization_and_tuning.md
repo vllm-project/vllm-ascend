@@ -8,19 +8,61 @@ To achieve ultimate performance on vllm-asend `v0.7.3` with mindie-turbo `2.0rc1
 
 ### 1. Compiler Optimization
 
+Install compiled python packages:
+
 ```bash
-# Install compiled python package
-...
-# You can also reproduce the build follow: https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html
+cd /tmp/
+wget https://repo.oepkgs.net/ascend/pytorch/vllm/lib/libcrypto.so.1.1
+wget https://repo.oepkgs.net/ascend/pytorch/vllm/lib/libomp.so
+wget https://repo.oepkgs.net/ascend/pytorch/vllm/lib/libssl.so.1.1
+wget https://repo.oepkgs.net/ascend/pytorch/vllm/python/py311_bisheng.tar.gz
 
-# Install optimized torch
-...
-# You can also reproduce the build follow: https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0064.html
+mv /tmp/*.so* /usr/local/lib
+tar -zxvf /tmp/py311_bisheng.* -C /usr/local/
+mv /usr/local/py311_bisheng/ /usr/local/python
+sed -i "1c#\!/usr/local/python/bin/python3.11" /usr/local/python/bin/pip3
+sed -i "1c#\!/usr/local/python/bin/python3.11" /usr/local/python/bin/pip3.11
+ln -sf /usr/local/python/bin/python3 /usr/bin/python
+ln -sf /usr/local/python/bin/python3 /usr/bin/python3
+ln -sf /usr/local/python/bin/python3.11 /usr/bin/python3.11
+ln -sf /usr/local/python/bin/pip3 /usr/bin/pip3
+ln -sf /usr/local/python/bin/pip3 /usr/bin/pip
+rm -rf /tmp/*
 
-# Install optimized torch-npu
-...
-# You can also reproduce the build follow: https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0065.html
+export PATH=/usr/bin:/usr/local/python/bin:$PATH
+export LANG C.UTF-8
 ```
+
+:::{note}
+You can also reproduce the build follow this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html).
+:::
+
+Install compiled torch package:
+
+```bash
+cd /tmp/
+wget https://repo.oepkgs.net/ascend/pytorch/vllm/torch/torch-2.5.1-cp311-cp311-linux_aarch64.whl
+pip install /tmp/torch-2.5.1*.whl --force-reinstall --no-deps
+pip install pandas gevent sacrebleu rouge_score pybind11 pytest
+```
+
+:::{note}
+You can also reproduce the build follow this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0064.html).
+:::
+
+Install compiled torch-npu package:
+
+```bash
+cd /tmp/
+wget https://repo.oepkgs.net/ascend/pytorch/vllm/torch/torch_npu-2.5.1-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+pip install /tmp/torch_npu-*.whl --force-reinstall --no-deps
+pip cache purge
+rm -rf /tmp/*
+```
+
+:::{note}
+You can also reproduce the build follow this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0065.html).
+:::
 
 ### 2. OS Optimization
 
@@ -57,16 +99,22 @@ Find more details [here](https://www.hiascend.com/document/detail/zh/Pytorch/700
 
 ### 3. torch-npu Optimization
 
+Memory optimization:
+
 ```bash
-# Memory optimization:
 # Upper limit of memory block splitting allowed (MB), Setting this parameter can prevent large memory blocks from being split.
 export PYTORCH_NPU_ALLOC_CONF="max_split_size_mb:250"
+
 # When operators on the communication stream have dependencies, they all need to be ended before being released for reuse. The logic of multi-stream reuse is to release the memory on the communication stream in advance so that the computing stream can be reused.
 export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+```
 
-# Schedule optimization:
+Schedule optimization:
+
+```bash
 # Optimize operator delivery queue, this will affect the memory peak value, and may degrade if the memory is tight.
 export TASK_QUEUE_ENABLE=2
+
 # This will greatly improve the CPU bottleneck model and ensure the same performance for the NPU bottleneck model.
 export CPU_AFFINITY_CONF=1
 ```
@@ -117,10 +165,11 @@ python -m vllm.entrypoints.openai.api_server \
 --additional-config '{"ascend_scheduler_config":{}}'
 ```
 
-> NOTE:
->
-> - Set `load-format=dummy` for a lightweight test, we don't need real download weights.
-> - You can pass `--additional-config '{"ascend_scheduler_config":{}}'` param to vllm when launch the server with ascend scheduler, which can accelerate the inference for V1 engine. Find more details [here](https://github.com/vllm-project/vllm-ascend/issues/788).
+:::{note}
+Set `load-format=dummy` for a lightweight test, we don't need real download weight.
+
+You can pass `--additional-config '{"ascend_scheduler_config":{}}'` param to vllm when launch the server with ascend scheduler, which can accelerate the inference for V1 engine. Find more details [here](https://github.com/vllm-project/vllm-ascend/issues/788).
+:::
 
 Run benchmark for online serving (need wait for vllm serving ready):
 
