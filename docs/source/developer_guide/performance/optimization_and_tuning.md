@@ -4,63 +4,41 @@
 
 To achieve ultimate performance on vllm-asend `v0.7.3` with mindie-turbo `2.0rc1`, we have made efforts to optimize our compilation, environment variables, application configs, etc.
 
+## Environment Preparation
+
+```bash
+# Install necessary dependencies
+pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+pip install mindie-turbo pandas datasets gevent sacrebleu rouge_score pybind11 pytest
+
+export HF_ENDPOINT="https://hf-mirror.com"
+export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+export VLLM_USE_V1=1
+```
+
 ## Optimizations
 
 ### 1. Compiler Optimization
 
-Install compiled python packages:
+Install compiled torch and torch-npu package:
 
 ```bash
 cd /tmp/
-wget https://repo.oepkgs.net/ascend/pytorch/vllm/lib/libcrypto.so.1.1
 wget https://repo.oepkgs.net/ascend/pytorch/vllm/lib/libomp.so
-wget https://repo.oepkgs.net/ascend/pytorch/vllm/lib/libssl.so.1.1
-wget https://repo.oepkgs.net/ascend/pytorch/vllm/python/py310_bisheng.tar.gz
-
 mv /tmp/*.so* /usr/local/lib
-tar -zxvf /tmp/py310_bisheng.* -C /usr/local/
-mv /usr/local/py310_bisheng/ /usr/local/python
-sed -i "1c#\!/usr/local/python/bin/python3.10" /usr/local/python/bin/pip3
-sed -i "1c#\!/usr/local/python/bin/python3.10" /usr/local/python/bin/pip3.10
-ln -sf /usr/local/python/bin/python3 /usr/bin/python
-ln -sf /usr/local/python/bin/python3 /usr/bin/python3
-ln -sf /usr/local/python/bin/python3.10 /usr/bin/python3.10
-ln -sf /usr/local/python/bin/pip3 /usr/bin/pip3
-ln -sf /usr/local/python/bin/pip3 /usr/bin/pip
-rm -rf /tmp/*
 
-export PATH=/usr/bin:/usr/local/python/bin:$PATH
-```
-
-:::{note}
-You can also reproduce the build follow this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html).
-:::
-
-Install compiled torch package:
-
-```bash
-cd /tmp/
 wget https://repo.oepkgs.net/ascend/pytorch/vllm/torch/torch-2.5.1-cp310-cp310-linux_aarch64.whl
 pip install /tmp/torch-2.5.1*.whl --force-reinstall --no-deps
-pip install pandas gevent sacrebleu rouge_score pybind11 pytest
-```
 
-:::{note}
-You can also reproduce the build follow this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0064.html).
-:::
-
-Install compiled torch-npu package:
-
-```bash
-cd /tmp/
 wget https://repo.oepkgs.net/ascend/pytorch/vllm/torch/torch_npu-2.5.1-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 pip install /tmp/torch_npu-*.whl --force-reinstall --no-deps
+
 pip cache purge
 rm -rf /tmp/*
 ```
 
 :::{note}
-You can also reproduce the build follow this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0065.html).
+You can also reproduce the torch build follow this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0064.html) or reproduce the torch-npu build follow this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0065.html).
 :::
 
 ### 2. OS Optimization
@@ -82,8 +60,7 @@ Make the priority of `tcmalloc` higher:
 
 ```bash
 export LD_PRELOAD="$LD_PRELOAD:<the location of libtcmalloc.so>"
-# For example:
-# export LD_PRELOAD="$LD_PRELOAD:/usr/local/lib/lib/libtcmalloc.so"
+# For example: export LD_PRELOAD="$LD_PRELOAD:/usr/lib/aarch64-linux-gnu/libtcmalloc.so"
 ```
 
 Verify your configuration:
@@ -139,16 +116,6 @@ Find more details [here](https://www.hiascend.com/document/detail/zh/mindie/20RC
 
 ## Benchmark
 
-### Environment Preparation
-
-```bash
-# Install necessary dependencies
-pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
-pip install mindie-turbo pandas datasets
-
-export HF_ENDPOINT="https://hf-mirror.com"
-```
-
 ### Usage
 
 Launch vllm server:
@@ -190,31 +157,51 @@ Before optimization:
 ```bash
 ============ Serving Benchmark Result ============
 Successful requests:                     200       
-Benchmark duration (s):                  187.54    
+Benchmark duration (s):                  188.33    
 Total input tokens:                      40000     
 Total generated tokens:                  25600     
-Request throughput (req/s):              1.07      
-Output token throughput (tok/s):         136.51    
-Total Token throughput (tok/s):          349.79    
+Request throughput (req/s):              1.06      
+Output token throughput (tok/s):         135.93    
+Total Token throughput (tok/s):          348.33    
 ---------------Time to First Token----------------
-Mean TTFT (ms):                          63.83     
-Median TTFT (ms):                        63.35     
-P99 TTFT (ms):                           82.36     
+Mean TTFT (ms):                          51.93     
+Median TTFT (ms):                        53.35     
+P99 TTFT (ms):                           67.70     
 -----Time per Output Token (excl. 1st token)------
-Mean TPOT (ms):                          22.22     
-Median TPOT (ms):                        22.35     
-P99 TPOT (ms):                           23.83     
+Mean TPOT (ms):                          27.56     
+Median TPOT (ms):                        27.51     
+P99 TPOT (ms):                           28.86     
 ---------------Inter-token Latency----------------
-Mean ITL (ms):                           22.22     
-Median ITL (ms):                         21.63     
-P99 ITL (ms):                            48.08     
+Mean ITL (ms):                           27.56     
+Median ITL (ms):                         27.45     
+P99 ITL (ms):                            31.65     
 ==================================================
 ```
 
-After all optimization:
+After optimization:
 
 ```bash
-...
+============ Serving Benchmark Result ============
+Successful requests:                     200       
+Benchmark duration (s):                  187.85    
+Total input tokens:                      40000     
+Total generated tokens:                  25600     
+Request throughput (req/s):              1.06      
+Output token throughput (tok/s):         136.28    
+Total Token throughput (tok/s):          349.21    
+---------------Time to First Token----------------
+Mean TTFT (ms):                          44.92     
+Median TTFT (ms):                        44.53     
+P99 TTFT (ms):                           64.20     
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          24.70     
+Median TPOT (ms):                        24.80     
+P99 TPOT (ms):                           26.03     
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           24.70     
+Median ITL (ms):                         24.04     
+P99 ITL (ms):                            50.68     
+==================================================
 ```
 
-Summary: ...
+Summary: The TTFT is reduced by approximately **13.5%**, the TPOT and ITL is reduced by approximately **10.4%**.
