@@ -35,7 +35,7 @@ os.environ["VLLM_USE_MODELSCOPE"] = "True"
     ("Qwen/QwQ-32B", "mp"),
     ("deepseek-ai/DeepSeek-V2-Lite", "mp"),
 ])
-@pytest.mark.timeout(10*60*60)
+@pytest.mark.timeout(10 * 60 * 60)
 def test_models_distributed(model: str,
                             distributed_executor_backend: str) -> None:
     example_prompts = [
