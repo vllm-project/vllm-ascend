@@ -99,6 +99,7 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import platform  # noqa: F401
     else:
         from vllm_ascend.patch import worker  # noqa: F401
+        from vllm_ascend.patch import spec_decode  # noqa: F401
 
 
 def vllm_version_is(target_vllm_version: str):
