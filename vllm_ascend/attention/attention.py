@@ -1166,7 +1166,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
 
         # TODO: Replace the env with more flexible expressions
         if self.enable_graph_mode:
-            if len(kv_cache) > 0 and kv_cache[0].numel(
+            if kv_cache is not None and len(kv_cache) > 0 and kv_cache[0].numel(
             ) > 0 and attn_metadata.num_prefills > 0:
                 slots = attn_metadata.slot_mapping
                 # NOTE: Separate the kv cache in advance to avoid OOM or other issues
