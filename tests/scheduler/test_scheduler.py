@@ -96,12 +96,8 @@ def create_scheduler(
     )
     cache_config.num_gpu_blocks = 10000
     return AscendScheduler(
-        scheduler_config,
-        model_config,
-        cache_config,
-        lora_config=None,
+        vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
-        log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
 
@@ -126,12 +122,11 @@ def create_requests(num_requests: int,
             mm_inputs = None
         request = Request(
             request_id=f"{i}",
-            prompt=None,
             prompt_token_ids=[i] * num_tokens,
-            sampling_params=sampling_params,
             multi_modal_inputs=mm_inputs,
             multi_modal_placeholders=mm_position,
             multi_modal_hashes=None,
+            sampling_params=sampling_params,
             eos_token_id=EOS_TOKEN_ID,
             arrival_time=0,
         )
