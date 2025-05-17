@@ -14,3 +14,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+
+import vllm_ascend.patch.platform.patch_main.patch_vllm_config  # noqa
