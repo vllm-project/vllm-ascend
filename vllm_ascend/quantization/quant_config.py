@@ -38,8 +38,7 @@ from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ops.fused_moe import AscendUnquantizedFusedMoEMethod
-
-from .quantizer import AscendQuantizer
+from vllm_ascend.quantization.quantizer import AscendQuantizer
 
 
 @register_quantization_config("ascend")

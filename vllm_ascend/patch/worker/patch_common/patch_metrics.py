@@ -15,12 +15,8 @@
 # limitations under the License.
 #
 
-from typing import Callable
-
 import torch
 from vllm.spec_decode.metrics import AsyncMetricsCollector
-
-Timer = Callable[[], float]
 
 
 def _copy_rejsample_metrics_async(self) -> torch.npu.Event:

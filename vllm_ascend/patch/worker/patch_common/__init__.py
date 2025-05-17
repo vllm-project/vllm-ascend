@@ -18,6 +18,7 @@
 # patch_utils should be the first import, because it will be used by other
 # patch files.
 import vllm_ascend.patch.worker.patch_common.patch_utils  # noqa isort:skip
+import vllm_ascend.patch.worker.patch_common.patch_cache_engine  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_distributed  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_metrics  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_minicpm  # noqa
