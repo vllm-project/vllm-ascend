@@ -25,8 +25,7 @@ from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 from vllm.utils import supports_dynamo
 
-from vllm_ascend.quantization.quant_config import ASCEND_QUATIZATION_METHOD
-from vllm_ascend.utils import update_aclgraph_sizes
+from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD, update_aclgraph_sizes
 
 CUSTOM_OP_ENABLED = False
 try:
