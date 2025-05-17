@@ -495,6 +495,9 @@ class AscendMLAImpl(MLAAttentionImpl):
     ) -> torch.Tensor:
         assert attn_metadata.prefill is not None
 
+        # TODO Don't know why PrefillCacheHit exists after turning on mtp
+        if attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
+            attn_metadata.attn_state = AscendAttentionState.PrefillNoCache
         num_tokens = query.size(0)
         attn_output = None
         # Here is only 2 possibility of input, ChunkedPrefill or PrefillNoCache

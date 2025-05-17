@@ -53,6 +53,8 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.patch.worker.patch_common.patch_v1_mtp_proposer import \
+    MtpProposer
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import vllm_version_is
 
@@ -175,6 +177,13 @@ class NPUModelRunner:
         self.kv_caches: List[torch.Tensor] = []
         # req_id -> (input_id -> encoder_output)
         self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
+
+        self.use_spec_decode = False
+        if self.speculate_config:
+            self.use_spec_decode = True
+            if get_pp_group().is_last_rank:
+                if self.speculative_config.method == 'mtp':
+                    self.drafter = MtpProposer(self.vllm_config, self)
 
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}

@@ -85,6 +85,26 @@
 #    Future Plan:
 #       Remove those patch when vllm merged them
 #
+# ** File: platform/patch_common/patch_arg_utils.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.engine.arg_utils.EngineArgs._is_v1_supported_oracle()`
+#    Why:
+#       In order to adapt to the mtp function of v1, a new patch is added.
+#    How：
+#       Add verification related to mtp function.
+#    Future Plan:
+#       Delete patch to follow the version plan.
+#
+# ** File: platform/patch_common/patch_config.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.config.SpeculativeConfig.__post_init__()`
+#    Why:
+#       In order to adapt to the mtp function of v1, a new patch is added.
+#    How：
+#       Add verification related to mtp function.
+#    Future Plan:
+#       Delete patch to follow the version plan.
+#
 #
 # * Worker Patch:
 # ===============
@@ -158,4 +178,16 @@
 #       - https://github.com/vllm-project/vllm-ascend/pull/395
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm and vllm-ascend.
+#
+# ** File: worker/patch_common/patch_v1_mtp_proposer.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.spec_decode`
+#    Why:
+#       In order to adapt to the mtp function of v1, Because vllm has not yet merged into the
+#       implementation of mtp in v1, we will implement mtp_proposer separately.
+#    How：
+#       Add verification related to mtp function.
+#    Future Plan:
+#       When vllm is merged into mtp, only the special parts will be modified.
+#       Delete patch to follow the version plan.
 #

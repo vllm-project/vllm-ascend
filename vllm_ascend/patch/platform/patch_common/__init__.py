@@ -15,4 +15,6 @@
 # limitations under the License.
 #
 
+import vllm_ascend.patch.platform.patch_common.patch_arg_utils
+import vllm_ascend.patch.platform.patch_common.patch_config
 import vllm_ascend.patch.platform.patch_common.patch_distributed  # noqa
