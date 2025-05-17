@@ -25,7 +25,8 @@ from torch.distributed.distributed_c10d import (Backend, PrefixStore,
                                                 _get_default_timeout,
                                                 is_nccl_available)
 from torch.distributed.rendezvous import rendezvous
-from vllm.config import ParallelConfig
+from vllm.config import ParallelConfig, VllmConfig
+from vllm.v1.engine.core import DPEngineCoreProc
 
 
 def ascend_destroy_model_parallel():
@@ -171,7 +172,7 @@ def parallel_config_get_dp_port(self) -> int:
     return port
 
 
-def ascend_stateless_init_dp_group(self) -> "ProcessGroup":
+def stateless_init_dp_group(self) -> "ProcessGroup":
     # TODO(Yizhou): Currently we have to set the backend to gloo
     # because in vllm.config.ParallelConfig.has_unfinished_dp the
     # device is set to cpu. We need to fix this in the future.
@@ -186,7 +187,21 @@ def ascend_stateless_init_dp_group(self) -> "ProcessGroup":
 
     return dp_group
 
+def _init_data_parallel(self, vllm_config: VllmConfig):
+    # Configure NPUs and stateless process group for data parallel.
+    dp_rank = vllm_config.parallel_config.data_parallel_rank
+    dp_size = vllm_config.parallel_config.data_parallel_size
+    local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
+
+    assert dp_size > 1
+    assert 0 <= local_dp_rank <= dp_rank < dp_size
+
+    self.local_dp_rank = local_dp_rank
+    self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
+    self.current_wave = 0
+
 
 vllm.distributed.parallel_state.destroy_model_parallel = ascend_destroy_model_parallel
+DPEngineCoreProc._init_data_parallel = _init_data_parallel
 ParallelConfig.get_next_dp_init_port = parallel_config_get_dp_port
-ParallelConfig.stateless_init_dp_group = ascend_stateless_init_dp_group
+ParallelConfig.stateless_init_dp_group = stateless_init_dp_group

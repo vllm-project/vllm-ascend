@@ -569,7 +569,7 @@ class NPUModelRunner:
                block_offsets,
                out=self.slot_mapping_np[:total_num_scheduled_tokens])
 
-        if self.chunked_prefill_enabled:
+        if True or self.chunked_prefill_enabled:
             attn_state = AscendAttentionState.ChunkedPrefill
         elif np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillNoCache
