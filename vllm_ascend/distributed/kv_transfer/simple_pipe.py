@@ -98,7 +98,7 @@ class SimplePipe(KVPipeBase):
         if proxy_ip == "" or proxy_port == "":
             self.proxy_address = ""
         else:
-            self.proxy_address = proxy_ip + ":" + proxy_port
+            self.proxy_address = proxy_ip + ":" + str(proxy_port)
 
         self._register_thread = None
         if port_offset == 0 and self.proxy_address != "":
