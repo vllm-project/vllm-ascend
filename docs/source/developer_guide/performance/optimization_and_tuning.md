@@ -230,17 +230,18 @@ python benchmark_serving.py \
 
 We used `vllm-ascend:v0.7.3` as our baseline and compared acceleration effects of different combinations of optimization methods. We completed our benchmark on single NPU and the results are shown below.
 
-.. image:: ../images/benchmark_results.png
+.. image:: ./images/benchmark_results.png
+    :align: center
 
 Details of our combinations of optimization methods:
 
-- Group A (baseline): vllm-ascend only
-- Group B: vllm-ascend + mindie-trubo
-- Group C: vllm-ascend + optimized python/torch/torch-npu
-- Group D: vllm-ascend + mindie-trubo + optimized python/torch/torch-npu
-- Group E: vllm-ascend + mindie-trubo + optimized python/torch/torch-npu + tcmalloc
-- Group F: Group E + PYTORCH_NPU_ALLOC_CONF="max_split_size_mb:250"
-- Group G: Group E + PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-- Group H: Group E + TASK_QUEUE_ENABLE=2
-- Group I: Group E + CPU_AFFINITY_CONF=1
-- Group J: Group E + TASK_QUEUE_ENABLE=2 + ascend-scheduler
+- **Group A (baseline):** vllm-ascend only
+- **Group B:** vllm-ascend + mindie-trubo
+- **Group C:** vllm-ascend + optimized python/torch/torch-npu
+- **Group D:** vllm-ascend + mindie-trubo + optimized python/torch/torch-npu
+- **Group E:** vllm-ascend + mindie-trubo + optimized python/torch/torch-npu + tcmalloc
+- **Group F:** Group E + PYTORCH_NPU_ALLOC_CONF="max_split_size_mb:250"
+- **Group G:** Group E + PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
+- **Group H:** Group E + TASK_QUEUE_ENABLE=2
+- **Group I:** Group E + CPU_AFFINITY_CONF=1
+- **Group J:** Group E + TASK_QUEUE_ENABLE=2 + ascend-scheduler
