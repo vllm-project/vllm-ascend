@@ -230,8 +230,7 @@ python benchmark_serving.py \
 
 We used `vllm-ascend:v0.7.3` as our baseline and compared acceleration effects of different combinations of optimization methods. We completed our benchmark on single NPU and the results are shown below.
 
-.. image:: ./images/benchmark_results.png
-    :align: center
+![](./images/benchmark_results.png)
 
 Details of our combinations of optimization methods:
 
