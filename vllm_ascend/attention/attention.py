@@ -461,7 +461,7 @@ class AscendMetadata(AttentionMetadata):
             self.seq_lens[i] += 1
         self.max_decode_seq_len = max(self.seq_lens)
         if CUSTOM_OP_ENABLED:
-            """Advance a step on NPU for existing inputs for a multi-step runner if custom ops is enabled"""
+            #advance a step on NPU for existing inputs for a multi-step runner if custom ops is enabled
             torch.ops._C.advance_step_flashattn_ascendc(
                 num_seqs=num_seqs,
                 num_queries=num_queries,
@@ -473,7 +473,7 @@ class AscendMetadata(AttentionMetadata):
                 slot_mapping=self.slot_mapping,
                 block_tables=self.block_tables)
         else:
-            """Use traditional Pytorch method for updating these tensors. """
+            # use traditional Pytorch method for updating these tensors.
             # update input_tokens
             sampled_token_ids_list = sampled_token_ids[:
                                                        num_queries].squeeze(  # type: ignore
