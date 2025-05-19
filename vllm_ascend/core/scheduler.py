@@ -22,6 +22,8 @@ from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.utils import cdiv
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.distributed.kv_transfer.kv_connector.factory import (KVConnectorFactory)
+from vllm.distributed.kv_transfer.kv_connector.v1 import (KVConnectorBase_V1, KVConnectorRole)
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig

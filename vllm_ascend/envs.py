@@ -104,6 +104,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # that the correct package is installed.
     "VLLM_VERSION":
     lambda: os.getenv("VLLM_VERSION", None),
+<<<<<<< HEAD
     # Whether to enable the trace recompiles from pytorch.
     "VLLM_ASCEND_TRACE_RECOMPILES":
     lambda: bool(int(os.getenv("VLLM_ASCEND_TRACE_RECOMPILES", '0'))),
@@ -126,6 +127,10 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # enable `pin_memory` while creating a tensor using `torch.tensor`.
     "VLLM_ASCEND_ACL_OP_INIT_MODE":
     lambda: os.getenv("VLLM_ASCEND_ACL_OP_INIT_MODE", '1'),
+    "DISAGGREGATED_RPEFILL_RANK_TABLE_PATH":
+    lambda: os.getenv("DISAGGREGATED_RPEFILL_RANK_TABLE_PATH", None),
+    "VLLM_LLMDD_CHANNEL_PORT":
+    lambda: os.getenv("VLLM_LLMDD_CHANNEL_PORT", 5557)
 }
 
 # end-env-vars-definition
