@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-import pytest
 import vllm
-from huggingface_hub import snapshot_download
 from vllm.lora.request import LoRARequest
 
 from tests.conftest import VllmRunner
@@ -16,11 +14,6 @@ EXPECTED_LORA_OUTPUT = [
     "SELECT avg(age) ,  min(age) ,  max(age) FROM singer WHERE country  =  'France'",  # noqa: E501
     "SELECT DISTINCT Country FROM singer WHERE Age  >  20",
 ]
-
-
-@pytest.fixture(scope="session")
-def ilama_lora_files():
-    return snapshot_download(repo_id="jeeejeee/ilama-text2sql-spider")
 
 
 def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
