@@ -243,9 +243,12 @@ cleanup() {
   rm -rf ./vllm_benchmarks
 }
 get_benchmarks_scripts() {
-  git clone -b main --depth=1 https://ghfast.top/https://github.com/vllm-project/vllm && \
-  mv vllm/benchmarks vllm_benchmarks
-  rm -rf ./vllm
+  git clone --depth=1 --filter=blob:none --sparse https://github.com/vllm-project/vllm
+  cd vllm
+  git sparse-checkout set benchmarks
+  mv benchmarks ../vllm_benchmarks
+  cd ..
+  rm -rf vllm
 }
 
 main() {
