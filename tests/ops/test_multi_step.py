@@ -20,22 +20,17 @@ import pytest
 import torch
 import torch_npu  # noqa: F401
 
-import vllm_ascend.platform  # noqa: F401
-
-# Only Neox style true scenario is supported for now
-IS_NEOX_STYLE = [True]
 DTYPES = [torch.int32, torch.int64]
 DEVICES = [f"npu:{0}"]
 # Set tolerance to 0 for equals
 DEFAULT_ATOL = 0
 DEFAULT_RTOL = 0
 
-# adapted from https://github.com/vllm-project/vllm/vllm/model_executor/layers/rotary_embedding.py
+# test custom ops of https://github.com/vllm-project/vllm-ascend/tree/main/csrc/kernels/advance_step.cpp
 
 
-@pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @torch.inference_mode()
-def test_single_generation_multi_step(is_neox_style: bool) -> None:
+def test_single_generation_multi_step() -> None:
     input_tokens_data = [2926]
     input_tokens_ascendc = torch.tensor(input_tokens_data, device='npu:0')
     input_tokens_python = torch.tensor(input_tokens_data, device='npu:0')
@@ -101,9 +96,8 @@ def test_single_generation_multi_step(is_neox_style: bool) -> None:
                                rtol=DEFAULT_RTOL)
 
 
-@pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @torch.inference_mode()
-def test_multi_result_generation_multi_step(is_neox_style: bool) -> None:
+def test_multi_result_generation_multi_step() -> None:
     input_tokens_data = [2926, 279, 12095, 1588]
     input_tokens_ascendc = torch.tensor(input_tokens_data, device='npu:0')
     input_tokens_python = torch.tensor(input_tokens_data, device='npu:0')

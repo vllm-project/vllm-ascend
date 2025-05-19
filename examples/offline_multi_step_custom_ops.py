@@ -19,6 +19,9 @@
 
 from vllm import LLM, SamplingParams
 
+import vllm_ascend.platform as pf
+
+pf.CUSTOM_OP_ENABLED = True  # set True for custom Ops of Multi-Step.
 prompts = [
     "Hello, my name is",
     "The president of the United States is",
@@ -36,7 +39,8 @@ llm = LLM(
     max_model_len=1024,  # max length of prompt
     tensor_parallel_size=1,  # number of NPUs to be used
     max_num_seqs=26,  # max batch number
-    enforce_eager=True,  # disable CUDA graph mode
+    enforce_eager=
+    True,  # Force PyTorch eager execution to debug intermediate tensors (disables graph optimizations)
     trust_remote_code=
     True,  # If the model is a cuscd tom model not yet available in the HuggingFace transformers library
     num_scheduler_steps=8,

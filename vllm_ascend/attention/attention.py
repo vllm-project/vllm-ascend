@@ -36,6 +36,7 @@ from vllm.config import get_current_vllm_config
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 from vllm_ascend.ops.cache import concat_and_cache_mla
+from vllm_ascend.platform import CUSTOM_OP_ENABLED
 from vllm_ascend.worker.model_runner import (
     ModelInputForNPUBuilder, ModelInputForNPUWithSamplingMetadata)
 
@@ -459,17 +460,47 @@ class AscendMetadata(AttentionMetadata):
         for i in range(num_queries):
             self.seq_lens[i] += 1
         self.max_decode_seq_len = max(self.seq_lens)
-        """Advance a step on NPU for existing inputs for a multi-step runner"""
-        torch.ops._C.advance_step_flashattn_ascendc(
-            num_seqs=num_seqs,
-            num_queries=num_queries,
-            block_size=block_size,
-            input_tokens=model_input.input_tokens,
-            sampled_token_ids=sampled_token_ids,
-            input_positions=model_input.input_positions,
-            seq_lens=self.seq_lens_tensor,
-            slot_mapping=self.slot_mapping,
-            block_tables=self.block_tables)
+        if CUSTOM_OP_ENABLED:
+            """Advance a step on NPU for existing inputs for a multi-step runner if custom ops is enabled"""
+            torch.ops._C.advance_step_flashattn_ascendc(
+                num_seqs=num_seqs,
+                num_queries=num_queries,
+                block_size=block_size,
+                input_tokens=model_input.input_tokens,
+                sampled_token_ids=sampled_token_ids,
+                input_positions=model_input.input_positions,
+                seq_lens=self.seq_lens_tensor,
+                slot_mapping=self.slot_mapping,
+                block_tables=self.block_tables)
+        else:
+            """Use traditional Pytorch method for updating these tensors. """
+            # update input_tokens
+            sampled_token_ids_list = sampled_token_ids[:
+                                                       num_queries].squeeze(  # type: ignore
+                                                           -1)
+            model_input.input_tokens[:
+                                     num_queries] = sampled_token_ids_list  # type: ignore
+
+            # get seq_lens and input_positions
+            seq_lens = self.seq_lens_tensor[:num_queries]
+            next_seq_lens = seq_lens + 1
+            next_input_pos = next_seq_lens - 1
+
+            # update seq_lens and input_positions
+            self.seq_lens_tensor[:num_queries] = next_seq_lens
+            model_input.input_positions[:
+                                        num_queries] = next_input_pos  # type: ignore
+
+            # 计算 block index 和 offset
+            block_idx = next_input_pos // block_size
+            block_offset = next_input_pos % block_size
+
+            current_block_table = self.block_tables.gather(
+                1, block_idx.unsqueeze(-1)).squeeze(-1)
+            slot_num = current_block_table * block_size + block_offset
+
+            # update slot_mapping
+            self.slot_mapping[:num_queries] = slot_num
 
 
 class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
