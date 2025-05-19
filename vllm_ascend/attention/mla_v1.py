@@ -1040,7 +1040,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         hidden_states_or_q_c: torch.Tensor,  # query in unified attn
         hidden_states_or_kv_c_normed: torch.Tensor,  # key in unified attn
         k_pe: torch.Tensor,  # value in unified attn
-        kv_cache: torch.Tensor,
+        kv_cache: Tuple[torch.Tensor],
         attn_metadata: M,
         output: Optional[torch.Tensor] = None,
         enable_multistream_mla: bool = False,
@@ -1182,23 +1182,31 @@ class AscendMLAImpl(MLAAttentionImpl):
                                                  key_cache=kv_cache[0],
                                                  value_cache=kv_cache[1],
                                                  slot_indices=slots)
-        elif kv_cache.numel() > 0:
-            key = torch.cat([
-                kv_c_normed.view([num_actual_toks, self.num_kv_heads, -1]),
-                k_pe
-            ],
-                            dim=2)
-            torch_npu._npu_reshape_and_cache_siso(
-                key=key,
-                key_cache=kv_cache,
-                slot_indices=attn_metadata.slot_mapping.flatten())
+        elif len(kv_cache):
+            # key = torch.cat([
+            #     kv_c_normed.view([num_actual_toks, self.num_kv_heads, -1]),
+            #     k_pe
+            # ],
+            #                 dim=2)
+            # torch_npu._npu_reshape_and_cache_siso(
+            #     key=key,
+            #     key_cache=kv_cache,
+            #     slot_indices=attn_metadata.slot_mapping.flatten())
+            kv_c_normed = kv_c_normed.view([num_actual_toks, self.num_kv_heads, -1])
+            torch_npu._npu_reshape_and_cache(
+                key=kv_c_normed,
+                value=k_pe,
+                key_cache=kv_cache[0],
+                value_cache=kv_cache[1],
+                slot_indices=attn_metadata.slot_mapping)
+        combined_cache = torch.cat([kv_cache[0], kv_cache[1]], dim=-1)
         if has_prefill:
             # FIX: aicore move should be also placed on the comm stream in dbo,
             # otherwise it may affect the accuracy
             # TODO: use an elegant way to overlap
             output_prefill = self._forward_prefill(prefill_q,
                                                    prefill_k_c_normed,
-                                                   prefill_k_pe, kv_cache,
+                                                   prefill_k_pe, combined_cache,
                                                    attn_metadata)
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
@@ -1218,7 +1226,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 output_decode = self._forward_decode(decode_ql_nope,
                                                      decode_q_pe,
                                                      decode_k_nope,
-                                                     decode_k_pe, kv_cache,
+                                                     decode_k_pe, combined_cache,
                                                      attn_metadata)
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:

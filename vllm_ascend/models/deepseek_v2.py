@@ -32,8 +32,8 @@ import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
                               get_tp_group, split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather,
@@ -67,6 +67,7 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer, is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.sequence import IntermediateTensors
+from vllm.utils import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
@@ -363,6 +364,15 @@ class CustomDeepseekV2MoE(nn.Module):
         self.tp_group = get_tp_group().device_group
         self.tp_rank = get_tp_group().rank_in_group
         self.ep_group = get_ep_group()
+        additional_config = get_current_vllm_config().additional_config
+        self.enable_graph_mode = False
+        self.kv_consumer = None
+        if additional_config:
+            self.enable_graph_mode = additional_config.get("enable_graph_mode", False)
+        transfer_config = get_current_vllm_config().kv_transfer_config
+        if transfer_config is not None:
+            self.kv_consumer = transfer_config.kv_role == "kv_consumer"
+
 
         self.params_dtype = torch.get_default_dtype()
         self.rm_router_logits = self.experts.rm_router_logits
@@ -386,6 +396,11 @@ class CustomDeepseekV2MoE(nn.Module):
             enable_force_load_balance = False
             if hasattr(attn_metadata, 'with_prefill_across_dp'):
                 is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
+        # If this node is kv_consumer, we force the moe always runs in decode path to make sure
+        # the behaviour aligned between dummy_run and normal model_execute.
+        if self.kv_consumer is not None:
+            is_prefill = False
+            enable_force_load_balance = False
 
         # router_logits: (num_tokens, n_experts)
         router_logits = None
