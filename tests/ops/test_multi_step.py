@@ -16,7 +16,6 @@
 # to run this test, you need to cd to the upper package which is 'tests',
 # and run with command 'pytest -s ops/test_multi_step.py'
 
-import pytest
 import torch
 import torch_npu  # noqa: F401
 
