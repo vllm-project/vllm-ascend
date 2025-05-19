@@ -47,9 +47,9 @@ apt update && apt install wget gcc g++ libnuma-dev git vim -y
 
 ### 1. Compilation Optimization
 
-TODO: add describe.
+#### 1.1 Install optimized `python`
 
-#### 1.1 Install twice compiled `python`
+Python supports **LTO** and **PGO** optimization starting from version `3.6` and above, which can be enabled at compile time. And we have offered compilation optimized `python` packages direcctly to users for the sake of convenience. You can also reproduce the `python` build follow this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html) according to your specific scenarios.
 
 ```bash
 mkdir -p /workspace/tmp
@@ -76,11 +76,9 @@ ln -sf  /usr/local/python/bin/pip3  /usr/bin/pip
 export PATH=/usr/bin:/usr/local/python/bin:$PATH
 ```
 
-:::{note}
-You can also reproduce the `python` build follow this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html) according to your specific scenarios.
-:::
+#### 1.2 Install optimized `torch` and `torch_npu`
 
-#### 1.2 Install twice compiled `torch` and `torch_npu`
+Similar to `python`, we have also offered compilation optimized `torch` and `torch_npu` packages direcctly to users for the sake of convenience. You can also reproduce the `torch` build follow this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0064.html) or reproduce the `torch_npu` build follow this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0065.html) according to your specific scenarios.
 
 ```bash
 cd /workspace/tmp
@@ -101,13 +99,9 @@ rm -rf /tmp/*
 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
 ```
 
-:::{note}
-You can also reproduce the `torch` build follow this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0064.html) or the `torch_npu` build follow this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0065.html) according to your specific scenarios.
-:::
-
 ### 2. OS Optimization
 
-TODO: add describe. Find more details [here](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html).
+**Tcmalloc (Thread Counting Malloc)** is a universal memory allocator that improves overall performance while ensuring low latency by introducing a multi-level cache structure, reducing mutex competition and optimizing large object processing flow. Find more details [here](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html).
 
 ```bash
 # Install tcmalloc
@@ -129,7 +123,7 @@ ldd `which python`
 
 ### 3. `torch_npu` Optimization
 
-TODO: add describe.
+Some performance tuning features in `torch_npu` are controlled by environment variables. Some features and their related environment variables are shown below.
 
 Memory optimization:
 
@@ -155,43 +149,35 @@ export CPU_AFFINITY_CONF=1
 
 #### 4.1 HCCL Optimization
 
-TODO: add describe.
+Some performance tuning features in HCCL currently have certain scenario limitations, so environment variables are used to control whether they are enabled or not for these features.
 
-These environment variables will improve performance in certain scenarios:
-
-- [HCCL_INTRA_ROCE_ENABLE](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0044.html)
-- [HCCL_RDMA_TC](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0045.html)
-- [HCCL_RDMA_SL](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0046.html)
-- [HCCL_BUFFSIZE](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0047.html)
-
-Find more details [here](https://www.hiascend.com).
+- `HCCL_INTRA_ROCE_ENABLE`: Use RDMA link instead of SDMA link between two 8Ps as the mesh interconnect link, find more details [here](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0044.html).
+- `HCCL_RDMA_TC`: Use this var to configure traffic class of RDMA network card, find more details [here](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0045.html).
+- `HCCL_RDMA_SL`: Use this var to configure service level of RDMA network card, find more details [here](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0046.html).
+- `HCCL_BUFFSIZE`: Use this var to control the cache size for sharing data between two NPUs, find more details [here](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0047.html).
 
 #### 4.2 `mindie_turbo` Optimization
 
-TODO: add describe.
-
-Some environment variables will improve performance in certain scenarios.
-
-Find more details [here](https://www.hiascend.com/document/detail/zh/mindie/20RC1/AcceleratePlugin/turbodev/mindie-turbo-0010.html).
+Some performance tuning features in `mindie_turbo` currently have certain scenario limitations, so environment variables are used to control whether they are enabled or not for these features. Find more details [here](https://www.hiascend.com/document/detail/zh/mindie/20RC1/AcceleratePlugin/turbodev/mindie-turbo-0010.html).
 
 ## Benchmark
 
 ### Preparation
-
-Please follow the [<u>Installation Guide</u>](https://vllm-ascend.readthedocs.io/en/v0.7.3/installation.html#setup-vllm-and-vllm-ascend) to make sure `vllm`, `vllm-ascend` and `mindie-turbo` is installed correctly.
-
-:::{note}
-Make sure your `vllm`, `vllm-ascend` and `mindie-turbo` is installed after your `python` configuration completed, because these packages will build binary files using the `python` in current environment. If you install `vllm`, `vllm-ascend` and `mindie-turbo` before `1.1`, the binary files will not use the optimized `python`.
-:::
 
 ```bash
 # Install necessary dependencies
 pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
 pip install "modelscope<1.23.0" pandas datasets gevent sacrebleu rouge_score pybind11 pytest
 
-# Configure this value to speed up model download
+# Configure this var to speed up model download
 VLLM_USE_MODELSCOPE=true
 ```
+
+Please follow the [<u>Installation Guide</u>](https://vllm-ascend.readthedocs.io/en/v0.7.3/installation.html#setup-vllm-and-vllm-ascend) to make sure `vllm`, `vllm-ascend` and `mindie-turbo` is installed correctly.
+
+:::{note}
+Make sure your `vllm`, `vllm-ascend` and `mindie-turbo` is installed after your `python` configuration completed, because these packages will build binary files using the `python` in current environment. If you install `vllm`, `vllm-ascend` and `mindie-turbo` before chapter `1.1`, the binary files will not use the optimized `python`.
+:::
 
 ### Usage
 
@@ -232,15 +218,20 @@ We used `vllm-ascend:v0.7.3` as our baseline and compared acceleration effects o
 
 ![](./images/benchmark_results.png)
 
+:::{note}
 Details of our combinations of optimization methods:
 
-- **Group A (baseline):** vllm-ascend only
-- **Group B:** vllm-ascend + mindie-trubo
-- **Group C:** vllm-ascend + optimized python/torch/torch-npu
-- **Group D:** vllm-ascend + mindie-trubo + optimized python/torch/torch-npu
-- **Group E:** vllm-ascend + mindie-trubo + optimized python/torch/torch-npu + tcmalloc
-- **Group F:** Group E + PYTORCH_NPU_ALLOC_CONF="max_split_size_mb:250"
-- **Group G:** Group E + PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
-- **Group H:** Group E + TASK_QUEUE_ENABLE=2
-- **Group I:** Group E + CPU_AFFINITY_CONF=1
-- **Group J:** Group E + TASK_QUEUE_ENABLE=2 + ascend-scheduler
+- **Group A:** `vllm_ascend` only **(baseline)**
+- **Group B:** `vllm_ascend` + `mindie_trubo`
+- **Group C:** `vllm_ascend` + optimized `python/torch/torch_npu`
+- **Group D:** `vllm_ascend` + `mindie_trubo` + optimized `python/torch/torch_npu`
+- **Group E:** `vllm_ascend` + `mindie_trubo` + optimized `python/torch/torch_npu` + `tcmalloc`
+- **Group F:** Group E + `PYTORCH_NPU_ALLOC_CONF="max_split_size_mb:250"`
+- **Group G:** Group E + `PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"`
+- **Group H:** Group E + `TASK_QUEUE_ENABLE=2`
+- **Group I:** Group E + `CPU_AFFINITY_CONF=1`
+:::
+
+To summarize, **Group H** (`vllm_ascend` + `mindie_trubo` + optimized `python/torch/torch_npu` + `tcmalloc` + `TASK_QUEUE_ENABLE=2`) achieves best performance on single NPU. The **TTFT** (prefill time) has been reduced by **43.31%** and the **TPOT** (same to **ITL**, decode time) has also been reduced by **47.93%** comparing to our baseline (`vllm_ascend` only).
+
+In addition, you can try more optimization methods shown in chapter `4.1` and `4.2` when using multiple NPU in distributed environment to get a even faster inference speed.
