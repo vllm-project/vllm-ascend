@@ -1,7 +1,7 @@
 # Performance
 
 :::{toctree}
-:caption: Deployment
+:caption: Optimization
 :maxdepth: 1
 optimization_and_tuning
 :::
