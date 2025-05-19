@@ -19,6 +19,9 @@
 
 Run `pytest tests/ops/test_fused_moe.py`.
 """
+# fused moe ops test will hit the infer_schema error, we need add the patch
+# here to make the test pass.
+import vllm_ascend.patch.worker.patch_common.patch_utils  # type: ignore[import]  # isort: skip  # noqa
 
 import pytest
 import torch

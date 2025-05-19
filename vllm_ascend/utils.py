@@ -38,6 +38,8 @@ else:
 # Maximum number of graphs that can be captured by ACL Graph
 MAX_CAPTURE_SIZE = 1920
 
+ASCEND_QUATIZATION_METHOD = "ascend"
+
 
 def try_register_lib(lib_name: str, lib_info: str = ""):
     import importlib
