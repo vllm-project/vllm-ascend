@@ -663,6 +663,13 @@ class AscendW8A8DynamicFusedMoEMethod:
                 1, 2).contiguous()
             layer.w2_weight.data = layer.w2_weight.data.transpose(
                 1, 2).contiguous()
+        # This optimization relies on the modifications in torch_npu, otherwise accuracy
+        # problem will happen. But we can evaluate the inference speed by transforming
+        # weights to NZ (29)
+        layer.w13_weight.data = torch_npu.npu_format_cast(
+            layer.w13_weight.data, 29)
+        layer.w2_weight.data = torch_npu.npu_format_cast(
+            layer.w2_weight.data, 29)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
             layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(
