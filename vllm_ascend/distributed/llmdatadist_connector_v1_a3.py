@@ -6,7 +6,6 @@ import torch
 import math
 from vllm_ascend import envs
 import time
-from vllm import envs
 from vllm.config import VllmConfig
 from collections.abc import Iterator
 import json
@@ -60,7 +59,7 @@ class ReqMeta:
   remote_block_ids: list[int]
   remote_host: str
   remote_port: str
-  remote_cluster_id: int
+  engine_id: str
 
 class LLMDataDistConnectorMetadata(KVConnectorMetadata):
 
@@ -76,15 +75,16 @@ class LLMDataDistConnectorMetadata(KVConnectorMetadata):
     self.requests[request_id] = ReqMeta(
         local_block_ids=local_block_ids,
         remote_block_ids=kv_transfer_params["remote_block_ids"],
-        remote_cluster_id=kv_transfer_params["remote_cluster_id"],
+        engine_id=kv_transfer_params["remote_engine_id"],
         remote_host=kv_transfer_params["remote_host"],
         remote_port=kv_transfer_params["remote_port"],
     )
 
 class LLMDataDistConnectorA3(KVConnectorBase_V1):
   def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
+    self.engine_id = vllm_config.kv_events_config.engine_id
     if role == KVConnectorRole.SCHEDULER:
-      self.connector_scheduler: Optional[LLMDataDistConnectorScheduler] = LLMDataDistConnectorScheduler(vllm_config)
+      self.connector_scheduler: Optional[LLMDataDistConnectorScheduler] = LLMDataDistConnectorScheduler(vllm_config, self.engine_id)
     elif role == KVConnectorRole.WORKER:
       self.connector_scheduler = None
       self.connector_worker = LLMDataDistConnectorWorker(vllm_config)
@@ -157,12 +157,11 @@ class LLMDataDistConnectorA3(KVConnectorBase_V1):
 
 class LLMDataDistConnectorScheduler():
 
-  def __init__(self, vllm_config: VllmConfig, cluster_id: int):
+  def __init__(self, vllm_config: VllmConfig, engine_id: int):
      self.vllm_config = vllm_config
      self.block_size = vllm_config.cache_config.block_size
-     self.cluster_id = cluster_id
+     self.engine_id = engine_id
      self.local_ip = get_ip()
-     self.local_rank = get_world_group().local_rank
 
      self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
 
@@ -264,9 +263,9 @@ class LLMDataDistConnectorScheduler():
         do_remote_prefill=True,
         do_remote_decode=False,
         remote_block_ids=computed_block_ids,
-        remote_engine_id=self.cluster_id,
+        remote_engine_id=self.engine_id,
         remote_host=self.local_ip,
-        remote_port=envs.VLLM_LLMDD_CHANNEL_PORT + self.local_rank,
+        remote_port=envs.VLLM_LLMDD_CHANNEL_PORT,
     )
 
 class LLMDataDistConnectorWorker():
@@ -314,7 +313,7 @@ class LLMDataDistConnectorWorker():
     msg_encoder = msgspec.msgpack.Encoder()
     msg_decoder = msgspec.msgpack.Decoder()
     msg_to_send = msg_encoder.encode(self.local_agent_metadata)
-    logger.debug(f"The local agent metadata have {len(msg)} bytes here")
+    logger.debug(f"The local agent metadata have {len(msg_to_send)} bytes here")
     logger.info(f"LLMDataDistConnectorWorker: Cluster {self.local_agent_metadata.cluster_id} start to listen request from peers")
     with zmq_ctx(zmq.ROUTER, url) as sock:
       event.set()
@@ -454,7 +453,7 @@ class LLMDataDistConnectorWorker():
         self.cache_addr.append(base_addr)
     # register paged kv cache into the llm_cache manager
     self.cache_desc = CacheDesc(len(self.cache_addr), [self.num_blocks, self.block_len], TORCH_DTYPE_TO_NPU_DTYPE[kv_cache_dtype])
-    self.cache_key = BlocksCacheKey(cluster_id=self.cluster_id)
+    self.cache_key = BlocksCacheKey(cluster_id=int(self.cluster_id))
     try:
       self.cache = self.cache_manager.register_blocks_cache(self.cache_desc, self.cache_addr, self.cache_key)
       logger.info("LLMDataDistWorker: End of register Paged Cache.")
@@ -463,7 +462,7 @@ class LLMDataDistConnectorWorker():
     self.ready_event = threading.Event()
     self.metadata_agent_listener_t = threading.Thread(
       target=self.listen_for_agent_metadat_req,
-      args=(self.ready_event),
+      args=(self.ready_event,),
       daemon=True,
       name="metadata_agent_listener")
     self.metadata_agent_listener_t.start()
@@ -477,7 +476,7 @@ class LLMDataDistConnectorWorker():
         meta.remote_block_ids,
         meta.remote_host,
         meta.remote_port,
-        meta.remote_cluster_id,
+        meta.engine_id,
         req_id
       )
 
@@ -636,6 +635,9 @@ class LLMDataDistConnectorWorker():
       raise RuntimeError(f"LLMDataDistConnectorWorker: Timeout during pull_blocks, you can try to increase the sync_kv_timeout config or checking your connect status")
 
 
+  def get_finished(self) -> tuple[Optional[set[str]], Optional[set[str]]]:
+    """Get the finished recving and sending requuests."""
+    return False, None
 
 
 @contextlib.contextmanager
