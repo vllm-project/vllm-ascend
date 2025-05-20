@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from typing import Optional, Any
 import torch
 import math
+from vllm_ascend import envs
+import time
 from vllm import envs
 from vllm.config import VllmConfig
 from collections.abc import Iterator
@@ -24,11 +26,23 @@ from vllm.utils import round_down, get_ip
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.request import RequestStatus
-from .llmdatadist_connector_v1 import TORCH_DTYPE_TO_NPU_DTYPE
+# from .llmdatadist_connector_v1 import TORCH_DTYPE_TO_NPU_DTYPE
 from vllm.v1.request import Request
 from vllm.utils import logger
 
+import llm_datadist
 from llm_datadist import LLMDataDist, LLMRole, CacheDesc, BlocksCacheKey, LLMConfig, LLMException
+
+TORCH_DTYPE_TO_NPU_DTYPE = {
+    torch.half: llm_datadist.DataType.DT_FLOAT16,
+    torch.float16: llm_datadist.DataType.DT_FLOAT16,
+    torch.bfloat16: llm_datadist.DataType.DT_BF16,
+    torch.float: llm_datadist.DataType.DT_FLOAT,
+    torch.float32: llm_datadist.DataType.DT_FLOAT,
+    torch.int8: llm_datadist.DataType.DT_INT8,
+    torch.int64: llm_datadist.DataType.DT_INT64,
+    torch.int32: llm_datadist.DataType.DT_INT32
+}
 
 GET_META_MSG = b"get_meta_msg"
 
@@ -46,7 +60,7 @@ class ReqMeta:
   remote_block_ids: list[int]
   remote_host: str
   remote_port: str
-  remote_cluster_id: str
+  remote_cluster_id: int
 
 class LLMDataDistConnectorMetadata(KVConnectorMetadata):
 
@@ -270,10 +284,13 @@ class LLMDataDistConnectorWorker():
       self.local_agent_metadata: Optional[LLMDataDistAgentMetadata] = None
 
       self.llm_datadist_role = None
-      if self.kv_transfer_config.kv_role is "kv_producer":
+      self.llm_datadist_remote_role = None
+      if self.kv_transfer_config.kv_role == "kv_producer":
         self.llm_datadist_role = LLMRole.PROMPT
-      elif self.kv_transfer_config.kv_role is "kv_consumer":
+        self.llm_datadist_remote_role = LLMRole.DECODER
+      elif self.kv_transfer_config.kv_role == "kv_consumer":
         self.llm_datadist_role = LLMRole.DECODER
+        self.llm_datadist_remote_role = LLMRole.PROMPT
       else:
         raise RuntimeError(f"LLMDataDistWorker: Receive unexpected kv role in LLMDataDistWorker, this worker now only suppoert kv_producer and kv_consumer, but receiving {vllm_config.kv_transfer_config.kv_role}")
 
@@ -282,13 +299,13 @@ class LLMDataDistConnectorWorker():
       self.prefill_device_list = []
       self.decode_device_list = []
       global_rank_table = self.read_offline_rank_table()
-      self.local_agent_metadata = self.read_agent_metadata(global_rank_table, self.local_ip, self.local_rank)
+      self.local_agent_metadata = self.read_agent_metadata(global_rank_table, self.local_ip, self.local_rank, self.llm_datadist_role)
       self.llm_datadist = LLMDataDist(self.llm_datadist_role, self.local_agent_metadata.cluster_id)
       self.init_llm_datadist()
-      remote_ip, remote_rank = self.get_remote_ip_and_rank()
-      for idx in range(len(remote_ip)):
-        remote_agent_meta = self.read_agent_metadata(global_rank_table, remote_ip[idx], remote_rank[idx])
-        self.add_remote_agent(remote_agent_meta)
+      # remote_ip, remote_rank = self.get_remote_ip_and_rank()
+      # for idx in range(len(remote_ip)):
+      #   remote_agent_meta = self.read_agent_metadata(global_rank_table, remote_ip[idx], remote_rank[idx], self.llm_datadist_remote_role)
+      #   self.add_remote_agent(remote_agent_meta)
 
 
   def listen_for_agent_metadat_req(self, event: threading.Event):
@@ -298,17 +315,17 @@ class LLMDataDistConnectorWorker():
     msg_decoder = msgspec.msgpack.Decoder()
     msg_to_send = msg_encoder.encode(self.local_agent_metadata)
     logger.debug(f"The local agent metadata have {len(msg)} bytes here")
+    logger.info(f"LLMDataDistConnectorWorker: Cluster {self.local_agent_metadata.cluster_id} start to listen request from peers")
     with zmq_ctx(zmq.ROUTER, url) as sock:
       event.set()
       while True:
         identity, _, msg = sock.recv_multipart()
         decode_msg = msg_decoder.decode(msg)
         if isinstance(decode_msg, LLMDataDistAgentMetadata):
+          sock.send_multipart((identity, b"", msg_to_send))
           self.add_remote_agent(decode_msg)
         else:
           logger.warning(f"LLMDataDistConnectorWorker: receiving unrecognized data {decode_msg}")
-        sock.send_multipart((identity, b"", msg_to_send))
-
 
   def init_llm_datadist(self):
     llm_config = LLMConfig()
@@ -319,7 +336,7 @@ class LLMDataDistConnectorWorker():
     llm_config_options = llm_config.generate_options()
     self.llm_datadist.init(llm_config_options)
     self.cache_manager = self.llm_datadist.cache_manager
-    logger.info(f"Done initialize llm_datadist in rank {self.rank}, local rank {self.local_rank}, cluster id {self.cluster_id}")
+    logger.info(f"Done initialize llm_datadist in rank {self.rank}, local rank {self.local_rank}, cluster id {self.local_agent_metadata.cluster_id}")
 
 
   def read_offline_rank_table(self):
@@ -344,31 +361,29 @@ class LLMDataDistConnectorWorker():
     return global_rank_table
 
 
-  def read_agent_metadata(self, global_rank_table, server_id, device_id):
+  def read_agent_metadata(self, global_rank_table, server_id, device_id, agent_role):
     devices_type_list = []
     agent_metadata = None
     if self.llm_datadist_role == LLMRole.PROMPT:
       devices_type_list.append("prefill_device_list")
-    elif self.llm_datadist_role == LLMRole.Decoder:
+    elif self.llm_datadist_role == LLMRole.DECODER:
       devices_type_list.append("decode_device_list")
     else:
       devices_type_list.append("prefill_device_list")
       devices_type_list.append("decode_device_list")
     for device_type in devices_type_list:
-      if self.local_agent_metadata is not None:
-        break
       device_list = global_rank_table[device_type]
       for device_info in device_list:
-        if device_info["server_id"] != server_id:
+        if device_info["server_id"] != str(server_id):
           continue
-        if device_info["device_id"] != device_id:
+        if device_info["device_id"] != str(device_id):
           continue
         super_pod_id_ = device_info["super_pod_id"]
         server_id_ = device_info["server_id"]
         device_id_ = device_info["device_id"]
         device_ip_ = device_info["device_ip"]
         super_device_id_ = device_info["super_device_id"]
-        cluster_id_ = device_info["cluster_id"]
+        cluster_id_ = int(device_info["cluster_id"])
         agent_metadata = LLMDataDistAgentMetadata(
           super_pod_id=super_pod_id_,
           server_id=server_id_,
@@ -382,7 +397,7 @@ class LLMDataDistConnectorWorker():
     return agent_metadata
 
   def get_remote_ip_and_rank(self):
-    local_info = (self.local_ip, self.local_rank)
+    local_info = (self.local_ip, str(self.local_rank))
     remote_device_ids = []
     remote_ranks = []
     if self.llm_datadist_role == LLMRole.PROMPT:
@@ -486,6 +501,7 @@ class LLMDataDistConnectorWorker():
        self.local_agent_metadata.cluster_id: local_rank_in_table,
        remote_cluster_id: remote_rank_in_table,
     }
+    cluster_rank_info = dict(sorted(cluster_rank_info.items(), key=lambda item: item[1]))
     rank_table = {}
     rank_table["version"] = "1.2"
     rank_table["server_count"] = "1" if remote_server_id == self.local_agent_metadata.server_id else "2"
@@ -550,7 +566,15 @@ class LLMDataDistConnectorWorker():
       }
       super_pod_list.append(local_super_pod_info)
     rank_table["super_pod_list"] = super_pod_list
-    comm_id = self.llm_datadist.link(comm_name, cluster_rank_info, rank_table)
+    comm_id = self.llm_datadist.link(comm_name, cluster_rank_info, json.dumps(rank_table))
+    while True:
+      ret = self.llm_datadist.query_register_mem_status(comm_id=comm_id)
+      if ret == llm_datadist.RegisterMemStatus.OK:
+        logger.info(f"LLMDataDistConnectorWorker: Linking success, comm id: {comm_id}")
+        break
+      elif ret == llm_datadist.RegiserMemStatus.FAILED:
+        raise RuntimeError(f"LLMDataDistConnectorWorker: Linking failed, comm id: {comm_id}")
+      logger.info("Checking query_register_mem_status again")
     self.linked_cluster.update({remote_cluster_id: comm_id})
     logger.info(f"Sucessfully build link with cluster id {remote_cluster_id} with cluster name {comm_name} !")
     return True
@@ -582,7 +606,7 @@ class LLMDataDistConnectorWorker():
       metadata_bytes = sock.recv()
       decoder = msgspec.msgpack.Decoder(LLMDataDistAgentMetadata)
       metadata = decoder.decode(metadata_bytes)
-      sucess = self.add_remote_agent(metadata)
+      self.add_remote_agent(metadata)
 
   def _read_blocks(
     self,
