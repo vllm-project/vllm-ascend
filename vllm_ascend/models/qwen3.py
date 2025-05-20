@@ -19,7 +19,6 @@
 # Adapted from vllm/model_executor/models/qwen3.py
 # This file is a part of the vllm-ascend project.
 
-from collections.abc import Iterable
 from typing import Iterable, List, Optional, Union
 
 import torch
