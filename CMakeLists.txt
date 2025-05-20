@@ -45,7 +45,7 @@ endif()
 
 include(${ASCENDC_CMAKE_DIR}/ascendc.cmake)
 file(GLOB KERNEL_FILES
-${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/pos_encoding_kernels.cpp)
+${CMAKE_CURRENT_SOURCE_DIR}/csrc/kernels/*.cpp)
 
 ascendc_library(vllm_ascend_kernels SHARED
     ${KERNEL_FILES}
