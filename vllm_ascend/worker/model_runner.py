@@ -64,6 +64,7 @@ from vllm.worker.model_runner_base import (
     _add_sampling_metadata_broadcastable_dict,
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
+
 from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
