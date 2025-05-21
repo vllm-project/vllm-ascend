@@ -20,9 +20,11 @@ namespace vllm_ascend {
 
 template <typename scalar_t> struct AccType;
 
-template <> struct AccType<bfloat16_t> {
-    using type = float;
-};
+#if (__CCE_AICORE__ >= 220)
+    template <> struct AccType<bfloat16_t> {
+        using type = float;
+    };
+#endif
 
 template <> struct AccType<half> {
     using type = half;

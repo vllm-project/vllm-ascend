@@ -26,6 +26,7 @@ from torch.distributed import ProcessGroup
 from torch.distributed.distributed_c10d import PrefixStore
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
+from vllm_ascend.utils import is_310p, communication_adaptation_310p
 
 from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
 from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD, update_aclgraph_sizes
@@ -74,6 +75,10 @@ class NPUPlatform(Platform):
 
         from vllm_ascend.quantization.quant_config import \
             AscendQuantConfig  # noqa: F401
+
+        if is_310p():
+            logger.info("patch torch communication while using Ascend 310P")
+            communication_adaptation_310p()
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0):
