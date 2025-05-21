@@ -20,12 +20,15 @@
 import torch
 import vllm
 import vllm.distributed
+import vllm.envs as envs
 from torch.distributed import ProcessGroup
 from torch.distributed.distributed_c10d import (Backend, PrefixStore,
                                                 _get_default_timeout,
                                                 is_nccl_available)
 from torch.distributed.rendezvous import rendezvous
 from vllm.config import ParallelConfig
+
+_DP_GROUP = None
 
 
 def ascend_destroy_model_parallel():
@@ -164,10 +167,9 @@ def parallel_config_get_dp_port(self) -> int:
     """
     answer = self.data_parallel_master_port
     self.data_parallel_master_port += 1
-    import os
 
     # NOTE: Get port from envs directly when using torchrun
-    port = int(os.environ.get("MASTER_PORT", answer))  # type: ignore
+    port = envs.VLLM_DP_MASTER_PORT if envs.VLLM_DP_MASTER_PORT else answer
     return port
 
 
@@ -183,8 +185,14 @@ def ascend_stateless_init_dp_group(self) -> "ProcessGroup":
         self.data_parallel_rank,
         self.data_parallel_size,
         backend="gloo")
+    global _DP_GROUP
+    _DP_GROUP = dp_group
 
     return dp_group
+
+
+def get_dp_group():
+    return _DP_GROUP
 
 
 vllm.distributed.parallel_state.destroy_model_parallel = ascend_destroy_model_parallel

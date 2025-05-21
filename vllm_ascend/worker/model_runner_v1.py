@@ -29,6 +29,8 @@ import numpy as np
 import numpy.typing as npt
 import torch
 import torch.nn as nn
+from torch.distributed import ReduceOp
+
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
@@ -53,6 +55,7 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
 from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.patch.platform.patch_common.patch_distributed import get_dp_group
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import vllm_version_is
 
@@ -296,6 +299,8 @@ class NPUModelRunner:
                 False) and self.vllm_config.model_config.use_mla
             self.use_cached_npu_graph = additional_config.get(
                 "use_cached_npu_graph", False)
+        self.has_prefilled = False
+        self.dp_group = get_dp_group()
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -595,6 +600,22 @@ class NPUModelRunner:
                                   device=input_ids.device)
             input_ids = torch.cat([input_ids, padding])
             positions = torch.cat([positions, padding])
+        if self.has_prefilled and not attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            self.has_prefilled = False
+        if not self.has_prefilled and self.enable_torchair_graph_mode:
+            self.has_prefilled = self.has_prefilled_all_rank(
+                attn_metadata.attn_state == AscendAttentionState.DecodeOnly)
+
+        if self.dp_group:
+            while not self.has_prefilled and self.enable_torchair_graph_mode and attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+                self._dummy_run(1)
+                tensor = torch.tensor([1], dtype=torch.int32, device="cpu")
+                torch.distributed.all_reduce(tensor,
+                                             op=ReduceOp.MAX,
+                                             group=self.dp_group)
+                self.has_prefilled = self.has_prefilled_all_rank(
+                    attn_metadata.attn_state ==
+                    AscendAttentionState.DecodeOnly)
 
         # Run forward pass
         with set_forward_context(attn_metadata,
@@ -604,7 +625,7 @@ class NPUModelRunner:
             if self.enable_torchair_graph_mode:
                 model_kwargs["kv_caches"] = self.kv_caches
                 model_kwargs["attn_metadata"] = attn_metadata
-            if self.enable_torchair_graph_mode and attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            if self.enable_torchair_graph_mode and attn_metadata.attn_state == AscendAttentionState.DecodeOnly and self.has_prefilled:
                 torch._dynamo.mark_static(input_ids)
                 torch._dynamo.mark_static(positions)
                 torch._dynamo.mark_static(attn_metadata.decode.block_table)
@@ -632,6 +653,15 @@ class NPUModelRunner:
                 )
 
         return hidden_states[sample_indices]
+
+    def has_prefilled_all_rank(self, has_prefilled: bool) -> bool:
+        tensor = torch.tensor([has_prefilled], dtype=torch.int32, device="cpu")
+        if self.dp_group:
+            torch.distributed.all_reduce(tensor,
+                                         op=ReduceOp.MIN,
+                                         group=self.dp_group)
+        aggregated_has_prefilled = bool(tensor.item())
+        return aggregated_has_prefilled
 
     def apply_grammar_bitmask(
         self,
@@ -832,7 +862,11 @@ class NPUModelRunner:
         self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
     @torch.inference_mode()
-    def _dummy_run(self, num_tokens: int) -> torch.Tensor:
+    def _dummy_run(
+        self,
+        num_tokens: int,
+        attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
+    ) -> torch.Tensor:
         model = self.model
         if self.is_multimodal_model:
             input_ids = None
@@ -861,10 +895,32 @@ class NPUModelRunner:
             })
 
         with set_forward_context(None, self.vllm_config):
-            hidden_states = model(input_ids=input_ids,
-                                  positions=positions,
-                                  intermediate_tensors=intermediate_tensors,
-                                  inputs_embeds=inputs_embeds)
+            if self.enable_torchair_graph_mode and attn_state == AscendAttentionState.DecodeOnly:
+                attn_metadata = self.attn_metadata_builder.dummy_build(
+                    num_reqs=num_tokens, num_actual_tokens=1)
+                torch._dynamo.mark_static(input_ids)
+                torch._dynamo.mark_static(positions)
+                torch._dynamo.mark_static(attn_metadata.decode.block_table)
+                torch._dynamo.mark_static(attn_metadata.decode.input_positions)
+                torch._dynamo.mark_static(attn_metadata.slot_mapping)
+                for kv in self.kv_caches:
+                    assert isinstance(kv, tuple), "kv_cache must be a tuple"
+                    torch._dynamo.mark_static(kv[0])
+                    torch._dynamo.mark_static(kv[1])
+                hidden_states = self.compile_model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=None,
+                    kv_caches=self.kv_caches,
+                    attn_metadata=attn_metadata,
+                )
+            else:
+                hidden_states = model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds)
         return hidden_states
 
     def profile_run(self) -> None:
