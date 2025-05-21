@@ -15,13 +15,15 @@
 # limitations under the License.
 #
 
-from typing import TYPE_CHECKING, Any, Optional, Union
+from typing import TYPE_CHECKING, Any, Optional, Union, cast
 
 from transformers.processing_utils import ProcessorMixin
 from typing_extensions import TypeVar
 from vllm.transformers_utils import processor
 from vllm.transformers_utils.processor import (_merge_mm_kwargs,
-                                               cached_get_processor)
+                                               cached_get_image_processor,
+                                               cached_get_processor,
+                                               cached_get_video_processor)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -90,9 +92,99 @@ def cached_processor_from_config(
     )
 
 
+def get_image_processor(
+    processor_name: str,
+    *args: Any,
+    revision: Optional[str] = None,
+    trust_remote_code: bool = False,
+    **kwargs: Any,
+):
+    """Load an image processor for the given model name via HuggingFace."""
+    # don't put this import at the top level
+    # it will call torch.cuda.device_count()
+    from transformers import AutoImageProcessor
+    from transformers.image_processing_utils import BaseImageProcessor
+
+    try:
+        processor = AutoImageProcessor.from_pretrained(
+            processor_name,
+            *args,
+            revision=revision,
+            trust_remote_code=trust_remote_code,
+            **kwargs)
+    except ValueError as e:
+        # If the error pertains to the processor class not existing or not
+        # currently being imported, suggest using the --trust-remote-code flag.
+        # Unlike AutoTokenizer, AutoImageProcessor does not separate such errors
+        if not trust_remote_code:
+            err_msg = (
+                "Failed to load the image processor. If the image processor is "
+                "a custom processor not yet available in the HuggingFace "
+                "transformers library, consider setting "
+                "`trust_remote_code=True` in LLM or using the "
+                "`--trust-remote-code` flag in the CLI.")
+            raise RuntimeError(err_msg) from e
+        else:
+            raise e
+
+    return cast(BaseImageProcessor, processor)
+
+
+def cached_image_processor_from_config(
+    model_config: "ModelConfig",
+    **kwargs: Any,
+):
+    return cached_get_image_processor(
+        model_config.model,
+        revision=model_config.revision,
+        trust_remote_code=model_config.trust_remote_code,
+        **_merge_mm_kwargs(model_config, **kwargs),
+    )
+
+
+def get_video_processor(
+    processor_name: str,
+    *args: Any,
+    revision: Optional[str] = None,
+    trust_remote_code: bool = False,
+    **kwargs: Any,
+):
+    """Load a video processor for the given model name via HuggingFace."""
+    # don't put this import at the top level
+    # it will call torch.cuda.device_count()
+    from transformers.image_processing_utils import BaseImageProcessor
+
+    processor = get_processor(
+        processor_name,
+        *args,
+        revision=revision,
+        trust_remote_code=trust_remote_code,
+        **kwargs,
+    )
+
+    return cast(BaseImageProcessor, processor.video_processor)
+
+
+def cached_video_processor_from_config(
+    model_config: "ModelConfig",
+    **kwargs: Any,
+):
+    return cached_get_video_processor(
+        model_config.model,
+        revision=model_config.revision,
+        trust_remote_code=model_config.trust_remote_code,
+        **_merge_mm_kwargs(model_config, **kwargs),
+    )
+
+
+# Adapted from vllm: https://github.com/vllm-project/vllm/pull/17948
 # Pass `revision` param to transformer processor to avoid using `main` as
 # default branch when using modelscope.
 # Find more details at:
 # https://github.com/vllm-project/vllm-ascend/issues/829
 processor.get_processor = get_processor
 processor.cached_processor_from_config = cached_processor_from_config
+processor.get_image_processor = get_image_processor
+processor.cached_image_processor_from_config = cached_image_processor_from_config
+processor.get_video_processor = get_video_processor
+processor.cached_video_processor_from_config = cached_video_processor_from_config
