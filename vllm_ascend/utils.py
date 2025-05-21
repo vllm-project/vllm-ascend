@@ -126,14 +126,16 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     original_sizes, compilation_config.cudagraph_capture_sizes = \
         compilation_config.cudagraph_capture_sizes, None
 
-    # Calculate parallel configuration factor (increases with DP or TP)
-    # TODO(Yizhou): This is a temporary solution, need to be improved
-    # in the future, taking into account the other parallel configurations.
+    # Calculate parallel configuration factor
     num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
     parallel_config = vllm_config.parallel_config
+
+    # TODO: Find out whether we need to take into account the pp_size
     parallel_factor = 1 + sum(size > 1 for size in [
-        parallel_config.data_parallel_size,
-        parallel_config.tensor_parallel_size
+        parallel_config.data_parallel_size_local,
+        parallel_config.tensor_parallel_size,
+        parallel_config.expert_parallel_size,
+        parallel_config.expert_tensor_parallel_size,
     ])
 
     # Calculate maximum supported batch sizes considering model architecture
