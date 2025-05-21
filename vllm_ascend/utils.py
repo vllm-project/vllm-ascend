@@ -25,7 +25,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, List, Tuple
 
 import torch
-import torch_npu  # noqa: F401
+import torch_npu  # noqa: F401  # noqa: F401
 import torchair  # type: ignore[import]  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
@@ -63,6 +63,7 @@ SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 
 ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
+
 
 def is_310p():
     global SOC_VERSION
@@ -111,8 +112,8 @@ def nd_to_nz_2d(in_tensor: torch.Tensor) -> torch.Tensor:
     pad_dims[1] = _round_up(in_tensor.size(1), 16) - in_tensor.size(1)
 
     return _custom_transpose(
-        _custom_reshape(_custom_pad(in_tensor, pad_dims), aux_dims), 1, 2
-    ).contiguous()
+        _custom_reshape(_custom_pad(in_tensor, pad_dims), aux_dims), 1,
+        2).contiguous()
 
 
 def aligned_16(tensor: torch.Tensor):
@@ -129,7 +130,10 @@ def aligned_16(tensor: torch.Tensor):
         return tensor
 
     # Create a new tensor with shape (n_aligned, H, W) and fill it with zeros
-    new_tensor = torch.zeros(n_aligned, *tensor.shape[1:], dtype=tensor.dtype, device=tensor.device)
+    new_tensor = torch.zeros(n_aligned,
+                             *tensor.shape[1:],
+                             dtype=tensor.dtype,
+                             device=tensor.device)
 
     # Copy the original tensor to the first N positions of the new tensor
     new_tensor[:n] = tensor
@@ -182,20 +186,19 @@ def communication_adaptation_310p():
         return all_reduce
 
     torch.distributed.all_reduce = all_reduce_wrapper_310p(
-        torch.distributed.all_reduce
-    )
+        torch.distributed.all_reduce)
     torch.distributed.distributed_c10d.all_reduce = all_reduce_wrapper_310p(
-        torch.distributed.distributed_c10d.all_reduce
-    )
+        torch.distributed.distributed_c10d.all_reduce)
 
     def reduce_scatter_310p(output_tensor, input_tensor, group=None):
         rank = torch.distributed.get_rank(group)
         world_size = torch.distributed.get_world_size(group)
-        torch.distributed.all_reduce(
-            input_tensor, torch.distributed.ReduceOp.SUM, group, async_op=False
-        )
+        torch.distributed.all_reduce(input_tensor,
+                                     torch.distributed.ReduceOp.SUM,
+                                     group,
+                                     async_op=False)
         interval = input_tensor.shape[0] // world_size
-        output_tensor[:] = input_tensor[rank * interval : (rank + 1) * interval]
+        output_tensor[:] = input_tensor[rank * interval:(rank + 1) * interval]
 
     torch.distributed._reduce_scatter_base = reduce_scatter_310p
     torch.distributed.distributed_c10d._reduce_scatter_base = reduce_scatter_310p
