@@ -23,6 +23,31 @@ from vllm.model_executor.layers.fused_moe.layer import \
     UnquantizedFusedMoEMethod
 
 
+def native_grouped_topk(
+    topk_weights: torch.Tensor,
+    num_expert_group: Optional[int],
+    topk_group: Optional[int],
+):
+    topk_group = 0 if topk_group is None else topk_group
+    num_expert_group = 0 if num_expert_group is None else num_expert_group
+
+    num_token = topk_weights.shape[0]
+    grouped_weights = topk_weights.view(num_token, num_expert_group,
+                                        -1).max(dim=-1).values
+    topk_group_indices = torch.topk(grouped_weights.to(torch.float32),
+                                    k=topk_group,
+                                    dim=-1,
+                                    sorted=False)[1]
+    topk_group_mask = torch.zeros_like(grouped_weights)
+    topk_group_mask.scatter_(1, topk_group_indices, 1)
+    topk_weight_mask = (topk_group_mask.unsqueeze(-1).expand(
+        num_token, num_expert_group,
+        topk_weights.shape[-1] // num_expert_group).reshape(num_token, -1))
+    topk_weights = topk_weights.masked_fill(~topk_weight_mask.bool(), 0.0)
+
+    return topk_weights
+
+
 def select_experts(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
