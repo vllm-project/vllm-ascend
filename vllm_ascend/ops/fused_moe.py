@@ -16,7 +16,8 @@
 # Adapted from vllm/tests/kernels/test_moe.py
 
 from typing import Callable, Optional
-
+import os
+import json
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
@@ -546,8 +547,34 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                                  expert_map=expert_map)
 
 
+def get_expert_map(expert_map_path, moe_instance_id, ep_rank, num_replicas):
+    with open(expert_map_path, "r") as f:
+        data = json.load(f)
+    layers = data["moe_layer_count"]
+    num_gpus = data["layer_list"][0]["device_count"]
+
+    tensor_data = []
+    for layer in data["layer_list"]:
+        device_data = []
+        for device in layer["device_list"]:
+            device_data.append(device["device_expert"])
+        tensor_data.append(device_data)
+    eplb_tensor = torch.tensor(tensor_data, dtype=torch.int)
+
+    eplb_maps = torch.full((layers, num_gpus, num_replicas), -1, dtype=torch.int32)
+    for l in range(layers):
+        for r in range(num_gpus):
+            e_ids = eplb_tensor[l, r]
+            eplb_maps[l, r, e_ids] = torch.arange(len(e_ids), dtype=torch.int32)
+
+    layer_expert_map = eplb_maps[moe_instance_id]
+    expert_map = layer_expert_map[ep_rank].to(torch.npu.current_device())
+    local_num_experts = torch.sum(torch.ne(expert_map, -1)).item()
+    return local_num_experts, expert_map
+
 class AscendFusedMoE(FusedMoE):
 
+    moe_counter = -1
     def __init__(
         self,
         num_experts: int,  # Global number of experts
@@ -574,6 +601,9 @@ class AscendFusedMoE(FusedMoE):
         # TODO: This could not initialize FusedMoE baseclass,
         # fixme and make __init__() of AscendFusedMoE more clear
         super(FusedMoE, self).__init__()
+
+        AscendFusedMoE.moe_counter += 1
+        self.moe_instance_id = AscendFusedMoE.moe_counter
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -616,10 +646,20 @@ class AscendFusedMoE(FusedMoE):
         self.activation = activation
 
         if self.ep_size > 1:
-            # Create a tensor of size num_experts filled with -1
-            self.local_num_experts, self.expert_map = determine_expert_map(
-                self.ep_size,
-                get_ep_group().rank_in_group, self.global_num_experts)
+            vllm_config = get_current_vllm_config()
+            if not vllm_config.additional_config:
+                expert_map_path = None
+            else:
+                expert_map_path = vllm_config.additional_config.get("expert_map_path", None)
+            if expert_map_path and os.path.exists(expert_map_path):
+                self.local_num_experts, self.expert_map = get_expert_map(
+                    expert_map_path, self.moe_instance_id, get_ep_group().rank_in_group, self.global_num_experts)
+            else:
+                # Create a tensor of size num_experts filled with -1
+                self.local_num_experts, self.expert_map = determine_expert_map(
+                    self.ep_size,
+                    get_ep_group().rank_in_group, self.global_num_experts)
+
             if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
                 self.tp_rank = get_etp_group().rank_in_group
                 self.ep_rank = get_ep_group().rank_in_group
