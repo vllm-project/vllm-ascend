@@ -75,7 +75,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: vllm-project/vllm
-          ref: ${{ matrix.vllm_verison }}
+          ref: ${{ matrix.vllm_version }}
           path: ./vllm-empty
 
       - name: Install vllm-project/vllm from source
