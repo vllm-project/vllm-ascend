@@ -18,7 +18,7 @@
 # limitations under the License.
 
 from functools import partial
-from typing import Callable, Iterable, Optional, Set, Tuple
+from typing import Callable, Optional
 
 import torch
 import torch.nn as nn
