@@ -34,8 +34,8 @@ try:
     CUSTOM_OP_ENABLED = True
 except ImportError as e:
     logging.warning(
-        "Failed to import 'vllm_ascend.vllm_ascend_C': %s. All custom ops will be disabled. ", e
-    )
+        "Failed to import 'vllm_ascend.vllm_ascend_C': %s. All custom ops will be disabled. ",
+        e)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
