@@ -120,6 +120,13 @@ class NPUModelRunner:
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
 
+        additional_config = vllm_config.additional_config
+        if additional_config and additional_config.get(
+                "ascend_scheduler_config", None) is not None:
+            self.use_v0_scheduler = True
+        else:
+            self.use_v0_scheduler = False
+
         self.graph_block_tables = np.zeros(
             (self.vllm_config.scheduler_config.max_num_seqs,
              (self.model_config.max_model_len + self.block_size - 1) //
@@ -545,13 +552,14 @@ class NPUModelRunner:
                block_offsets,
                out=self.slot_mapping_np[:total_num_scheduled_tokens])
 
-        if self.chunked_prefill_enabled:
-            attn_state = AscendAttentionState.ChunkedPrefill
-        elif np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
+        if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillNoCache
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
             attn_state = AscendAttentionState.DecodeOnly
+        # splitfuse
+        elif not self.use_v0_scheduler or self.chunked_prefill_enabled:
+            attn_state = AscendAttentionState.ChunkedPrefill
         else:
             attn_state = AscendAttentionState.PrefillCacheHit
 
