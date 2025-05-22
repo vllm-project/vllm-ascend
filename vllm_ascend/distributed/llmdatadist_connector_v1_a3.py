@@ -504,7 +504,7 @@ class LLMDataDistConnectorWorker():
     remote_server_id = metadata.server_id
     is_same_server = remote_server_id == self.local_agent_metadata.server_id
     is_same_pod = remote_super_pod_id == self.local_agent_metadata.super_pod_id
-    if self.llm_datadist_role == LLMRole.RPOMPT:
+    if self.llm_datadist_role == LLMRole.PROMPT:
       prefill_metadata = self.local_agent_metadata
       decode_metadata = metadata
     else:
@@ -673,7 +673,7 @@ class LLMDataDistConnectorWorker():
       raise RuntimeError(f"LLMDataDistConnectorWorker: Timeout during pull_blocks, you can try to increase the sync_kv_timeout config or checking your connect status")
 
 
-  def get_finished(self) -> tuple[Optional[set[str]], Optional[set[str]]]:
+  def get_finished(self, finished_req_ids: set[str]) -> tuple[Optional[set[str]], Optional[set[str]]]:
     """Get the finished recving and sending requuests."""
     import copy
     req_ids_to_ret = copy.deepcopy(self.finished_reqs)
