@@ -1053,17 +1053,23 @@ class NPUModelRunner:
                         torch_npu.npu_format_cast(kv_caches[layer_name][0], 2)
                         torch_npu.npu_format_cast(kv_caches[layer_name][1], 2)
                     else:
-                        num_caches = kv_cache_shape[0]
-                        kv_cache_list = []
-                        for i in range(num_caches):
-                            cache_shape = kv_cache_shape[1:]
-                            kv_cache_for_compute = torch.zeros(cache_shape, dtype=dtype, device=self.device)
-                            kv_cache_list.append(kv_cache_for_compute)
-                            # import math
-                            # total_size = math.prod(cache_shape)
-                            # alignment = 2 * 1024 * 1024
-                            # total_size_with_alignment = total_size + alignment
-                        kv_caches[layer_name] = kv_cache_list
+                        if self.model_config.is_deepseek_mla:
+                            num_blocks, block_size, num_kv_heads, head_size = kv_cache_shape
+                            rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
+                            nope_dim = head_size - rope_dim
+                            nope_cache_shape = (num_blocks, block_size, num_kv_heads, nope_dim)
+                            rope_cache_shape = (num_blocks, block_size, num_kv_heads, rope_dim)
+                            nope_cache = torch.zeros(nope_cache_shape, dtype=dtype, device=self.device)
+                            rope_cache = torch.zeros(rope_cache_shape, dtype=dtype, device=self.device)
+                            kv_caches[layer_name] = (rope_cache, nope_cache)
+                        else:
+                            num_caches = kv_cache_shape[0]
+                            kv_cache_list = []
+                            for i in range(num_caches):
+                                cache_shape = kv_cache_shape[1:]
+                                kv_cache_for_compute = torch.zeros(cache_shape, dtype=dtype, device=self.device)
+                                kv_cache_list.append(kv_cache_for_compute)
+                            kv_caches[layer_name] = kv_cache_list
                         # torch_npu.npu_format_cast(kv_caches[layer_name], 2)
                 else:
                     # TODO: add new branches when introducing more types of
@@ -1074,7 +1080,7 @@ class NPUModelRunner:
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
-        
+
         if has_kv_transfer_group():
             get_kv_transfer_group().register_kv_caches(kv_caches)
 
