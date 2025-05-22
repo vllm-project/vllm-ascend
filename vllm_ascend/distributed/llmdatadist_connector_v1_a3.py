@@ -20,7 +20,7 @@ from vllm.distributed.parallel_state import (
   get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
   get_tp_group, get_world_group
 )
-from vllm.config import KVTransferConfig
+from vllm.config import KVTransferConfig, get_current_vllm_config
 from vllm.utils import round_down, get_ip
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -438,11 +438,11 @@ class LLMDataDistConnectorWorker():
     _, first_kv_cache_tuple = next(iter(kv_caches.items()))
     first_kv_cache = first_kv_cache_tuple[0]
     kv_cache_dtype = first_kv_cache.dtype
-    use_mla = len(first_kv_cache_tuple) == 1
+    use_mla = get_current_vllm_config().model_config.is_deepseek_mla
     if use_mla:
-        # MLA case.
+        # MLA case. [2 (k_normed, k_pe), num_blocks, ...]
         self.num_blocks = first_kv_cache.shape[0]
-        block_rank = 2  # [block_size, latent_dim]
+        block_rank = 3  # [block_size, latent_dim]
         block_shape = first_kv_cache.shape[-block_rank:]
     else:
         # [2 (k and v), num_blocks, ...]
@@ -451,23 +451,47 @@ class LLMDataDistConnectorWorker():
         block_shape = first_kv_cache.shape[-block_rank:]
 
     self.block_len = math.prod(block_shape)
-    self.cache_addr = []
+    self.cache_addr = None
     alignment = 2 * 1024 * 1024
-    for cache_or_caches in kv_caches.values():
-      # cache_list = [cache_or_caches] if use_mla else cache_or_caches
-      for cache in cache_or_caches:
-        base_addr = cache.data_ptr()
-        assert base_addr % alignment == 0, "The address of the registered kv cache should be aligned to 2M"
-        self.cache_addr.append(base_addr)
-    # register paged kv cache into the llm_cache manager
-    self.cache_desc = CacheDesc(len(self.cache_addr), [*cache.shape], TORCH_DTYPE_TO_NPU_DTYPE[kv_cache_dtype])
-    self.cache_key = BlocksCacheKey(cluster_id=int(self.local_agent_metadata.cluster_id))
-    logger.info(f"num of cache: {len(self.cache_addr)}, size of cache: {[*cache.shape]}, real size of cache: {first_kv_cache.shape}")
-    try:
-      self.cache = self.cache_manager.register_blocks_cache(self.cache_desc, self.cache_addr, self.cache_key)
-      logger.info("LLMDataDistWorker: End of register Paged Cache.")
-    except (TypeError, ValueError) as e:
-      raise RuntimeError(f"LLMDataDistConnectorWorker: Passing unexpected parameter to register_block_cache, receiving [cache_desc: {self.cache_desc}, cache_addr: {self.cache_addr}, cache_key: {self.cache_key}]")
+    if use_mla:
+      cache_k_normed_addr_list = []
+      cache_k_pe_addr_list = []
+      k_normed = None
+      k_pe = None
+      for cache_or_caches in kv_caches.values():
+        k_normed, k_pe = cache_or_caches[0], cache_or_caches[1]
+        cache_k_normed_addr_list.append(k_normed.data_ptr())
+        cache_k_pe_addr_list.append(k_pe.data_ptr())
+      self.cache_addr = (cache_k_normed_addr_list, cache_k_pe_addr_list)
+
+      cache_desc_k_normed = CacheDesc(len(self.cache_addr[0]), [*k_normed.shape], TORCH_DTYPE_TO_NPU_DTYPE[kv_cache_dtype])
+      cache_desc_k_pe = CacheDesc(len(self.cache_addr[1]), [*k_pe.shape], TORCH_DTYPE_TO_NPU_DTYPE[kv_cache_dtype])
+      cache_key_k_normed = BlocksCacheKey(cluster_id=int(self.local_agent_metadata.cluster_id), model_id=0)
+      cache_key_k_pe = BlocksCacheKey(cluster_id=int(self.local_agent_metadata.cluster_id), model_id=1)
+      self.cache_desc = (cache_desc_k_normed, cache_desc_k_pe)
+      self.cache_key = (cache_key_k_normed, cache_key_k_pe)
+      try:
+        cache_k_normed = self.cache_manager.register_block_cache(self.cache_desc[0], self.cache_addr[0], self.cache_key[0])
+        cache_k_pe = self.cache_manager.register_block_cache(self.cache_desc[1], self.cache_addr[1], self.cache_key[1])
+        self.cache = (cache_k_normed, cache_k_pe)
+        logger.info("LLMDataDistWorker: End of register Paged Cache.")
+      except (TypeError, ValueError) as e:
+        raise RuntimeError(f"LLMDataDistConnectorWorker: Passing unexpected parameter to register_block_cache, receiving [cache_desc: {self.cache_desc}, cache_addr: {self.cache_addr}, cache_key: {self.cache_key}]")
+    else:
+      for cache_or_caches in kv_caches.values():
+        for cache in cache_or_caches:
+          base_addr = cache.data_ptr()
+          assert base_addr % alignment == 0, "The address of the registered kv cache should be aligned to 2M"
+          self.cache_addr.append(base_addr)
+      # register paged kv cache into the llm_cache manager
+      self.cache_desc = CacheDesc(len(self.cache_addr), [*cache.shape], TORCH_DTYPE_TO_NPU_DTYPE[kv_cache_dtype])
+      self.cache_key = BlocksCacheKey(cluster_id=int(self.local_agent_metadata.cluster_id))
+      logger.info(f"num of cache: {len(self.cache_addr)}, size of cache: {[*cache.shape]}, real size of cache: {first_kv_cache.shape}")
+      try:
+        self.cache = self.cache_manager.register_blocks_cache(self.cache_desc, self.cache_addr, self.cache_key)
+        logger.info("LLMDataDistWorker: End of register Paged Cache.")
+      except (TypeError, ValueError) as e:
+        raise RuntimeError(f"LLMDataDistConnectorWorker: Passing unexpected parameter to register_block_cache, receiving [cache_desc: {self.cache_desc}, cache_addr: {self.cache_addr}, cache_key: {self.cache_key}]")
     self.ready_event = threading.Event()
     self.metadata_agent_listener_t = threading.Thread(
       target=self.listen_for_agent_metadat_req,
@@ -663,14 +687,27 @@ class LLMDataDistConnectorWorker():
 
     remote_cluster_id = self.linked_cluster[remote_ip][0]
     logger.info(f"remote cluster id is: {remote_cluster_id}")
-    remote_cache_key = BlocksCacheKey(cluster_id=remote_cluster_id)
-    logger.info("Try pull blocks from remote server")
-    try:
-      self.cache_manager.pull_blocks(remote_cache_key, self.cache, local_block_ids, remote_block_ids)
-    except (TypeError, ValueError) as e:
-      raise RuntimeError(f"LLMDataDistConnectorWorker: Passing unexpected parameter to pull_blocks remote_cache_key: {remote_cache_key}, cache: {self.cache}, local_block_ids: {local_block_ids}, remote_block_ids: {remote_block_ids}")
-    except LLMException:
-      raise RuntimeError(f"LLMDataDistConnectorWorker: Timeout during pull_blocks, you can try to increase the sync_kv_timeout config or checking your connect status")
+    is_mla = get_current_vllm_config().model_config.is_deepseek_mla
+    if is_mla:
+      remote_cache_key_k_normed = BlocksCacheKey(cluster_id=remote_cluster_id, model_id=0)
+      remote_cache_key_k_pe = BlocksCacheKey(cluster_id=remote_cluster_id, model_id=1)
+      logger.info("Try pull blocks from remote server")
+      try:
+        self.cache_manager.pull_blocks(remote_cache_key_k_normed, self.cache[0], local_block_ids, remote_block_ids)
+        self.cache_manager.pull_blocks(remote_cache_key_k_pe, self.cache[1], local_block_ids, remote_block_ids)
+      except (TypeError, ValueError) as e:
+        raise RuntimeError(f"LLMDataDistConnectorWorker: Passing unexpected parameter to pull_blocks remote_cache_key: {remote_cache_key}, cache: {self.cache}, local_block_ids: {local_block_ids}, remote_block_ids: {remote_block_ids}")
+      except LLMException:
+        raise RuntimeError(f"LLMDataDistConnectorWorker: Timeout during pull_blocks, you can try to increase the sync_kv_timeout config or checking your connect status")
+    else:
+      remote_cache_key = BlocksCacheKey(cluster_id=remote_cluster_id)
+      logger.info("Try pull blocks from remote server")
+      try:
+        self.cache_manager.pull_blocks(remote_cache_key, self.cache, local_block_ids, remote_block_ids)
+      except (TypeError, ValueError) as e:
+        raise RuntimeError(f"LLMDataDistConnectorWorker: Passing unexpected parameter to pull_blocks remote_cache_key: {remote_cache_key}, cache: {self.cache}, local_block_ids: {local_block_ids}, remote_block_ids: {remote_block_ids}")
+      except LLMException:
+        raise RuntimeError(f"LLMDataDistConnectorWorker: Timeout during pull_blocks, you can try to increase the sync_kv_timeout config or checking your connect status")
 
 
   def get_finished(self, finished_req_ids: set[str]) -> tuple[Optional[set[str]], Optional[set[str]]]:
