@@ -696,12 +696,14 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
 
         # Compute tokens.
         # Fixme: this is for the version compatibility, remove this once vllm v0.8.5 does not be supported.
-        if not hasattr(seq_data, "prompt_embeds") or seq_data.prompt_embeds is None:
+        if not hasattr(seq_data,
+                       "prompt_embeds") or seq_data.prompt_embeds is None:
             tokens = seq_data.get_token_ids()[context_len:seq_len]
             prompt_embeds = None
         else:
             tokens = [0] * (seq_len - context_len)
-            prompt_embeds = seq_data.get_token_embeddings()[context_len:seq_len]
+            prompt_embeds = seq_data.get_token_embeddings(
+            )[context_len:seq_len]
 
         token_types = seq_group_metadata.token_type_ids
 
