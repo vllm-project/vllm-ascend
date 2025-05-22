@@ -1,7 +1,7 @@
 import msgspec
 from dataclasses import dataclass
 
-from typing import Optional, Any
+from typing import Optional, Any, Tuple
 import torch
 import math
 from vllm_ascend import envs
@@ -82,7 +82,7 @@ class LLMDataDistConnectorMetadata(KVConnectorMetadata):
 
 class LLMDataDistConnectorA3(KVConnectorBase_V1):
   def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
-    self.engine_id = vllm_config.kv_events_config.engine_id
+    self.engine_id = vllm_config.kv_transfer_config.engine_id
     if role == KVConnectorRole.SCHEDULER:
       self.connector_scheduler: Optional[LLMDataDistConnectorScheduler] = LLMDataDistConnectorScheduler(vllm_config, self.engine_id)
     elif role == KVConnectorRole.WORKER:
@@ -133,7 +133,7 @@ class LLMDataDistConnectorA3(KVConnectorBase_V1):
                     finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
       """Get the finished recving and sending requests."""
       assert self.connector_worker is not None
-      return self.connector_worker.get_finished()
+      return self.connector_worker.get_finished(finished_req_ids)
 
   def start_load_kv(self, forward_context: "ForwardContext",
                     **kwargs) -> None:
@@ -253,9 +253,9 @@ class LLMDataDistConnectorScheduler():
     # we just transfer any data that computed from prefill node
     # note: there might be some issue on this, check it if there is any unexpected result
 
-    # all_full = request.num_computed_tokens % self.block_size == 0
-    # computed_block_ids = block_ids if all_full else block_ids[:-1]
-    computed_block_ids = block_ids
+    all_full = request.num_computed_tokens % self.block_size == 0
+    computed_block_ids = block_ids if all_full else block_ids[:-1]
+    # computed_block_ids = block_ids
     # If prompt < block_size, no xfer so free blocks immediately.
     delay_free_blocks = len(computed_block_ids) > 0
 
@@ -301,6 +301,7 @@ class LLMDataDistConnectorWorker():
       self.local_agent_metadata = self.read_agent_metadata(global_rank_table, self.local_ip, self.local_rank, self.llm_datadist_role)
       self.llm_datadist = LLMDataDist(self.llm_datadist_role, self.local_agent_metadata.cluster_id)
       self.init_llm_datadist()
+      self.finished_reqs = set()
       # remote_ip, remote_rank = self.get_remote_ip_and_rank()
       # for idx in range(len(remote_ip)):
       #   remote_agent_meta = self.read_agent_metadata(global_rank_table, remote_ip[idx], remote_rank[idx], self.llm_datadist_remote_role)
@@ -309,10 +310,11 @@ class LLMDataDistConnectorWorker():
 
   def listen_for_agent_metadat_req(self, event: threading.Event):
     port = envs.VLLM_LLMDD_CHANNEL_PORT + self.local_rank
-    url = f"tcp://{self.local_ip}:{port}"
+    url = f"tcp://0.0.0.0:{port}"
     msg_encoder = msgspec.msgpack.Encoder()
     msg_decoder = msgspec.msgpack.Decoder()
     msg_to_send = msg_encoder.encode(self.local_agent_metadata)
+    logger.debug(f"Start to listen to address: {url}")
     logger.debug(f"The local agent metadata have {len(msg_to_send)} bytes here")
     logger.info(f"LLMDataDistConnectorWorker: Cluster {self.local_agent_metadata.cluster_id} start to listen request from peers")
     with zmq_ctx(zmq.ROUTER, url) as sock:
@@ -320,7 +322,9 @@ class LLMDataDistConnectorWorker():
       while True:
         identity, _, msg = sock.recv_multipart()
         decode_msg = msg_decoder.decode(msg)
-        if isinstance(decode_msg, LLMDataDistAgentMetadata):
+        if "cluster_id" in decode_msg:
+          decode_msg = LLMDataDistAgentMetadata(**decode_msg)
+          logger.info(f"LLMDataDistConnectorWorker: Receive message from cluster {decode_msg.cluster_id}")
           sock.send_multipart((identity, b"", msg_to_send))
           self.add_remote_agent(decode_msg)
         else:
@@ -329,9 +333,10 @@ class LLMDataDistConnectorWorker():
   def init_llm_datadist(self):
     llm_config = LLMConfig()
     llm_config.device_id = self.local_rank
-    llm_config.sync_kv_timeout = 1000
+    llm_config.sync_kv_timeout = 20000
     llm_config.enable_switch_role = True
     llm_config.enable_cache_manager = True
+    llm_config.enable_remote_cache_accessible = True
     llm_config_options = llm_config.generate_options()
     self.llm_datadist.init(llm_config_options)
     self.cache_manager = self.llm_datadist.cache_manager
@@ -423,16 +428,17 @@ class LLMDataDistConnectorWorker():
 
 
   def init_cluster_info(self, global_rank_table):
-    if self.kv_transfer_config.kv_role is "kv_producer":
+    if self.kv_transfer_config.kv_role == "kv_producer":
       self.cluster_id = global_rank_table["prefill_device_list"][self.rank]["cluster_id"]
     else:
       self.cluster_id = global_rank_table["decode_device_list"][self.rank]["cluster_id"]
 
 
-  def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-    _, first_kv_cache = next(iter(kv_caches.items()))
-    kv_cache_dtype = first_kv_cache.dtype()
-    use_mla = len(first_kv_cache) == 3
+  def register_kv_caches(self, kv_caches: dict[str, Tuple[torch.Tensor]]):
+    _, first_kv_cache_tuple = next(iter(kv_caches.items()))
+    first_kv_cache = first_kv_cache_tuple[0]
+    kv_cache_dtype = first_kv_cache.dtype
+    use_mla = len(first_kv_cache_tuple) == 1
     if use_mla:
         # MLA case.
         self.num_blocks = first_kv_cache.shape[0]
@@ -440,20 +446,23 @@ class LLMDataDistConnectorWorker():
         block_shape = first_kv_cache.shape[-block_rank:]
     else:
         # [2 (k and v), num_blocks, ...]
-        self.num_blocks = first_kv_cache.shape[1]
+        self.num_blocks = first_kv_cache.shape[0]
         block_rank = 3  # [block_size, kv_heads, head_dim]
         block_shape = first_kv_cache.shape[-block_rank:]
 
     self.block_len = math.prod(block_shape)
     self.cache_addr = []
+    alignment = 2 * 1024 * 1024
     for cache_or_caches in kv_caches.values():
-      cache_list = [cache_or_caches] if use_mla else cache_or_caches
-      for cache in cache_list:
+      # cache_list = [cache_or_caches] if use_mla else cache_or_caches
+      for cache in cache_or_caches:
         base_addr = cache.data_ptr()
+        assert base_addr % alignment == 0, "The address of the registered kv cache should be aligned to 2M"
         self.cache_addr.append(base_addr)
     # register paged kv cache into the llm_cache manager
-    self.cache_desc = CacheDesc(len(self.cache_addr), [self.num_blocks, self.block_len], TORCH_DTYPE_TO_NPU_DTYPE[kv_cache_dtype])
-    self.cache_key = BlocksCacheKey(cluster_id=int(self.cluster_id))
+    self.cache_desc = CacheDesc(len(self.cache_addr), [*cache.shape], TORCH_DTYPE_TO_NPU_DTYPE[kv_cache_dtype])
+    self.cache_key = BlocksCacheKey(cluster_id=int(self.local_agent_metadata.cluster_id))
+    logger.info(f"num of cache: {len(self.cache_addr)}, size of cache: {[*cache.shape]}, real size of cache: {first_kv_cache.shape}")
     try:
       self.cache = self.cache_manager.register_blocks_cache(self.cache_desc, self.cache_addr, self.cache_key)
       logger.info("LLMDataDistWorker: End of register Paged Cache.")
@@ -469,6 +478,8 @@ class LLMDataDistConnectorWorker():
     self.ready_event.wait()
 
   def start_load_kv(self, metadata: LLMDataDistConnectorMetadata):
+    logger.info("start to load kv")
+    logger.info(f"load kv metadata is: {metadata}")
     for req_id, meta in metadata.requests.items():
       logger.debug(f"Start to transmit {req_id}")
       self._read_blocks(
@@ -479,6 +490,7 @@ class LLMDataDistConnectorWorker():
         meta.engine_id,
         req_id
       )
+      self.finished_reqs.add(req_id)
 
   def add_remote_agent(self, metadata: LLMDataDistAgentMetadata) -> bool:
     remote_cluster_id = metadata.cluster_id
@@ -492,89 +504,109 @@ class LLMDataDistConnectorWorker():
     remote_server_id = metadata.server_id
     is_same_server = remote_server_id == self.local_agent_metadata.server_id
     is_same_pod = remote_super_pod_id == self.local_agent_metadata.super_pod_id
-    # remote_rank_id = remote_cluster_id
-    comm_name = f"pd_comm_{remote_device_ip}_{self.local_agent_metadata.device_ip}"
-    local_rank_in_table = 0 if remote_server_id > self.local_agent_metadata.server_id else 1
-    remote_rank_in_table = 1 if remote_server_id > self.local_agent_metadata.server_id else 0
+    if self.llm_datadist_role == LLMRole.RPOMPT:
+      prefill_metadata = self.local_agent_metadata
+      decode_metadata = metadata
+    else:
+      prefill_metadata = metadata
+      decode_metadata = self.local_agent_metadata
+    comm_name = f"pd_comm_{prefill_metadata.device_ip}_{decode_metadata.device_ip}"
     cluster_rank_info = {
-       self.local_agent_metadata.cluster_id: local_rank_in_table,
-       remote_cluster_id: remote_rank_in_table,
+      prefill_metadata.cluster_id: 0,
+      decode_metadata.cluster_id: 1
     }
-    cluster_rank_info = dict(sorted(cluster_rank_info.items(), key=lambda item: item[1]))
+    # remote_rank_id = remote_cluster_id
+    # comm_name = f"pd_comm_{remote_device_ip}_{self.local_agent_metadata.device_ip}"
+    # local_rank_in_table = 0 if remote_server_id > self.local_agent_metadata.server_id else 1
+    # remote_rank_in_table = 1 if remote_server_id > self.local_agent_metadata.server_id else 0
+    # cluster_rank_info = {
+    #    self.local_agent_metadata.cluster_id: local_rank_in_table,
+    #    remote_cluster_id: remote_rank_in_table,
+    # }
+    # cluster_rank_info = dict(sorted(cluster_rank_info.items(), key=lambda item: item[1]))
     rank_table = {}
     rank_table["version"] = "1.2"
-    rank_table["server_count"] = "1" if remote_server_id == self.local_agent_metadata.server_id else "2"
+    rank_table["server_count"] = "1" if is_same_server else "2"
     rank_table["status"] = "completed"
   
     # generate server_list for rank table
     rank_table["server_list"] = []
-    local_server_device_info = {
+    decode_server_device_info = None
+    prefill_server_device_info = {
       "device": [
         {
-          "device_id": self.local_agent_metadata.device_id,
-          "device_ip": self.local_agent_metadata.device_ip,
-          "super_device_id": self.local_agent_metadata.super_device_id,
-          "rank_id": local_rank_in_table
+          "device_id": prefill_metadata.device_id,
+          "device_ip": prefill_metadata.device_ip,
+          "super_device_id": prefill_metadata.super_device_id,
+          "rank_id": "0"
         }
       ],
-      "server_id": self.local_agent_metadata.server_id
+      "server_id": prefill_metadata.server_id
     }
     if is_same_server:
-      local_server_device_info["device"].append(
+      prefill_server_device_info["device"].append(
         {
-          "device_id": remote_device_id,
-          "device_ip": remote_device_ip,
-          "super_device_id": remote_super_device_id,
-          "rank_id": remote_rank_in_table
+          "device_id": decode_metadata.device_id,
+          "device_ip": decode_metadata.device_ip,
+          "super_device_id": decode_metadata.super_device_id,
+          "rank_id": "1"
         }
       )
     else:
-      remote_server_device_info = {
+      decode_server_device_info = {
         "device": [
           {
-            "device_id": remote_device_id,
-            "device_ip": remote_device_ip,
-            "super_device_id": remote_super_device_id,
-            "rank_id": remote_rank_in_table
+            "device_id": decode_metadata.device_id,
+            "device_ip": decode_metadata.device_ip,
+            "super_device_id": decode_metadata.super_device_id,
+            "rank_id": "1"
           }
         ],
-        "server_id": remote_server_id
+        "server_id": decode_metadata.server_id
       }
-      rank_table["server_list"].append(remote_server_device_info)
-    rank_table["server_list"].append(local_server_device_info)
+    rank_table["server_list"].append(prefill_server_device_info)
+    if decode_server_device_info is not None:
+      rank_table["server_list"].append(decode_server_device_info)
 
     # generate super_pod_list for rank table
     super_pod_list = []
-    remote_super_pod_info = {
-       "super_pod_id": remote_super_pod_id,
+    prefill_super_pod_info = {
+       "super_pod_id": prefill_metadata.super_pod_id,
        "server_list": [
-          {"server_id": remote_server_id}
+          {"server_id": prefill_metadata.server_id}
         ],
     }
     if is_same_pod and not is_same_server:
-      remote_super_pod_info["server_list"].append(
-        {"server_id": self.local_agent_metadata.server_id}
+      prefill_super_pod_info["server_list"].append(
+        {"server_id": decode_metadata.server_id}
       )
-    super_pod_list.append(remote_super_pod_info)
+    super_pod_list.append(prefill_super_pod_info)
     if not is_same_pod:
-      local_super_pod_info = {
-        "super_pod_id": self.local_agent_metadata.super_pod_id,
+      decode_super_pod_id = {
+        "super_pod_id": decode_metadata.super_pod_id,
         "server_list": [
-          {"server_id": self.local_agent_metadata.server_id}
+          {"server_id": decode_metadata.server_id}
         ],
       }
-      super_pod_list.append(local_super_pod_info)
+      super_pod_list.append(decode_super_pod_id)
     rank_table["super_pod_list"] = super_pod_list
+    logger.info(f"LLMDataDistConnectorWorker: try link with remote, comm id: {comm_name}")
+    logger.info(f"rank table \n{rank_table}")
+    logger.info(f"comm name: {comm_name}")
+    logger.info(f"cluster rank info: {cluster_rank_info}")
     comm_id = self.llm_datadist.link(comm_name, cluster_rank_info, json.dumps(rank_table))
+    logger.info("Fnished link process")
     while True:
       ret = self.llm_datadist.query_register_mem_status(comm_id=comm_id)
       if ret == llm_datadist.RegisterMemStatus.OK:
         logger.info(f"LLMDataDistConnectorWorker: Linking success, comm id: {comm_id}")
         break
-      elif ret == llm_datadist.RegiserMemStatus.FAILED:
+      elif ret == llm_datadist.RegisterMemStatus.FAILED:
         raise RuntimeError(f"LLMDataDistConnectorWorker: Linking failed, comm id: {comm_id}")
+      time.sleep(1)
       logger.info("Checking query_register_mem_status again")
-    self.linked_cluster.update({remote_cluster_id: comm_id})
+    self.linked_cluster.update({remote_server_id: (remote_cluster_id, comm_id)})
+    logger.info(f"cached linked cluster: {self.linked_cluster}")
     logger.info(f"Sucessfully build link with cluster id {remote_cluster_id} with cluster name {comm_name} !")
     return True
 
@@ -601,10 +633,13 @@ class LLMDataDistConnectorWorker():
     msg_encoder = msgspec.msgpack.Encoder()
     msg_send = msg_encoder.encode(self.local_agent_metadata)
     with zmq_ctx(zmq.REQ, url) as sock:
+      logger.info("Try request remote metadata from socket......")
       sock.send(msg_send)
       metadata_bytes = sock.recv()
-      decoder = msgspec.msgpack.Decoder(LLMDataDistAgentMetadata)
+      decoder = msgspec.msgpack.Decoder()
       metadata = decoder.decode(metadata_bytes)
+      metadata = LLMDataDistAgentMetadata(**metadata)
+      logger.info(f"recving metadata: {metadata}")
       self.add_remote_agent(metadata)
 
   def _read_blocks(
@@ -613,10 +648,10 @@ class LLMDataDistConnectorWorker():
     remote_block_ids: list[int],
     remote_ip: str,
     remote_port: int,
-    remote_cluster_id: str,
+    remote_engine_id: str,
     request_id: str,
   ):
-    if remote_cluster_id not in self.linked_cluster:
+    if remote_ip not in self.linked_cluster:
       self.connect_to_remote_agent(remote_ip, remote_port)
     num_local_blocks = len(local_block_ids)
     if num_local_blocks == 0:
@@ -626,7 +661,10 @@ class LLMDataDistConnectorWorker():
     if num_local_blocks < num_remote_blocks:
       remote_block_ids = remote_block_ids[-num_local_blocks:]
 
+    remote_cluster_id = self.linked_cluster[remote_ip][0]
+    logger.info(f"remote cluster id is: {remote_cluster_id}")
     remote_cache_key = BlocksCacheKey(cluster_id=remote_cluster_id)
+    logger.info("Try pull blocks from remote server")
     try:
       self.cache_manager.pull_blocks(remote_cache_key, self.cache, local_block_ids, remote_block_ids)
     except (TypeError, ValueError) as e:
@@ -637,7 +675,13 @@ class LLMDataDistConnectorWorker():
 
   def get_finished(self) -> tuple[Optional[set[str]], Optional[set[str]]]:
     """Get the finished recving and sending requuests."""
-    return False, None
+    import copy
+    req_ids_to_ret = copy.deepcopy(self.finished_reqs)
+    self.finished_reqs.clear()
+    if self.llm_datadist_role == LLMRole.PROMPT:
+      return req_ids_to_ret, None
+    else:
+      return None, req_ids_to_ret
 
 
 @contextlib.contextmanager

@@ -979,7 +979,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return output
 
     @staticmethod
-    def maybe_setup_kv_connector(self, scheduler_output: "SchedulerOutput"):
+    def maybe_setup_kv_connector(scheduler_output: "SchedulerOutput"):
         # Update KVConnector with the KVConnector metadata forward().
         if has_kv_transfer_group():
             kv_connector = get_kv_transfer_group()
@@ -998,7 +998,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     @staticmethod
     def get_finished_kv_transfer(
             scheduler_output: "SchedulerOutput",
-    ) -> tuple[Optional[set[str], Optional[set[str]]]]:
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_finished(
                 scheduler_output.finished_req_ids)
@@ -1282,10 +1282,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         torch_npu.npu_format_cast(kv_caches[layer_name][0], 2)
                         torch_npu.npu_format_cast(kv_caches[layer_name][1], 2)
                     else:
-                        kv_caches[layer_name] = torch.zeros(kv_cache_shape,
-                                                            dtype=dtype,
-                                                            device=self.device)
-                        torch_npu.npu_format_cast(kv_caches[layer_name], 2)
+                        num_caches = kv_cache_shape[0]
+                        kv_cache_list = []
+                        for i in range(num_caches):
+                            cache_shape = kv_cache_shape[1:]
+                            kv_cache_for_compute = torch.zeros(cache_shape, dtype=dtype, device=self.device)
+                            kv_cache_list.append(kv_cache_for_compute)
+                            # import math
+                            # total_size = math.prod(cache_shape)
+                            # alignment = 2 * 1024 * 1024
+                            # total_size_with_alignment = total_size + alignment
+                        kv_caches[layer_name] = kv_cache_list
+                        # torch_npu.npu_format_cast(kv_caches[layer_name], 2)
                 else:
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
@@ -1295,6 +1303,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
+        
+        if has_kv_transfer_group():
+            get_kv_transfer_group().register_kv_caches(kv_caches)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """
