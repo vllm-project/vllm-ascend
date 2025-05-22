@@ -36,13 +36,11 @@ jobs:
         os: [linux-arm64-npu-1, linux-arm64-npu-4]
         vllm_verison: [main, v0.8.5.post1]
     concurrency:
-      group: >
-        ${{ 
-        matrix.os == 'linux-arm64-npu-4' 
-          && format('pr-{0}-limit-npu-4') 
-        || format('job-{0}-{1}', matrix.os, matrix.vllm_verison) 
-        }}
-      cancel-in-progress: false
+        group: >-
+            ${{ matrix.os == 'linux-arm64-npu-4'
+            && 'pr-limit-npu-4'
+            || format('job-{0}-{1}', matrix.os, matrix.vllm_version) }}
+        cancel-in-progress: false
     name: vLLM Ascend test
     runs-on: ${{ matrix.os }}
     container:
