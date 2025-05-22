@@ -51,11 +51,11 @@ jobs:
         vllm_verison: [main, v0.8.5.post1]
     concurrency:
       group: >
-        ${{ 
-        matrix.os == 'linux-arm64-npu-4' 
-          && github.event.pull_request.number 
-          && format('pr-{0}-limit-npu-4', github.event.pull_request.number) 
-        || format('job-{0}-{1}-{2}', matrix.os, matrix.vllm_verison, github.event.pull_request.number) 
+        ${{
+        matrix.os == 'linux-arm64-npu-4'
+          && github.event.pull_request.number
+          && format('pr-{0}-limit-npu-4', github.event.pull_request.number)
+        || format('job-{0}-{1}-{2}', matrix.os, matrix.vllm_verison, github.event.pull_request.number)
         }}
       cancel-in-progress: false
     name: vLLM Ascend test
@@ -112,10 +112,12 @@ jobs:
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
             pytest -sv tests/singlecard/test_offline_inference.py
+            pytest -sv tests/singlecard/test_ilama_lora.py
             pytest -sv tests/ops
             pytest -sv tests/compile
           else
             pytest -sv -k "QwQ" tests/multicard/test_offline_inference_distributed.py
+            pytest -sv tests/multicard/test_ilama_lora_tp2.py
             pytest -sv tests/ops
             pytest -sv tests/compile
           fi
@@ -125,9 +127,11 @@ jobs:
           VLLM_USE_V1: 0
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
+            pytest -sv tests/singlecard/test_ilama_lora.py
             pytest -sv tests/singlecard/test_offline_inference.py
             pytest -sv tests/ops
           else
+            pytest -sv tests/multicard/test_ilama_lora_tp2.py
             pytest -sv -k "QwQ" tests/multicard/test_offline_inference_distributed.py
             pytest -sv -k "DeepSeek" tests/multicard/test_offline_inference_distributed.py
             pytest -sv tests/ops
