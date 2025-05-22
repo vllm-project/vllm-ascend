@@ -390,11 +390,8 @@ class Qwen3MoeForCausalLM(nn.Module, SupportsPP):
             "gate_proj",
             "up_proj",
         ],
-        "experts": [
-            "experts.0.gate_proj",
-            "experts.0.up_proj",
-            "experts.0.down_proj"
-        ]
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
     }
 
     fall_back_to_pt_during_load = False
