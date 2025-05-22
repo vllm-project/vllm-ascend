@@ -33,7 +33,9 @@ try:
     import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
     CUSTOM_OP_ENABLED = True
 except ImportError as e:
-    logging.warning("Failed to import vllm_ascend_C:%s", e)
+    logging.warning(
+        "Custom operations disabled: failed to import 'vllm_ascend.vllm_ascend_C': %s", e
+    )
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig

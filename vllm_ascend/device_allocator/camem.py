@@ -60,7 +60,9 @@ try:
     lib_name = find_loaded_library("vllm_ascend_C")
     camem_available = True
 except ImportError as e:
-    logger.warning("Failed to import vllm_ascend_C:%s", e)
+    logger.warning(
+        "Sleep mode disabled: failed to import 'vllm_ascend.vllm_ascend_C': %s", e
+    )
     init_module = None
     python_create_and_map = None
     python_unmap_and_release = None
