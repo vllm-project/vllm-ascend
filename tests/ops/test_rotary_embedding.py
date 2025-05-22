@@ -10,7 +10,12 @@ import pytest
 import torch
 import torch.nn as nn
 
-import vllm_ascend.platform  # noqa: F401
+from vllm_ascend.utils import try_register_lib
+
+try_register_lib(
+    "vllm_ascend.vllm_ascend_C",
+    exc_info=
+    "Warning: Failed to register custom ops, all custom ops will be disabled.")
 
 # Only Neox style true scenario is supported for now
 IS_NEOX_STYLE = [True]

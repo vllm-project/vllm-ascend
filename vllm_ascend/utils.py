@@ -41,7 +41,7 @@ MAX_CAPTURE_SIZE = 1920
 ASCEND_QUATIZATION_METHOD = "ascend"
 
 
-def try_register_lib(lib_name: str, lib_info: str = ""):
+def try_register_lib(lib_name: str, lib_info: str = "", exc_info: str = ""):
     import importlib
     import importlib.util
     try:
@@ -51,6 +51,8 @@ def try_register_lib(lib_name: str, lib_info: str = ""):
             if lib_info:
                 logger.info(lib_info)
     except Exception:
+        if exc_info:
+            logger.info(exc_info)
         pass
 
 
