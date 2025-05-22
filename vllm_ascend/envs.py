@@ -36,8 +36,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("SOC_VERSION", None),
     # Use padded Qwen2.5-VL to accelerate inference on NPU.
     # Set this var to `0` to avoid padding when using vllm-ascend for verl.
-    "USE_OPTIMIZED_QWEN2_5_VL":
-    lambda: bool(int(os.getenv('USE_OPTIMIZED_QWEN2_5_VL', '1'))),
+    "USE_OPTIMIZED_MODEL":
+    lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
 }
 
 
