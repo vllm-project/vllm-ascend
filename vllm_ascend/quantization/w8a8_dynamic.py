@@ -342,6 +342,7 @@ def fused_experts(hidden_states: torch.Tensor,
     num_experts = w1.shape[0]
     dtype = hidden_states.dtype
     device = hidden_states.device
+    topk_weights = topk_weights.to(dtype)
 
     if expert_map is not None:
         # Generate token indices and flatten
