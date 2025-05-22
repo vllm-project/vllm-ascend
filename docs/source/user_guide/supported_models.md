@@ -8,6 +8,8 @@
 | DeepSeek v3 | ✅ | |
 | DeepSeek R1 | ✅ | |
 | DeepSeek Distill (Qwen/LLama) | ✅ | |
+| Qwen3 | ✅ | |
+| Qwen3-Moe | ✅ | |
 | Qwen2.5 | ✅ | |
 | QwQ-32B | ✅ | |
 | LLama3.1/3.2 | ✅ | |
