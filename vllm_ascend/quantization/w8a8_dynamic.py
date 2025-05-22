@@ -68,22 +68,31 @@ def apply_mlp(hidden_states_wrapper: List[torch.Tensor],
     else:
         pertoken_scale = dynamic_scale
 
-    # gmm1: gate_up_proj
-    hidden_states = torch_npu.npu_grouped_matmul(
-        x=[hidden_states],
-        weight=[w1],
-        scale=[w1_scale],
-        per_token_scale=[pertoken_scale],
-        split_item=2,
-        group_list_type=group_list_type,
-        group_type=0,
-        group_list=group_list,
-        output_dtype=w2_scale.dtype)[0]
+    # # gmm1: gate_up_proj
+    # hidden_states = torch_npu.npu_grouped_matmul(
+    #     x=[hidden_states],
+    #     weight=[w1],
+    #     scale=[w1_scale],
+    #     per_token_scale=[pertoken_scale],
+    #     split_item=2,
+    #     group_list_type=group_list_type,
+    #     group_type=0,
+    #     group_list=group_list,
+    #     output_dtype=w2_scale.dtype)[0]
 
-    # act_fn: swiglu
-    hidden_states = torch_npu.npu_swiglu(hidden_states)
-    hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(
-        hidden_states)
+    # # act_fn: swiglu
+    # hidden_states = torch_npu.npu_swiglu(hidden_states)
+    # hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(
+    #     hidden_states)
+
+    # gmm + swiglu + quant
+    hidden_states, swiglu_out_scale = torch_npu.npu_grouped_matmul_swiglu_quant(
+        x=hidden_states,
+        weight=w1,
+        weight_scale=w1_scale,
+        x_scale=pertoken_scale,
+        group_list=group_list,
+    )
 
     # gmm2: down_proj
     hidden_states = torch_npu.npu_grouped_matmul(
@@ -661,8 +670,18 @@ class AscendW8A8DynamicFusedMoEMethod:
         if self.transpose_weight:
             layer.w13_weight.data = layer.w13_weight.data.transpose(
                 1, 2).contiguous()
+            # aclnnGroupedMatmulSwigluQuant requires the following 5-dim shape.
+            layer.w13_weight.data = layer.w13_weight.data.reshape(
+                layer.w13_weight.data[0],
+                layer.w13_weight.data[1] // 16,
+                16,
+                layer.w13_weight.data[2] // 32,
+                32
+            ).permute(0, 3, 1, 2, 4).contiguous()
             layer.w2_weight.data = layer.w2_weight.data.transpose(
                 1, 2).contiguous()
+        # transforming to nz format.
+        layer.w13_weight.data = torch_npu.npu_format_cast(layer.w13_weight, 29)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
             layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(
