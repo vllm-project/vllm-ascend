@@ -1,6 +1,7 @@
 import enum
 import hashlib
 import json
+import random
 import struct
 import time
 from dataclasses import dataclass
@@ -14,7 +15,7 @@ from vllm.distributed import get_tensor_model_parallel_rank, get_world_group
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -28,8 +29,6 @@ from llm_datadist import LLMException, LLMStatusCode
 
 import vllm_ascend.envs as envs
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
-
-logger = init_logger(__name__)
 
 TORCH_DTYPE_TO_NPU_DTYPE = {
     torch.half: llm_datadist.DataType.DT_FLOAT16,
@@ -294,12 +293,13 @@ class KVTransferEngine:
         # find an appropriate value to minimize memory waste.
         options = {
             "llm.SyncKvCacheWaitTime": envs.LLMDATADIST_SYNC_CACHE_WAIT_TIME,
-            "ge.flowGraphMemMaxSize": f"{(9*1024*1024*1024):d}",
+            "ge.flowGraphMemMaxSize": f"{int(2.25*1024*1024*1024):d}",
             "ge.exec.deviceId": str(self.local_rank),
         }
         if self.role == llm_datadist.LLMRole.PROMPT:
             options["llm.listenIpInfo"] = f"{self.local_device_ip}:26000"
         self.datadist_engine.init(options)
+        logger.info("llm_datadist init done")
         self.kv_transfer = self.datadist_engine.kv_cache_manager
 
     def make_cluster(self, prefill_ip, cluster_id=-1):
@@ -316,13 +316,9 @@ class KVTransferEngine:
         for server in self.cluster_info.get_servers_by_role(
                 ServerRole.Prefill):
             for device in server.devices:
-                target_tp_rank = self.tp_rank % min(
-                    self.cluster_info.prefill_tp_size,
-                    self.cluster_info.decode_tp_size)
-                if target_tp_rank == device.tp_rank:
-                    cluster = self.make_cluster(device.device_ip,
-                                                device.cluster_id)
-                    clusters.append(cluster)
+                cluster = self.make_cluster(device.device_ip,
+                                            device.cluster_id)
+                clusters.append(cluster)
         return clusters
 
 
@@ -404,6 +400,13 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
         init_cluster_info(self._vllm_config)
         self.cluster_info = get_cluster_info()
 
+        if self.cluster_info.prefill_tp_size < self.cluster_info.decode_tp_size:
+            raise ValueError(
+                "The prefill tensor parallel size must be greater than or "
+                f"equal to the decode tensor parallel size, but got "
+                f"{self.cluster_info.prefill_tp_size} < "
+                f"{self.cluster_info.decode_tp_size}.")
+
         self.local_server_id = kv_transfer_config.get_from_extra_config(
             "local_server_id", None)
         if self.local_server_id is None:
@@ -422,12 +425,13 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
                 f"Expected only one server for {self.kv_role}, but got {len(servers)}"
             self.local_server_id = servers[0].server_id
 
-        self.dp_rank = self._vllm_config.parallel_config.data_parallel_rank
+        self.dp_rank = self._vllm_config.parallel_config.data_parallel_rank_local
         self.tp_size = self._vllm_config.parallel_config.tensor_parallel_size
         self.tp_rank = get_tensor_model_parallel_rank()
         self.num_layers = self._vllm_config.model_config.get_num_layers(
             self._vllm_config.parallel_config)
-
+        if self.tp_size == 1:
+            local_rank = self.dp_rank
         local_rank = get_world_group().local_rank
         self.llm_datadist_engine = KVTransferEngine(self.kv_role, local_rank,
                                                     self.dp_rank, self.tp_rank,
@@ -436,24 +440,23 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
         if self.kv_role == llm_datadist.LLMRole.DECODER:
             # Each decoding rank should correspond to each prefilling rank.
             clusters = self.llm_datadist_engine.make_clusters()
-            while len(clusters) > 0:
-                overall_ret, link_rets = \
-                    self.llm_datadist_engine.datadist_engine.link_clusters(
-                    clusters, timeout=3000)
+            random.shuffle(clusters)
+            for cluster in clusters:
+                while True:
+                    link_ret, link_rets = \
+                        self.llm_datadist_engine.datadist_engine.link_clusters(
+                        [cluster], timeout=30_000)
 
-                if overall_ret != LLMStatusCode.LLM_SUCCESS:
-                    logger.warning(f"Failed to link clusters, {overall_ret=}")
-                    continue
+                    if link_ret == LLMStatusCode.LLM_SUCCESS \
+                        and link_rets[0] == LLMStatusCode.LLM_SUCCESS:
+                        break
 
-                for idx in range(len(link_rets) - 1, -1, -1):
-                    link_ret = link_rets[idx]
-                    if link_ret == LLMStatusCode.LLM_SUCCESS:
-                        clusters.pop(idx)
-
-                if len(clusters) == 0:
-                    logger.info("Successfully linked clusters")
-                else:
-                    logger.warning(f"Still {len(clusters)} clusters to link")
+                    sleep_time = random.uniform(5, 17)
+                    logger.warning(
+                        f"Failed to link cluster({cluster.remote_cluster_id}), "
+                        f"retrying in {sleep_time:.2f} seconds")
+                    time.sleep(sleep_time)
+            logger.info("Successfully linked clusters")
 
         # LLMDataDist will deallocate the cache buffer either when the cache
         # buffer's Python object goes out of scope or when deallocate_cache() is
@@ -462,6 +465,18 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
         # prevent this, we maintain a reference to the cache buffer until the
         # next round, ensuring it is not prematurely deallocated.
         self.kv_buffers: List = []
+
+        # In graph mode (migrated from v0), the layer KV cache format differs
+        # from the v1 format. As a result, the KV transfer process requires
+        # specific handling to accommodate this difference.
+        additional_config = self._vllm_config.additional_config
+        self.enable_graph_mode = additional_config and additional_config.get(
+            "enable_graph_mode", False)
+
+        if self.enable_graph_mode and \
+            self.kv_role == llm_datadist.LLMRole.PROMPT:
+            raise NotImplementedError(
+                "The graph mode is not supported for prefill node now.")
 
     def _detach_kv_buffers(self):
         for kv_buffer in self.kv_buffers:
@@ -508,9 +523,22 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
         attn_metadata = forward_context.attn_metadata
         assert attn_metadata is not None, "The attn_metadata should not be None."
 
-        request_ids = [
-            self._get_unique_req_id(req.request_id)
-            for req in metadata.requests if not req.is_store
+        request_metadatas = {}
+        for request in metadata.requests:
+            if request.is_store:
+                continue
+            datadist_request_id = request_id_hex_to_number(request.request_id)
+            target_tp_rank = self._get_target_tp_rank(datadist_request_id)
+            unique_req_id = self._get_unique_req_id(request.request_id,
+                                                    target_tp_rank)
+            request_metadatas[request.request_id] = {
+                "datadist_request_id": datadist_request_id,
+                "target_tp_rank": target_tp_rank,
+                "unique_req_id": unique_req_id,
+            }
+
+        unique_req_ids = [
+            meta["unique_req_id"] for meta in request_metadatas.values()
         ]
         if self.cluster_info.is_1p1d(
         ) and self.cluster_info.prefill_dp_size == 1:
@@ -521,15 +549,15 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
             assert len(servers) == 1, \
                 f"Expected only one server for {self.kv_role}, but got {len(servers)}"
             prefill_infos: Dict[str, Any] = {
-                request_id: {
+                unique_req_id: {
                     "dp_rank": 0,
                     "server_id": servers[0].server_id,
                 }
-                for request_id in request_ids
+                for unique_req_id in unique_req_ids
             }
         else:
             prefill_infos = fetch_prefill_info(
-                self.cluster_info.router_endpoint, request_ids)
+                self.cluster_info.router_endpoint, unique_req_ids)
 
         # If prefill_infos is None, it indicates that get_prefill_info failed.
         # Therefore, we need to recalculate the kv cache during the decoding
@@ -547,8 +575,27 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
                 forward_context.virtual_engine]
             kv_cache_layers.append(kv_cache_layer)
 
+        if self.enable_graph_mode:
+            # Currently, the graph mode is migrated from the v0, and the kv
+            # cache layer is a tuple. The first element is
+            # 'layer_kv_cache_nope', and the second element is
+            # 'layer_kv_cache_pe'.
+            assert isinstance(kv_cache_layers[0], tuple) and \
+                len(kv_cache_layers[0]) == 2, (
+                    "The kv_cache_layer should be a tuple of two tensors for "
+                    "current graph mode.")
+            layer_kv_cache_nope_shape = kv_cache_layers[0][0].shape
+            layer_kv_cache_pe_shape = kv_cache_layers[0][1].shape
+            kv_lora_rank = layer_kv_cache_nope_shape[-1]
+            qk_rope_head_dim = layer_kv_cache_pe_shape[-1]
+            kv_cache_layer_shape = list(layer_kv_cache_nope_shape[:-1]) + \
+                [kv_lora_rank + qk_rope_head_dim]
+            kv_hidden_dtype = kv_cache_layers[0][0].dtype
+        else:
+            kv_cache_layer_shape = list(kv_cache_layers[0].shape)
+            kv_hidden_dtype = kv_cache_layers[0].dtype
+
         is_mla = isinstance(attn_metadata, AscendMLAMetadata)
-        kv_cache_layer_shape = list(kv_cache_layers[0].shape)
         num_heads = int(kv_cache_layer_shape[-2])
         head_dim = int(kv_cache_layer_shape[-1])
         # Load the KV for each request each layer
@@ -570,28 +617,24 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
                 # [1, 2, slen, num_heads, head_dim]
                 kv_cache_shape = (1, 2, slen, num_heads, head_dim)
 
-            uniq_req_id = self._get_unique_req_id(request.request_id)
-            dp_rank: int = prefill_infos[uniq_req_id]["dp_rank"]
-            server_id: str = prefill_infos[uniq_req_id]["server_id"]
+            # Each request uses the same llm_datadist request_id, which needs to
+            # be converted into an integer value.
+            request_metadata = request_metadatas[request.request_id]
+            datadist_request_id = request_metadata["datadist_request_id"]
+            target_tp_rank = request_metadata["target_tp_rank"]
+            unique_req_id = request_metadata["unique_req_id"]
+
+            dp_rank: int = prefill_infos[unique_req_id]["dp_rank"]
+            server_id: str = prefill_infos[unique_req_id]["server_id"]
+            remote_cluster_id = self.cluster_info.get_cluster_id(
+                server_id, dp_rank, target_tp_rank)
+            kv_cache_key = llm_datadist.CacheKey(remote_cluster_id,
+                                                 datadist_request_id, 1)
 
             # pull kv cache from prefill node by request
-            kv_hidden_dtype = kv_cache_layers[0].dtype
             kv_buffer, pulled_kv_caches = self._create_cache_tensors(
                 self.num_layers, kv_cache_shape, kv_hidden_dtype)
             self._attach_kv_buffer(kv_buffer)
-
-            target_tp_rank = self.tp_rank % min(
-                self.cluster_info.prefill_tp_size,
-                self.cluster_info.decode_tp_size,
-            )
-            remote_cluster_id = self.cluster_info.get_cluster_id(
-                server_id, dp_rank, target_tp_rank)
-
-            # Each request uses the same llm_datadist request_id, which needs to
-            # be converted into an integer value.
-            datadist_request_id = string_to_int64_hash(request.request_id)
-            kv_cache_key = llm_datadist.CacheKey(remote_cluster_id,
-                                                 datadist_request_id, 1)
             self.llm_datadist_engine.kv_transfer.pull_cache(
                 kv_cache_key, kv_buffer, 0)
 
@@ -608,8 +651,18 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
 
             for layer_id, kv_cache_layer in enumerate(kv_cache_layers):
                 pulled_kv_cache = pulled_kv_caches[layer_id]
-                self._inject_kv_into_layer(kv_cache_layer, pulled_kv_cache,
-                                           req_slot_mapping, is_mla)
+
+                if self.enable_graph_mode:
+                    pulled_kv_cache = torch.split(pulled_kv_cache,
+                                                  dim=-1,
+                                                  split_size_or_sections=[
+                                                      kv_lora_rank,
+                                                      qk_rope_head_dim
+                                                  ])
+
+                self._inject_kv_into_layer(
+                    kv_cache_layer, pulled_kv_cache, req_slot_mapping, is_mla
+                    and not self.enable_graph_mode)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """
@@ -652,12 +705,14 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
         # layer operations, all send is done in wait_for_save
 
         if self.kv_role == llm_datadist.LLMRole.DECODER:
-            # In the prompt role, we do not need to load KV cache.
+            # In the decoder role, we do not need to save KV cache.
             return
 
         forward_context = get_forward_context()
         metadata: KVConnectorMetadata = self._get_connector_metadata()
-        assert isinstance(metadata, LLMDataDistConnectorV1Metadata)
+        assert isinstance(metadata, LLMDataDistConnectorV1Metadata), \
+            ("metadata should be LLMDataDistConnectorV1Metadata, but got "
+            f"{type(metadata)}.")
 
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:
@@ -677,11 +732,26 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
             slen = request.token_ids.shape[0]
             req_slot_mapping = request.slot_mapping[:slen]
 
-            uniq_req_id = self._get_unique_req_id(request.request_id)
+            uniq_req_id = self._get_unique_req_id(request.request_id,
+                                                  self.tp_rank)
             prefill_info_input[uniq_req_id] = {
                 "dp_rank": self.dp_rank,
                 "server_id": self.local_server_id,
             }
+
+            # Initialize LLMDatadist data structure. Each request uses the same
+            # llm_datadist request_id, which needs to be converted to an integer
+            # value.
+            datadist_request_id = request_id_hex_to_number(request.request_id)
+            kv_cache_keys = [
+                llm_datadist.CacheKey(self.llm_datadist_engine.cluster_id,
+                                      datadist_request_id, 1)
+            ]
+
+            if not self._need_save_kv(datadist_request_id):
+                # We choose some ranks to save kv cache randomly, if the rank is
+                # not selected, we do not need to save kv cache.
+                continue
 
             kv_caches: List[torch.Tensor] = []
             for _, attn_layer in forward_context.no_compile_layers.items():
@@ -691,15 +761,6 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
                                                        req_slot_mapping,
                                                        is_mla)
                 kv_caches.append(kv_cache.detach())
-
-            # Initialize LLMDatadist data structure. Each request uses the same
-            # llm_datadist request_id, which needs to be converted to an integer
-            # value.
-            datadist_request_id = string_to_int64_hash(request.request_id)
-            kv_cache_keys = [
-                llm_datadist.CacheKey(self.llm_datadist_engine.cluster_id,
-                                      datadist_request_id, 1)
-            ]
 
             # If MLA is used, the kv_cache_shape should be (1, slen, num_heads,
             # head_dim). Otherwise, it should be (1, 2, slen, num_heads,
@@ -727,18 +788,21 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
         # need to report the prefill information to the router. This is because
         # there is only one candidate server for the decode node to request the
         # KV cache from.
-        if not self.cluster_info.is_1p1d(
-        ) or self.cluster_info.prefill_dp_size != 1:
+        if len(prefill_info_input) > 0 and (
+                not self.cluster_info.is_1p1d()
+                or self.cluster_info.prefill_dp_size != 1):
             report_prefill_info(self.cluster_info.router_endpoint,
                                 prefill_info_input)
         logger.info("[rank%d][P]: KV send DONE.", torch.distributed.get_rank())
 
     def _inject_kv_into_layer(
         self,
-        dst_kv_cache_layer: torch.Tensor,
-        pulled_kv_cache: torch.Tensor,
+        dst_kv_cache_layer: Union[torch.Tensor, tuple[torch.Tensor,
+                                                      torch.Tensor]],
+        pulled_kv_cache: Union[torch.Tensor, tuple[torch.Tensor,
+                                                   torch.Tensor]],
         slot_mapping: torch.Tensor,
-        is_mla: bool,
+        use_siso: bool,
     ) -> None:
         """Inject the KV cache into the layer.
 
@@ -755,8 +819,12 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
         """
         # The `wait_for_save` function explains why the first dimension is
         # necessary.
-        kv_cache = pulled_kv_cache.squeeze(0)
-        if is_mla:
+        if isinstance(pulled_kv_cache, tuple):
+            kv_cache = [cache.squeeze(0) for cache in pulled_kv_cache]
+        else:
+            kv_cache = pulled_kv_cache.squeeze(0)
+
+        if use_siso:
             torch_npu._npu_reshape_and_cache_siso(
                 key=kv_cache,
                 key_cache=dst_kv_cache_layer,
@@ -764,6 +832,8 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
             )
 
         else:
+            kv_cache[0] = kv_cache[0].contiguous()
+            kv_cache[1] = kv_cache[1].contiguous()
             torch_npu._npu_reshape_and_cache(
                 key=kv_cache[0],
                 value=kv_cache[1],
@@ -820,8 +890,9 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
         # NOTE: only request in waiting queue will come here. we use datadist
         # pull cache to do transfer, so we don't align to block_size in prefill,
         # we won't have extra new matched tokens; in decode, new request kv
-        # cache will be transferred from prefill, so num_computed_tokens = 0, and
-        # extra new matched tokens should be len(request.prompt_token_ids) - 1
+        # cache will be transferred from prefill, so num_computed_tokens = 0,
+        # and extra new matched tokens should be len(request.prompt_token_ids) -
+        # 1
         if self.kv_role == llm_datadist.LLMRole.PROMPT:
             return 0
         return len(request.prompt_token_ids) - 1
@@ -876,23 +947,9 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
             # the first N requests in the list scheduled_cache_reqs.
             if not cached_req.resumed_from_preemption:
                 break
-            if cached_req.req_id in self._requests_need_load:
-                # NOTE(rob): cached_req_data does not have the full
-                # list of token ids (only new tokens). So we look it
-                # up in the actual request object.
-                request = self._requests_need_load[cached_req.req_id]
-                total_tokens = len(
-                    cached_req.new_token_ids) + cached_req.num_computed_tokens
-                token_ids = request.all_token_ids[:total_tokens]
-
-                meta.add_request(
-                    request_id=cached_req.req_id,
-                    token_ids=token_ids,
-                    block_ids=cached_req.block_ids,
-                    block_size=self._block_size,
-                    is_store=False,
-                )
-                total_need_load += 1
+            raise NotImplementedError(
+                "Resumed requests are not supported in this version of the "
+                "connector.")
 
         assert total_need_load == len(self._requests_need_load)
         self._requests_need_load.clear()
@@ -931,8 +988,33 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
             cache_desc.shape, dtype, cache_buf_addrs)
         return cache_buf, cache_tensors
 
-    def _get_unique_req_id(self, request_id: str) -> str:
-        return f"{request_id}-{self.tp_rank}"
+    def _get_unique_req_id(self, request_id: str, tp_rank: int) -> str:
+        return f"{request_id}-{tp_rank}"
+
+    def _get_prefill_tp_ranks_for_req(self, datadist_req_id: int) -> list[int]:
+        """Based on the LLMDataDist request id, select a subset of tensor
+        parallel ranks. Specifically, choose `decode_tp_size` ranks randomly
+        from all available prefill TP ranks. These selected ranks are
+        responsible for saving the KV cache for the current request."""
+        if self.cluster_info.prefill_tp_size == self.cluster_info.decode_tp_size:
+            return list(range(self.cluster_info.prefill_tp_size))
+
+        rand = random.Random(datadist_req_id)
+        sampled_nums = rand.sample(range(self.cluster_info.prefill_tp_size),
+                                   self.cluster_info.decode_tp_size)
+        return sampled_nums
+
+    def _need_save_kv(self, datadist_req_id: int) -> bool:
+        """Determines whether the current rank needs to save the KV cache for a
+        given LLMDataDist request ID."""
+        return self.tp_rank in self._get_prefill_tp_ranks_for_req(
+            datadist_req_id)
+
+    def _get_target_tp_rank(self, datadist_req_id: int) -> int:
+        """Determines the target tensor parallel (TP) rank for a given TP rank
+        and LLMDataDist request ID."""
+        return self._get_prefill_tp_ranks_for_req(datadist_req_id)[
+            self.tp_rank]
 
 
 # ==============================
@@ -967,3 +1049,23 @@ def string_to_int64_hash(input_str):
     trunked_bytes = hashed_bytes[:8]
     uint64_value = struct.unpack("<Q", trunked_bytes)[0]
     return uint64_value
+
+
+def request_id_hex_to_number(request_id: str):
+    """
+    Convert the hex part of a request ID string to an int64 number. For example,
+    for the string "cmpl-6e1a2f3d-0", this extracts "6e1a2f3d" and converts it
+    to its integer value (e.g., 1847209789).
+    """
+    try:
+        hex_str = request_id.split("-")[1]
+        if len(hex_str) != 8:
+            raise ValueError(
+                "The length of the hex string in request_id should be 8, but "
+                f"got {len(hex_str)}.")
+        return int(hex_str, 16)
+    except ValueError:
+        logger.warning(
+            f"Invalid hex string in request_id: {request_id}. Using hash value "
+            "instead.")
+        return string_to_int64_hash(request_id)
