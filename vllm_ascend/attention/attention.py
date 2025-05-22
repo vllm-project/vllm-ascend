@@ -947,6 +947,9 @@ class AscendAttentionBackendImpl(AttentionImpl):
         return output.view(num_tokens, self.hidden_size)
 
 
+ALLOWED_NUM_QUERIES_PER_KV = [32, 64, 128]
+
+
 class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
 
     def __init__(
@@ -1005,6 +1008,13 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         if additional_config:
             self.enable_graph_mode = additional_config.get(
                 "enable_graph_mode", False)
+        if self.enable_graph_mode:
+            assert self.num_queries_per_kv in ALLOWED_NUM_QUERIES_PER_KV, \
+                ("The allowed number of queries per kv when enabling both MLA and Graph mode"
+                " only support {32, 64, 128}, Thus this is not supported for DeepSeek-V2-Lite,"
+                " as it only has 16 attention heads. And if you're using DeepSeek-V3 or DeepSeek-R1,"
+                " please make sure after the tensor parallel split, num_heads / num_kv_heads in "
+                "{32, 64, 128}.")
 
     def exec_kv(
         self,
