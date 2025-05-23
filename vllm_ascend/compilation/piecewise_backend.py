@@ -20,12 +20,12 @@ from vllm.utils import weak_ref_tensors
 class ConcreteSizeEntry:
     runtime_shape: int
     need_to_compile: bool  # the size is in compile_sizes
-    use_npugraph: bool  # the size is in cudagraph_capture_sizes
+    use_aclgraph: bool  # the size is in cudagraph_capture_sizes
 
     compiled: bool = False
     runnable: Callable = None  # type: ignore
     num_finished_warmup: int = 0
-    npugraph: Optional[torch.npu.NPUGraph] = None
+    aclgraph: Optional[torch.npu.NPUGraph] = None
     output: Optional[Any] = None
 
     # for aclgraph debugging, track the input addresses
@@ -67,7 +67,7 @@ class NPUPiecewiseBackend:
 
         self.compile_sizes: Set[int] = set(
             self.compilation_config.compile_sizes)
-        self.cudagraph_capture_sizes: Set[int] = set(
+        self.aclgraph_capture_sizes: Set[int] = set(
             self.compilation_config.cudagraph_capture_sizes
         ) if self.compilation_config.use_cudagraph else set()
 
@@ -86,11 +86,11 @@ class NPUPiecewiseBackend:
         # to_be_compiled_sizes tracks the remaining sizes to compile,
         # and updates during the compilation process, so we need to copy it
         self.to_be_compiled_sizes: Set[int] = self.compile_sizes.copy()
-        for shape in self.compile_sizes.union(self.cudagraph_capture_sizes):
+        for shape in self.compile_sizes.union(self.aclgraph_capture_sizes):
             self.concrete_size_entries[shape] = ConcreteSizeEntry(
                 runtime_shape=shape,
                 need_to_compile=shape in self.compile_sizes,
-                use_npugraph=shape in self.cudagraph_capture_sizes,
+                use_aclgraph=shape in self.aclgraph_capture_sizes,
             )
 
     def check_for_ending_compilation(self):
@@ -133,10 +133,10 @@ class NPUPiecewiseBackend:
             if self.is_last_graph and not self.to_be_compiled_sizes:
                 self.check_for_ending_compilation()
 
-        if not entry.use_npugraph:
+        if not entry.use_aclgraph:
             return entry.runnable(*args)
 
-        if entry.npugraph is None:
+        if entry.aclgraph is None:
             if entry.num_finished_warmup < self.compilation_config.cudagraph_num_of_warmups:  # noqa
                 entry.num_finished_warmup += 1
                 if self.is_first_graph:
@@ -158,7 +158,7 @@ class NPUPiecewiseBackend:
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
             ]
             entry.input_addresses = input_addresses
-            npugraph = torch.npu.NPUGraph()
+            aclgraph = torch.npu.NPUGraph()
 
             with ExitStack() as stack:
                 if not self.is_first_graph:
@@ -173,27 +173,27 @@ class NPUPiecewiseBackend:
                         patch("torch.npu.empty_cache", lambda: None))
 
                 # mind-exploding: carefully manage the reference and memory.
-                with torch.npu.graph(npugraph, pool=self.graph_pool):
-                    # `output` is managed by pytorch's npugraph pool
+                with torch.npu.graph(aclgraph, pool=self.graph_pool):
+                    # `output` is managed by pytorch's aclgraph pool
                     output = entry.runnable(*args)
                     if self.is_last_graph:
                         # by converting it to weak ref,
                         # the original `output` will immediately be released
                         # to save memory. It is only safe to do this for
                         # the last graph, because the output of the last graph
-                        # will not be used by any other cuda graph.
+                        # will not be used by any other npu aclgraph.
                         output = weak_ref_tensors(output)
 
             # here we always use weak ref for the output
             # to save memory
             entry.output = weak_ref_tensors(output)
-            entry.npugraph = npugraph
+            entry.aclgraph = aclgraph
 
             compilation_counter.num_cudagraph_caputured += 1
 
             # important: we need to return the output, rather than
             # the weak ref of the output, so that pytorch can correctly
-            # manage the memory during cuda graph capture
+            # manage the memory during npu aclgraph capture
             return output
 
         if self.is_debugging_mode:
@@ -206,5 +206,5 @@ class NPUPiecewiseBackend:
                 f" Expected {entry.input_addresses}, got {new_input_addresses}"
             )
 
-        entry.npugraph.replay()
+        entry.aclgraph.replay()
         return entry.output
