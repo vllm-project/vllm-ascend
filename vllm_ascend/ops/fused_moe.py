@@ -15,15 +15,15 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/kernels/test_moe.py
 
-from typing import Callable, List, Optional
+from typing import Callable, Optional
 
 import torch
 import torch.distributed as dist
 import torch_npu
 from vllm.config import get_current_vllm_config
-from vllm.distributed import (get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce,
-                              GroupCoordinator)
+from vllm.distributed import (GroupCoordinator,
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
@@ -217,7 +217,6 @@ def fused_experts_with_all2all(
             sorted_local_expert_idx, local_num_experts).to(torch.int64)
 
         hidden_states = hidden_states[sorted_idx]
-        group_list_type = 0
     else:
         row_idx_len = num_tokens * top_k
         row_idx = torch.arange(0,
@@ -234,7 +233,6 @@ def fused_experts_with_all2all(
         expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
             expanded_expert_idx, num_experts)
         expert_tokens = expert_tokens.to(torch.int64)
-        group_list_type = 0
 
     w1 = w1.transpose(1, 2)
     gate_up_out_list = torch_npu.npu_grouped_matmul(
@@ -595,13 +593,13 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             super().__init__(moe=moe)
         vllm_config = get_current_vllm_config()
 
-        self.ep_group = get_ep_group()
-        self.ep_size = self.ep_group.world_size
+        ep_group = get_ep_group()
+        self.ep_size = ep_group.world_size
         self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.local_batch_size = self.global_batch_size // self.ep_size
 
         try:
-            device_group = self.ep_group.device_group
+            device_group = ep_group.device_group
             # TODO: Try local_rank = ep_group.rank_in_group
             local_rank = torch.distributed.get_rank(group=device_group)
             backend = device_group._get_backend(torch.device("npu"))
@@ -636,7 +634,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = False,
-        dp_size: int = 1,
         **kwargs,
     ):
         # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
@@ -678,7 +675,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 top_k=top_k,
                 expert_map=expert_map,
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name)
-        elif dp_size == 1:
+        elif get_ep_group().world_size == 1:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
                                  w2=layer.w2_weight,
@@ -687,6 +684,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                                  top_k=top_k,
                                  expert_map=expert_map)
         else:
+            # The current implementation of deepseek moe splits hidden_states
+            # according to tp_size before they are feed into fused_moe module.
+            # Therefore, all2all is needed no matter how dp/tp is set so as to
+            # dispatch/combine tokens.
             return fused_experts_with_all2all(hidden_states=x,
                                               w1=layer.w13_weight,
                                               w2=layer.w2_weight,
@@ -694,8 +695,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                                               topk_ids=topk_ids,
                                               top_k=top_k,
                                               expert_map=expert_map,
-                                              ep_group=self.ep_group)
-            
+                                              ep_group=get_ep_group())
 
 
 class AscendFusedMoE(FusedMoE):
@@ -873,8 +873,7 @@ class AscendFusedMoE(FusedMoE):
             scoring_func=self.scoring_func,
             e_score_correction_bias=self.e_score_correction_bias,
             is_prefill=is_prefill,
-            enable_force_load_balance=enable_force_load_balance,
-            dp_size=self.dp_size)
+            enable_force_load_balance=enable_force_load_balance)
 
         if VLLM_ENABLE_MC2 and not is_prefill:
             ...
