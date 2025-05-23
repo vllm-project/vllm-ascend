@@ -562,10 +562,10 @@ def get_expert_map(expert_map_path, moe_instance_id, ep_rank, num_replicas):
     eplb_tensor = torch.tensor(tensor_data, dtype=torch.int)
 
     eplb_maps = torch.full((layers, num_gpus, num_replicas), -1, dtype=torch.int32)
-    for l in range(layers):
-        for r in range(num_gpus):
-            e_ids = eplb_tensor[l, r]
-            eplb_maps[l, r, e_ids] = torch.arange(len(e_ids), dtype=torch.int32)
+    for layer_id in range(layers):
+        for gpu_id in range(num_gpus):
+            e_ids = eplb_tensor[layer_id, gpu_id]
+            eplb_maps[layer_id, gpu_id, e_ids] = torch.arange(len(e_ids), dtype=torch.int32)
 
     layer_expert_map = eplb_maps[moe_instance_id]
     expert_map = layer_expert_map[ep_rank].to(torch.npu.current_device())
