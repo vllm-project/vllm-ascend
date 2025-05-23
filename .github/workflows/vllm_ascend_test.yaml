@@ -53,7 +53,7 @@ jobs:
         matrix.os == 'linux-arm64-npu-4'
           && github.event.pull_request.number
           && format('pr-{0}-limit-npu-4', github.event.pull_request.number)
-        || format('job-{0}-{1}-{2}', matrix.os, matrix.vllm_verison, github.event.pull_request.number)
+        || format('job-{0}-{1}-{2}', matrix.os, matrix.vllm_version, github.event.pull_request.number)
         }}
       cancel-in-progress: false
     name: vLLM Ascend test
