@@ -1061,7 +1061,7 @@ class NPUModelRunner:
                             rope_cache_shape = (num_blocks, block_size, num_kv_heads, rope_dim)
                             nope_cache = torch.zeros(nope_cache_shape, dtype=dtype, device=self.device)
                             rope_cache = torch.zeros(rope_cache_shape, dtype=dtype, device=self.device)
-                            kv_caches[layer_name] = (rope_cache, nope_cache)
+                            kv_caches[layer_name] = (nope_cache, rope_cache)
                         else:
                             num_caches = kv_cache_shape[0]
                             kv_cache_list = []

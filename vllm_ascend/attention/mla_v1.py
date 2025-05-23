@@ -498,7 +498,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_tokens = query.size(0)
         attn_output = None
         # Here is only 2 possibility of input, ChunkedPrefill or PrefillNoCache
-        if attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
+        if attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill or attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
             attn_output = torch.empty(num_tokens,
                                       self.num_heads * self.v_head_dim,
                                       dtype=query.dtype,
@@ -793,8 +793,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 value=k_pe,
                 key_cache=kv_cache[0],
                 value_cache=kv_cache[1],
-                slot_indices=slots)
-            combined_cache = torch.cat([kv_c_normed, k_pe], dim=-1)
+                slot_indices=attn_metadata.slot_mapping)
+        combined_cache = torch.cat([kv_cache[0], kv_cache[1]], dim=-1)
         if has_prefill:
             output[num_decode_tokens:] = self._forward_prefill(
                 prefill_q, prefill_k_c_normed, prefill_k_pe, combined_cache,
