@@ -33,7 +33,6 @@ class dummyFusionOp:
 
 
 def register_dummy_fusion_op() -> None:
-    torch.cuda.CUDAGraph = torch.npu.NPUGraph
     torch.ops._C.rms_norm = dummyFusionOp(name="rms_norm")
     torch.ops._C.fused_add_rms_norm = dummyFusionOp(name="fused_add_rms_norm")
     torch.ops._C.static_scaled_fp8_quant = dummyFusionOp(
