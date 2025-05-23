@@ -161,8 +161,9 @@ jobs:
         if: steps.filter_spec_decode.outputs.speculative_tests_changed == 'true' || github.event_name == 'schedule'
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
+            VLLM_USE_MODELSCOPE=true pytest -sv tests/singlecard/spec_decode/e2e/test_v1_spec_decode.py
             pytest -sv tests/singlecard/spec_decode/e2e/test_mtp_correctness.py  # it needs a clean process
-            pytest -sv tests/singlecard/spec_decode --ignore=tests/singlecard/spec_decode/e2e/test_mtp_correctness.py
+            pytest -sv tests/singlecard/spec_decode --ignore=tests/singlecard/spec_decode/e2e/test_mtp_correctness.py --ignore=tests/singlecard/spec_decode/e2e/test_v1_spec_decode.py
           fi
 
       - name: Run vllm-project/vllm test for V0 Engine
