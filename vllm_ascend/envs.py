@@ -66,6 +66,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("C_COMPILER", None),
     "VLLM_VERSION":
     lambda: os.getenv("VLLM_VERSION", None),
+    "VLLM_FUSED_EXPERTS_SEQ_SPLIT_LENGTH":
+    lambda: int(os.getenv("VLLM_FUSED_EXPERTS_SEQ_SPLIT_LENGTH", "8192")),
 }
 
 # end-env-vars-definition
