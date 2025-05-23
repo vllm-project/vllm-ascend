@@ -29,7 +29,7 @@ from transformers import AutoConfig
 from tests.utils import RemoteOpenAIServer
 
 # any model with a chat template should work here
-MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 
 CONFIG = AutoConfig.from_pretrained(MODEL_NAME)
 
