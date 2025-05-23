@@ -9,3 +9,4 @@ ray
 types-jsonschema
 xgrammar
 zmq
+numba
