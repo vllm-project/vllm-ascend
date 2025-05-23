@@ -476,9 +476,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
         # Convert from (L, N, V) to (N, L, V)
-        self.W_UV = W_UV.transpose(0, 1)
+        self.W_UV = W_UV.transpose(0, 1).contiguous()
         # Convert from (L, N, P) to (N, P, L)
-        self.W_UK_T = W_UK.permute(1, 2, 0)
+        self.W_UK_T = W_UK.permute(1, 2, 0).contiguous()
+        self.W_UV.data = torch_npu.npu_format_cast(self.W_UV.data, 29)
+        self.W_UK_T.data = torch_npu.npu_format_cast(self.W_UK_T.data, 29)
 
     def _forward_prefill(
         self,

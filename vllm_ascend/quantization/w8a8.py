@@ -110,5 +110,6 @@ class AscendW8A8LinearMethod:
             requires_grad=False).to(layer.aclnn_input_scale.dtype)
         if self.transpose_weight:
             layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
+        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, 29)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
