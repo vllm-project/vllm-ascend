@@ -128,6 +128,7 @@ jobs:
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
             pytest -sv tests/singlecard/test_ilama_lora.py
+            pytest -sv tests/singlecard/test_prompt_embedding.py
             pytest -sv tests/singlecard/test_offline_inference.py
             pytest -sv tests/ops
           else
@@ -172,4 +173,3 @@ jobs:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
         run: |
           pytest -sv
-          pytest -sv ./vllm-empty/tests/entrypoints/openai/test_completion_with_prompt_embeds.py
