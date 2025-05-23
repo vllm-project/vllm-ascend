@@ -232,7 +232,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.requests: Dict[str, CachedRequestState] = {}
         # Persistent batch.
         # Remove this after we drop 0.8.5 support
-        if vllm_version_is("0.8.5") or f("0.8.5.post1"):
+        if vllm_version_is("0.8.5") or ("0.8.5.post1"):
             self.input_batch = InputBatch(
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=self.model_config.max_model_len,
@@ -905,7 +905,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             assert isinstance(self.drafter, MtpProposer)
             spec_token_ids = self._generate_mtp_token_ids(
                 valid_sampled_token_ids, sampling_metadata, scheduler_output,
-                spec_decode_metadata, positions, num_scheduled_tokens, 
+                spec_decode_metadata, positions, num_scheduled_tokens,
                 hidden_states, attn_metadata)
         return spec_token_ids
 
