@@ -128,6 +128,11 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # enable `pin_memory` while creating a tensor using `torch.tensor`.
     "VLLM_ASCEND_ACL_OP_INIT_MODE":
     lambda: os.getenv("VLLM_ASCEND_ACL_OP_INIT_MODE", '1'),
+    # Some models are optimized by vllm ascend. While in some case, e.g. rlhf
+    # training, the optimized model may not be suitable. In this case, set this
+    # value to False to disable the optimized model.
+    "USE_OPTIMIZED_MODEL":
+    lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
 }
 
 # end-env-vars-definition
