@@ -18,6 +18,9 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
+from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
+from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
+
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
@@ -100,6 +103,8 @@ class AscendMLAMetadata:
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
 
+    query_lens: list[int] = None
+    seq_lens: torch.Tensor = None
     # The dimension of the attention heads
     head_dim: Optional[int] = None
     attn_mask: torch.Tensor = None
@@ -118,6 +123,16 @@ class AscendMLAMetadata:
         #         f"Only {supported_head_sizes} are supported for head_dim,",
         #         f"received {self.head_dim}.")
 
+    def split_metadata_for_multistream(
+            self,
+            ms_split_config: MSAttentionMetadataSplitConfig,
+    ) -> list["AscendMLAMetadata"]:
+        """Split metadata for multi-stream with AscendMLAMetadata"""
+        return model_input_split_v1_mla_attn(
+            ms_split_config=ms_split_config,
+            attn_metadata=self,
+            _metadata_cls=AscendMLAMetadata,
+        )
 
 M = TypeVar("M", bound=AscendMLAMetadata)
 
@@ -315,6 +330,8 @@ class AscendMLAMetadataBuilder:
 
         return self.metadata_cls(  # type: ignore
             num_actual_tokens=num_actual_tokens,
+            query_lens=query_lens.tolist(),
+            seq_lens=seq_lens,
             slot_mapping=slot_mapping,
             head_dim=self.runner.model_config.get_head_size(),
             num_decodes=self._num_decodes,
@@ -783,16 +800,34 @@ class AscendMLAImpl(MLAAttentionImpl):
                 key_cache=kv_cache,
                 slot_indices=attn_metadata.slot_mapping.flatten())
         if has_prefill:
-            output[num_decode_tokens:] = self._forward_prefill(
+            # FIX: aicore move/copy should be also placed on the comm stream in dbo, 
+            # otherwise it may affect the accuracy or disturb the overlap of next stage
+            # TODO: use an elegant way here to avoid it
+            output_prefill = self._forward_prefill(
                 prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache,
                 attn_metadata)
+            from vllm.multistream.context import get_multistream_comm_context
+            current_ms_metadata = get_multistream_comm_context()
+            if current_ms_metadata is not None:
+                with torch.npu.stream(current_ms_metadata.comm_stream):
+                    output[num_decode_tokens:] = output_prefill
+                    current_ms_metadata.after_comm_event.record()
+            else:
+                output[num_decode_tokens:] = output_prefill
         if has_decode:
             if self.running_in_graph:
                 return self._forward_decode(decode_ql_nope, decode_q_pe,
                                             decode_k_nope, decode_k_pe,
                                             kv_cache, attn_metadata)
             else:
-                output[:num_decode_tokens] = self._forward_decode(
-                    decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe,
-                    kv_cache, attn_metadata)
+                from vllm.multistream.context import get_multistream_comm_context
+                current_ms_metadata = get_multistream_comm_context()   
+                output_decode = self._forward_decode(
+                     decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe,
+                     kv_cache, attn_metadata)
+            if current_ms_metadata is not None:
+                with torch.npu.stream(current_ms_metadata.comm_stream):
+                    output[:num_decode_tokens] = output_decode
+            else:
+                output[:num_decode_tokens] = output_decode
         return output_padded
