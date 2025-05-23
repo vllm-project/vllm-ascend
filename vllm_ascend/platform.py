@@ -31,13 +31,11 @@ CUSTOM_OP_ENABLED = False
 try:
     # register custom ops into torch_library here
     import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
-
-except ImportError:
-    logging.warning(
-        "Warning: Failed to register custom ops, all custom ops will be disabled"
-    )
-else:
     CUSTOM_OP_ENABLED = True
+except ImportError as e:
+    logging.warning(
+        "Failed to import 'vllm_ascend.vllm_ascend_C': %s. All custom ops will be disabled. ",
+        e)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
