@@ -9,3 +9,5 @@ ray
 types-jsonschema
 xgrammar
 zmq
+quart
+types-psutil
