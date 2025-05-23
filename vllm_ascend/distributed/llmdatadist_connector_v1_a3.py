@@ -438,8 +438,8 @@ class LLMDataDistConnectorWorker():
     _, first_kv_cache_tuple = next(iter(kv_caches.items()))
     first_kv_cache = first_kv_cache_tuple[0]
     kv_cache_dtype = first_kv_cache.dtype
-    use_mla = get_current_vllm_config().model_config.is_deepseek_mla
-    if use_mla:
+    self.use_mla = first_kv_cache_tuple[0].size(-1) != first_kv_cache_tuple[1].size(-1)
+    if self.use_mla:
         # MLA case. [2 (k_normed, k_pe), num_blocks, ...]
         self.num_blocks = first_kv_cache.shape[0]
         block_rank = 3  # [block_size, latent_dim]
@@ -453,7 +453,7 @@ class LLMDataDistConnectorWorker():
     self.block_len = math.prod(block_shape)
     self.cache_addr = None
     alignment = 2 * 1024 * 1024
-    if use_mla:
+    if self.use_mla:
       cache_k_normed_addr_list = []
       cache_k_pe_addr_list = []
       k_normed = None
@@ -471,8 +471,8 @@ class LLMDataDistConnectorWorker():
       self.cache_desc = (cache_desc_k_normed, cache_desc_k_pe)
       self.cache_key = (cache_key_k_normed, cache_key_k_pe)
       try:
-        cache_k_normed = self.cache_manager.register_block_cache(self.cache_desc[0], self.cache_addr[0], self.cache_key[0])
-        cache_k_pe = self.cache_manager.register_block_cache(self.cache_desc[1], self.cache_addr[1], self.cache_key[1])
+        cache_k_normed = self.cache_manager.register_blocks_cache(self.cache_desc[0], self.cache_addr[0], self.cache_key[0])
+        cache_k_pe = self.cache_manager.register_blocks_cache(self.cache_desc[1], self.cache_addr[1], self.cache_key[1])
         self.cache = (cache_k_normed, cache_k_pe)
         logger.info("LLMDataDistWorker: End of register Paged Cache.")
       except (TypeError, ValueError) as e:
@@ -687,8 +687,7 @@ class LLMDataDistConnectorWorker():
 
     remote_cluster_id = self.linked_cluster[remote_ip][0]
     logger.info(f"remote cluster id is: {remote_cluster_id}")
-    is_mla = get_current_vllm_config().model_config.is_deepseek_mla
-    if is_mla:
+    if self.use_mla:
       remote_cache_key_k_normed = BlocksCacheKey(cluster_id=remote_cluster_id, model_id=0)
       remote_cache_key_k_pe = BlocksCacheKey(cluster_id=remote_cluster_id, model_id=1)
       logger.info("Try pull blocks from remote server")
