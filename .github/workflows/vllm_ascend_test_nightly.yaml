@@ -95,19 +95,16 @@ jobs:
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
             pytest -sv tests/ops/test_multi_step.py
+            pytest -sv tests/singlecard/test_ilama_lora.py
           else
             pytest -sv tests/multicard --ignore=tests/multicard/test_offline_inference_distributed.py
           fi
 
-      - name: Run vllm-project/vllm-ascend test on V0 engine
-        env:
-          VLLM_USE_V1: 0
+      - name: Run vllm-project/vllm-ascend Speculative Decode test
+        if: steps.filter_spec_decode.outputs.speculative_tests_changed == 'true' || github.event_name == 'schedule'
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
-            pytest -sv tests/ops/test_multi_step.py
+            VLLM_USE_MODELSCOPE=true pytest -sv tests/singlecard/spec_decode/e2e/test_v1_spec_decode.py
             pytest -sv tests/singlecard/spec_decode/e2e/test_mtp_correctness.py  # it needs a clean process
-            pytest -sv tests/singlecard/spec_decode --ignore=tests/singlecard/spec_decode/e2e/test_mtp_correctness.py
-
-          else
-            pytest -sv tests/multicard --ignore=tests/multicard/test_offline_inference_distributed.py
+            pytest -sv tests/singlecard/spec_decode --ignore=tests/singlecard/spec_decode/e2e/test_mtp_correctness.py --ignore=tests/singlecard/spec_decode/e2e/test_v1_spec_decode.py
           fi
