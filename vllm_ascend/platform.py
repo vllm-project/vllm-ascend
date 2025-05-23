@@ -202,9 +202,6 @@ class NPUPlatform(Platform):
                     "ascend_scheduler_config", None) is not None:
                 additional_scheduler_config = additional_config.get(
                     "ascend_scheduler_config")
-                if vllm_config.scheduler_config.enable_chunked_prefill:
-                    additional_scheduler_config[
-                        "enable_chunked_prefill"] = True
                 from vllm_ascend.core.schedule_config import \
                     AscendSchedulerConfig
                 ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
