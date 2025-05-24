@@ -30,7 +30,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
-from vllm_ascend.utils import vllm_version_is
 
 
 class AscendAttentionBackend(AttentionBackend):
@@ -111,6 +110,7 @@ class AscendMetadata:
     block_tables: torch.Tensor
     # (batch_size,). The sequence length per sequence. Sequence length means
     # the computed tokens + new tokens None if it is a decoding.
+    query_start_loc: torch.Tensor
     query_lens: torch.Tensor
     seq_lens: torch.Tensor
     # Maximum query length in the batch. None for decoding.
@@ -141,14 +141,8 @@ class AscendAttentionMetadataBuilder:
 
     def build(self, num_reqs, num_actual_tokens, max_query_len,
               common_prefix_len):
-        if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
-            block_table = (self.runner.input_batch.block_table.
-                           get_device_tensor()[:num_reqs])
-        else:
-            block_table = self.runner.input_batch.block_table[
-                0].get_device_tensor()
-            block_table[:num_reqs, :self.runner.max_num_blocks_per_req] = (
-                block_table[:num_reqs])
+        block_table = (
+            self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
 
         query_lens = self.runner.query_lens
         seq_lens = self.runner.seq_lens_cpu[:num_reqs]
@@ -156,9 +150,13 @@ class AscendAttentionMetadataBuilder:
             self.runner.device, non_blocking=True)
         attn_mask = self.runner.attn_mask
         attn_state = self.runner.attn_state
+        query_start_loc_cpu = self.runner.query_start_loc_cpu[:num_reqs + 1]
+        query_start_loc = query_start_loc_cpu.to(self.runner.device,
+                                                 non_blocking=True)
 
         attn_metadata = AscendMetadata(num_actual_tokens=num_actual_tokens,
                                        block_tables=block_table,
+                                       query_start_loc=query_start_loc,
                                        query_lens=query_lens,
                                        seq_lens=seq_lens,
                                        max_query_len=max_query_len,
@@ -220,11 +218,11 @@ class AscendAttentionBackendImpl(AttentionImpl):
             key: shape = [batch_size, seq_len, num_kv_heads * head_size]
             value: shape = [batch_size, seq_len, num_kv_heads * head_size]
             kv_cache: shape = [2, num_blocks, block_size,
-                               num_kv_heads * head_size]
+                               num_kv_heads, head_size]
                       key_cache = [num_blocks, block_size,
-                                   num_kv_heads * head_size]
+                                   num_kv_heads, head_size]
                       value_cache = [num_blocks, block_size,
-                                     num_kv_heads * head_size]
+                                     num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [batch_size * seq_len, num_heads, head_size]

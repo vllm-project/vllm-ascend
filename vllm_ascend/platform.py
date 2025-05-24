@@ -25,19 +25,17 @@ from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 from vllm.utils import supports_dynamo
 
-from vllm_ascend.utils import update_aclgraph_sizes
+from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD, update_aclgraph_sizes
 
 CUSTOM_OP_ENABLED = False
 try:
     # register custom ops into torch_library here
     import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
-
-except ImportError:
-    logging.warning(
-        "Warning: Failed to register custom ops, all custom ops will be disabled"
-    )
-else:
     CUSTOM_OP_ENABLED = True
+except ImportError as e:
+    logging.warning(
+        "Failed to import 'vllm_ascend.vllm_ascend_C': %s. All custom ops will be disabled. ",
+        e)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -60,7 +58,7 @@ class NPUPlatform(Platform):
     device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
     dispatch_key: str = "PrivateUse1"
 
-    supported_quantization: list[str] = ["ascend"]
+    supported_quantization: list[str] = [ASCEND_QUATIZATION_METHOD]
 
     def is_sleep_mode_available(self) -> bool:
         return True
@@ -72,6 +70,15 @@ class NPUPlatform(Platform):
         # Adapt the global patch here.
         from vllm_ascend.utils import adapt_patch
         adapt_patch(is_global_patch=True)
+
+        # For online serving, "ascend" quantization method is not a choice natively,
+        # so we need to add "ascend" quantization method to quantization methods list
+        # and the user can enable quantization using "vllm serve --quantization ascend".
+        if parser is not None:
+            quant_action = parser._option_string_actions.get('--quantization')
+            if quant_action and hasattr(quant_action, 'choices'):
+                if ASCEND_QUATIZATION_METHOD not in quant_action.choices:
+                    quant_action.choices.append(ASCEND_QUATIZATION_METHOD)
 
         from vllm_ascend.quantization.quant_config import \
             AscendQuantConfig  # noqa: F401

@@ -14,7 +14,6 @@ from vllm.model_executor.layers.sampler import (PromptLogprobs, SampleLogprobs,
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceGroupMetadata, SequenceOutput)
-from vllm.utils import current_stream
 from vllm.worker.model_runner_base import (
     _init_attn_metadata_from_tensor_dict,
     _init_frozen_model_input_from_tensor_dict,
@@ -23,6 +22,7 @@ from vllm.worker.multi_step_model_runner import (ModelOutput,
                                                  PythonizationCache,
                                                  StatefulModelInput)
 
+from vllm_ascend.utils import current_stream
 from vllm_ascend.worker.model_runner import (
     ModelInputForNPUWithSamplingMetadata, NPUModelRunnerBase)
 

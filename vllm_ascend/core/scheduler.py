@@ -51,6 +51,11 @@ class AscendScheduler(Scheduler):
         self.scheduled_req_ids: set[str] = set()
         self.running: list[Request] = []
 
+        if self.vllm_config.kv_transfer_config is not None and \
+            self.vllm_config.kv_transfer_config.is_kv_consumer:
+            raise ValueError(
+                "AscendScheduler cannot be used for decode nodes. ")
+
     def schedule(self) -> SchedulerOutput:
         if self.scheduler_config.chunked_prefill_enabled:
             return super().schedule()
@@ -286,6 +291,14 @@ class AscendScheduler(Scheduler):
             structured_output_request_ids={},
             grammar_bitmask=None,
         )
+
+        # NOTE(Kuntai): this function is designed for multiple purposes:
+        # 1. Plan the KV cache store
+        # 2. Wrap up all the KV cache load / save ops into an opaque object
+        # 3. Clear the internal states of the connector
+        if self.connector is not None:
+            meta = self.connector.build_connector_meta(scheduler_output)
+            scheduler_output.kv_connector_metadata = meta
 
         # Advance the number of computed tokens for the request AFTER
         # the request is scheduled.

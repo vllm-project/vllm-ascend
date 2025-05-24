@@ -38,11 +38,12 @@ from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
 from vllm_ascend.ops.fused_moe import AscendUnquantizedFusedMoEMethod
+from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD
 
 from .quantizer import AscendQuantizer
 
 
-@register_quantization_config("ascend")
+@register_quantization_config(ASCEND_QUATIZATION_METHOD)
 class AscendQuantConfig(QuantizationConfig):
     """Config class for Ascend
     
@@ -58,7 +59,7 @@ class AscendQuantConfig(QuantizationConfig):
 
     @classmethod
     def get_name(cls) -> str:
-        return "ascend"
+        return ASCEND_QUATIZATION_METHOD
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
@@ -81,7 +82,7 @@ class AscendQuantConfig(QuantizationConfig):
     def override_quantization_method(cls, hf_quant_cfg,
                                      user_quant) -> Optional[str]:
         if torch.npu.is_available():
-            return "ascend"
+            return ASCEND_QUATIZATION_METHOD
         return None
 
     def get_quant_method(self, layer: torch.nn.Module,
