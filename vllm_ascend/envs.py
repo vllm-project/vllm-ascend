@@ -66,6 +66,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("C_COMPILER", None),
     "VLLM_VERSION":
     lambda: os.getenv("VLLM_VERSION", None),
+    "MODEL_INSTANCE_ROLE":
+    lambda: os.getenv("MODEL_INSTANCE_ROLE", None),
 }
 
 # end-env-vars-definition

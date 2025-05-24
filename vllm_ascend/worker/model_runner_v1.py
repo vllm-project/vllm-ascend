@@ -57,6 +57,7 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
+import vllm_ascend.envs as ascend_envs
 from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.platform import NPUPlatform
@@ -1122,6 +1123,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # maximum num_tokens.
         num_reqs = self.scheduler_config.max_num_seqs
         num_tokens = self.max_num_tokens
+        # for decode no need to run max_num_tokens for profile
+        # only need to set bs*1, but for mtp case and future
+        # compatibility just set to 100
+        # FIXME: adjust the correct value if something wrong
+        if ascend_envs.MODEL_INSTANCE_ROLE is not None and ascend_envs.MODEL_INSTANCE_ROLE == "decode":
+            num_tokens = 100 if num_reqs < 100 else num_reqs
         min_tokens_per_req = num_tokens // num_reqs
 
         num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
@@ -1142,7 +1149,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         ]
 
         # Trigger compilation for general shape.
-        hidden_states = self._dummy_run(self.max_num_tokens)
+        hidden_states = self._dummy_run(num_tokens)
 
         if get_pp_group().is_last_rank:
             hidden_states = hidden_states[logit_indices]
