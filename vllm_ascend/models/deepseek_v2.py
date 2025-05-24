@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 import torch.distributed as dist
 import torch_npu
+import torchair as tng
 import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
@@ -210,6 +211,8 @@ class CustomDeepseekV2MoE(nn.Module):
         self.tp_group = get_tp_group().device_group
         self.tp_rank = get_tp_group().rank_in_group
 
+        self.enable_multi_stream = True
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
         # when profile runs, force experts to load balanced tokens
@@ -224,8 +227,12 @@ class CustomDeepseekV2MoE(nn.Module):
             enable_force_load_balance = False
         num_tokens, hidden_dim = hidden_states.shape
 
-        if self.n_shared_experts is not None:
+        moe_multi_stream = self.enable_multi_stream and not is_prefill
+
+        if self.n_shared_experts is not None and not moe_multi_stream:
             shared_output = self.shared_experts(hidden_states)
+        else:
+            shared_hidden_states = hidden_states
 
         if self.tp_size > 1:
             # pass
@@ -244,16 +251,40 @@ class CustomDeepseekV2MoE(nn.Module):
         else:
             local_hidden_states = hidden_states
 
+        if self.n_shared_experts is not None and moe_multi_stream:
+            with tng.scope.npu_stream_switch('1'):
+                tng.scope.npu_wait_tensor(shared_hidden_states, shared_hidden_states)
+                x, dynamic_scale = torch_npu.npu_dynamic_quant(shared_hidden_states)
+                gate_up = torch_npu.npu_quant_matmul(
+                    x,
+                    self.shared_experts.gate_up_proj.weight,
+                    self.shared_experts.gate_up_proj.weight_scale,
+                    output_dtype=torch.int32,
+                )
+
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(local_hidden_states)
 
-        router_hidden_states = self.experts(
-            hidden_states=local_hidden_states,
-            router_logits=router_logits,
-            is_prefill=is_prefill,
-            top_k=CustomDeepseekV2MoE.top_k,
-            enable_force_load_balance=enable_force_load_balance,
-        ) * self.routed_scaling_factor
+        if moe_multi_stream:
+            router_hidden_states, shared_output = self.experts(
+                hidden_states=local_hidden_states,
+                router_logits=router_logits,
+                is_prefill=is_prefill,
+                top_k=CustomDeepseekV2MoE.top_k,
+                enable_force_load_balance=enable_force_load_balance,
+                shared_experts=self.shared_experts,
+                shared_gate_up=gate_up,
+                shared_dynamic_scale=dynamic_scale
+            )
+            router_hidden_states = router_hidden_states * self.routed_scaling_factor
+        else:
+            router_hidden_states = self.experts(
+                hidden_states=local_hidden_states,
+                router_logits=router_logits,
+                is_prefill=is_prefill,
+                top_k=CustomDeepseekV2MoE.top_k,
+                enable_force_load_balance=enable_force_load_balance,
+            ) * self.routed_scaling_factor
 
         if self.tp_size > 1:
             dist.all_gather(list(chunk_hidden_states), router_hidden_states,
