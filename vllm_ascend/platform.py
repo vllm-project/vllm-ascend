@@ -128,6 +128,27 @@ class NPUPlatform(Platform):
             enforce_eager = getattr(vllm_config.model_config, "enforce_eager",
                                     False)
 
+        additional_config = vllm_config.additional_config
+        parallel_config = vllm_config.parallel_config
+        cache_config = vllm_config.cache_config
+
+        if parallel_config:
+            # Default value for expert tensor parallel size
+            parallel_config.expert_tensor_parallel_size = 1
+
+            # NOTE: When enable_expert_parallel is True, we follow vLLM convention:
+            # ep_size = world_size, which means expert_tensor_parallel_size must be 1
+            if (additional_config
+                    and "expert_tensor_parallel_size" in additional_config
+                    and not parallel_config.enable_expert_parallel):
+                parallel_config.expert_tensor_parallel_size = int(
+                    additional_config["expert_tensor_parallel_size"])
+
+            # Calculate expert parallel size based on world size
+            parallel_config.expert_parallel_size = (
+                parallel_config.world_size //
+                parallel_config.expert_tensor_parallel_size)
+
         # TODO(Yizhou): Override the value of enforce_eager to True before
         # the CANN and torch_npu support NPU compilation.
         enforce_eager = True
@@ -155,21 +176,20 @@ class NPUPlatform(Platform):
                 ["vllm.unified_ascend_attention_with_output"])
             update_aclgraph_sizes(vllm_config)
 
-        if vllm_config.additional_config is not None:
-            enable_graph_mode = vllm_config.additional_config.get(
-                "enable_graph_mode", False)
+        if additional_config is not None:
+            enable_graph_mode = additional_config.get("enable_graph_mode",
+                                                      False)
             if enable_graph_mode and not supports_dynamo():
                 logger.warning(
                     "enable_graph_mode is not supported because the version of torch is too low, forcing close enable_graph_mode"
                 )
-                vllm_config.additional_config["enable_graph_mode"] = False
+                additional_config["enable_graph_mode"] = False
             if enable_graph_mode and envs.VLLM_USE_V1 and envs.VLLM_MLA_DISABLE:
                 logger.warning(
                     "NPU graph mode is still experimental and not supported for V1 without mla currently, "
                     "it has been disabled automatically.")
-                vllm_config.additional_config["enable_graph_mode"] = False
+                additional_config["enable_graph_mode"] = False
 
-        parallel_config = vllm_config.parallel_config
         if parallel_config and parallel_config.worker_cls == "auto":
             if envs.VLLM_USE_V1:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
@@ -181,7 +201,6 @@ class NPUPlatform(Platform):
             else:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
 
-        cache_config = vllm_config.cache_config
         if cache_config:
             if cache_config.block_size is None:
                 cache_config.block_size = 128
@@ -197,7 +216,6 @@ class NPUPlatform(Platform):
             # If ascend_scheduler_config exists in additional_config,
             # extents original scheduler_config to use AscendScheduler.
 
-            additional_config = vllm_config.additional_config
             if additional_config and additional_config.get(
                     "ascend_scheduler_config", None) is not None:
                 additional_scheduler_config = additional_config.get(
