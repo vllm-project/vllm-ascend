@@ -66,6 +66,15 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("C_COMPILER", None),
     "VLLM_VERSION":
     lambda: os.getenv("VLLM_VERSION", None),
+    # ACL_OP_INIT_MODE:
+    #   0: default, normal init.
+    #   1: delay init until launch aclops.
+    #   2: forbid aclops init and launch.
+    # Find more details at https://gitee.com/ascend/pytorch/pulls/18094
+    # We set this var default to `1` in vllm-ascend to avoid segment fault when
+    # enable `pin_memory` while creating a tensor using `torch.tensor`.
+    "ACL_OP_INIT_MODE":
+    lambda: os.getenv("ACL_OP_INIT_MODE", '1'),
 }
 
 # end-env-vars-definition
