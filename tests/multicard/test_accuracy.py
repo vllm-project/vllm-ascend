@@ -48,7 +48,7 @@ def run_test(model_name, queue, more_args=None):
         batch_size="auto",
     )
     result = results["results"][TASK][FILTER]
-    print("result:", result)
+    print(100 * "*", "\nThe accuracy test result:", result)
     queue.put(result)
     del results
     torch.npu.empty_cache()
