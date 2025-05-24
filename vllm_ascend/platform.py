@@ -169,6 +169,11 @@ class NPUPlatform(Platform):
                     "it has been disabled automatically.")
                 vllm_config.additional_config["enable_graph_mode"] = False
 
+            kv_cache_dtype = vllm_config.additional_config.get(
+                "kv_cache_dtype", None)
+            if kv_cache_dtype is not None:
+                vllm_config.cache_config.cache_dtype = kv_cache_dtype
+
         parallel_config = vllm_config.parallel_config
         if parallel_config and parallel_config.worker_cls == "auto":
             if envs.VLLM_USE_V1:
