@@ -680,7 +680,6 @@ class AscendW8A8DynamicFusedMoEMethod:
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = True,
         enable_force_load_balance: bool = True,
-        dp_size: int = 1,
         **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
@@ -733,7 +732,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 top_k=top_k,
                 expert_map=expert_map,
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name)
-        elif dp_size == 1:
+        elif self.ep_group.world_size == 1:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
                                  w1_scale=layer.w13_weight_scale,
@@ -744,6 +743,10 @@ class AscendW8A8DynamicFusedMoEMethod:
                                  top_k=top_k,
                                  expert_map=expert_map)
         else:
+            # The current implementation of deepseek moe splits hidden_states
+            # according to tp_size before they are feed into fused_moe module.
+            # Therefore, all2all is needed no matter how dp/tp is set so as to
+            # dispatch/combine tokens.
             return fused_experts_with_all2all(hidden_states=x,
                                               w1=layer.w13_weight,
                                               w1_scale=layer.w13_weight_scale,

@@ -373,12 +373,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.qk_rope_head_dim = qk_rope_head_dim
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
-        # TODO: below padding should be removed after kernel is ready
-        # we found npu_flash_attention can only works on 128 divisible head_dim, we pad it to target size here
-        # and slice the final result to guarantee its functionality.
-        self.padding_head_dim = (
-            (self.qk_nope_head_dim + self.qk_rope_head_dim - 1) // 128 +
-            1) * 128
 
         # Hack for V1 for now to avoid torch library overhead (since we are
         # already inside an attention custom op), pull out the forward
@@ -476,9 +470,11 @@ class AscendMLAImpl(MLAAttentionImpl):
             [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
 
         # Convert from (L, N, V) to (N, L, V)
-        self.W_UV = W_UV.transpose(0, 1)
+        self.W_UV = W_UV.transpose(0, 1).contiguous()
         # Convert from (L, N, P) to (N, P, L)
-        self.W_UK_T = W_UK.permute(1, 2, 0)
+        self.W_UK_T = W_UK.permute(1, 2, 0).contiguous()
+        self.W_UV.data = torch_npu.npu_format_cast(self.W_UV.data, 29)
+        self.W_UK_T.data = torch_npu.npu_format_cast(self.W_UK_T.data, 29)
 
     def _forward_prefill(
         self,
@@ -528,17 +524,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             key = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
                             dim=-1)
 
-            torch_npu._npu_flash_attention(
-                query=query,
-                key=key,
-                value=value,
-                mask=attn_metadata.attn_mask,
-                seq_len=attn_metadata.prefill.context_lens,
-                scale_value=self.scale,
-                num_heads=self.num_heads,
-                num_kv_heads=self.num_heads,
-                out=attn_output)
-            attn_output = attn_output.view(-1, self.num_heads,self.v_head_dim)
+            attn_output = attn_output.view(-1, self.num_heads, self.v_head_dim)
         else:
             raise RuntimeError(
                 "Unexpected path reached, AscendMLAImpl should only have PrefillNoCache and ChunkedPrefill scenario in forward prefill, please file a bug to vllm-ascend !"
