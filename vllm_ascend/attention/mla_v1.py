@@ -16,7 +16,6 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
-from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 if TYPE_CHECKING:
@@ -239,12 +238,8 @@ class AscendMLAMetadataBuilder:
         # function. We should avoid GPU -> CPU sync as much as possible because
         # it blocks on all previous kernels.
         device = self.runner.device
-        if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
-            block_table = (self.runner.input_batch.block_table.
-                           get_device_tensor()[:num_reqs])
-        else:
-            block_table = (self.runner.input_batch.block_table[0].
-                           get_device_tensor()[:num_reqs])
+        block_table = (
+            self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
         slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
             device, non_blocking=True)
         input_positions = self.runner.positions_cpu[:num_actual_tokens].to(
@@ -523,7 +518,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             attn_output = torch.empty(num_tokens,
                                       self.num_heads,
-                                      self.padding_head_dim,
+                                      self.v_head_dim,
                                       dtype=query.dtype,
                                       device=query.device)
             k_nope, value = self.kv_b_proj(kv_c_normed)[0].view(
@@ -532,31 +527,18 @@ class AscendMLAImpl(MLAAttentionImpl):
                     [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             key = torch.cat((k_nope, k_pe.expand((*k_nope.shape[:-1], -1))),
                             dim=-1)
-            pad_query = torch.nn.functional.pad(query, [
-                0, self.padding_head_dim - self.qk_rope_head_dim -
-                self.qk_nope_head_dim
-            ],
-                                                value=0)
-            pad_key = torch.nn.functional.pad(key, [
-                0, self.padding_head_dim - self.qk_rope_head_dim -
-                self.qk_nope_head_dim
-            ],
-                                              value=0)
-            pad_value = torch.nn.functional.pad(
-                value, [0, self.padding_head_dim - self.v_head_dim], value=0)
+
             torch_npu._npu_flash_attention(
-                query=pad_query,
-                key=pad_key,
-                value=pad_value,
+                query=query,
+                key=key,
+                value=value,
                 mask=attn_metadata.attn_mask,
                 seq_len=attn_metadata.prefill.context_lens,
                 scale_value=self.scale,
                 num_heads=self.num_heads,
                 num_kv_heads=self.num_heads,
                 out=attn_output)
-            attn_output = attn_output.view(
-                -1, self.num_heads,
-                self.padding_head_dim)[:, :, :self.v_head_dim]
+            attn_output = attn_output.view(-1, self.num_heads,self.v_head_dim)
         else:
             raise RuntimeError(
                 "Unexpected path reached, AscendMLAImpl should only have PrefillNoCache and ChunkedPrefill scenario in forward prefill, please file a bug to vllm-ascend !"
