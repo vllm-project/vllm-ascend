@@ -266,25 +266,26 @@ def test_gather_cache_mla(kv_lora_rank, qk_rope_head_dim, block_size,
 
     # torch_npu._npu_paged_cache_load
     kv_c = torch.empty(
-        (total_tokens, kv_lora_rank), dtype=torch.float16, device=device
+        (total_tokens, 1, kv_lora_rank), dtype=torch.float16, device=device
     )
     k_pe = torch.empty(
-        (total_tokens, qk_rope_head_dim), dtype=torch.float16, device=device
+        (total_tokens, 1, qk_rope_head_dim), dtype=torch.float16, device=device
     )
     cached_kv_c, cached_k_pe = src_cache.split(
         [kv_lora_rank, qk_rope_head_dim], dim=2
     )
-    cached_kv_c = cached_kv_c.view(num_blocks, block_size, 1, kv_lora_rank)
-    cached_k_pe = cached_k_pe.view(num_blocks, block_size, 1, qk_rope_head_dim)
+    cached_kv_c = cached_kv_c.view(num_blocks, block_size, 1, kv_lora_rank).to(torch.float16)
+    cached_k_pe = cached_k_pe.view(num_blocks, block_size, 1, qk_rope_head_dim).to(torch.float16)
 
     torch_npu._npu_paged_cache_load(
         cached_kv_c,
         cached_k_pe,
         block_table,
+        seq_len_tensor.int(),
         seq_starts,
         kv_c,
         k_pe
     )
 
-    torch_npu_result = torch.cat([kv_c, k_pe], dim=1)
-    torch.testing.assert_close(torch_npu_result, expected)
+    torch_npu_result = torch.cat([kv_c, k_pe], dim=2).view(total_tokens, -1)
+    torch.testing.assert_close(torch_npu_result, expected.to(torch.float16))
