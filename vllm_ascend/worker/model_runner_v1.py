@@ -114,6 +114,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
@@ -1189,7 +1190,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 device=self.device,
                 pin_memory=True,
                 vocab_size=self.model_config.get_vocab_size(),
-                kv_cache_config=kv_cache_config,
+                block_size=self.cache_config.block_size,
             )
 
         for kv_cache_group in kv_cache_config.kv_cache_groups:
