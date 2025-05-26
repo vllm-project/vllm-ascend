@@ -7,7 +7,8 @@ from typing import Optional
 
 import pytest
 import torch
-#from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
+import torch_npu
+# from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 
@@ -258,13 +259,32 @@ def test_gather_cache_mla(kv_lora_rank, qk_rope_head_dim, block_size,
     expected = torch.cat(expected_batches, dim=0)
     '''
 
-    #gather_cache_torch(src_cache, expected, block_table, cu_seq_lens, batch_size, seq_starts)
+    # gather_cache_torch(src_cache, expected, block_table, cu_seq_lens, batch_size, seq_starts)
     gather_cache_torch(src_cache, expected, block_table, cu_seq_lens,
                        batch_size, seq_starts)
-    '''
-    dst = torch.zeros((total_tokens, entry_size),
-            dtype=src_cache.dtype,
-            device=device)
-    ops.gather_cache(src_cache, dst, block_table, cu_seq_lens, batch_size, seq_starts)
-    torch.testing.assert_close(dst, expected)
-    '''
+
+
+    # torch_npu._npu_paged_cache_load
+    kv_c = torch.empty(
+        (total_tokens, kv_lora_rank), dtype=torch.float16, device=device
+    )
+    k_pe = torch.empty(
+        (total_tokens, qk_rope_head_dim), dtype=torch.float16, device=device
+    )
+    cached_kv_c, cached_k_pe = src_cache.split(
+        [kv_lora_rank, qk_rope_head_dim], dim=2
+    )
+    cached_kv_c = cached_kv_c.view(num_blocks, block_size, 1, kv_lora_rank)
+    cached_k_pe = cached_k_pe.view(num_blocks, block_size, 1, qk_rope_head_dim)
+
+    torch_npu._npu_paged_cache_load(
+        cached_kv_c,
+        cached_k_pe,
+        block_table,
+        seq_starts,
+        kv_c,
+        k_pe
+    )
+
+    torch_npu_result = torch.cat([kv_c, k_pe], dim=1)
+    torch.testing.assert_close(torch_npu_result, expected)
