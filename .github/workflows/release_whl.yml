@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: Build and Release Wheel
+name: build / wheel
 
 on:
   pull_request:
