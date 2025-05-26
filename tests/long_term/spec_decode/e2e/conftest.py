@@ -26,9 +26,9 @@ import torch
 from vllm import SamplingParams
 from vllm.sequence import PromptLogprobs, SampleLogprobs
 
-from ....model_utils import (TokensTextLogprobs,
-                             TokensTextLogprobsPromptLogprobs,
-                             check_logprobs_close, check_outputs_equal)
+from tests.model_utils import (TokensTextLogprobs,
+                               TokensTextLogprobsPromptLogprobs,
+                               check_logprobs_close, check_outputs_equal)
 
 PROMPTS = [
     "Hello, my name is",

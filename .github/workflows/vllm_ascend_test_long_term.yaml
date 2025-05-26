@@ -41,7 +41,7 @@ jobs:
     strategy:
       max-parallel: 2
       matrix:
-        vllm_version: [main, v0.8.5.post1]
+        vllm_version: [main, v0.9.0]
     name: vLLM Ascend long term test
     runs-on: linux-arm64-npu-1
     container:

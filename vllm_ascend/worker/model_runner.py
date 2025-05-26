@@ -64,8 +64,6 @@ from vllm.worker.model_runner_base import (
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
 
-from vllm_ascend.utils import vllm_version_is
-
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
@@ -1017,10 +1015,8 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         pattern: Optional[str] = None,
         max_size: Optional[int] = None,
     ) -> None:
-        if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
-            from vllm.model_executor.model_loader.loader import ShardedStateLoader  # type: ignore[import]  # isort: skip  # noqa
-        else:
-            from vllm.model_executor.model_loader import ShardedStateLoader
+
+        from vllm.model_executor.model_loader import ShardedStateLoader
         ShardedStateLoader.save_model(
             self.model,
             path,
@@ -1032,12 +1028,9 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         self,
         tensorizer_config: TensorizerConfig,
     ) -> None:
-        if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
-            from vllm.model_executor.model_loader.loader import \
-                TensorizerLoader  # type: ignore  # noqa
-        else:
-            from vllm.model_executor.model_loader import \
-                TensorizerLoader  # type: ignore  # noqa
+
+        from vllm.model_executor.model_loader import \
+            TensorizerLoader  # type: ignore  # noqa
         TensorizerLoader.save_model(
             self.model,
             tensorizer_config=tensorizer_config,
