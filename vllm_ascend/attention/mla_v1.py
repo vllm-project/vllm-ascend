@@ -16,6 +16,7 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 if TYPE_CHECKING:
@@ -238,8 +239,14 @@ class AscendMLAMetadataBuilder:
         # function. We should avoid GPU -> CPU sync as much as possible because
         # it blocks on all previous kernels.
         device = self.runner.device
-        block_table = (
-            self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
+        if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
+            block_table = (self.runner.input_batch.block_table.
+                           get_device_tensor()[:num_reqs])
+        else:
+            block_table = self.runner.input_batch.block_table[
+                0].get_device_tensor()
+            block_table[:num_reqs, :self.runner.max_num_blocks_per_req] = (
+                block_table[:num_reqs])
         slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
             device, non_blocking=True)
         input_positions = self.runner.positions_cpu[:num_actual_tokens].to(

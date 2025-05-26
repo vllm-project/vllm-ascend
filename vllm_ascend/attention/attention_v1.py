@@ -30,6 +30,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
+from vllm_ascend.utils import vllm_version_is
 
 
 class AscendAttentionBackend(AttentionBackend):
@@ -141,8 +142,14 @@ class AscendAttentionMetadataBuilder:
 
     def build(self, num_reqs, num_actual_tokens, max_query_len,
               common_prefix_len):
-        block_table = (
-            self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
+        if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
+            block_table = (self.runner.input_batch.block_table.
+                           get_device_tensor()[:num_reqs])
+        else:
+            block_table = self.runner.input_batch.block_table[
+                0].get_device_tensor()
+            block_table[:num_reqs, :self.runner.max_num_blocks_per_req] = (
+                block_table[:num_reqs])
 
         query_lens = self.runner.query_lens
         seq_lens = self.runner.seq_lens_cpu[:num_reqs]
