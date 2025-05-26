@@ -239,6 +239,8 @@ Then run:
 
 ```bash
 # export VLLM_USE_MODELSCOPE=true to speed up download if huggingface is not reachable.
+# NOTE: pip install "modelscope<1.23.0" to avoid errors.
+# Find more details at https://github.com/vllm-project/vllm/pull/13807.
 python example.py
 ```
 
