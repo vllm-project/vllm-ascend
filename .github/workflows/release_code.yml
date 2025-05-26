@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: Generate and Release Code
+name: build / sdist
 
 on:
   pull_request:
