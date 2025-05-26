@@ -27,8 +27,8 @@ from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.spec_decode_worker import SpecDecodeWorker
 from vllm.spec_decode.top1_proposer import Top1Proposer
 
-from tests.singlecard.spec_decode.test_utils import mock_spec_decode_sampler
-from tests.singlecard.spec_decode.utils import create_batch, mock_worker
+from tests.long_term.spec_decode.test_utils import mock_spec_decode_sampler
+from tests.long_term.spec_decode.utils import create_batch, mock_worker
 
 
 @pytest.mark.parametrize('queue_size', [4])

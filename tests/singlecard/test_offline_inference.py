@@ -35,7 +35,6 @@ MODELS = [
     "Qwen/Qwen3-0.6B-Base",
 ]
 MULTIMODALITY_MODELS = ["Qwen/Qwen2.5-VL-3B-Instruct"]
-os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 
@@ -82,8 +81,3 @@ def test_multimodal(model, prompt_template, vllm_runner):
         vllm_model.generate_greedy(prompts=prompts,
                                    images=images,
                                    max_tokens=64)
-
-
-if __name__ == "__main__":
-    import pytest
-    pytest.main([__file__])

@@ -1,14 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-import os
 import random
 from typing import Any
 
 import pytest
 from vllm import LLM, SamplingParams
-
-os.environ["VLLM_USE_MODELSCOPE"] = "True"
 
 
 @pytest.fixture
