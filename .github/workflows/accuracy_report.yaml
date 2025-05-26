@@ -128,7 +128,7 @@ jobs:
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.PR_TOKEN }}
-          base: ${{ github.ref_name }}
+          base: ${{ github.event.inputs.branch }}
           branch: auto-pr/accuracy-test
           commit-message: "Update accuracy report for ${{ github.event.inputs.branch }}"
           add-paths: ./docs/source/developer_guide/evaluation/accuracy_report/*.md
