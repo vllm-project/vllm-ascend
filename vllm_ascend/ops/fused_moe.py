@@ -748,6 +748,7 @@ class AscendFusedMoE(FusedMoE):
                     vllm_parallel_config=vllm_config.parallel_config))
 
             self.moe_parallel_config.ep_size = get_ep_group().world_size
+            self.moe_parallel_config.tp_size = get_etp_group().world_size
 
         self.top_k = top_k
         self.num_experts = num_experts
