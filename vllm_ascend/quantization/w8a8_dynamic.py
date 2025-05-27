@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
 import torch
 import torch.distributed as dist
