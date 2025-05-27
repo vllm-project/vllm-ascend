@@ -1,18 +1,18 @@
-#forked https://github.com/vllm-project/vllm/blob/main/tests/kernels/test_flashmla.py
-#test https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/mla/flashmla.py#L136-L146
+# forked https://github.com/vllm-project/vllm/blob/main/tests/kernels/test_flashmla.py
+# test https://github.com/vllm-project/vllm/blob/main/vllm/v1/attention/backends/mla/flashmla.py#L136-L146
 import random
 from typing import Tuple
 
 import pytest
 import torch
+import torch_npu
 
 
 def cal_diff(x: torch.Tensor, y: torch.Tensor, name: str) -> None:
     x, y = x.double(), y.double()
-    #RMSE = ((x - y) * (x - y)).mean().sqrt().item()
-    cos_diff = 1 - 2 * (x * y).sum().item() / max(
-        (x * x + y * y).sum().item(), 1e-12)
-    #amax_diff = (x - y).abs().max().item()
+    # RMSE = ((x - y) * (x - y)).mean().sqrt().item()
+    cos_diff = 1 - 2 * (x * y).sum().item() / max((x * x + y * y).sum().item(), 1e-12)
+    # amax_diff = (x - y).abs().max().item()
     # print(f"{name}: {cos_diff=}, {RMSE=}, {amax_diff=}")
     assert cos_diff < 1e-5
 
@@ -27,7 +27,7 @@ def flash_mla_with_kvcache_torch(
     causal: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """PyTorch reference implementation for flash_mla_with_kvcache.
-    
+
     Args:
         q: Query tensor with shape [batch, 1, num_heads_q, head_dim]
         k_cache: Key cache tensor with shape [num_blocks, block_size, 1, head_dim]
@@ -36,7 +36,7 @@ def flash_mla_with_kvcache_torch(
         head_dim_v: Value head dimension (kv_lora_rank)
         softmax_scale: Scale factor for attention scores
         causal: Whether to use causal attention
-    
+
     Returns:
         output: Output tensor [batch, 1, num_heads_q, head_dim_v]
         lse: Log sum exp [batch, num_heads_q, 1]
@@ -76,13 +76,13 @@ def flash_mla_with_kvcache_torch(
         k_i = k_i.repeat_interleave(h_q, dim=1)  # [seq_len, h_q, d]
 
         # Compute attention scores
-        scores = torch.einsum('nhd,khd->nhk', q_i, k_i)  # [1, h_q, seq_len]
+        scores = torch.einsum("nhd,khd->nhk", q_i, k_i)  # [1, h_q, seq_len]
 
         # Apply causal mask if needed
         if causal:
             scores.masked_fill_(
-                torch.arange(seq_len, device=device) > seq_len - 1,
-                float('-inf'))
+                torch.arange(seq_len, device=device) > seq_len - 1, float("-inf")
+            )
 
         # Compute log sum exp
         lse[i] = scores.logsumexp(dim=-1, keepdim=True)  # [1, h_q, 1]
@@ -93,10 +93,48 @@ def flash_mla_with_kvcache_torch(
         # Compute output
         # Use head_dim_v instead of full dimension for values
         v_i = k_i[..., :head_dim_v]  # [seq_len, h_q, head_dim_v]
-        out[i] = torch.einsum('nhk,khd->nhd', attn_weights,
-                              v_i)  # [1, h_q, head_dim_v]
+        out[i] = torch.einsum("nhk,khd->nhd", attn_weights, v_i)  # [1, h_q, head_dim_v]
 
     return out, lse
+
+
+def get_key_value_from_cache(
+    cache: torch.Tensor,
+    seq_lens: torch.Tensor,
+    block_table: torch.Tensor,
+    head_num_q: int,
+    head_dim_qk: int,
+    head_dim_v: int,
+    batch_size: int,
+    block_size: int,
+    max_seq_len: int,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    num_tokens = seq_lens.sum().item()
+    key = torch.empty((num_tokens, head_num_q, head_dim_qk), dtype=cache.dtype)
+    value = torch.empty((num_tokens, head_num_q, head_dim_v), dtype=cache.dtype)
+
+    token_acc = 0
+    masks = torch.empty((batch_size, max_seq_len, max_seq_len), dtype=torch.float16)
+
+    for i in range(batch_size):
+        seq_len = seq_lens[i].item()
+
+        num_blocks_needed = (seq_len + block_size - 1) // block_size
+        block_indices = block_table[i, :num_blocks_needed]
+
+        key_i = cache[block_indices]  # [num_blocks_needed, block_size, 1, d]
+        key_i = key_i.view(-1, 1, head_dim_qk)[:seq_len]  # [seq_len, 1, head_dim_qk]
+        key_i = key_i.repeat_interleave(
+            head_num_q, dim=1
+        )  # [seq_len, head_num_q, head_dim_qk]
+
+        value_i = key_i[..., :head_dim_v]  # [seq_len, head_num_q, head_dim_v]
+        key[token_acc : token_acc + seq_len] = key_i
+        value[token_acc : token_acc + seq_len] = value_i
+        masks[i, :seq_len, :seq_len] = 1.0
+        token_acc += seq_len
+
+    return key, value, masks
 
 
 @pytest.mark.parametrize("batch_size", [128])
@@ -130,27 +168,23 @@ def test_flash_mla_with_kvcache(
     causal = True
 
     # 设置序列长度
-    cache_seqlens = torch.full((batch_size, ),
-                               mean_seq_len_k,
-                               dtype=torch.int32,
-                               device=device)
+    cache_seqlens = torch.full(
+        (batch_size,), mean_seq_len_k, dtype=torch.int32, device=device
+    )
     if varlen:
         for i in range(batch_size):
             cache_seqlens[i] = max(
-                int(random.normalvariate(mean_seq_len_k, mean_seq_len_k / 2)),
-                seq_len_q)
+                int(random.normalvariate(mean_seq_len_k, mean_seq_len_k / 2)), seq_len_q
+            )
 
     # 计算最大序列长度和padding
     max_seqlen = cache_seqlens.max().item()
     max_seqlen_pad = ((max_seqlen + 255) // 256) * 256
 
     # 创建输入张量
-    q = torch.randn(batch_size,
-                    seq_len_q,
-                    num_heads_q,
-                    head_dim,
-                    device=device,
-                    dtype=dtype)
+    q = torch.randn(
+        batch_size, seq_len_q, num_heads_q, head_dim, device=device, dtype=dtype
+    )
 
     # 创建block table
     num_blocks = batch_size * max_seqlen_pad // block_size
@@ -158,17 +192,15 @@ def test_flash_mla_with_kvcache(
     block_table = block_table.view(batch_size, max_seqlen_pad // block_size)
 
     # 创建key cache
-    k_cache = torch.randn(num_blocks,
-                          block_size,
-                          num_heads_kv,
-                          head_dim,
-                          device=device,
-                          dtype=dtype)
+    k_cache = torch.randn(
+        num_blocks, block_size, num_heads_kv, head_dim, device=device, dtype=dtype
+    )
 
     # 设置padding区域为NaN
     for i in range(batch_size):
-        k_cache.view(batch_size, max_seqlen_pad, num_heads_kv,
-                     head_dim)[i, cache_seqlens[i].item():] = float('nan')
+        k_cache.view(batch_size, max_seqlen_pad, num_heads_kv, head_dim)[
+            i, cache_seqlens[i].item() :
+        ] = float("nan")
 
     # 计算scale
     scale = head_dim**-0.5
@@ -183,7 +215,46 @@ def test_flash_mla_with_kvcache(
         softmax_scale=scale,
         causal=causal,
     )
-    '''
+
+    key, value, masks = get_key_value_from_cache(
+        k_cache,
+        cache_seqlens,
+        block_table,
+        num_heads_q,
+        head_dim,
+        head_dim_v,
+        batch_size,
+        block_size,
+        max_seqlen_pad,
+    )
+
+    out_npu = torch.empty(
+        batch_size, num_heads_q, head_dim_v, dtype=dtype, device=device
+    )
+    lse_npu = torch.empty(num_heads_q, batch_size, dtype=torch.float32, device=device)
+
+    query = q.view(batch_size, num_heads_q, head_dim)
+    query1, query2 = torch.split(query, [128, 64], dim=2)
+    key1, key2 = torch.split(key, [128, 64], dim=2)
+    seq_lens_query = torch.ones(batch_size, dtype=torch.int32, device=device)
+    seq_lens = torch.stack([seq_lens_query, cache_seqlens], dim=0).cpu()
+
+    torch_npu._npu_ring_mla(
+        query1,
+        query2,
+        key1,
+        key2,
+        value,
+        masks,
+        seq_lens,
+        num_heads_q,
+        num_heads_kv,
+        1.0,
+        out_npu,
+        lse_npu,
+    )
+
+    """
     from flash_mla import flash_mla_with_kvcache, get_mla_metadata
     # 获取tile scheduler metadata
     tile_metadata, num_splits = get_mla_metadata(
@@ -208,4 +279,4 @@ def test_flash_mla_with_kvcache(
     # 验证结果
     cal_diff(out_flash, out_torch, "output")
     cal_diff(lse_flash, lse_torch, "lse")
-    '''
+    """

@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Type, TypeVar
 
 import torch
+import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
@@ -61,6 +62,7 @@ class AscendMLAPrefillMetadata:
         # New for MLA (compared to FlashAttention)
         # For handling chunked prefill
         cu_seq_lens: torch.Tensor
+        chunk_seq_lens: torch.Tensor
         starts: torch.Tensor
         seq_tot: list[int]
         max_seq_lens: list[int]
@@ -324,6 +326,7 @@ class AscendMLAMetadataBuilder:
                 chunked_context_metadata = \
                     AscendMLAPrefillMetadata.ChunkedContextMetadata(
                     cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
+                    chunk_seq_lens=chunk_seq_lens.to(device, non_blocking=True),
                     starts=chunk_starts.to(device, non_blocking=True),
                     seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
                     max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
@@ -516,16 +519,31 @@ class AscendMLAImpl(MLAAttentionImpl):
         iters = len(prefill_metadata.chunked_context.seq_tot)
         workspace = prefill_metadata.chunked_context.workspace
 
+        num_blocks = kv_c_and_k_pe_cache.shape[0]
+        block_size = kv_c_and_k_pe_cache.shape[1]
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
 
-            gather_cache_torch(
-                src_cache=kv_c_and_k_pe_cache,
-                dst=workspace,
-                block_table=prefill_metadata.block_table,
-                cu_seq_lens=prefill_metadata.chunked_context.cu_seq_lens[i],
-                batch_size=attn_metadata.num_prefills,
-                seq_starts=prefill_metadata.chunked_context.starts[i],
+            cached_kv_c = kv_c_and_k_pe_cache[..., : self.kv_lora_rank].view(
+                num_blocks,
+                block_size,
+                1,
+                self.kv_lora_rank,
+            ).to(torch.float16)
+            cached_k_pe = kv_c_and_k_pe_cache[..., self.kv_lora_rank :].view(
+                num_blocks,
+                block_size,
+                1,
+                self.kv_lora_rank,
+            ).to(torch.float16)
+            torch_npu._npu_paged_cache_load(
+                cached_kv_c,
+                cached_k_pe,
+                prefill_metadata.block_table,
+                prefill_metadata.chunked_context.chunk_seq_lens[i],
+                prefill_metadata.chunked_context.starts[i],
+                workspace[:toks][..., :self.kv_lora_rank],
+                workspace[:toks][..., self.kv_lora_rank:],
             )
 
             kv_c_normed = workspace[:toks]\
