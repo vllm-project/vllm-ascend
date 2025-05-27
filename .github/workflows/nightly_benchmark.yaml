@@ -49,7 +49,7 @@ defaults:
 jobs:
   test:
     name: run benchmarks main
-    runs-on: ${{ github.event.inputs.runner || 'linux-arm64-npu-1' }}
+    runs-on: ${{ github.event.inputs.runner || 'linux-arm64-npu-static-8' }}
     container:
       image: ${{ github.event.inputs.image || 'm.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10' }}
       env:
