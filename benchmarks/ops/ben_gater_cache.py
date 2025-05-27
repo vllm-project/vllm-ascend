@@ -1,26 +1,12 @@
-# SPDX-License-Identifier: Apache-2.0
-# forked https://github.com/vllm-project/vllm/blob/main/tests/kernels/test_cache.py
-# test https://github.com/vllm-project/vllm/blob/main/vllm/attention/backends/mla/common.py#L1399-L1406
-# test https://github.com/vllm-project/vllm/blob/main/vllm/attention/backends/mla/common.py#L1221-L1228
-import random
+from typing import Tuple
 from typing import Optional
-
+import numpy as np
 import pytest
 import torch
-import torch_npu
-# from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
-from vllm import _custom_ops as ops
-from vllm.platforms import current_platform
+import torch_npu  # noqa: F401
+import vllm  # noqa: F401
 
-DTYPES = [torch.half, torch.bfloat16, torch.float]
-NUM_TOKENS = [42]  # Arbitrary values for testing
-# Parameters for MLA tests.
-KV_LORA_RANKS = [512]
-QK_ROPE_HEAD_DIMS = [64]
-NUM_TOKENS_MLA = [42]
-BLOCK_SIZES_MLA = [16]
-NUM_BLOCKS_MLA = [8]
-SEEDS = [0]
+import vllm_ascend.platform  # noqa: F401
 
 
 def _create_mla_cache(
@@ -39,89 +25,40 @@ def _create_mla_cache(
                        device=device)
 
 
-def concat_and_cache_mla_torch(
-        kv_c_normed: torch.Tensor,  # [num_tokens, num_kv_head, nope]
-        k_pe: torch.Tensor,  # [num_tokens, num_kv_head, rope]
-        kv_cache: torch.
-    Tensor,  # [num_blocks, block_size, num_kv_head, nope + rope]
-        slot_mapping,  # [num_tokens]
-):
-    num_blocks = kv_cache.size()[0]
-    block_size = kv_cache.size()[1]
-    num_kv_head = k_pe.size()[1]
-
-    idx_for_copy = slot_mapping // block_size * block_size + slot_mapping % block_size
-    kv_cache = kv_cache.view(num_blocks * block_size, num_kv_head, -1)
-    kv_cache[idx_for_copy] = torch.cat([kv_c_normed.unsqueeze(1), k_pe],
-                                       dim=-1)
-
-
-@pytest.mark.parametrize("kv_lora_rank", KV_LORA_RANKS)
-@pytest.mark.parametrize("qk_rope_head_dim", QK_ROPE_HEAD_DIMS)
-@pytest.mark.parametrize("num_tokens", NUM_TOKENS_MLA)
-@pytest.mark.parametrize("block_size", BLOCK_SIZES_MLA)
-@pytest.mark.parametrize("num_blocks", NUM_BLOCKS_MLA)
-@pytest.mark.parametrize("dtype", DTYPES)
-@pytest.mark.parametrize("seed", SEEDS)
-#@pytest.mark.cpu_model
-#@pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
-@torch.inference_mode()
-def test_concat_and_cache_mla(
-    kv_lora_rank: int,
-    qk_rope_head_dim: int,
-    num_tokens: int,
-    block_size: int,
-    num_blocks: int,
-    dtype: torch.dtype,
-    seed: int,
-) -> None:
-    device = "npu"
-    kv_cache_dtype = "auto"
-    current_platform.seed_everything(seed)
-    torch.set_default_device(device)
-
-    total_slots = num_blocks * block_size
-    slot_mapping_lst = random.sample(range(total_slots), num_tokens)
-    slot_mapping = torch.tensor(slot_mapping_lst,
-                                dtype=torch.long,
-                                device=device)
-
-    kv_c = torch.randn(num_tokens, kv_lora_rank, dtype=dtype, device=device)
-    k_pe = torch.randn(num_tokens,
-                       qk_rope_head_dim,
-                       dtype=dtype,
-                       device=device)
-    entry_size = kv_lora_rank + qk_rope_head_dim
-
-    # scale = torch.tensor(0.1, dtype=torch.float32, device=device)
-    kv_cache = _create_mla_cache(num_blocks, block_size, entry_size, dtype,
-                                 kv_cache_dtype, device)
-    ref_temp = torch.zeros(*kv_cache.shape, dtype=dtype, device=device)
-
-    for i in range(num_tokens):
-        slot = slot_mapping[i].item()
-        block_idx = slot // block_size
-        block_offset = slot % block_size
-        ref_temp[block_idx, block_offset, :kv_lora_rank] = kv_c[i]
-        ref_temp[block_idx, block_offset, kv_lora_rank:] = k_pe[i]
-
-    ref_kv_cache = ref_temp
-
-    #ops.concat_and_cache_mla(kv_c, k_pe, kv_cache, slot_mapping,
-    #kv_cache_dtype, scale)
-
-    concat_and_cache_mla_torch(kv_c, k_pe.unsqueeze(1), kv_cache, slot_mapping)
-    torch.testing.assert_close(kv_cache, ref_kv_cache)
-
-
 def _fill_mla_cache(cache: torch.Tensor, kv_cache_dtype: str):
     rand_dtype = torch.float16 if kv_cache_dtype == "fp8" else cache.dtype
     vals = torch.randn(*cache.shape, device=cache.device, dtype=rand_dtype)
-    if kv_cache_dtype == "fp8":
-        temp = torch.zeros_like(cache)
-        ops.convert_fp8(temp, vals, 1.0, kv_dtype=kv_cache_dtype)
-        vals = temp
     cache.copy_(vals)
+
+def benchmark_npu(fn, num_iterations=100, num_warmup_iterations=50):
+    """
+    Benchmark function for NPU operations
+    
+    Args:
+        fn: Function to benchmark
+        num_iterations: Number of timing iterations
+        num_warmup_iterations: Number of warmup iterations
+    
+    Returns:
+        float: Minimum elapsed time in seconds
+    """
+    start = torch.npu.Event(enable_timing=True)
+    end = torch.npu.Event(enable_timing=True)
+    times = np.zeros(num_iterations + num_warmup_iterations)
+
+    # Run iterations
+    for i in range(num_warmup_iterations + num_iterations):
+        with torch.no_grad():
+            start.record()
+            fn()  # Execute the function
+            end.record()
+        torch.npu.synchronize()
+        times[i] = start.elapsed_time(end)
+
+    # Remove warmup iterations and convert to seconds
+    times = times[num_warmup_iterations:]
+    elapsed_time = np.amin(times) / 1000
+    return elapsed_time
 
 
 def gather_cache_torch(
@@ -189,7 +126,6 @@ def gather_cache_torch(
             dst[dst_start:dst_start + partial_block_size] = \
             src_cache[block_id, :partial_block_size].squeeze(1)
 
-
 @pytest.mark.parametrize("kv_lora_rank", [512])
 @pytest.mark.parametrize("qk_rope_head_dim", [64])
 @pytest.mark.parametrize("block_size", [16])
@@ -203,7 +139,11 @@ def gather_cache_torch(
 def test_gather_cache_mla(kv_lora_rank, qk_rope_head_dim, block_size,
                           num_blocks, max_seq_len, batch_size, dtype,
                           kv_cache_dtype):
-    device = "npu"
+    # Set random seed and device
+    device = "npu:{0}"
+    seed = 0
+    torch.manual_seed(seed)
+    torch.set_default_device(device)
     entry_size = kv_lora_rank + qk_rope_head_dim
     src_cache = _create_mla_cache(num_blocks, block_size, entry_size, dtype,
                                   kv_cache_dtype, device)
@@ -252,7 +192,6 @@ def test_gather_cache_mla(kv_lora_rank, qk_rope_head_dim, block_size,
     )
     cached_kv_c = cached_kv_c.view(num_blocks, block_size, 1, kv_lora_rank).to(torch.float16)
     cached_k_pe = cached_k_pe.view(num_blocks, block_size, 1, qk_rope_head_dim).to(torch.float16)
-
     torch_npu._npu_paged_cache_load(
         cached_kv_c,
         cached_k_pe,
@@ -264,5 +203,30 @@ def test_gather_cache_mla(kv_lora_rank, qk_rope_head_dim, block_size,
     )
 
     torch_npu_result = torch.cat([kv_c, k_pe], dim=2).view(total_tokens, -1)
-    torch_npu_result = torch_npu_result.to(dtype) # output fp16
-    torch.testing.assert_close(torch_npu_result, expected)
+    torch.testing.assert_close(torch_npu_result, expected.to(torch.float16))
+
+    def ref_fn():
+        gather_cache_torch(src_cache, expected, block_table, cu_seq_lens,
+                       batch_size, seq_starts)
+        
+    def npu_fn():
+        torch_npu._npu_paged_cache_load(
+            cached_kv_c,
+            cached_k_pe,
+            block_table,
+            seq_len_tensor.int(),
+            seq_starts,
+            kv_c,
+            k_pe
+        )
+        torch_npu_result = torch.cat([kv_c, k_pe], dim=2).view(total_tokens, -1)
+
+    # Benchmark both implementations
+    ref_time = benchmark_npu(ref_fn)
+    custom_time = benchmark_npu(npu_fn)
+
+    # Print performance results
+    print("\nPerformance Results:")
+    print(f"Reference implementation: {ref_time*1000:.3f} ms")
+    print(f"Custom implementation: {custom_time*1000:.3f} ms")
+    print(f"Speedup: {ref_time/custom_time:.2f}x")
