@@ -614,6 +614,7 @@ class AscendFusedMoE(FusedMoE):
         self.e_score_correction_bias = e_score_correction_bias
         self.expert_map = None
         self.activation = activation
+        self.max_model_len = vllm_config.model_config.max_model_len
 
         if self.ep_size > 1:
             # Create a tensor of size num_experts filled with -1

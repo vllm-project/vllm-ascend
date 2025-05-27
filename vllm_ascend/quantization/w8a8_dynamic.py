@@ -27,6 +27,7 @@ from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import select_experts
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
+VLLM_ENABLE_FIXED_ALL_TO_ALL_BUFFER: bool = envs_ascend.VLLM_ENABLE_FIXED_ALL_TO_ALL_BUFFER
 
 
 def process_topk_ids(topk_ids: torch.Tensor, expert_num: int, ep_size: int,
@@ -58,16 +59,13 @@ def process_topk_ids(topk_ids: torch.Tensor, expert_num: int, ep_size: int,
                         experts_per_ep_rank_val).to(original_dtype)
     indices_arange = torch.arange(topk_ids.shape[0], device=device)
 
-    is_new_segment = torch.cat(
-        (torch.tensor([True], device=device), assigned_ep_rank[1:]
-         != assigned_ep_rank[:-1]))
+    is_new_segment = torch.cat((torch.tensor([True], device=device),
+                                assigned_ep_rank[1:] != assigned_ep_rank[:-1]))
     temp_start_markers = torch.full_like(indices_arange,
                                          -1,
                                          dtype=indices_arange.dtype)
     temp_start_markers[is_new_segment] = indices_arange[is_new_segment]
-    start_offset_for_each_token = torch.cummax(temp_start_markers.float(),
-                                               dim=0)[0].to(
-                                                   temp_start_markers.dtype)
+    start_offset_for_each_token = torch.cummax(temp_start_markers, dim=0)[0]
     token_intra_ep_rank_idx = indices_arange - start_offset_for_each_token
     is_kept_mask = token_intra_ep_rank_idx < max_row_per_ep_rank
     cumsum_kept = torch.cumsum(is_kept_mask.float(), dim=0).to(torch.long)
@@ -303,48 +301,28 @@ def fused_experts_with_all2all(
             expert_idx=topk_ids,
             active_num=num_tokens)
 
-        local_buffer_rows = (num_tokens // ep_group.world_size +
-                             1) * ep_group.world_size * top_k * 2
-        max_row_per_ep_rank = local_buffer_rows // ep_group.world_size
-        expert_idx_buffer_scatter, unpad_indices = process_topk_ids(
-            expanded_expert_idx, global_num_experts, ep_group.world_size,
-            max_row_per_ep_rank, num_tokens, top_k)
-        hidden_states_pad_idx = torch.zeros(
-            expert_idx_buffer_scatter.shape,
-            dtype=expert_idx_buffer_scatter.dtype,
-            device=expert_idx_buffer_scatter.device)
-        non_pad_len = torch.sum((expert_idx_buffer_scatter
-                                 != global_num_experts).to(torch.int32))
-        hidden_states_pad_idx[expert_idx_buffer_scatter !=
-                              global_num_experts] = torch.arange(
-                                  non_pad_len,
-                                  dtype=expert_idx_buffer_scatter.dtype,
-                                  device=hidden_states.device)
-        expert_idx_buffer_gather = torch.empty_like(
-            expert_idx_buffer_scatter,
-            dtype=expert_idx_buffer_scatter.dtype,
-            device=expert_idx_buffer_scatter.device)
-        dist.all_to_all_single(expert_idx_buffer_gather,
-                               expert_idx_buffer_scatter,
-                               group=ep_group.device_group)
-        hidden_states_buffer_scatter = hidden_states[hidden_states_pad_idx]
+        global_expert_tokens = torch.bincount(expanded_expert_idx,
+                                              minlength=global_num_experts)
+        scatter_sizes = global_expert_tokens.view(ep_group.world_size,
+                                                  -1).sum(-1)
 
-        hidden_states_buffer_gather = torch.empty_like(
-            hidden_states_buffer_scatter,
-            dtype=hidden_states_buffer_scatter.dtype,
-            device=hidden_states_buffer_scatter.device)
-
-        dist.all_to_all_single(hidden_states_buffer_gather,
-                               hidden_states_buffer_scatter,
+        gather_sizes = torch.empty_like(scatter_sizes)
+        dist.all_to_all_single(gather_sizes,
+                               scatter_sizes,
                                group=ep_group.device_group)
-        mask = expert_idx_buffer_gather != global_num_experts
-        local_expert_idx = expert_idx_buffer_gather[mask] - ep_group.rank * (
-            global_num_experts // ep_group.world_size)
-        hidden_states = hidden_states_buffer_gather[mask]
-        idx_type = local_expert_idx.dtype
-        sorted_local_expert_idx, sorted_idx = torch.sort(
-            local_expert_idx.float())
-        sorted_local_expert_idx = sorted_local_expert_idx.to(idx_type)
+        scatter_size_list = scatter_sizes.cpu().tolist()
+        gather_size_list = gather_sizes.cpu().tolist()
+
+        expanded_expert_idx = expanded_expert_idx % local_num_experts
+        hidden_states = ep_group.all_to_all(hidden_states, 0, 0,
+                                            scatter_size_list,
+                                            gather_size_list)
+        local_expert_idx = ep_group.all_to_all(expanded_expert_idx, 0, 0,
+                                               scatter_size_list,
+                                               gather_size_list)
+
+        sorted_local_expert_idx, sorted_idx = torch.sort(local_expert_idx)
+
         expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
             sorted_local_expert_idx, local_num_experts).to(torch.int64)
 
@@ -380,30 +358,12 @@ def fused_experts_with_all2all(
                               group_list_type=group_list_type)
 
     if expert_map is not None:
-        idx_type = sorted_idx.dtype
-        resorted_idx = torch.argsort(sorted_idx.float()).to(idx_type)
+        resorted_idx = torch.argsort(sorted_idx)
         hidden_states = hidden_states[resorted_idx]
-        hidden_states_scatter = torch.zeros(
-            (mask.shape[0], hidden_states.shape[1]),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device)
-        hidden_states_scatter[mask] = hidden_states
-        hidden_states_gatter = torch.empty_like(
-            hidden_states_scatter,
-            dtype=hidden_states_scatter.dtype,
-            device=hidden_states_scatter.device)
-        dist.all_to_all_single(hidden_states_gatter,
-                               hidden_states_scatter,
-                               group=ep_group.device_group)
-        hidden_states_gatter = hidden_states_gatter[expert_idx_buffer_scatter
-                                                    != global_num_experts]
-        if hidden_states_gatter.shape[0] != row_idx_len:
-            hidden_states = torch.zeros((row_idx_len, hidden_states.shape[1]),
-                                        dtype=hidden_states.dtype,
-                                        device=hidden_states.device)
-            hidden_states[unpad_indices != -1] = hidden_states_gatter
-        else:
-            hidden_states = hidden_states_gatter
+        hidden_states = ep_group.all_to_all(hidden_states, 0, 0,
+                                            gather_size_list,
+                                            scatter_size_list)
+
         final_hidden_states = torch_npu.npu_moe_finalize_routing(
             hidden_states,
             skip1=None,
@@ -425,6 +385,133 @@ def fused_experts_with_all2all(
             expanded_src_to_dst_row=expanded_row_idx,
             export_for_source_row=topk_ids,
         )
+    if len(original_shape) == 3:
+        final_hidden_states = final_hidden_states.view(original_shape)
+    return final_hidden_states
+
+
+def fused_experts_with_all2all_with_fixed_buffer(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    top_k: int,
+    max_model_len: int,
+    expert_map: torch.Tensor = None,
+    ep_group: GroupCoordinator = None,
+):
+    original_shape = hidden_states.shape
+    if len(original_shape) == 3:
+        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+
+    num_tokens, _ = hidden_states.shape
+    device = hidden_states.device
+
+    global_num_experts = len(expert_map)
+    local_num_experts = global_num_experts // ep_group.world_size
+    row_idx_len = num_tokens * top_k
+    row_idx = (torch.arange(0, row_idx_len, dtype=torch.int32,
+                            device=device).view(top_k,
+                                                -1).permute(1, 0).contiguous())
+    hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
+        hidden_states,
+        row_idx=row_idx,
+        expert_idx=topk_ids,
+        active_num=num_tokens)
+
+    local_buffer_rows = (max_model_len // ep_group.world_size +
+                         1) * ep_group.world_size * top_k * 2
+    max_row_per_ep_rank = local_buffer_rows // ep_group.world_size
+    expert_idx_buffer_scatter, unpad_indices = process_topk_ids(
+        expanded_expert_idx, global_num_experts, ep_group.world_size,
+        max_row_per_ep_rank, num_tokens, top_k)
+    hidden_states_pad_idx = torch.zeros(
+        expert_idx_buffer_scatter.shape,
+        dtype=expert_idx_buffer_scatter.dtype,
+        device=expert_idx_buffer_scatter.device)
+    non_pad_len = torch.sum(
+        (expert_idx_buffer_scatter != global_num_experts).to(torch.int32))
+    hidden_states_pad_idx[
+        expert_idx_buffer_scatter != global_num_experts] = torch.arange(
+            non_pad_len,
+            dtype=expert_idx_buffer_scatter.dtype,
+            device=hidden_states.device)
+
+    hidden_states_buffer_scatter = hidden_states[hidden_states_pad_idx]
+    expert_idx_buffer_gather = torch.empty_like(
+        expert_idx_buffer_scatter,
+        dtype=expert_idx_buffer_scatter.dtype,
+        device=expert_idx_buffer_scatter.device)
+    hidden_states_buffer_gather = torch.empty_like(
+        hidden_states_buffer_scatter,
+        dtype=hidden_states_buffer_scatter.dtype,
+        device=hidden_states_buffer_scatter.device)
+    dist.all_to_all_single(expert_idx_buffer_gather,
+                           expert_idx_buffer_scatter,
+                           group=ep_group.device_group)
+    dist.all_to_all_single(hidden_states_buffer_gather,
+                           hidden_states_buffer_scatter,
+                           group=ep_group.device_group)
+    mask = expert_idx_buffer_gather != global_num_experts
+    local_expert_idx = expert_idx_buffer_gather[mask] - ep_group.rank * (
+        global_num_experts // ep_group.world_size)
+    hidden_states = hidden_states_buffer_gather[mask]
+    idx_type = local_expert_idx.dtype
+    sorted_local_expert_idx, sorted_idx = torch.sort(local_expert_idx.float())
+    sorted_local_expert_idx = sorted_local_expert_idx.to(idx_type)
+
+    expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
+        sorted_local_expert_idx, local_num_experts).to(torch.int64)
+    hidden_states = hidden_states[sorted_idx]
+    group_list_type = 0
+
+    hidden_states_wrapper = [hidden_states]
+    del hidden_states
+
+    hidden_states = apply_mlp(hidden_states_wrapper,
+                              w1,
+                              w1_scale,
+                              w2,
+                              w2_scale,
+                              expert_tokens,
+                              group_list_type=group_list_type)
+
+    resorted_idx = torch.argsort(sorted_idx.float()).to(sorted_idx.dtype)
+    hidden_states = hidden_states[resorted_idx]
+    hidden_states_scatter = torch.zeros(
+        (mask.shape[0], hidden_states.shape[1]),
+        dtype=hidden_states.dtype,
+        device=hidden_states.device)
+    hidden_states_scatter[mask] = hidden_states
+    hidden_states_gatter = torch.empty_like(
+        hidden_states_scatter,
+        dtype=hidden_states_scatter.dtype,
+        device=hidden_states_scatter.device)
+    dist.all_to_all_single(hidden_states_gatter,
+                           hidden_states_scatter,
+                           group=ep_group.device_group)
+    hidden_states_gatter = hidden_states_gatter[
+        expert_idx_buffer_scatter != global_num_experts]
+    if hidden_states_gatter.shape[0] != row_idx_len:
+        hidden_states = torch.zeros((row_idx_len, hidden_states.shape[1]),
+                                    dtype=hidden_states.dtype,
+                                    device=hidden_states.device)
+        hidden_states[unpad_indices != -1] = hidden_states_gatter
+    else:
+        hidden_states = hidden_states_gatter
+    final_hidden_states = torch_npu.npu_moe_finalize_routing(
+        hidden_states,
+        skip1=None,
+        skip2=None,
+        bias=None,
+        scales=topk_weights,
+        expanded_src_to_dst_row=expanded_row_idx,
+        export_for_source_row=topk_ids,
+    )
+
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
     return final_hidden_states
@@ -687,7 +774,6 @@ class AscendW8A8DynamicFusedMoEMethod:
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = True,
         enable_force_load_balance: bool = True,
-        dp_size: int = 1,
         **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
@@ -740,7 +826,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 top_k=top_k,
                 expert_map=expert_map,
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name)
-        elif dp_size == 1:
+        elif self.ep_group.world_size == 1:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
                                  w1_scale=layer.w13_weight_scale,
@@ -750,7 +836,24 @@ class AscendW8A8DynamicFusedMoEMethod:
                                  topk_ids=topk_ids,
                                  top_k=top_k,
                                  expert_map=expert_map)
+        elif VLLM_ENABLE_FIXED_ALL_TO_ALL_BUFFER and expert_map is not None:
+            return fused_experts_with_all2all_with_fixed_buffer(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w1_scale=layer.w13_weight_scale,
+                w2=layer.w2_weight,
+                w2_scale=layer.w2_weight_scale,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                top_k=top_k,
+                max_model_len=layer.max_model_len,
+                expert_map=expert_map,
+                ep_group=self.ep_group)
         else:
+            # The current implementation of deepseek moe splits hidden_states
+            # according to tp_size before they are feed into fused_moe module.
+            # Therefore, all2all is needed no matter how dp/tp is set so as to
+            # dispatch/combine tokens.
             return fused_experts_with_all2all(hidden_states=x,
                                               w1=layer.w13_weight,
                                               w1_scale=layer.w13_weight_scale,
