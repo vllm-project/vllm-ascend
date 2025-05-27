@@ -47,9 +47,17 @@ function quickstart_online_test() {
   wait_for_exit "$VLLM_PID"
 }
 
+function quickstart_offline_test_topk() {
+  export VLLM_ENABLE_TOPK_OPTIMZE=1
+  # Do real script test
+  python3 "${SCRIPT_DIR}/../../examples/offline_inference_npu.py"
+}
+
 _info "====> Start simple_test"
 simple_test
 _info "====> Start quickstart_offline_test"
 quickstart_offline_test
 _info "====> Start quickstart_online_test"
 quickstart_online_test
+_info "====> Start quickstart_offline_test_topk"
+quickstart_offline_test_topk
