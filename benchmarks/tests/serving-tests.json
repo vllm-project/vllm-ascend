@@ -19,7 +19,7 @@
       "model": "LLM-Research/Meta-Llama-3.1-8B-Instruct",
       "backend": "vllm",
       "dataset_name": "sharegpt",
-      "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+      "dataset_path": "/root/.cache/datasets/sharegpt/ShareGPT_V3_unfiltered_cleaned_split.json",
       "num_prompts": 200
     }
   },
@@ -43,7 +43,7 @@
       "model": "Qwen/Qwen2.5-7B-Instruct",
       "backend": "vllm",
       "dataset_name": "sharegpt",
-      "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+      "dataset_path": "/root/.cache/datasets/sharegpt/ShareGPT_V3_unfiltered_cleaned_split.json",
       "num_prompts": 200
     }
   }
