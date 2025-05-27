@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-name: 'e2e test / pd-disaggregation'
+name: 'e2e test / long-term-test'
 
 on:
   schedule:
@@ -35,38 +35,22 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  prefilling-decoding-disaggregation:
-    # pd-test will be triggered when tag 'pd-test' & 'ready-for-test' or schedule job
-    if: ${{ contains(github.event.pull_request.labels.*.name, 'pd-test') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') || github.event_name == 'schedule' }}
+  long-term-test:
+    # long-term-test will be triggered when tag 'long-term-test' & 'ready-for-test' or schedule job
+    if: ${{ contains(github.event.pull_request.labels.*.name, 'long-term-test')  && contains(github.event.pull_request.labels.*.name, 'ready-for-test') || github.event_name == 'schedule' }}
     strategy:
+      max-parallel: 2
       matrix:
-        vllm_verison: [main, v0.8.5.post1]
-    name: vLLM Ascend prefilling decoding disaggregation test
-    runs-on: linux-arm64-npu-static-8
-
+        vllm_version: [main, v0.8.5.post1]
+    name: vLLM Ascend long term test
+    runs-on: linux-arm64-npu-1
     container:
+      # TODO(yikun): Remove m.daocloud.io prefix when infra proxy ready
       image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
-      volumes:
-        - /usr/local/dcmi:/usr/local/dcmi
-        - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
-        - /usr/local/Ascend/driver/:/usr/local/Ascend/driver/
-        # Use self-host cache speed up pip and model download
-        - /home/action/.cache:/github/home/.cache/
-      options: >-
-        --device /dev/davinci0
-        --device /dev/davinci1
-        --device /dev/davinci2
-        --device /dev/davinci3
-        --device /dev/davinci4
-        --device /dev/davinci5
-        --device /dev/davinci6
-        --device /dev/davinci7
-        --device /dev/davinci_manager
-        --device /dev/devmm_svm
-        --device /dev/hisi_hdc
       env:
         HF_ENDPOINT: https://hf-mirror.com
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        VLLM_LOGGING_LEVEL: ERROR
     steps:
       - name: Check npu and CANN info
         run: |
@@ -93,7 +77,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: vllm-project/vllm
-          ref: ${{ matrix.vllm_verison }}
+          ref: ${{ matrix.vllm_version }}
           path: ./vllm-empty
 
       - name: Install vllm-project/vllm from source
@@ -105,3 +89,10 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pip install -v -e .
+
+      - name: Run vllm-project/vllm-ascend long term test
+        run: |
+          # spec decode test
+          VLLM_USE_MODELSCOPE=true pytest -sv tests/long_term/spec_decode/e2e/test_v1_spec_decode.py
+          VLLM_USE_MODELSCOPE=True pytest -sv tests/long_term/spec_decode/e2e/test_mtp_correctness.py  # it needs a clean process
+          pytest -sv tests/long_term/spec_decode --ignore=tests/long_term/spec_decode/e2e/test_mtp_correctness.py --ignore=tests/long_term/spec_decode/e2e/test_v1_spec_decode.py
