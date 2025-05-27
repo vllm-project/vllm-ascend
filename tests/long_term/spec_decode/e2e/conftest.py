@@ -20,13 +20,10 @@
 import shutil
 from itertools import cycle
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import Optional, Sequence, Union
 
-import pytest
 import torch
-from vllm import LLM, SamplingParams
-from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.model_executor.utils import set_random_seed
+from vllm import SamplingParams
 from vllm.sequence import PromptLogprobs, SampleLogprobs
 
 from ....model_utils import (TokensTextLogprobs,
@@ -43,65 +40,6 @@ PROMPTS = [
     "Curious George is a",
     "Python 3.11 brings improvements to its",
 ]
-
-
-@pytest.fixture
-def test_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
-                       test_llm_kwargs, seed):
-
-    def generate():
-        kwargs = {
-            **common_llm_kwargs,
-            **per_test_common_llm_kwargs,
-            **test_llm_kwargs,
-        }
-
-        llm = LLM(**kwargs)
-
-        if seed is not None:
-            set_random_seed(seed)
-
-        yield llm
-
-        del llm
-        cleanup_dist_env_and_memory()
-
-    return generate
-
-
-def maybe_assert_ngram_worker(llm):
-    # Verify the proposer worker is ngram if ngram is specified.
-    if (llm.llm_engine.speculative_config is not None
-            and llm.llm_engine.speculative_config.method == "ngram"):
-        from vllm.spec_decode.ngram_worker import NGramWorker
-        assert isinstance(
-            llm.llm_engine.model_executor.driver_worker.proposer_worker,
-            NGramWorker)
-
-
-def get_output_from_llm_generator(
-        llm_generator, prompts,
-        sampling_params) -> Tuple[List[str], List[List[int]], float]:
-    tokens: List[str] = []
-    token_ids: List[List[int]] = []
-    acceptance_rate: float = -1.0
-    for llm in llm_generator():
-        maybe_assert_ngram_worker(llm)
-
-        outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
-
-        token_ids = [output.outputs[0].token_ids for output in outputs]
-        tokens = [output.outputs[0].text for output in outputs]
-
-        # Fetch acceptance rate if logging is enabled.
-        if stat_loggers := getattr(llm.llm_engine, "stat_loggers", None):
-            stat_logger = stat_loggers["prometheus"]
-            acceptance_rate = (stat_logger.metrics.
-                               gauge_spec_decode_draft_acceptance_rate.labels(
-                                   **stat_logger.labels)._value.get())
-        del llm
-
-    return tokens, token_ids, acceptance_rate
 
 
 def check_logprobs_correctness(
