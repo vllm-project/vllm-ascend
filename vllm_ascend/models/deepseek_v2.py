@@ -228,12 +228,12 @@ class CustomDeepseekV2MoE(nn.Module):
             shared_output = self.shared_experts(hidden_states)
 
         if self.tp_size > 1:
-            padded_num_tokens = (self.tp_size -
-                                 num_tokens % self.tp_size) % self.tp_size
+            num_padding_tokens = (self.tp_size -
+                                  num_tokens % self.tp_size) % self.tp_size
             # Pad hidden_states to make it divisible by tp_size to avoid cross-ring AllGatherV on 910B2C
-            if padded_num_tokens > 0:
-                hidden_states = nn.functional.pad(hidden_states,
-                                                  (0, 0, 0, padded_num_tokens))
+            if num_padding_tokens > 0:
+                hidden_states = nn.functional.pad(
+                    hidden_states, (0, 0, 0, num_padding_tokens))
             chunk_hidden_states = torch.tensor_split(hidden_states,
                                                      self.tp_size,
                                                      dim=0)
@@ -256,8 +256,8 @@ class CustomDeepseekV2MoE(nn.Module):
             dist.all_gather(list(chunk_hidden_states), router_hidden_states,
                             self.tp_group)
             final_hidden_states = torch.cat(chunk_hidden_states, dim=0)
-            if padded_num_tokens > 0:
-                final_hidden_states = final_hidden_states[:-padded_num_tokens]
+            if num_padding_tokens > 0:
+                final_hidden_states = final_hidden_states[:-num_padding_tokens]
         else:
             final_hidden_states = router_hidden_states
 
