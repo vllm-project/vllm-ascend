@@ -23,6 +23,7 @@ import vllm_ascend.ops.fused_moe  # noqa
 import vllm_ascend.ops.layernorm  # noqa
 import vllm_ascend.ops.rotary_embedding  # noqa
 import vllm_ascend.ops.vocab_parallel_embedding  # noqa
+import vllm_ascend.ops.topk_topp_sampler  # noqa
 
 
 class dummyFusionOp:
