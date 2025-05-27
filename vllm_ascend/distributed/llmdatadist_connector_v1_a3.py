@@ -190,9 +190,8 @@ class LLMDataDistConnectorScheduler():
     if params is not None and params.get("do_remote_prefill"):
         # Remote prefill: get all prompt blocks from remote.
         assert num_computed_tokens % self.block_size == 0
-        rounded_num_prompt_tokens = round_down(
-            len(request.prompt_token_ids), self.block_size)
-        count = max(rounded_num_prompt_tokens - num_computed_tokens, 0)
+        # Note: We use the full token count as transmit data here.
+        count = max(len(request.prompt_token_ids) - num_computed_tokens, 0)
         return count, count > 0
 
     # No remote prefill for this request.
@@ -249,13 +248,10 @@ class LLMDataDistConnectorScheduler():
             or request.status != RequestStatus.FINISHED_LENGTH_CAPPED):
         return False, None
 
-    # NIXL transfer the full block only, but I don't see any reason to do that, so here
+    # note: NIXL transfer the full block only, but I don't see any reason to do that, so here
     # we just transfer any data that computed from prefill node
     # note: there might be some issue on this, check it if there is any unexpected result
-
-    all_full = request.num_computed_tokens % self.block_size == 0
-    computed_block_ids = block_ids if all_full else block_ids[:-1]
-    # computed_block_ids = block_ids
+    computed_block_ids = block_ids
     # If prompt < block_size, no xfer so free blocks immediately.
     delay_free_blocks = len(computed_block_ids) > 0
 
@@ -276,7 +272,11 @@ class LLMDataDistConnectorWorker():
         self,
         vllm_config: VllmConfig):
       logger.info("Initialize the LLMDataDistConnectorWorker")
-      self.local_rank = get_world_group().local_rank
+      # we assume the local node only contains dp and tp and pp, and tp, pp will not communicate inter-node.
+      # for any scenario beyond this scope, the functionality of this connector is not guaranteed.
+      self.local_rank = get_world_group().rank % (vllm_config.parallel_config.data_parallel_size_local * 
+                                                  vllm_config.parallel_config.tensor_parallel_size * 
+                                                  vllm_config.parallel_config.pipeline_parallel_size)
       self.rank = get_world_group().rank
       self.local_ip = get_ip()
       self.kv_transfer_config: Optional[KVTransferConfig] = vllm_config.kv_transfer_config

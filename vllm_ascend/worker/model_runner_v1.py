@@ -649,6 +649,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 model_kwargs["kv_caches"] = self.kv_caches
                 model_kwargs["attn_metadata"] = attn_metadata
             if self.enable_torchair_graph_mode and attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+                logger.debug("ModelRunner: into the torchair path")
                 torch._dynamo.mark_static(input_ids)
                 torch._dynamo.mark_static(positions)
                 torch._dynamo.mark_static(attn_metadata.decode.block_table)
@@ -666,6 +667,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     **model_kwargs,
                 )
             else:
+                logger.debug("ModelRunner: into the eager path")
                 assert self.model is not None
                 hidden_states = self.model(
                     input_ids=input_ids,
@@ -863,6 +865,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
             if not has_kv_transfer_group():
+                logger.debug("skip this step for we receive the data from remote disaggregate prefill node")
                 # Return empty ModelRunnerOuptut if there's no work to do.
                 return EMPTY_MODEL_RUNNER_OUTPUT
             return self.kv_connector_no_forward(scheduler_output)
@@ -1132,11 +1135,29 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 })
 
             with set_forward_context(None, self.vllm_config):
-                hidden_states = model(
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds)
+                # For dummy run, we compile a second torchair graph to make sure the aligned behaviour with actual model
+                if self.enable_torchair_graph_mode and self.vllm_config.kv_transfer_config.kv_role == "kv_consumer":
+                    input_ids = torch.zeros(self.scheduler_config.max_num_seqs, dtype=input_ids.dtype, device=input_ids.device)
+                    positions = torch.zeros(self.scheduler_config.max_num_seqs, dtype=positions.dtype, device=positions.device)
+                    torch._dynamo.mark_static(input_ids)
+                    torch._dynamo.mark_static(positions)
+                    model_kwargs = {
+                        "kv_caches": None,
+                        "attn_metadata": None
+                    }
+                    hidden_states = self.compile_model(
+                        input_ids=input_ids,
+                        positions=positions,
+                        intermediate_tensors=intermediate_tensors,
+                        inputs_embeds=None,
+                        **model_kwargs,
+                    )
+                else:
+                    hidden_states = model(
+                        input_ids=input_ids,
+                        positions=positions,
+                        intermediate_tensors=intermediate_tensors,
+                        inputs_embeds=inputs_embeds)
             return hidden_states
 
     def profile_run(self) -> None:
