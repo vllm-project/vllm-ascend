@@ -35,10 +35,10 @@ function run_prefill_instance() {
     --arg kv_buffer_device "npu" \
     --arg kv_role "kv_producer" \
     --argjson kv_parallel_size 8 \
-    --arg kv_port "11001" \
+    --arg kv_port 11001 \
     --argjson prefill_device_ips "$prefill_device_ips" \
     --argjson decode_device_ips "$decode_device_ips" \
-    --argjson llmdatadist_comm_port "26000" \
+    --argjson llmdatadist_comm_port 26000 \
     --arg proxy_ip "0.0.0.0" \
     --argjson proxy_port "$register_port" \
     --argjson http_port "$prefill_port" \
@@ -85,10 +85,10 @@ function run_decode_instance() {
     --arg kv_buffer_device "npu" \
     --arg kv_role "kv_consumer" \
     --argjson kv_parallel_size 8 \
-    --arg kv_port "21001" \
+    --arg kv_port 21001 \
     --argjson prefill_device_ips "$prefill_device_ips" \
     --argjson decode_device_ips "$decode_device_ips" \
-    --argjson llmdatadist_comm_port "26000" \
+    --argjson llmdatadist_comm_port 26000 \
     --arg proxy_ip "0.0.0.0" \
     --argjson proxy_port "$register_port" \
     --argjson http_port "$decode_port" \
