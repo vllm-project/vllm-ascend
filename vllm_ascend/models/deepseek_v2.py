@@ -387,6 +387,8 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             qk_head_dim=self.qk_head_dim,
             v_head_dim=self.v_head_dim,
             rotary_emb=self.rotary_emb,
+            q_a_proj=None if self.q_lora_rank is None else self.q_a_proj,
+            q_a_layernorm=None if self.q_lora_rank is None else self.q_a_layernorm,
             q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
             kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
             kv_a_layernorm=self.kv_a_layernorm,
@@ -397,10 +399,13 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         self.prefix = prefix
         self.debug_layer_idx = int(self.prefix.split(".")[-2])
         self.enable_graph_mode = False
+        self.enable_mla_pro = False
         additional_config = get_current_vllm_config().additional_config
         if additional_config:
             self.enable_graph_mode = additional_config.get(
                 "enable_graph_mode", False)
+            self.enable_mla_pro = additional_config.get(
+                "enable_mla_pro", False)
 
     def forward(
             self,
@@ -408,6 +413,14 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             hidden_states: torch.Tensor,
             kv_cache: Optional[torch.Tensor] = None,
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
+        if self.enable_graph_mode and self.enable_mla_pro and attn_metadata.num_prefills==0:
+            return self.mla_attn.impl.forward(self.mla_attn,
+                                 hidden_states,
+                                 None,
+                                 None,
+                                 kv_cache,
+                                 attn_metadata)
+
         if self.q_lora_rank is not None:
             ckq = self.q_a_proj(hidden_states)[0]
             hidden_states_or_q_c = self.q_a_layernorm(ckq)
