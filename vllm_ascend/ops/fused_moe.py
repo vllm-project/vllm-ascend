@@ -771,7 +771,12 @@ class AscendFusedMoE(FusedMoE):
         self.e_score_correction_bias = e_score_correction_bias
         self.expert_map = None
         self.activation = activation
-
+        self.enable_graph_mode = False
+        additional_config = get_current_vllm_config().additional_config
+        if additional_config:
+            self.enable_graph_mode = additional_config.get(
+                "enable_graph_mode", False)
+            
         # Create a tensor of size num_experts filled with -1
         self.local_num_experts, self.expert_map = determine_expert_map(
             self.ep_size,
