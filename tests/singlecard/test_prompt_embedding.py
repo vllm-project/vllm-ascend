@@ -29,7 +29,10 @@ from openai import BadRequestError
 from transformers import AutoConfig
 
 from tests.utils import RemoteOpenAIServer
-from vllm_ascend.utils import vllm_version_is
+from vllm.engine.arg_utils import EngineArgs
+
+if not hasattr(EngineArgs, "enable_prompt_embeds"):
+    pytest.skip("Not supported vllm version", allow_module_level=True)
 
 # any model with a chat template should work here
 MODEL_NAME = snapshot_download("LLM-Research/Llama-3.2-1B-Instruct")
@@ -83,9 +86,6 @@ def create_dummy_embeds(num_tokens: int = 5) -> str:
 @pytest.mark.skipif(
     os.getenv("VLLM_USE_V1") == "1",
     reason="Enable embedding input will fallback to v0, skip it")
-@pytest.mark.skipif(
-    vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"),
-    reason="prompt_embeds is not supported in v0.8.5 and v0.8.5.post1")
 async def test_completions_with_prompt_embeds(
         client_with_prompt_embeds: openai.AsyncOpenAI, model_name: str):
     # Test case: Single prompt embeds input
@@ -194,9 +194,6 @@ async def test_completions_with_prompt_embeds(
 @pytest.mark.skipif(
     os.getenv("VLLM_USE_V1") == "1",
     reason="Enable embedding input will fallback to v0, skip it")
-@pytest.mark.skipif(
-    vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"),
-    reason="prompt_embeds is not supported in v0.8.5 and v0.8.5.post1")
 async def test_completions_errors_with_prompt_embeds(
         client_with_prompt_embeds: openai.AsyncOpenAI, model_name: str):
     # Test error case: invalid prompt_embeds
