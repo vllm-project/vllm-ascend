@@ -215,6 +215,11 @@ class CustomDeepseekV2MoE(nn.Module):
         # when profile runs, force experts to load balanced tokens
         # to avoid high memory consumption on a single rank.
         # TODO: need a better flag to indicate whether in profile run or not.
+
+        #ep=1 etp=tp
+        if self.experts.ep_group.world_size == 1:
+            return self.forward_etp(hidden_states)
+
         if attn_metadata is None:
             # for profile run
             is_prefill = True
@@ -268,6 +273,45 @@ class CustomDeepseekV2MoE(nn.Module):
             final_hidden_states = final_hidden_states + shared_output
 
         return final_hidden_states.view(num_tokens, hidden_dim)
+
+    def forward_etp(self,
+                hidden_states: torch.Tensor,
+                is_prefill: bool = False) -> torch.Tensor:
+        num_tokens, hidden_dim = hidden_states.shape
+        hidden_states = hidden_states.view(-1, hidden_dim)
+
+        if self.n_shared_experts is not None:
+            shared_output = self.shared_experts(hidden_states)
+
+        if envs_ascend.VLLM_ENABLE_MC2 and not is_prefill and self.tp_size > 1:
+            chunks = torch.chunk(hidden_states, self.tp_size, dim=0)
+            hidden_states = chunks[self.tp_rank_in_group]
+
+        # router_logits: (num_tokens, n_experts)
+        router_logits, _ = self.gate(hidden_states)
+
+        hidden_states = self.experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            is_prefill=is_prefill,
+            top_k=CustomDeepseekV2MoE.top_k) * self.routed_scaling_factor
+
+        if self.tp_size > 1:
+            if envs_ascend.VLLM_ENABLE_MC2 and not is_prefill:
+                final_hidden_states = torch.zeros([num_tokens, hidden_dim],
+                                                  dtype=self.params_dtype,
+                                                  device="npu")
+                dist.all_gather_into_tensor(final_hidden_states, hidden_states,
+                                            self.tp_group)
+                hidden_states = final_hidden_states
+            else:
+                hidden_states = tensor_model_parallel_all_reduce(
+                    hidden_states)
+
+        if self.n_shared_experts is not None:
+            hidden_states = hidden_states + shared_output
+
+        return hidden_states.view(num_tokens, hidden_dim)
 
 
 class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):

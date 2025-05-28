@@ -50,6 +50,7 @@ class AscendScheduler(Scheduler):
                          include_finished_set, log_stats)
         self.scheduled_req_ids: set[str] = set()
         self.running: list[Request] = []
+        self.include_finished_set = include_finished_set
 
         if self.vllm_config.kv_transfer_config is not None and \
             self.vllm_config.kv_transfer_config.is_kv_consumer:
