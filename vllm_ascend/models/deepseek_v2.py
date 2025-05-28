@@ -275,8 +275,8 @@ class CustomDeepseekV2MoE(nn.Module):
         return final_hidden_states.view(num_tokens, hidden_dim)
 
     def forward_etp(self,
-                hidden_states: torch.Tensor,
-                is_prefill: bool = False) -> torch.Tensor:
+                    hidden_states: torch.Tensor,
+                    is_prefill: bool = False) -> torch.Tensor:
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
 
@@ -305,8 +305,7 @@ class CustomDeepseekV2MoE(nn.Module):
                                             self.tp_group)
                 hidden_states = final_hidden_states
             else:
-                hidden_states = tensor_model_parallel_all_reduce(
-                    hidden_states)
+                hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
         if self.n_shared_experts is not None:
             hidden_states = hidden_states + shared_output

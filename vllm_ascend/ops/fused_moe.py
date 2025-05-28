@@ -40,6 +40,7 @@ else:
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 
+import os
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 
@@ -838,7 +839,8 @@ class AscendFusedMoE(FusedMoE):
         assert self.quant_method is not None
         #ep=1 etp=tp
         if self.ep_group.world_size == 1:
-            return self.forward_etp(hidden_states, router_logits, is_prefill, top_k)
+            return self.forward_etp(hidden_states, router_logits, is_prefill,
+                                    top_k)
 
         if top_k:
             real_top_k = top_k
@@ -876,10 +878,10 @@ class AscendFusedMoE(FusedMoE):
         return final_hidden_states
 
     def forward_etp(self,
-                hidden_states: torch.Tensor,
-                router_logits: torch.Tensor,
-                is_prefill: bool,
-                top_k=None):
+                    hidden_states: torch.Tensor,
+                    router_logits: torch.Tensor,
+                    is_prefill: bool,
+                    top_k=None):
         assert self.quant_method is not None
 
         if top_k:
@@ -887,12 +889,12 @@ class AscendFusedMoE(FusedMoE):
         else:
             real_top_k = self.top_k
 
-        #                MC2   ag/rs  boardcast/all_reduce
+        #                MC2   ag/rs  broadcast/all_reduce
         #  prefill_req    x      x            √
         #  decode_req     √      x            √
         #  graph_mode     √      √            x
         if self.dp_size > 1:
-            if envs.VLLM_ENABLE_MC2 and not is_prefill:
+            if VLLM_ENABLE_MC2 and not is_prefill:
                 ...
             elif int(os.environ.get("USING_LCCL_COM",
                                     '0')) == 1:  # type: ignore
@@ -902,7 +904,7 @@ class AscendFusedMoE(FusedMoE):
                     router_logits, 0, False)
             elif self.enable_graph_mode and not is_prefill:
                 hidden_states = get_dp_group().all_gather(hidden_states, 0)
-                router_logits = get_dp_group().all_gather(router_logits, 0) 
+                router_logits = get_dp_group().all_gather(router_logits, 0)
             else:
                 cu_tokens_across_dp_cpu = get_forward_context(
                 ).dp_metadata.cu_tokens_across_dp_cpu
@@ -928,10 +930,8 @@ class AscendFusedMoE(FusedMoE):
             e_score_correction_bias=self.e_score_correction_bias,
             is_prefill=is_prefill)
 
-
-
         if self.dp_size > 1:
-            if envs.VLLM_ENABLE_MC2 and not is_prefill:
+            if VLLM_ENABLE_MC2 and not is_prefill:
                 ...
             elif int(os.environ.get("USING_LCCL_COM",
                                     '0')) == 1:  # type: ignore
@@ -955,7 +955,7 @@ class AscendFusedMoE(FusedMoE):
                 final_hidden_states = all_hidden_states[start:end, :]
 
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
-           final_hidden_states = tensor_model_parallel_all_reduce(
-               final_hidden_states)
+            final_hidden_states = tensor_model_parallel_all_reduce(
+                final_hidden_states)
 
         return final_hidden_states
