@@ -776,7 +776,7 @@ class AscendFusedMoE(FusedMoE):
         if additional_config:
             self.enable_graph_mode = additional_config.get(
                 "enable_graph_mode", False)
-            
+
         # Create a tensor of size num_experts filled with -1
         self.local_num_experts, self.expert_map = determine_expert_map(
             self.ep_size,
