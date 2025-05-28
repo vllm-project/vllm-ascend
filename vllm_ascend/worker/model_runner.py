@@ -1037,6 +1037,8 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
             config = torchair.CompilerConfig()
             config.experimental_config.frozen_parameter = True
             config.experimental_config.tiling_schedule_optimize = True
+            config.experimental_config.enable_view_optimize = \
+            get_ascend_config().torchair_graph_config.enable_view_optimize
             torch.npu.set_compile_mode(jit_compile=False)
             if not self.use_cached_npu_graph:
                 npu_backend = torchair.get_npu_backend(compiler_config=config)

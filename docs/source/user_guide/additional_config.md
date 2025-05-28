@@ -38,6 +38,7 @@ The details of each config option are as follows:
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `enabled` | bool | `False` | Whether to enable torchair graph mode |
+| `enable_view_optimize` | bool | `True` | Whether to enable torchair view optimization |
 | `use_cached_graph` | bool | `False` | Whether to use cached graph |
 | `graph_batch_sizes` | list[int] | `[]` | The batch size for torchair graph cache |
 | `graph_batch_sizes_init` | bool | `False` | Init graph batch size dynamically if `graph_batch_sizes` is empty |
