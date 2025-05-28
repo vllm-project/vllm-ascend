@@ -1000,6 +1000,10 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         self.w_kc = None
         self.w_vc = None
 
+        self.cos = None
+        self.sin = None
+        self.debug_layer_idx = extra_impl_args.get('debug_layer_idx', 0)
+
         self.enable_graph_mode = False
         additional_config = get_current_vllm_config().additional_config
         if additional_config:
@@ -1128,17 +1132,19 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim],
                                dim=-1)
         if k_pe is None and attn_metadata.decode_metadata:
-            seq_len = self.rotary_emb.max_position_embeddings
+            # During the autoregressive decoding process, the cos and sin values are exactly the same for each layer
+            if self.debug_layer_idx == 0 or self.cos is None or self.sin is None:
+                seq_len = self.rotary_emb.max_position_embeddings
 
-            cos = self.rotary_emb.cos_cached[:seq_len].to(dtype=q_pe.dtype)
-            sin = self.rotary_emb.sin_cached[:seq_len].to(dtype=q_pe.dtype)
-            cos = cos[attn_metadata.input_positions]
-            sin = sin[attn_metadata.input_positions]
-            cos = cos[:, None, None, :]
-            sin = sin[:, None, None, :]
+                self.cos = self.rotary_emb.cos_cached[:seq_len].to(dtype=q_pe.dtype)
+                self.sin = self.rotary_emb.sin_cached[:seq_len].to(dtype=q_pe.dtype)
+                self.cos = self.cos[attn_metadata.input_positions]
+                self.sin = self.sin[attn_metadata.input_positions]
+                self.cos = self.cos[:, None, None, :]
+                self.sin = self.sin[:, None, None, :]
 
-            q_pe = self.rope_single(q_pe, cos, sin)
-            k_pe, k_nope = self.exec_kv(hidden_states_or_kv_c_normed, cos, sin,
+            q_pe = self.rope_single(q_pe, self.cos, self.sin)
+            k_pe, k_nope = self.exec_kv(hidden_states_or_kv_c_normed, self.cos, self.sin,
                                         kv_cache, attn_metadata.slot_mapping)
         else:
             if k_pe is None:
