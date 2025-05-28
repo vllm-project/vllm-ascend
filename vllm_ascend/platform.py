@@ -133,9 +133,8 @@ class NPUPlatform(Platform):
             if enable_graph_mode:
                 if enforce_eager:
                     raise RuntimeError(
-                        f"Expect enable_graph_mode != enforce_eager. However got enable_graph_mode={enable_graph_mode}"
-                        f" and enforce_eager={enforce_eager}. Please set `enforce_eager=False` if you attempt"
-                        " to enable NPU graph mode.")
+                        "Can't enable graph mode and eager mode at the same time. Please set `enforce_eager=False` if you attempt to enable NPU graph mode."
+                    )
                 elif envs.VLLM_USE_V1 and envs.VLLM_MLA_DISABLE:
                     logger.warning(
                         "NPU graph mode is still experimental and not supported for V1 without mla currently, "
@@ -145,10 +144,7 @@ class NPUPlatform(Platform):
                     model_type = model_config.hf_config.model_type
                     if "deepseek" not in model_type:
                         raise NotImplementedError(
-                            "NPU Graph only supports deepseek. Please "
-                            "disable it by additional_config={'enable_graph_mode': True} "
-                            "to serve deepseek models with NPU graph mode on vllm-ascend with V0 engine."
-                            " Or set `enforce_eager=True` to use eager mode on V1 engine."
+                            "enable_graph_mode only works with deepseek model."
                         )
 
         elif envs.VLLM_USE_V1 and model_config is not None and not enforce_eager:
@@ -157,9 +153,8 @@ class NPUPlatform(Platform):
                 raise NotImplementedError(
                     "ACL Graph does not support deepseek. Please "
                     "adopt additional_config={'enable_graph_mode': True} "
-                    "to serve deepseek models with NPU graph mode on vllm-ascend with V0 engine."
-                    " Or set `enforce_eager=True` to use eager mode on V1 engine."
-                )
+                    "to serve deepseek models with NPU graph mode on vllm-ascend with V1 engine."
+                    " Or set `enforce_eager=True` to use eager mode.")
             elif "qwen" not in model_type:
                 logger.warning(
                     "ACL Graph is currently experimental. Please "
