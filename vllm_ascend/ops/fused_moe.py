@@ -768,6 +768,8 @@ class AscendFusedMoE(FusedMoE):
         self.expert_map = None
         self.activation = activation
         self.max_model_len = vllm_config.model_config.max_model_len
+        self.global_batch_size = vllm_config.scheduler_config.max_num_seqs * (
+            dp_size if dp_size is not None else get_dp_group().world_size)
 
         if self.ep_size > 1:
             # Create a tensor of size num_experts filled with -1

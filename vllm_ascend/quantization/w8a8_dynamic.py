@@ -400,6 +400,7 @@ def fused_experts_with_all2all_with_fixed_buffer(
     topk_ids: torch.Tensor,
     top_k: int,
     max_model_len: int,
+    global_batch_size: int,
     expert_map: torch.Tensor = None,
     ep_group: GroupCoordinator = None,
 ):
@@ -422,7 +423,8 @@ def fused_experts_with_all2all_with_fixed_buffer(
         expert_idx=topk_ids,
         active_num=num_tokens)
 
-    max_row_per_ep_rank = (max_model_len // ep_group.world_size +
+    max_row_per_ep_rank = (-(-global_batch_size // ep_group.world_size) *
+                           max_model_len // ep_group.world_size +
                            1) * top_k * 2
     expert_idx_buffer_scatter, unpad_indices = process_topk_ids(
         expanded_expert_idx, global_num_experts, ep_group.world_size,
@@ -846,6 +848,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 topk_ids=topk_ids,
                 top_k=top_k,
                 max_model_len=layer.max_model_len,
+                global_batch_size=layer.global_batch_size,
                 expert_map=expert_map,
                 ep_group=self.ep_group)
         else:
