@@ -213,7 +213,9 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         if self.device_config.device.type == "npu":
             self.device = torch.device(f"npu:{self.local_rank}")
             NPUPlatform.set_device(self.device)
+            gc.collect()
             NPUPlatform.empty_cache()
+            torch.npu.reset_peak_memory_stats()
             self.init_npu_memory = NPUPlatform.mem_get_info()[0]
         else:
             raise RuntimeError(
@@ -280,7 +282,9 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
+        gc.collect()
         NPUPlatform.empty_cache()
+        torch.npu.reset_peak_memory_stats()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
