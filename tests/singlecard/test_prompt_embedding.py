@@ -27,9 +27,9 @@ import torch
 from modelscope import snapshot_download  # type: ignore
 from openai import BadRequestError
 from transformers import AutoConfig
+from vllm.engine.arg_utils import EngineArgs
 
 from tests.utils import RemoteOpenAIServer
-from vllm.engine.arg_utils import EngineArgs
 
 if not hasattr(EngineArgs, "enable_prompt_embeds"):
     pytest.skip("Not supported vllm version", allow_module_level=True)
