@@ -17,14 +17,25 @@
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 
+# mypy: disable-error-code="import-not-found"
+
+import contextlib
 import math
 from typing import TYPE_CHECKING
 
 import torch
+import torchair  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs
+
+try:
+    from torchair.scope import npu_stream_switch as _npu_stream_switch
+    from torchair.scope import npu_wait_tensor as _npu_wait_tensor
+except ImportError:
+    from torchair.ops import NpuStreamSwitch as _npu_stream_switch
+    from torchair.ops import npu_wait_tensor as _npu_wait_tensor
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -173,3 +184,14 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
 
 def dispose_tensor(x: torch.Tensor):
     x.set_(torch.empty((0, ), device=x.device, dtype=x.dtype))
+
+
+def npu_stream_switch(tag: str, priority: int = 0, enabled: bool = True):
+    return _npu_stream_switch(
+        tag, priority) if enabled else contextlib.nullcontext()
+
+
+def npu_wait_tensor(self: torch.Tensor,
+                    dependency: torch.Tensor,
+                    enabled: bool = True):
+    return _npu_wait_tensor(self, dependency) if enabled else self
