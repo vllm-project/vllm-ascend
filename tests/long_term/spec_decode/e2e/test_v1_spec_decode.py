@@ -72,7 +72,7 @@ def test_ngram_correctness(
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
-        ref_llm = LLM(model=model_name, max_model_len=1024)
+        ref_llm = LLM(model=model_name, max_model_len=1024, enforce_eager=True)
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
 
@@ -85,6 +85,7 @@ def test_ngram_correctness(
                 "num_speculative_tokens": 3,
             },
             max_model_len=1024,
+            enforce_eager=True,
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0
@@ -135,6 +136,7 @@ def test_eagle_correctness(
                 "max_model_len": 2048,
             },
             max_model_len=2048,
+            enforce_eager=True,
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0
