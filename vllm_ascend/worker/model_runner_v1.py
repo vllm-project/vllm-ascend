@@ -61,7 +61,6 @@ from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
-from vllm_ascend.utils import vllm_version_is
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -210,16 +209,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}
         # Persistent batch.
-        # Remove this after we drop 0.8.5 support
-        if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
-            self.input_batch = InputBatch(
-                max_num_reqs=self.max_num_reqs,
-                max_model_len=self.model_config.max_model_len,
-                max_num_blocks_per_req=self.max_num_blocks_per_req,
-                device=self.device,
-                pin_memory=True,
-                vocab_size=self.model_config.get_vocab_size(),
-            )
 
         self.input_ids = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int32,
@@ -573,10 +562,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                positions_np // self.block_size)
-        if vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1"):
-            block_table_cpu = self.input_batch.block_table.get_cpu_tensor()
-        else:
-            block_table_cpu = self.input_batch.block_table[0].get_cpu_tensor()
+
+        block_table_cpu = self.input_batch.block_table[0].get_cpu_tensor()
         block_numbers = block_table_cpu.flatten()[block_table_indices].numpy()
         block_offsets = positions_np % self.block_size
         np.add(block_numbers * self.block_size,
@@ -1182,16 +1169,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         """
         import torch_npu
         kv_caches: Dict[str, torch.Tensor] = {}
-        if not (vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1")):
-            self.input_batch = InputBatch(
-                max_num_reqs=self.max_num_reqs,
-                max_model_len=self.model_config.max_model_len,
-                max_num_batched_tokens=self.max_num_tokens,
-                device=self.device,
-                pin_memory=True,
-                vocab_size=self.model_config.get_vocab_size(),
-                block_size=self.cache_config.block_size,
-            )
+
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.model_config.max_model_len,
+            max_num_batched_tokens=self.max_num_tokens,
+            device=self.device,
+            pin_memory=True,
+            vocab_size=self.model_config.get_vocab_size(),
+            block_size=self.cache_config.block_size,
+        )
 
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
