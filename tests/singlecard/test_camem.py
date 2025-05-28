@@ -24,7 +24,7 @@ from vllm.utils import GiB_bytes
 from tests.utils import fork_new_process_for_each_test
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 
-
+@fork_new_process_for_each_test
 def test_basic_camem():
     # some tensors from default memory pool
     shape = (1024, 1024)
@@ -57,7 +57,6 @@ def test_basic_camem():
     assert torch.allclose(output, torch.ones_like(output) * 3)
 
 
-@pytest.mark.skipif(True, reason="test failed, should be fixed later")
 @fork_new_process_for_each_test
 def test_end_to_end():
     free, total = torch.npu.mem_get_info()
