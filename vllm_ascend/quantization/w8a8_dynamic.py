@@ -20,14 +20,14 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch_npu
-import torchair as tng  # type: ignore
 from vllm.distributed import GroupCoordinator
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import select_experts
-from vllm_ascend.utils import dispose_tensor
+from vllm_ascend.utils import (dispose_tensor, npu_stream_switch,
+                               npu_wait_tensor)
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 
@@ -164,11 +164,11 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
     shared_experts = kwargs.get("shared_experts", None)
     shared_experts_input = kwargs.get("shared_experts_input", None)
     if shared_experts is not None:
-        with tng.scope.npu_stream_switch("moe_secondary"):
-            tng.scope.npu_wait_tensor(shared_experts_input, topk_weights)
+        with npu_stream_switch("moe_secondary", 0):
+            npu_wait_tensor(shared_experts_input, topk_weights)
             shared_gate_up, _ = shared_experts.gate_up_proj(
                 shared_experts_input)
-            tng.scope.npu_wait_tensor(shared_gate_up[0], expand_x)
+            npu_wait_tensor(shared_gate_up[0], expand_x)
             shared_act = shared_experts.act_fn(shared_gate_up)
 
     # `expand_x` will be disposed in the `apply_mlp` function
@@ -212,8 +212,8 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
     if shared_experts is None:
         return hidden_states
     else:
-        with tng.scope.npu_stream_switch("moe_secondary"):
-            tng.scope.npu_wait_tensor(shared_act[0], down_out_list)
+        with npu_stream_switch("moe_secondary", 0):
+            npu_wait_tensor(shared_act[0], down_out_list)
             shared_output, _ = shared_experts.down_proj(shared_act)
         return hidden_states, shared_output
 
