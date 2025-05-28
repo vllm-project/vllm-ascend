@@ -66,6 +66,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("C_COMPILER", None),
     "VLLM_VERSION":
     lambda: os.getenv("VLLM_VERSION", None),
+    # dispatch tokens to experts averagely for performance test
+    "VLLM_ENABLE_FIX_ROUTE":
+    lambda: bool(int(os.getenv("VLLM_ENABLE_FIX_ROUTE", '0'))),
 }
 
 # end-env-vars-definition
