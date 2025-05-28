@@ -106,7 +106,7 @@ class SimplePipe(KVPipeBase):
             # Note that only NPU 0 of each P/D instance register to proxy.
             if not hostname:
                 hostname = get_ip()  # Get ip of current host.
-            port = kv_transfer_config.kv_port + port_offset
+            port = int(kv_transfer_config.kv_port) + port_offset
             if port == 0:
                 raise ValueError("Port cannot be 0")
             self._hostname = hostname
