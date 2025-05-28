@@ -144,11 +144,13 @@ pip install vllm-ascend==|pip_vllm_ascend_version| --extra-index https://downloa
 git clone --depth 1 --branch |vllm_version| https://github.com/vllm-project/vllm
 cd vllm
 VLLM_TARGET_DEVICE=empty pip install . --extra-index https://download.pytorch.org/whl/cpu/
+cd ..
 
 # Install vLLM Ascend
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 pip install -e . --extra-index https://download.pytorch.org/whl/cpu/
+cd ..
 ```
 :::
 
