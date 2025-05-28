@@ -153,7 +153,7 @@ class AscendMLAMetadataBuilder:
         num_prefill_tokens = 0
 
         for i, req_id in enumerate(input_batch.req_ids):
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            num_tokens = scheduler_output.num_scheduled_tokens[req_id] - len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
             # for now treat 1 scheduled token as "decode" even if its not,
             # we should update this to something like < 8 in the future but
             # currently the TritonMLA._forward_decode only supports

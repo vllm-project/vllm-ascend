@@ -534,10 +534,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
         num_scheduled_tokens = np.empty(num_reqs, dtype=np.int32)
+        num_query_tokens = np.empty(num_reqs, dtype=np.int32)
         max_num_scheduled_tokens = 0
         for i, req_id in enumerate(self.input_batch.req_ids):
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_scheduled_tokens[i] = num_tokens
+            num_query_tokens[i] = num_tokens - len(scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
             max_num_scheduled_tokens = max(max_num_scheduled_tokens,
                                            num_tokens)
 
@@ -586,7 +588,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillNoCache
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
-        elif np.all(num_scheduled_tokens == 1):
+        elif np.all(num_query_tokens == 1):
             attn_state = AscendAttentionState.DecodeOnly
         # splitfuse
         elif not self.use_v0_scheduler or self.chunked_prefill_enabled:
