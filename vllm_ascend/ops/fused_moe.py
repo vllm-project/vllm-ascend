@@ -37,10 +37,11 @@ if not (vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1")):
 else:
     MoEConfig = None
 
+import os
+
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 
-import os
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 
