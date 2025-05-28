@@ -29,12 +29,11 @@ from tests.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+
 GuidedDecodingBackendV0 = [
-    "outlines",
-    "lm-format-enforcer",
-    "xgrammar",
+    "auto", "outlines", "lm-format-enforcer", "xgrammar", "guidance"
 ]
-GuidedDecodingBackendV1 = ["xgrammar", "guidance:disable-any-whitespace"]
+GuidedDecodingBackendV1 = ["auto", "xgrammar", "guidance"]
 GuidedDecodingBackend = list(
     set(GuidedDecodingBackendV0 + GuidedDecodingBackendV1))
 
