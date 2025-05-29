@@ -1147,8 +1147,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             with set_forward_context(None, self.vllm_config):
                 # For dummy run, we compile a second torchair graph to make sure the aligned behaviour with actual model
                 if self.enable_torchair_graph_mode and self.vllm_config.kv_transfer_config.kv_role == "kv_consumer":
-                    input_ids = torch.zeros(self.scheduler_config.max_num_seqs, dtype=input_ids.dtype, device=input_ids.device)
-                    positions = torch.zeros(self.scheduler_config.max_num_seqs, dtype=positions.dtype, device=positions.device)
+                    input_ids = torch.zeros(num_tokens, dtype=input_ids.dtype, device=input_ids.device)
+                    positions = torch.zeros(num_tokens, dtype=positions.dtype, device=positions.device)
                     torch._dynamo.mark_static(input_ids)
                     torch._dynamo.mark_static(positions)
                     model_kwargs = {
