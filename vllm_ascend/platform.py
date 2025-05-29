@@ -125,7 +125,7 @@ class NPUPlatform(Platform):
 
         if parallel_config:
             # Default value for expert tensor parallel size
-            parallel_config.expert_tensor_parallel_size = 1
+            parallel_config.expert_tensor_parallel_size = parallel_config.tensor_parallel_size
 
             # NOTE: When enable_expert_parallel is True, we follow vLLM convention:
             # ep_size = world_size, which means expert_tensor_parallel_size must be 1
