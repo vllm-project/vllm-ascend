@@ -10,3 +10,5 @@ types-jsonschema
 xgrammar
 zmq
 numba
+quart
+types-psutil

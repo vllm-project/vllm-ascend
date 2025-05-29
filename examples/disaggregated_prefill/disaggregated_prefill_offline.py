@@ -13,7 +13,7 @@ import time
 from multiprocessing import Event, Process
 
 kv_connector_extra_config = {
-    "prompt_device_ips": ["1.2.3.1", "1.2.3.2"],
+    "prefill_device_ips": ["1.2.3.1", "1.2.3.2"],
     "decode_device_ips": ["1.2.3.9", "1.2.3.10"],
     "llmdatadist_comm_port": 26000,
 }
