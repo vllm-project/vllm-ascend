@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 import torch.distributed as dist
 import torch_npu
-import torchair as tng
+import torchair as tng  # type: ignore
 import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
@@ -257,7 +257,8 @@ class CustomDeepseekV2MoE(nn.Module):
         if self.n_shared_experts is not None and cv_parallel:
             with tng.scope.npu_stream_switch('cv'):
                 tng.scope.npu_wait_tensor(shared_hidden_states, router_logits)
-                x, dynamic_scale = torch_npu.npu_dynamic_quant(shared_hidden_states)
+                x, dynamic_scale = torch_npu.npu_dynamic_quant(
+                    shared_hidden_states)
                 gate_up = torch_npu.npu_quant_matmul(
                     x,
                     self.shared_experts.gate_up_proj.weight,
@@ -274,8 +275,7 @@ class CustomDeepseekV2MoE(nn.Module):
                 enable_force_load_balance=enable_force_load_balance,
                 shared_experts=self.shared_experts,
                 shared_gate_up=gate_up,
-                shared_dynamic_scale=dynamic_scale
-            )
+                shared_dynamic_scale=dynamic_scale)
             router_hidden_states = router_hidden_states * self.routed_scaling_factor
         else:
             router_hidden_states = self.experts(

@@ -20,7 +20,7 @@ from typing import Any, Callable, Dict, List, Optional
 import torch
 import torch.distributed as dist
 import torch_npu
-import torchair as tng
+import torchair as tng  # type: ignore
 from vllm.distributed import GroupCoordinator, tensor_model_parallel_all_reduce
 
 import vllm_ascend.envs as envs_ascend
@@ -133,19 +133,17 @@ def apply_mlp(hidden_states_wrapper: List[torch.Tensor],
     return hidden_states
 
 
-def fused_experts_with_mc2(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    top_k: int,
-    expert_map: torch.Tensor = None,
-    moe_all_to_all_group_name: str = "",
-    **kwargs
-) -> torch.Tensor:
+def fused_experts_with_mc2(hidden_states: torch.Tensor,
+                           w1: torch.Tensor,
+                           w2: torch.Tensor,
+                           w1_scale: torch.Tensor,
+                           w2_scale: torch.Tensor,
+                           topk_weights: torch.Tensor,
+                           topk_ids: torch.Tensor,
+                           top_k: int,
+                           expert_map: torch.Tensor = None,
+                           moe_all_to_all_group_name: str = "",
+                           **kwargs) -> torch.Tensor:
     global_bs = 0
     moe_expert_num = len(expert_map)
     # hidden_states = hidden_states.bfloat16()
