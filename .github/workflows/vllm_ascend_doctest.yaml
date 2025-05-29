@@ -76,7 +76,7 @@ jobs:
         if: ${{ endsWith(matrix.vllm_verison, '-openeuler') }}
         run: |
           yum update -y
-          yum install -y gcc g++ numactrl-devel git curl
+          yum install -y gcc g++ numactl-devel git curl
 
       - name: Config pip mirrors
         run: |
