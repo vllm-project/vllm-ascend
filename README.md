@@ -63,7 +63,7 @@ Below is maintained branches:
 
 | Branch     | Status       | Note                                 |
 |------------|--------------|--------------------------------------|
-| main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.8.x branch   |
+| main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.9.x branch   |
 | v0.7.1-dev | Unmaintained | Only doc fixed is allowed |
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version |
 
