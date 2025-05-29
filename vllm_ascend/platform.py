@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import gc
 import logging
 import os
 from typing import TYPE_CHECKING, Optional, Tuple
@@ -244,3 +245,9 @@ class NPUPlatform(Platform):
         model configuration.
         """
         return True
+
+    @classmethod
+    def clear_npu_memory(cls):
+        gc.collect()
+        torch.npu.empty_cache()
+        torch.npu.reset_peak_memory_stats()
