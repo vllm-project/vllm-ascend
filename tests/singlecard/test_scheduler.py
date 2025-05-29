@@ -30,6 +30,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
+from tests.conftest import VllmRunner
 from vllm_ascend.core.scheduler import AscendScheduler
 
 EOS_TOKEN_ID = 50256
@@ -394,3 +395,27 @@ def test_stop_via_update_from_output():
     assert len(scheduler.running) == 1
     assert not requests[0].is_finished()
     assert list(requests[0].output_token_ids) == [EOS_TOKEN_ID, 10, 11]
+
+MODELS = [
+    "Qwen/Qwen3-0.6B-Base",
+]
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["float16"])
+@pytest.mark.parametrize("max_tokens", [5])
+def test_models(model: str, dtype: str, max_tokens: int) -> None:
+    # 5042 tokens for gemma2
+    # gemma2 has alternating sliding window size of 4096
+    # we need a prompt with more than 4096 tokens to test the sliding window
+    prompt = "The following numbers of the sequence " + ", ".join(
+        str(i) for i in range(1024)) + " are:"
+    example_prompts = [prompt]
+
+    with VllmRunner(model,
+                    max_model_len=8192,
+                    dtype=dtype,
+                    enforce_eager=True,
+                    gpu_memory_utilization=0.7,
+                    enable_prefix_caching=False,
+                    additional_config={'ascend_schduler_config': {}}) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)

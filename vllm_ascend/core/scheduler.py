@@ -130,14 +130,15 @@ class AscendScheduler(Scheduler):
 
             assert num_new_tokens > 0
             watermark = getattr(self.scheduler_config, "watermark", 0.01)
-            if not self._check_watermark_for_prefill(
-                    request, num_new_tokens, computed_blocks, watermark):
+            if not self._check_watermark_for_prefill(request, num_new_tokens,
+                                                     computed_blocks.blocks,
+                                                     watermark):
                 # Scheduling would exceed watermark, skip.
                 skip_cur_request()
                 continue
 
             new_blocks = self.kv_cache_manager.allocate_slots(
-                request, num_new_tokens, computed_blocks)
+                request, num_new_tokens, new_computed_blocks=computed_blocks)
             if new_blocks is None:
                 # The request cannot be scheduled.
                 break
@@ -155,9 +156,8 @@ class AscendScheduler(Scheduler):
 
             if self.lora_config and request.lora_request:
                 scheduled_loras.add(request.lora_request.lora_int_id)
-            req_to_new_block_ids[request.request_id] = [
-                b.block_id for b in computed_blocks + new_blocks
-            ]
+            req_to_new_block_ids[request.request_id] = (
+                self.kv_cache_manager.get_block_ids(request.request_id))
             # Update request info.
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
@@ -215,9 +215,8 @@ class AscendScheduler(Scheduler):
                 # Schedule the request.
                 scheduled_running_reqs.append(request)
                 self.scheduled_req_ids.add(request.request_id)
-                req_to_new_block_ids[request.request_id] = [
-                    b.block_id for b in new_blocks
-                ]
+                req_to_new_block_ids[request.request_id] = (
+                    new_blocks.get_block_ids())
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 req_index += 1
@@ -326,7 +325,8 @@ class AscendScheduler(Scheduler):
                                len(computed_blocks) * self.block_size)
         num_required_blocks = cdiv(num_new_tokens + num_computed_tokens,
                                    self.block_size)
-        req_blocks = self.kv_cache_manager.req_to_blocks[request.request_id]
+        req_blocks = self.kv_cache_manager.single_type_manager.req_to_blocks[
+            request.request_id]
         num_new_blocks = (num_required_blocks - len(req_blocks) -
                           len(computed_blocks))
         num_evictable_computed_blocks = sum(1 for blk in computed_blocks
