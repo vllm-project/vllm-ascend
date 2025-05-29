@@ -250,7 +250,6 @@ void advance_step_flashattn_ascendc(
     cmd.Run();
     return ;
 }
-
 } // namespace vllm_ascend
 
 TORCH_LIBRARY_EXPAND(_C, ops)
@@ -275,7 +274,7 @@ TORCH_LIBRARY_EXPAND(_C, ops)
         "                         int added_vocab_start_index, "
         "                         int added_vocab_end_index) -> (Tensor masked_input, Tensor mask)");
     ops.impl("get_masked_input_and_mask", torch::kPrivateUse1, &vllm_ascend::get_masked_input_and_mask);
-    
+
     ops.def(
         "advance_step_flashattn_ascendc(int num_seqs, int num_queries, int block_size,"
         "                               Tensor! input_tokens, Tensor! sampled_token_ids, Tensor! input_positions,"
