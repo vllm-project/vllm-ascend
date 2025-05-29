@@ -21,23 +21,12 @@ on:
   schedule:
     - cron: '00 16 * * *'
   workflow_dispatch:
-    inputs:
-      runner:
-        required: true
-        type: choice
-        options:
-          - linux-arm64-npu-4
-          - linux-arm64-npu-1
-          - linux-arm64-npu-static-8
-        default: 'linux-arm64-npu-1'
-        description: 'The runner selected to run on'
-      image:
-        required: true
-        type: choice
-        options:
-          - m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
-        default: 'm.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10'
-        description: 'The docker image which will be loaded'
+  pull_request:
+    branches:
+        - 'main'
+        - '*-dev'
+    paths:
+        - '.github/workflows/nightly_benchmarks.yaml'
 
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -50,9 +39,26 @@ defaults:
 jobs:
   test:
     name: run benchmarks main
-    runs-on: ${{ github.event.inputs.runner || 'linux-arm64-npu-static-8' }}
+    runs-on: 'linux-arm64-npu-static-8'
+    strategy:
+      matrix:
+        include:
+          - vllm_branch: v0.9.0
+            vllm_ascend_branch: main
     container:
-      image: ${{ github.event.inputs.image || 'm.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10' }}
+      image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
+      volumes:
+        - /usr/local/dcmi:/usr/local/dcmi
+        - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
+        - /usr/local/Ascend/driver/:/usr/local/Ascend/driver/
+        # Use self-host cache speed up pip and model download
+        - /home/action/.cache:/github/home/.cache/
+      options: >-
+        --device /dev/davinci0
+        --device /dev/davinci1
+        --device /dev/davinci_manager
+        --device /dev/devmm_svm
+        --device /dev/hisi_hdc
       env:
         HF_ENDPOINT: https://hf-mirror.com
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
@@ -80,12 +86,15 @@ jobs:
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.vllm_ascend_branch }}
           
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v4
         with:
           repository: vllm-project/vllm
           path: ./vllm-empty
+          ref: ${{  matrix.vllm_branch }}
 
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
@@ -102,7 +111,7 @@ jobs:
         with:
           repository: cosdt/elastic-tool
           path: ./elastic_tool
-          ref: 0.1.0-dev
+          ref: main
 
       - name: Install elastic_tool
         working-directory: ./elastic_tool
