@@ -147,7 +147,7 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
     global_bs = 0
     moe_expert_num = len(expert_map)
     # hidden_states = hidden_states.bfloat16()
-    kwargs1 = {
+    kwargs_mc2 = {
         "x": hidden_states,
         "expert_ids": topk_ids,
         "expert_shard_type": 0,
@@ -178,9 +178,9 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
         "tp_world_size": tp_size,
         "tp_rank_id": tp_rank,
     }
-    kwargs1.update(stage1_kwargs)
+    kwargs_mc2.update(stage1_kwargs)
 
-    output = torch_npu.npu_moe_distribute_dispatch(**kwargs1)
+    output = torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
     # comm_stream.wait_stream(torch.npu.current_stream())
     expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[
         0:5]
@@ -206,7 +206,7 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
         down_out_list, shared_output = down_out_list
 
     # moeCombine
-    kwargs2 = {
+    kwargs_mc2 = {
         "expand_x": down_out_list,
         "expert_ids": topk_ids,
         "expand_idx": expand_idx,
@@ -230,9 +230,9 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
         "tp_world_size": tp_size,
         "tp_rank_id": tp_rank,
     }
-    kwargs2.update(stage3_kwargs)
+    kwargs_mc2.update(stage3_kwargs)
 
-    hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs2)
+    hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
 
     if multi_stream:
         return hidden_states, shared_output
