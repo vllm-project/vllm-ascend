@@ -16,20 +16,25 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+set -euo pipefail
 
-set -eo errexit
-VLLM_VERSION=${1%%-*}
-export HF_ENDPOINT="https://hf-mirror.com"
+trap clean_venv EXIT
+check_npus
+create_vllm_venv
 
-. $(dirname "$0")/common.sh
+_info "====> Install vllm and vllm-ascend from ${VLLM_VERSION}"
+if [[ "$VLLM_VERSION" == "main" ]]; then
+    pip install vllm==0.9.0
+    pip install vllm-ascend==0.8.5rc1
+fi
 
-_info "====> Start Quickstart test"
-. "${SCRIPT_DIR}/doctests/001-quickstart-test.sh"
+if [[ "$VLLM_VERSION" == "v0.7.3" ]]; then
+    pip install vllm==0.7.3
+    pip install vllm-ascend==0.7.3 --extra-index https://download.pytorch.org/whl/cpu/
+fi
 
-_info "====> Start pip binary installation test"
-. "${SCRIPT_DIR}/doctests/002-pip-binary-installation-test.sh"
+pip list | grep vllm
 
-_info "====> Start pip source installation test"
-. "${SCRIPT_DIR}/doctests/003-pip-source-installation-test.sh"
-
-_info "Doctest passed."
+# Verify the installation
+_info "====> Run offline example test"
+python3 "${SCRIPT_DIR}/../../examples/offline_inference_npu.py"
