@@ -644,6 +644,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         with set_forward_context(attn_metadata,
                                  self.vllm_config,
                                  num_tokens=num_input_tokens):
+            self.maybe_setup_kv_connector(scheduler_output)
             model_kwargs = {}
             if self.enable_torchair_graph_mode:
                 model_kwargs["kv_caches"] = self.kv_caches
@@ -677,6 +678,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     **model_kwargs,
                 )
 
+        self.maybe_wait_for_kv_save()
+        finished_sending, finished_recving = self.get_finished_kv_transfer(scheduler_output)
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -701,7 +704,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             sample_indices = spec_decode_metadata.logits_indices
 
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
-                total_num_scheduled_tokens, sample_indices)
+                total_num_scheduled_tokens, sample_indices, finished_sending, finished_recving)
 
     def _calc_spec_decode_metadata(
         self,
@@ -871,7 +874,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             return self.kv_connector_no_forward(scheduler_output)
         (attn_metadata, hidden_states, spec_decode_metadata, positions,
          num_scheduled_tokens,
-         sample_indices) = (self._process_reqs(scheduler_output,
+         sample_indices, finished_sending, finished_recving) = (self._process_reqs(scheduler_output,
                                                intermediate_tensors))
         logits = self.model.compute_logits(hidden_states[sample_indices], None)
 
@@ -963,6 +966,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict={},
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
         )
         return model_runner_output
 
@@ -973,6 +978,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.maybe_setup_kv_connector(scheduler_output)
             finsihed_sending, finished_recving = (
                 self.get_finished_kv_transfer(scheduler_output))
+            # For the case of no forward caused by receiving remote kv,
+            # one round of dummy inference is necessary
+            # to prevent any hang issue caused by collective calls.
+            if finished_recving is not None and len(finished_recving) > 0:
+                self._dummy_run(1)
         if not finsihed_sending and not finished_recving:
             return EMPTY_MODEL_RUNNER_OUTPUT
         
