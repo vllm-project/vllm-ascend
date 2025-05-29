@@ -810,12 +810,18 @@ class AscendFusedMoE(FusedMoE):
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
+        self.enable_cv_parallel = False
+        if vllm_config.additional_config:
+            self.enable_cv_parallel = vllm_config.additional_config.get(
+                "enable_cv_parallel", False)
+
     def forward(self,
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
                 is_prefill: bool,
                 enable_force_load_balance: bool = False,
-                top_k=None):
+                top_k=None,
+                **kwargs):
         assert self.quant_method is not None
 
         if top_k:
@@ -842,7 +848,11 @@ class AscendFusedMoE(FusedMoE):
             scoring_func=self.scoring_func,
             e_score_correction_bias=self.e_score_correction_bias,
             is_prefill=is_prefill,
-            enable_force_load_balance=enable_force_load_balance)
+            enable_force_load_balance=enable_force_load_balance,
+            **kwargs)
+
+        if self.enable_cv_parallel and not is_prefill:
+            final_hidden_states, shared_output = final_hidden_states
 
         if VLLM_ENABLE_MC2 and not is_prefill:
             ...
@@ -851,4 +861,6 @@ class AscendFusedMoE(FusedMoE):
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 
+        if self.enable_cv_parallel and not is_prefill:
+            return final_hidden_states, shared_output
         return final_hidden_states
