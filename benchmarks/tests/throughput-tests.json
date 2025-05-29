@@ -9,6 +9,17 @@
       "num_prompts": 200,
       "backend": "vllm"
     }
+  },
+  {
+    "test_name": "throughput_qwen2_5_7B_tp1",
+    "parameters": {
+      "model": "Qwen/Qwen2.5-7B-Instruct",
+      "tensor_parallel_size": 1,
+      "load_format": "dummy",
+      "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json",
+      "num_prompts": 200,
+      "backend": "vllm"
+    }
   }
 ]
 

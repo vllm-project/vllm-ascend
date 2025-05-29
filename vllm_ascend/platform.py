@@ -23,19 +23,18 @@ import torch
 import vllm.envs as envs
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
-from vllm.utils import supports_dynamo
+
+from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD, update_aclgraph_sizes
 
 CUSTOM_OP_ENABLED = False
 try:
     # register custom ops into torch_library here
     import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
-
-except ImportError:
-    logging.warning(
-        "Warning: Failed to register custom ops, all custom ops will be disabled"
-    )
-else:
     CUSTOM_OP_ENABLED = True
+except ImportError as e:
+    logging.warning(
+        "Failed to import 'vllm_ascend.vllm_ascend_C': %s. All custom ops will be disabled. ",
+        e)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -58,7 +57,7 @@ class NPUPlatform(Platform):
     device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
     dispatch_key: str = "PrivateUse1"
 
-    supported_quantization: list[str] = ["ascend"]
+    supported_quantization: list[str] = [ASCEND_QUATIZATION_METHOD]
 
     def is_sleep_mode_available(self) -> bool:
         return True
@@ -70,6 +69,15 @@ class NPUPlatform(Platform):
         # Adapt the global patch here.
         from vllm_ascend.utils import adapt_patch
         adapt_patch(is_global_patch=True)
+
+        # For online serving, "ascend" quantization method is not a choice natively,
+        # so we need to add "ascend" quantization method to quantization methods list
+        # and the user can enable quantization using "vllm serve --quantization ascend".
+        if parser is not None:
+            quant_action = parser._option_string_actions.get('--quantization')
+            if quant_action and hasattr(quant_action, 'choices'):
+                if ASCEND_QUATIZATION_METHOD not in quant_action.choices:
+                    quant_action.choices.append(ASCEND_QUATIZATION_METHOD)
 
         from vllm_ascend.quantization.quant_config import \
             AscendQuantConfig  # noqa: F401
@@ -110,24 +118,48 @@ class NPUPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm.config import CompilationLevel  # noqa: E402
         compilation_config = vllm_config.compilation_config
+        model_config = vllm_config.model_config
 
-        if vllm_config.model_config is None:
+        if model_config is None:
             logger.warning("Model config is missing. This may indicate "
                            "that we are running a test case")
             enforce_eager = False
         else:
-            enforce_eager = getattr(vllm_config.model_config, "enforce_eager",
-                                    False)
+            enforce_eager = getattr(model_config, "enforce_eager", False)
 
-        # TODO(Yizhou): Override the value of enforce_eager to True before
-        # the CANN and torch_npu support NPU compilation.
-        enforce_eager = True
-        logger.warning(
-            "NPU compilation support pending. Will be available in future CANN and "
-            "torch_npu releases. NPU graph mode is currently experimental and disabled "
-            "by default. You can just adopt additional_config={'enable_graph_mode': True} "
-            "to serve deepseek models with NPU graph mode on vllm-ascend with V0 engine. "
-        )
+        if vllm_config.additional_config is not None:
+            enable_graph_mode = vllm_config.additional_config.get(
+                "enable_graph_mode", False)
+            if enable_graph_mode:
+                if enforce_eager:
+                    raise RuntimeError(
+                        "Can't enable graph mode and eager mode at the same time. Please set `enforce_eager=False` if you attempt to enable NPU graph mode."
+                    )
+                elif envs.VLLM_USE_V1 and envs.VLLM_MLA_DISABLE:
+                    logger.warning(
+                        "NPU graph mode is still experimental and not supported for V1 without mla currently, "
+                        "it has been disabled automatically.")
+                    vllm_config.additional_config["enable_graph_mode"] = False
+                if model_config:
+                    model_type = model_config.hf_config.model_type
+                    if "deepseek" not in model_type:
+                        raise NotImplementedError(
+                            "enable_graph_mode only works with deepseek model."
+                        )
+
+        elif envs.VLLM_USE_V1 and model_config is not None and not enforce_eager:
+            model_type = model_config.hf_config.model_type
+            if "deepseek" in model_type:
+                raise NotImplementedError(
+                    "ACL Graph does not support deepseek. Please "
+                    "adopt additional_config={'enable_graph_mode': True} "
+                    "to serve deepseek models with NPU graph mode on vllm-ascend with V1 engine."
+                    " Or set `enforce_eager=True` to use eager mode.")
+            elif "qwen" not in model_type:
+                logger.warning(
+                    "ACL Graph is currently experimental. Please "
+                    "raise an issue on https://github.com/vllm-project/vllm-ascend/issues"
+                    " if you encourage any Error")
 
         if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:
             logger.info("Compilation disabled, using eager mode by default")
@@ -144,20 +176,7 @@ class NPUPlatform(Platform):
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(
                 ["vllm.unified_ascend_attention_with_output"])
-
-        if vllm_config.additional_config is not None:
-            enable_graph_mode = vllm_config.additional_config.get(
-                "enable_graph_mode", False)
-            if enable_graph_mode and not supports_dynamo():
-                logger.warning(
-                    "enable_graph_mode is not supported because the version of torch is too low, forcing close enable_graph_mode"
-                )
-                vllm_config.additional_config["enable_graph_mode"] = False
-            if enable_graph_mode and envs.VLLM_USE_V1:
-                logger.warning(
-                    "NPU graph mode is still experimental and not supported for V1 currently, "
-                    "it has been disabled automatically.")
-                vllm_config.additional_config["enable_graph_mode"] = False
+            update_aclgraph_sizes(vllm_config)
 
         parallel_config = vllm_config.parallel_config
         if parallel_config and parallel_config.worker_cls == "auto":
@@ -175,11 +194,11 @@ class NPUPlatform(Platform):
         if cache_config:
             if cache_config.block_size is None:
                 cache_config.block_size = 128
-            if envs.VLLM_USE_V1 and cache_config.enable_prefix_caching:
+            if cache_config.enable_prefix_caching and cache_config.block_size != 128:
                 logger.warning(
-                    "Prefix caching is not supported for V1 now, disable prefix caching"
+                    "If prefix caching is enabled, block size must be set to 128."
                 )
-                cache_config.enable_prefix_caching = False
+                cache_config.block_size = 128
 
         if envs.VLLM_USE_V1:
             # Activate custom ops for v1.
@@ -234,3 +253,10 @@ class NPUPlatform(Platform):
         model configuration.
         """
         return True
+
+    @classmethod
+    def get_piecewise_backend_cls(cls) -> str:
+        """
+        Get piecewise backend class for piecewise graph.
+        """
+        return "vllm_ascend.compilation.piecewise_backend.NPUPiecewiseBackend"  # noqa

@@ -57,7 +57,6 @@ MAX_SPEC_TOKENS = 1
 
 # precision
 PRECISION = "bfloat16"
-os.environ["VLLM_USE_MODELSCOPE"] = "True"
 
 
 @pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "1",
@@ -307,7 +306,7 @@ def test_mtp_e2e_quant_greedy_correctness_torchair_graph(
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        "block_size": 8,
+        "block_size": 16,
         # 2 for small prompt, 256//8 for generated.
         "num_gpu_blocks_override": 2 + 256 // 8,
         "max_model_len": (2 + 256 // 8) * 8,
@@ -450,8 +449,3 @@ def test_mtp_disable_queue(vllm_runner, common_llm_kwargs,
                                   per_test_common_llm_kwargs,
                                   baseline_llm_kwargs, test_llm_kwargs,
                                   batch_size, output_len, seed)
-
-
-if __name__ == "__main__":
-    import pytest
-    pytest.main([__file__])

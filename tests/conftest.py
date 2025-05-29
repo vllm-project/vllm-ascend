@@ -23,6 +23,7 @@ from typing import List, Optional, Tuple, TypeVar, Union
 import numpy as np
 import pytest
 import torch
+from huggingface_hub import snapshot_download
 from PIL import Image
 from vllm import LLM, SamplingParams
 from vllm.config import TaskOption
@@ -76,7 +77,7 @@ class VllmRunner:
         block_size: int = 16,
         enable_chunked_prefill: bool = False,
         swap_space: int = 4,
-        enforce_eager: Optional[bool] = False,
+        enforce_eager: Optional[bool] = True,
         **kwargs,
     ) -> None:
         self.model = LLM(
@@ -349,3 +350,8 @@ def vllm_runner():
 @pytest.fixture(params=list(PROMPT_TEMPLATES.keys()))
 def prompt_template(request):
     return PROMPT_TEMPLATES[request.param]
+
+
+@pytest.fixture(scope="session")
+def ilama_lora_files():
+    return snapshot_download(repo_id="jeeejeee/ilama-text2sql-spider")

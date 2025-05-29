@@ -1,8 +1,14 @@
 -r requirements-lint.txt
 -r requirements.txt
 modelscope
+openai
 pytest >= 6.0
 pytest-asyncio
 lm-eval
 ray
 types-jsonschema
+xgrammar
+zmq
+numba
+quart
+types-psutil

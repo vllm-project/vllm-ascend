@@ -24,16 +24,9 @@
 #           each worker's `__init__` function.
 #
 # Then in each kind of patch, there are three folders:
-# - patch_0_8_5: contains the patches applied when vllm version is 0.8.5.
+# - patch_0_9_0: contains the patches applied when vllm version is 0.9.0.
 # - patch_main: contains the patches applied when vllm version is main branch.
-# - patch_common: contains the patches applied in both 0.8.5 and main branch.
-#
-# In the future, with the vllm version upgrade, the new patch folder such as
-# patch_0_8_5, patch_0_8_6, etc. will be added to manage the patch for different
-# vllm version. And the patch_common will contain the patches applied in all the
-# vllm version.
-# Once the vllm version is too old that vllm-ascend will not support, the related
-# patch folder will be removed as well.
+# - patch_common: contains the patches applied in both 0.9.0 and main branch.
 #
 # Once a new patch is added in vllm-ascend, please add the patch description into this file as well.
 # ----------------------------------------------------------------------------------
@@ -158,4 +151,18 @@
 #       - https://github.com/vllm-project/vllm-ascend/pull/395
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm and vllm-ascend.
+#
+# ** File: worker/patch_common/patch_eagle.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.spec_decode.eagle.prepare_inputs`
+#    Why:
+#       We need to use the patched `prepare_input_kernel` in `eagle.prepare_inputs`.
+#       The mainly reason to overwrite `prepare_input_kernel` is this is a triton
+#       kernel, ascend is now not support triton kernel.
+#    How：
+#       Re-implementation the `prepare_input_kernel` triton kernel by pytorch
+#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
+#       - Ascend doesn't support triton
+#    Future Plan:
+#       Revert it when the ascend support triton kernel.
 #
