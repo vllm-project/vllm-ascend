@@ -1371,7 +1371,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         batched_dummy_mm_inputs = MultiModalKwargs.batch([dummy_mm_kwargs] *
                                                          max_num_mm_items)
         batched_dummy_mm_inputs = MultiModalKwargs.as_kwargs(
-            batched_dummy_mm_inputs, device=self.device)
+            batched_dummy_mm_inputs,
+            dtype=self.model_config.dtype,
+            device=self.device,
+        )
 
         # Run multimodal encoder.
         dummy_encoder_outputs = self.model.get_multimodal_embeddings(
