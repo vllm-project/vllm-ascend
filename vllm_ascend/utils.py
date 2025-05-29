@@ -169,3 +169,7 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             "No adjustment needed for ACL graph batch sizes: %s model (layers: %d) with %d sizes",
             vllm_config.model_config.architectures[0], num_hidden_layers,
             len(original_sizes))
+
+
+def dispose_tensor(x: torch.Tensor):
+    x.set_(torch.empty((0, ), device=x.device, dtype=x.dtype))
