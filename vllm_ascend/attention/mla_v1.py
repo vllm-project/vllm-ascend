@@ -490,7 +490,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_tokens = query.size(0)
         attn_output = None
         # Here is only 2 possibility of input, ChunkedPrefill or PrefillNoCache
-        if attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
+        if (attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
+                or attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit):
             attn_output = torch.empty(num_tokens,
                                       self.num_heads * self.v_head_dim,
                                       dtype=query.dtype,
@@ -649,7 +650,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         hidden_states_or_q_c: torch.Tensor,  # query in unified attn
         hidden_states_or_kv_c_normed: torch.Tensor,  # key in unified attn
         k_pe: torch.Tensor,  # value in unified attn
-        kv_cache: torch.Tensor,
+        kv_cache: Tuple[torch.Tensor],
         attn_metadata: M,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -755,19 +756,27 @@ class AscendMLAImpl(MLAAttentionImpl):
                                                  key_cache=kv_cache[0],
                                                  value_cache=kv_cache[1],
                                                  slot_indices=slots)
-        elif kv_cache.numel() > 0:
-            key = torch.cat([
-                kv_c_normed.view([num_actual_toks, self.num_kv_heads, -1]),
-                k_pe
-            ],
-                            dim=2)
-            torch_npu._npu_reshape_and_cache_siso(
-                key=key,
-                key_cache=kv_cache,
-                slot_indices=attn_metadata.slot_mapping.flatten())
+        elif len(kv_cache):
+            # key = torch.cat([
+            #     kv_c_normed.view([num_actual_toks, self.num_kv_heads, -1]),
+            #     k_pe
+            # ],
+            #                 dim=2)
+            # torch_npu._npu_reshape_and_cache_siso(
+            #     key=key,
+            #     key_cache=kv_cache,
+            #     slot_indices=attn_metadata.slot_mapping.flatten())
+            kv_c_normed = kv_c_normed.view([num_actual_toks, self.num_kv_heads, -1])
+            torch_npu._npu_reshape_and_cache(
+                key=kv_c_normed,
+                value=k_pe,
+                key_cache=kv_cache[0],
+                value_cache=kv_cache[1],
+                slot_indices=attn_metadata.slot_mapping)
+        combined_cache = torch.cat([kv_cache[0], kv_cache[1]], dim=-1)
         if has_prefill:
             output[num_decode_tokens:] = self._forward_prefill(
-                prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache,
+                prefill_q, prefill_k_c_normed, prefill_k_pe, combined_cache,
                 attn_metadata)
         if has_decode:
             if self.running_in_graph:
@@ -777,5 +786,5 @@ class AscendMLAImpl(MLAAttentionImpl):
             else:
                 output[:num_decode_tokens] = self._forward_decode(
                     decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe,
-                    kv_cache, attn_metadata)
+                    combined_cache, attn_metadata)
         return output_padded
