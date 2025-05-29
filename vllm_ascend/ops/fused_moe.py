@@ -753,21 +753,27 @@ class AscendFusedMoE(FusedMoE):
         self.e_score_correction_bias = e_score_correction_bias
         self.expert_map = None
         self.activation = activation
+
+        if self.ep_size > 1:
+            # Create a tensor of size num_experts filled with -1
+            self.local_num_experts, self.expert_map = determine_expert_map(
+                self.ep_size,
+                get_ep_group().rank_in_group, self.global_num_experts)
+
+            self.moe_parallel_config.tp_rank = get_etp_group().rank_in_group
+            self.moe_parallel_config.ep_rank = get_ep_group().rank_in_group
+
+        else:
+            self.moe_parallel_config.tp_rank = get_etp_group().rank_in_group
+            self.moe_parallel_config.ep_rank = get_ep_group().rank_in_group
+            self.local_num_experts, self.expert_map = (self.global_num_experts,
+                                                       None)
+            
         self.enable_graph_mode = False
         additional_config = get_current_vllm_config().additional_config
         if additional_config:
             self.enable_graph_mode = additional_config.get(
                 "enable_graph_mode", False)
-
-        # Create a tensor of size num_experts filled with -1
-        self.local_num_experts, self.expert_map = determine_expert_map(
-            self.ep_size,
-            get_ep_group().rank_in_group, self.global_num_experts)
-
-        self.moe_parallel_config.tp_rank = get_etp_group().rank_in_group
-        self.moe_parallel_config.ep_rank = get_ep_group().rank_in_group
-        self.local_num_experts, self.expert_map = (self.global_num_experts,
-                                                   None)
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
