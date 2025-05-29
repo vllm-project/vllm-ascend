@@ -1305,7 +1305,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         return output
 
 
-def mla_pro_attn(
+    def mla_pro_attn(
         self,
         layer: AttentionLayer,
         hidden_states_or_q_c: torch.Tensor,
@@ -1316,17 +1316,17 @@ def mla_pro_attn(
         attn_type: str = AttentionType.DECODER,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-    cos_sin = self.rotary_emb.cos_sin_cache[attn_metadata.input_positions.flatten()]
-    cos, sin = cos_sin.chunk(2, dim=-1)
-    cos = cos.repeat_interleave(2, dim=-1)
-    sin = sin.repeat_interleave(2, dim=-1)
-    cache_index = attn_metadata.slot_mapping
-    cache_mode = "PA_NZ" if self.enable_kv_nz else "PA_BSND"
+        cos_sin = self.rotary_emb.cos_sin_cache[attn_metadata.input_positions.flatten()]
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        cos = cos.repeat_interleave(2, dim=-1)
+        sin = sin.repeat_interleave(2, dim=-1)
+        cache_index = attn_metadata.slot_mapping
+        cache_mode = "PA_NZ" if self.enable_kv_nz else "PA_BSND"
 
-    q_nope, q_pe, k_npe, k_pe = torch_npu.npu_mla_prolog(
+        q_nope, q_pe, k_nope, k_pe = torch_npu.npu_mla_prolog(
             token_x = hidden_states_or_q_c.unsqueeze(1),
             weight_dq = self.q_a_proj[0].weight.T,
-            weight_uq_dr = self.q_proj.weight.T,
+            weight_uq_qr = self.q_proj.weight.T,
             weight_uk = self.w_kc,
             weight_dkv_kr = self.kv_a_proj_with_mqa.weight.T,
             rmsnorm_gamma_cq = self.q_a_layernorm[0].weight,
@@ -1337,39 +1337,39 @@ def mla_pro_attn(
             rmsnorm_epsilon_cq = self.q_a_layernorm[0].variance_epsilon,
             rmsnorm_epsilon_ckv = self.kv_a_layernorm.variance_epsilon,
             cache_mode = cache_mode    
-    )
+        )
 
-    num_tokens = hidden_states_or_q_c.shape[0]
-    block_size, n_kv = k_nope.size()[1], k_nope.size()[2]
+        num_tokens = hidden_states_or_q_c.shape[0]
+        block_size, n_kv = k_nope.size()[1], k_nope.size()[2]
 
-    if self.enable_kv_nz:
-        block_num = k_nope.size()[0]
-        k_nope = k_nope.view(block_num, n_kv, self.kv_lora_rank // 16, block_size, 16)
-        k_pe = k_pe.view(block_num, n_kv, self.qk_rope_head_dim // 16, block_size, 16)
-    else:
-        k_nope, k_pe = k_nope.unsqueeze(2), k_pe.unsqueeze(2)
+        if self.enable_kv_nz:
+            block_num = k_nope.size()[0]
+            k_nope = k_nope.view(block_num, n_kv, self.kv_lora_rank // 16, block_size, 16)
+            k_pe = k_pe.view(block_num, n_kv, self.qk_rope_head_dim // 16, block_size, 16)
+        else:
+            k_nope, k_pe = k_nope.squeeze(2), k_pe.squeeze(2)
 
-    
-    attn_output, _ = torch_npu.npu_fused_infer_attention_score(
-                    q_nope,
-                    k_nope,
-                    k_nope,
-                    query_rope=q_pe,
-                    key_rope=k_pe,
-                    num_heads=self.num_heads,
-                    num_key_value_heads=n_kv,
-                    input_layout="BSND",
-                    atten_mask=attn_metadata.attn_mask,
-                    scale=self.scale,
-                    antiquant_mode=0,
-                    antiquant_scale=None,
-                    block_table=attn_metadata.block_tables,
-                    block_size=block_size,
-                    actual_seq_lengths_kv=attn_metadata.seq_lens,
-                )
-    attn_output = attn_output.view(num_tokens, -1, self.kv_lora_rank).transpose(0, 1)
-    attn_output = torch.bmm(attn_output, self.w_vc).transpose(0, 1)
-    output, _ = self.o_proj(attn_output.reshape(num_tokens, -1))
+        
+        attn_output, _ = torch_npu.npu_fused_infer_attention_score(
+            q_nope,
+            k_nope,
+            k_nope,
+            query_rope=q_pe,
+            key_rope=k_pe,
+            num_heads=self.num_heads,
+            num_key_value_heads=n_kv,
+            input_layout="BSND",
+            atten_mask=attn_metadata.attn_mask,
+            scale=self.scale,
+            antiquant_mode=0,
+            antiquant_scale=None,
+            block_table=attn_metadata.block_tables,
+            block_size=block_size,
+            actual_seq_lengths_kv=attn_metadata.seq_lens,
+        )
+        attn_output = attn_output.view(num_tokens, -1, self.kv_lora_rank).transpose(0, 1)
+        attn_output = torch.bmm(attn_output, self.w_vc).transpose(0, 1)
+        output, _ = self.o_proj(attn_output.reshape(num_tokens, -1))
 
-    return output
+        return output
     
