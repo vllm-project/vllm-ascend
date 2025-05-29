@@ -170,6 +170,7 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
     return {masked_input, mask};
 }
 
+
 void verify_tensor(std::string const& name, at::Tensor const& t,
                           int64_t const size_0, int64_t const size_1,
                           c10::ScalarType const type) {
@@ -266,6 +267,7 @@ TORCH_LIBRARY_EXPAND(_C, ops)
         "                 Tensor cos_sin_cache, bool is_neox) -> (Tensor query, Tensor key)");
     ops.impl("rotary_embedding", torch::kPrivateUse1, &vllm_ascend::rotary_embedding);
 
+
     ops.def(
         "get_masked_input_and_mask(Tensor input, "
         "                         int org_vocab_start_index, "
@@ -274,6 +276,7 @@ TORCH_LIBRARY_EXPAND(_C, ops)
         "                         int added_vocab_start_index, "
         "                         int added_vocab_end_index) -> (Tensor masked_input, Tensor mask)");
     ops.impl("get_masked_input_and_mask", torch::kPrivateUse1, &vllm_ascend::get_masked_input_and_mask);
+
 
     ops.def(
         "advance_step_flashattn_ascendc(int num_seqs, int num_queries, int block_size,"
