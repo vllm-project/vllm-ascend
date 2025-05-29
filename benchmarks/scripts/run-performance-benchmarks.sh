@@ -243,7 +243,7 @@ cleanup() {
 }
 
 get_benchmarks_scripts() {
-  git clone -b main --depth=1 git@github.com:vllm-project/vllm.git && \
+  git clone -b main --depth=1 https://github.com/vllm-project/vllm.git && \
   mv vllm/benchmarks vllm_benchmarks
   rm -rf ./vllm
 }
