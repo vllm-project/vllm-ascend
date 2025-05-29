@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
 import torch
 import torch.distributed as dist
@@ -25,11 +25,12 @@ from vllm.distributed import GroupCoordinator
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import select_experts
+from vllm_ascend.utils import dispose_tensor
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 
 
-def apply_mlp(hidden_states_wrapper: List[torch.Tensor],
+def apply_mlp(hidden_states: torch.Tensor,
               w1: torch.Tensor,
               w1_scale: torch.Tensor,
               w2: torch.Tensor,
@@ -41,7 +42,7 @@ def apply_mlp(hidden_states_wrapper: List[torch.Tensor],
     apply MLP: gate_up_proj -> swiglu -> down_proj
 
     Args:
-        hidden_states_wrapper: wrapper of input hidden states with shape (num_tokens, hidden_size).
+        hidden_states: input hidden states with shape (num_tokens, hidden_size).
         w1: expert weights1 with shape
             (num_experts, hidden_size, intermediate_size * 2)
         w1_scale: weights1 scale with shape (num_experts, intermediate_size * 2)
@@ -60,11 +61,13 @@ def apply_mlp(hidden_states_wrapper: List[torch.Tensor],
         hidden_states: output hidden states after MLP.
     """
 
-    assert len(hidden_states_wrapper) == 1
-    hidden_states = hidden_states_wrapper.pop()
     if dynamic_scale is None:
+        unquantized_hidden_states = hidden_states
         hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
             hidden_states)
+        # Dispose the original unquantized hidden states
+        # to save npu memory because they're no longer used.
+        dispose_tensor(unquantized_hidden_states)
     else:
         pertoken_scale = dynamic_scale
 
@@ -155,11 +158,8 @@ def fused_experts_with_mc2(
     if quant_mode == 0:
         dynamic_scale = None
 
-    # place hidden_states in a list to transfer its ownership into the `apply_mlp` function
-    hidden_states_wrapper = [expand_x]
-    del expand_x
-
-    down_out_list = apply_mlp(hidden_states_wrapper,
+    # `expand_x` will be disposed in the `apply_mlp` function
+    down_out_list = apply_mlp(expand_x,
                               w1,
                               w1_scale,
                               w2,
@@ -281,10 +281,8 @@ def fused_experts_with_all2all(
         expert_tokens = expert_tokens.to(torch.int64)
         group_list_type = 0
 
-    hidden_states_wrapper = [hidden_states]
-    del hidden_states
-
-    hidden_states = apply_mlp(hidden_states_wrapper,
+    # `hidden_states` will be disposed in the `apply_mlp` function
+    hidden_states = apply_mlp(hidden_states,
                               w1,
                               w1_scale,
                               w2,
@@ -399,11 +397,8 @@ def fused_experts(hidden_states: torch.Tensor,
         expert_tokens = expert_tokens.to(torch.int64)
         group_list_type = 0
 
-    # place hidden_states in a list to transfer its ownership into the `apply_mlp` function
-    hidden_states_wrapper = [hidden_states]
-    del hidden_states
-
-    hidden_states = apply_mlp(hidden_states_wrapper,
+    # `hidden_states` will be disposed in the `apply_mlp` function
+    hidden_states = apply_mlp(hidden_states,
                               w1,
                               w1_scale,
                               w2,
