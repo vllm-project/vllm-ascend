@@ -21,19 +21,24 @@ import gc
 import os
 import time
 import weakref
+import copy
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Union, Tuple, Any, Callable
 
 import numpy as np
 import numpy.typing as npt
 import torch
 import torch.nn as nn
+from torch import Tensor
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import set_forward_context, get_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -496,8 +501,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> tuple[SpecDecodeMetadata, torch.Tensor, SpecDecodeMetadata,
-               torch.Tensor, int, torch.Tensor]:
+    ) -> tuple[Any, Any, Any | None, Tensor, Any, Tensor | Any, Any, Any]:
         # Check input valid
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -628,11 +632,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         with set_forward_context(attn_metadata,
                                  self.vllm_config,
                                  num_tokens=num_input_tokens):
+            self.maybe_setup_kv_connector(scheduler_output)
             model_kwargs = {}
             if self.enable_torchair_graph_mode:
                 model_kwargs["kv_caches"] = self.kv_caches
                 model_kwargs["attn_metadata"] = attn_metadata
             if self.enable_torchair_graph_mode and attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+                logger.debug("ModelRunner: into the torchair path")
                 torch._dynamo.mark_static(input_ids)
                 torch._dynamo.mark_static(positions)
                 torch._dynamo.mark_static(attn_metadata.decode.block_table)
@@ -650,6 +656,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     **model_kwargs,
                 )
             else:
+                logger.debug("ModelRunner: into the eager path")
                 assert self.model is not None
                 hidden_states = self.model(
                     input_ids=input_ids,
@@ -659,6 +666,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     **model_kwargs,
                 )
 
+        self.maybe_wait_for_kv_save()
+        finished_sending, finished_recving = self.get_finished_kv_transfer(scheduler_output)
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -683,7 +692,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             sample_indices = spec_decode_metadata.logits_indices
 
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
-                total_num_scheduled_tokens, sample_indices)
+                total_num_scheduled_tokens, sample_indices, finished_sending, finished_recving)
 
     def _calc_spec_decode_metadata(
         self,
@@ -846,11 +855,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
         self._update_states(scheduler_output)
         if not scheduler_output.total_num_scheduled_tokens:
-            # Return empty ModelRunnerOuptut if there's no work to do.
-            return EMPTY_MODEL_RUNNER_OUTPUT
+            if not has_kv_transfer_group():
+                logger.debug("skip this step for we receive the data from remote disaggregate prefill node")
+                # Return empty ModelRunnerOuptut if there's no work to do.
+                return EMPTY_MODEL_RUNNER_OUTPUT
+            return self.kv_connector_no_forward(scheduler_output)
         (attn_metadata, hidden_states, spec_decode_metadata, positions,
          num_scheduled_tokens,
-         sample_indices) = (self._process_reqs(scheduler_output,
+         sample_indices, finished_sending, finished_recving) = (self._process_reqs(scheduler_output,
                                                intermediate_tensors))
         logits = self.model.compute_logits(hidden_states[sample_indices], None)
 
@@ -932,6 +944,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             hidden_states,
             attn_metadata,
         )
+        if has_kv_transfer_group():
+            get_kv_transfer_group().clear_connector_metadata()
 
         model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -940,8 +954,55 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             spec_token_ids=spec_token_ids,
             logprobs=logprobs_lists,
             prompt_logprobs_dict={},
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
         )
         return model_runner_output
+
+    def kv_connector_no_forward(
+            self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
+        with set_forward_context(None, self.vllm_config):
+            self.maybe_setup_kv_connector(scheduler_output)
+            finsihed_sending, finished_recving = (
+                self.get_finished_kv_transfer(scheduler_output))
+            # For the case of no forward caused by receiving remote kv,
+            # one round of dummy inference is necessary
+            # to prevent any hang issue caused by collective calls.
+            if finished_recving is not None and len(finished_recving) > 0:
+                self._dummy_run(1)
+        if not finsihed_sending and not finished_recving:
+            return EMPTY_MODEL_RUNNER_OUTPUT
+
+        output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        output.finished_sending = finsihed_sending
+        output.finished_recving = finished_recving
+        return output
+
+    @staticmethod
+    def maybe_setup_kv_connector(scheduler_output: "SchedulerOutput"):
+        # Update KVConnector with the KVConnector metadata forward().
+        if has_kv_transfer_group():
+            kv_connector = get_kv_transfer_group()
+            assert isinstance(kv_connector, KVConnectorBase_V1)
+            assert scheduler_output.kv_connector_metadata is not None
+            kv_connector.bind_connector_metadata(
+                scheduler_output.kv_connector_metadata)
+
+            kv_connector.start_load_kv(get_forward_context())
+
+    @staticmethod
+    def maybe_wait_for_kv_save() -> None:
+        if has_kv_transfer_group():
+            get_kv_transfer_group().wait_for_save()
+
+    @staticmethod
+    def get_finished_kv_transfer(
+            scheduler_output: "SchedulerOutput",
+    ) -> tuple[Optional[set[str]], Optional[set[str]]]:
+        if has_kv_transfer_group():
+            return get_kv_transfer_group().get_finished(
+                scheduler_output.finished_req_ids)
+        return None, None
 
     def _profile_multimodal(self) -> None:
         # TODO: handle encoder-decoder models once we support them.
@@ -1071,11 +1132,29 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 })
 
             with set_forward_context(None, self.vllm_config):
-                hidden_states = model(
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds)
+                # For dummy run, we compile a second torchair graph to make sure the aligned behaviour with actual model
+                if self.enable_torchair_graph_mode and self.vllm_config.kv_transfer_config.kv_role == "kv_consumer":
+                    input_ids = torch.zeros(num_tokens, dtype=input_ids.dtype, device=input_ids.device)
+                    positions = torch.zeros(num_tokens, dtype=positions.dtype, device=positions.device)
+                    torch._dynamo.mark_static(input_ids)
+                    torch._dynamo.mark_static(positions)
+                    model_kwargs = {
+                        "kv_caches": None,
+                        "attn_metadata": None
+                    }
+                    hidden_states = self.compile_model(
+                        input_ids=input_ids,
+                        positions=positions,
+                        intermediate_tensors=intermediate_tensors,
+                        inputs_embeds=None,
+                        **model_kwargs,
+                    )
+                else:
+                    hidden_states = model(
+                        input_ids=input_ids,
+                        positions=positions,
+                        intermediate_tensors=intermediate_tensors,
+                        inputs_embeds=inputs_embeds)
             return hidden_states
 
     def profile_run(self) -> None:
@@ -1221,10 +1300,24 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         torch_npu.npu_format_cast(kv_caches[layer_name][0], 2)
                         torch_npu.npu_format_cast(kv_caches[layer_name][1], 2)
                     else:
-                        kv_caches[layer_name] = torch.zeros(kv_cache_shape,
-                                                            dtype=dtype,
-                                                            device=self.device)
-                        torch_npu.npu_format_cast(kv_caches[layer_name], 2)
+                        if self.model_config.is_deepseek_mla:
+                            num_blocks, block_size, num_kv_heads, head_size = kv_cache_shape
+                            rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
+                            nope_dim = head_size - rope_dim
+                            nope_cache_shape = (num_blocks, block_size, num_kv_heads, nope_dim)
+                            rope_cache_shape = (num_blocks, block_size, num_kv_heads, rope_dim)
+                            nope_cache = torch.zeros(nope_cache_shape, dtype=dtype, device=self.device)
+                            rope_cache = torch.zeros(rope_cache_shape, dtype=dtype, device=self.device)
+                            kv_caches[layer_name] = (nope_cache, rope_cache)
+                        else:
+                            num_caches = kv_cache_shape[0]
+                            kv_cache_list = []
+                            for i in range(num_caches):
+                                cache_shape = kv_cache_shape[1:]
+                                kv_cache_for_compute = torch.zeros(cache_shape, dtype=dtype, device=self.device)
+                                kv_cache_list.append(kv_cache_for_compute)
+                            kv_caches[layer_name] = kv_cache_list
+                        # torch_npu.npu_format_cast(kv_caches[layer_name], 2)
                 else:
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
@@ -1234,6 +1327,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             kv_caches,
             self.vllm_config.compilation_config.static_forward_context,
             self.kv_caches)
+
+        if has_kv_transfer_group():
+            get_kv_transfer_group().register_kv_caches(kv_caches)
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         """

@@ -64,6 +64,7 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer, make_empty_intermediate_tensors_factory, make_layers,
     maybe_prefix)
 from vllm.sequence import IntermediateTensors
+from vllm.utils import logger
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
@@ -210,8 +211,17 @@ class CustomDeepseekV2MoE(nn.Module):
 
         self.tp_group = get_tp_group().device_group
         self.tp_rank = get_tp_group().rank_in_group
+        additional_config = get_current_vllm_config().additional_config
+        self.enable_graph_mode = False
+        self.kv_consumer = None
+        if additional_config:
+            self.enable_graph_mode = additional_config.get("enable_graph_mode", False)
+        transfer_config = get_current_vllm_config().kv_transfer_config
+        if transfer_config is not None:
+            self.kv_consumer = transfer_config.kv_role == "kv_consumer"
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+
+def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         attn_metadata = get_forward_context().attn_metadata
         # when profile runs, force experts to load balanced tokens
         # to avoid high memory consumption on a single rank.
@@ -223,6 +233,12 @@ class CustomDeepseekV2MoE(nn.Module):
         else:
             is_prefill = attn_metadata.num_prefills > 0
             enable_force_load_balance = False
+            # If this node is kv_consumer, we force the moe always runs in decode path to make sure
+            # the behaviour aligned between dummy_run and normal model_execute.
+            if self.kv_consumer is not None:
+                is_prefill = False
+                enable_force_load_balance = False
+
         num_tokens, hidden_dim = hidden_states.shape
 
         if self.n_shared_experts is not None:
