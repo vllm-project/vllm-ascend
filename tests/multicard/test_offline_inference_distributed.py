@@ -22,7 +22,6 @@ Run `pytest tests/test_offline_inference.py`.
 """
 import os
 
-import pytest
 import vllm  # noqa: F401
 
 from tests.conftest import VllmRunner
@@ -47,8 +46,6 @@ def test_models_distributed_QwQ():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "1",
-                    reason="deepseek v2 lite is not supported on v1")
 def test_models_distributed_DeepSeek():
     example_prompts = [
         "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
