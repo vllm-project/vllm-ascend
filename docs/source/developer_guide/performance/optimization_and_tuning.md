@@ -89,7 +89,7 @@ wget https://repo.oepkgs.net/ascend/pytorch/vllm/torch/torch_npu-2.5.1-cp311-cp3
 
 # Install optimized torch and torch_npu
 pip install /workspace/tmp/torch-2.5.1*.whl --force-reinstall --no-deps
-pip install /workspace//tmp/torch_npu-2.5.1*.whl --force-reinstall --no-deps
+pip install /workspace/tmp/torch_npu-2.5.1*.whl --force-reinstall --no-deps
 
 # Clear pip cache and download files
 pip cache purge
