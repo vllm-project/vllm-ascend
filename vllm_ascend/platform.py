@@ -75,7 +75,8 @@ class NPUPlatform(Platform):
         # and the user can enable quantization using "vllm serve --quantization ascend".
         if parser is not None:
             quant_action = parser._option_string_actions.get('--quantization')
-            if quant_action and getattr(quant_action, 'choices', None) is not None:
+            if quant_action and getattr(quant_action, 'choices',
+                                        None) is not None:
                 if ASCEND_QUATIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUATIZATION_METHOD)
 
