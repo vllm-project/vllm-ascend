@@ -22,7 +22,7 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.top1_proposer import Top1Proposer
 
-from tests.singlecard.spec_decode.utils import (
+from tests.long_term.spec_decode.utils import (
     create_seq_group_metadata_from_prompts, create_worker)
 
 

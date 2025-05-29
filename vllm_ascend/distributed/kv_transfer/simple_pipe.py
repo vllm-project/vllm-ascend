@@ -61,22 +61,22 @@ class SimplePipe(KVPipeBase):
             raise NotImplementedError(
                 "kv_role should be inside [kv_producer, kv_consumer]")
 
-        prompt_device_ips = kv_connector_extra_config.get(
-            "prompt_device_ips", None)
+        prefill_device_ips = kv_connector_extra_config.get(
+            "prefill_device_ips", None)
         decode_device_ips = kv_connector_extra_config.get(
             "decode_device_ips", None)
-        if prompt_device_ips is None or decode_device_ips is None:
+        if prefill_device_ips is None or decode_device_ips is None:
             raise ValueError(
-                "Please specify prompt_device_ips and decode_device_ips"
+                "Please specify prefill_device_ips and decode_device_ips"
                 "in kv_transfer_config.kv_connector_extra_config")
-        p_device_num = len(prompt_device_ips)
+        p_device_num = len(prefill_device_ips)
         d_device_num = len(decode_device_ips)
         # When number of devices in P and D is not equal,
         # we assume that device in D can be mapped to any device in P.
         self.p_device_rank = self.rank % p_device_num
         self.d_device_rank = self.rank % d_device_num
 
-        self.prompt_ip_list = prompt_device_ips
+        self.prompt_ip_list = prefill_device_ips
         self.decode_ip_list = decode_device_ips
         self.llmdatadist_comm_port = kv_connector_extra_config.get(
             "llmdatadist_comm_port", 26000)
@@ -98,7 +98,7 @@ class SimplePipe(KVPipeBase):
         if proxy_ip == "" or proxy_port == "":
             self.proxy_address = ""
         else:
-            self.proxy_address = proxy_ip + ":" + proxy_port
+            self.proxy_address = proxy_ip + ":" + str(proxy_port)
 
         self._register_thread = None
         if port_offset == 0 and self.proxy_address != "":
@@ -106,7 +106,7 @@ class SimplePipe(KVPipeBase):
             # Note that only NPU 0 of each P/D instance register to proxy.
             if not hostname:
                 hostname = get_ip()  # Get ip of current host.
-            port = kv_transfer_config.kv_port + port_offset
+            port = int(kv_transfer_config.kv_port) + port_offset
             if port == 0:
                 raise ValueError("Port cannot be 0")
             self._hostname = hostname

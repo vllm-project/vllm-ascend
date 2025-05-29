@@ -141,8 +141,11 @@ class AscendAttentionMetadataBuilder:
 
     def build(self, num_reqs, num_actual_tokens, max_query_len,
               common_prefix_len):
-        block_table = (
-            self.runner.input_batch.block_table.get_device_tensor()[:num_reqs])
+
+        block_table = self.runner.input_batch.block_table[0].get_device_tensor(
+        )
+        block_table[:num_reqs, :self.runner.max_num_blocks_per_req] = (
+            block_table[:num_reqs])
 
         query_lens = self.runner.query_lens
         seq_lens = self.runner.seq_lens_cpu[:num_reqs]
