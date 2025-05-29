@@ -274,8 +274,11 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,
                     intermediate_tensors=intermediate_tensors,
-                    **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
-                                                 device=self.device),
+                    **MultiModalKwargs.as_kwargs(
+                        multi_modal_kwargs,
+                        dtype=self.model_runner.model_config.dtype,
+                        device=self.device,
+                    ),
                     **model_execute_kwargs,
                 )
 
