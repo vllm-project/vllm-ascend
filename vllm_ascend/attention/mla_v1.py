@@ -117,6 +117,8 @@ class AscendMLAMetadata:
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
 
+    with_prefill_across_dp: bool = False
+
     # The dimension of the attention heads
     head_dim: Optional[int] = None
     attn_mask: torch.Tensor = None
@@ -280,13 +282,16 @@ class AscendMLAMetadataBuilder:
             decode=decode_metadata,
         )
 
-    def build(self,
-              num_reqs: int,
-              num_actual_tokens: int,
-              max_query_len: int,
-              common_attn_metadata: CommonAttentionMetadata,
-              common_prefix_len: Optional[int] = None,
-              graph_pad_size: int = -1) -> AscendMLAMetadata:
+    def build(
+        self,
+        num_reqs: int,
+        num_actual_tokens: int,
+        max_query_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        common_prefix_len: Optional[int] = None,
+        graph_pad_size: int = -1,
+        with_prefill_across_dp: bool = False,
+    ) -> AscendMLAMetadata:
         assert self._num_decodes + self._num_prefills == num_reqs
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
@@ -388,6 +393,7 @@ class AscendMLAMetadataBuilder:
             query_start_loc=query_start_loc,
             block_tables=block_table,
             seq_lens=seq_lens,
+            with_prefill_across_dp=with_prefill_across_dp,
         )
 
 
@@ -621,7 +627,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv = self.kv_a_proj_with_mqa(hidden_states)[0]
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv = kv.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-        k_pe, k_nope, _, _ = torch.ops.npu_inference.npu_kv_rmsnorm_rope_cache(
+        k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv,
             self.kv_a_layernorm.weight,
             cos,
@@ -643,7 +649,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         B, N, D = x.shape
         S = 1
         x = x.view(B, N, S, D)
-        x = torch.ops.npu_inference.npu_interleave_rope(x, cos, sin)
+        x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
     def _forward_decode(
