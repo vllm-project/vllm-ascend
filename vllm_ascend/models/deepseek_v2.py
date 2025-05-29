@@ -413,7 +413,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             hidden_states: torch.Tensor,
             kv_cache: Optional[torch.Tensor] = None,
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
-        if self.enable_graph_mode and self.enable_mla_pro and attn_metadata.num_prefills==0:
+        if self.enable_graph_mode and self.enable_mla_pro and attn_metadata is not None and attn_metadata.num_prefills==0:
             return self.mla_attn.impl.forward(self.mla_attn,
                                  hidden_states,
                                  None,
