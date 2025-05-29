@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import gc
 import logging
 import os
 from typing import TYPE_CHECKING, Optional, Tuple
@@ -249,3 +250,9 @@ class NPUPlatform(Platform):
         Get piecewise backend class for piecewise graph.
         """
         return "vllm_ascend.compilation.piecewise_backend.NPUPiecewiseBackend"  # noqa
+
+    @classmethod
+    def clear_npu_memory(cls):
+        gc.collect()
+        torch.npu.empty_cache()
+        torch.npu.reset_peak_memory_stats()
