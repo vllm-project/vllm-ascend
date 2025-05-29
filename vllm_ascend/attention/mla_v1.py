@@ -117,6 +117,8 @@ class AscendMLAMetadata:
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
 
+    with_prefill_across_dp: bool = False
+
     # The dimension of the attention heads
     head_dim: Optional[int] = None
     attn_mask: torch.Tensor = None
@@ -260,6 +262,10 @@ class AscendMLAMetadataBuilder:
                                   PAD_SLOT_ID,
                                   dtype=torch.int32,
                                   device=device)
+        query_start_loc = torch.full((num_reqs, ),
+                                     -1,
+                                     dtype=torch.int32,
+                                     device=device)
         decode_metadata = AscendMLADecodeMetadata(
             input_positions=input_positions,
             block_table=block_table,
@@ -278,15 +284,21 @@ class AscendMLAMetadataBuilder:
             attn_state=AscendAttentionState.DecodeOnly,
             prefill=None,
             decode=decode_metadata,
+            query_start_loc=query_start_loc,
+            seq_lens=seq_lens,
+            block_tables=block_table,
         )
 
-    def build(self,
-              num_reqs: int,
-              num_actual_tokens: int,
-              max_query_len: int,
-              common_attn_metadata: CommonAttentionMetadata,
-              common_prefix_len: Optional[int] = None,
-              graph_pad_size: int = -1) -> AscendMLAMetadata:
+    def build(
+        self,
+        num_reqs: int,
+        num_actual_tokens: int,
+        max_query_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        common_prefix_len: Optional[int] = None,
+        graph_pad_size: int = -1,
+        with_prefill_across_dp: bool = False,
+    ) -> AscendMLAMetadata:
         assert self._num_decodes + self._num_prefills == num_reqs
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
@@ -388,6 +400,7 @@ class AscendMLAMetadataBuilder:
             query_start_loc=query_start_loc,
             block_tables=block_table,
             seq_lens=seq_lens,
+            with_prefill_across_dp=with_prefill_across_dp,
         )
 
 
@@ -621,7 +634,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv = self.kv_a_proj_with_mqa(hidden_states)[0]
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv = kv.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-        k_pe, k_nope, _, _ = torch.ops.npu_inference.npu_kv_rmsnorm_rope_cache(
+        k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv,
             self.kv_a_layernorm.weight,
             cos,
@@ -643,7 +656,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         B, N, D = x.shape
         S = 1
         x = x.view(B, N, S, D)
-        x = torch.ops.npu_inference.npu_interleave_rope(x, cos, sin)
+        x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
     def _forward_decode(
@@ -766,6 +779,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 sin = sin[attn_metadata.decode.input_positions]
                 cos = cos[:, None, None, :]
                 sin = sin[:, None, None, :]
+
                 decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
                 decode_k_pe, decode_k_nope = self.exec_kv(
                     hidden_states_or_kv_c_normed, cos, sin, kv_cache,
