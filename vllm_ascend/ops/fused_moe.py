@@ -20,6 +20,7 @@ from typing import Callable, Optional
 import torch
 import torch.distributed as dist
 import torch_npu
+import torchair as tng  # type: ignore
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (GroupCoordinator,
                               get_tensor_model_parallel_world_size,
@@ -38,19 +39,18 @@ VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 USING_LCCL_COM: bool = envs_ascend.USING_LCCL_COM
 
 
-def fused_experts_with_mc2(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    top_k: int,
-    expert_map: torch.Tensor = None,
-    moe_all_to_all_group_name: Optional[str] = None,
-) -> torch.Tensor:
+def fused_experts_with_mc2(hidden_states: torch.Tensor,
+                           w1: torch.Tensor,
+                           w2: torch.Tensor,
+                           topk_weights: torch.Tensor,
+                           topk_ids: torch.Tensor,
+                           top_k: int,
+                           expert_map: torch.Tensor = None,
+                           moe_all_to_all_group_name: Optional[str] = None,
+                           **kwargs) -> torch.Tensor:
     global_bs = 0
     moe_expert_num = len(expert_map)
-    kwargs = {
+    kwargs_mc2 = {
         "x": hidden_states,
         "expert_ids": topk_ids,
         "expert_shard_type": 0,
@@ -81,12 +81,19 @@ def fused_experts_with_mc2(
         "tp_world_size": tp_size,
         "tp_rank_id": tp_rank,
     }
-    kwargs.update(stage1_kwargs)
+    kwargs_mc2.update(stage1_kwargs)
 
-    output = torch_npu.npu_moe_distribute_dispatch(**kwargs)
+    output = torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
     # comm_stream.wait_stream(torch.npu.current_stream())
     expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[
         0:5]
+
+    shared_experts = kwargs.get('shared_experts', None)
+    if shared_experts:
+        shared_gate_up = kwargs.get('shared_gate_up', None)
+        with tng.scope.npu_stream_switch('cv'):
+            tng.scope.npu_wait_tensor(shared_gate_up, expand_x)
+            shared_x = shared_experts.act_fn(shared_gate_up)
 
     w1 = w1.transpose(1, 2)
     expert_token_nums = torch.cumsum(expert_token_nums,
@@ -116,10 +123,15 @@ def fused_experts_with_mc2(
         group_list=group_list,
     )
 
+    if shared_experts:
+        with tng.scope.npu_stream_switch('cv'):
+            tng.scope.npu_wait_tensor(shared_x, down_out_list)
+            shared_output = shared_experts.down_proj(shared_x)
+
     down_out_list = torch.cat(down_out_list, dim=0)
 
     # moeCombine
-    kwargs = {
+    kwargs_mc2 = {
         "expand_x": down_out_list,
         "expert_ids": topk_ids,
         "expand_idx": expand_idx,
@@ -141,10 +153,12 @@ def fused_experts_with_mc2(
         "tp_world_size": tp_size,
         "tp_rank_id": tp_rank,
     }
-    kwargs.update(stage3_kwargs)
+    kwargs_mc2.update(stage3_kwargs)
 
-    hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs)
+    hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
 
+    if shared_experts:
+        return hidden_states, shared_output
     return hidden_states
 
 
@@ -664,7 +678,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 topk_ids=topk_ids,
                 top_k=top_k,
                 expert_map=expert_map,
-                moe_all_to_all_group_name=self.moe_all_to_all_group_name)
+                moe_all_to_all_group_name=self.moe_all_to_all_group_name,
+                **kwargs)
         elif get_ep_group().world_size == 1:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,

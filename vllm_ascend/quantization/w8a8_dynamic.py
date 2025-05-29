@@ -74,7 +74,7 @@ def apply_mlp(hidden_states_wrapper: List[torch.Tensor],
     if shared_experts:
         shared_gate_up = kwargs.get('shared_gate_up', None)
         shared_dynamic_scale = kwargs.get('shared_dynamic_scale', None)
-        with tng.scope.npu_stream_switch('1'):
+        with tng.scope.npu_stream_switch('cv'):
             tng.scope.npu_wait_tensor(shared_gate_up, hidden_states)
             shared_x, shared_dynamic_scale = torch_npu.npu_dequant_swiglu_quant(
                 x=shared_gate_up,
@@ -117,7 +117,7 @@ def apply_mlp(hidden_states_wrapper: List[torch.Tensor],
         output_dtype=w2_scale.dtype)[0]
 
     if shared_experts:
-        with tng.scope.npu_stream_switch('1'):
+        with tng.scope.npu_stream_switch('cv'):
             tng.scope.npu_wait_tensor(shared_x, hidden_states)
             shared_output = torch_npu.npu_quant_matmul(
                 shared_x,

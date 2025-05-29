@@ -262,14 +262,18 @@ class CustomDeepseekV2MoE(nn.Module):
         if self.n_shared_experts is not None and cv_parallel:
             with tng.scope.npu_stream_switch('cv'):
                 tng.scope.npu_wait_tensor(shared_hidden_states, router_logits)
-                x, dynamic_scale = torch_npu.npu_dynamic_quant(
-                    shared_hidden_states)
-                gate_up = torch_npu.npu_quant_matmul(
-                    x,
-                    self.shared_experts.gate_up_proj.weight,
-                    self.shared_experts.gate_up_proj.weight_scale,
-                    output_dtype=torch.int32,
-                )
+                dynamic_scale = None
+                if self.shared_experts.is_dynamic_quant:
+                    x, dynamic_scale = torch_npu.npu_dynamic_quant(
+                        shared_hidden_states)
+                    gate_up = torch_npu.npu_quant_matmul(
+                        x,
+                        self.shared_experts.gate_up_proj.weight,
+                        self.shared_experts.gate_up_proj.weight_scale,
+                        output_dtype=torch.int32,
+                    )
+                else:
+                    gate_up, _ = self.gate_up_proj(shared_hidden_states)
 
         if cv_parallel:
             router_hidden_states, shared_output = self.experts(
