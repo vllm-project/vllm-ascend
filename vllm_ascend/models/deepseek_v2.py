@@ -30,6 +30,7 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 import torch.distributed as dist
 import torch_npu
+import torchair as tng
 import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
@@ -70,6 +71,7 @@ from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
+VLLM_ENABLE_CV_PARALLEL: bool = envs_ascend.VLLM_ENABLE_CV_PARALLEL
 
 
 class CustomDeepseekV2MLP(nn.Module):
@@ -224,8 +226,13 @@ class CustomDeepseekV2MoE(nn.Module):
             enable_force_load_balance = False
         num_tokens, hidden_dim = hidden_states.shape
 
+        cv_parallel = VLLM_ENABLE_CV_PARALLEL and not is_prefill
+
         if self.n_shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
+            if not cv_parallel:
+                shared_output = self.shared_experts(hidden_states)
+            else:
+                shared_hidden_states = hidden_states
 
         if self.tp_size > 1:
             # pass
@@ -247,13 +254,37 @@ class CustomDeepseekV2MoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(local_hidden_states)
 
-        router_hidden_states = self.experts(
-            hidden_states=local_hidden_states,
-            router_logits=router_logits,
-            is_prefill=is_prefill,
-            top_k=CustomDeepseekV2MoE.top_k,
-            enable_force_load_balance=enable_force_load_balance,
-        ) * self.routed_scaling_factor
+        if self.n_shared_experts is not None and cv_parallel:
+            with tng.scope.npu_stream_switch('cv'):
+                tng.scope.npu_wait_tensor(shared_hidden_states, router_logits)
+                x, dynamic_scale = torch_npu.npu_dynamic_quant(shared_hidden_states)
+                gate_up = torch_npu.npu_quant_matmul(
+                    x,
+                    self.shared_experts.gate_up_proj.weight,
+                    self.shared_experts.gate_up_proj.weight_scale,
+                    output_dtype=torch.int32,
+                )
+
+        if cv_parallel:
+            router_hidden_states, shared_output = self.experts(
+                hidden_states=local_hidden_states,
+                router_logits=router_logits,
+                is_prefill=is_prefill,
+                top_k=CustomDeepseekV2MoE.top_k,
+                enable_force_load_balance=enable_force_load_balance,
+                shared_experts=self.shared_experts,
+                shared_gate_up=gate_up,
+                shared_dynamic_scale=dynamic_scale
+            )
+            router_hidden_states = router_hidden_states * self.routed_scaling_factor
+        else:
+            router_hidden_states = self.experts(
+                hidden_states=local_hidden_states,
+                router_logits=router_logits,
+                is_prefill=is_prefill,
+                top_k=CustomDeepseekV2MoE.top_k,
+                enable_force_load_balance=enable_force_load_balance,
+            ) * self.routed_scaling_factor
 
         if self.tp_size > 1:
             dist.all_gather(list(chunk_hidden_states), router_hidden_states,
