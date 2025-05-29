@@ -84,8 +84,8 @@ Similar to `python`, we have also offered compilation optimized `torch` and `tor
 cd /workspace/tmp
 
 # Download prebuilt packages
-wget https://repo.oepkgs.net/ascend/pytorch/vllm/torch/torch-2.5.1-cp310-cp310-linux_aarch64.whl
-wget https://repo.oepkgs.net/ascend/pytorch/vllm/torch/torch_npu-2.5.1-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
+wget https://repo.oepkgs.net/ascend/pytorch/vllm/torch/torch-2.5.1-cp311-cp311-linux_aarch64.whl
+wget https://repo.oepkgs.net/ascend/pytorch/vllm/torch/torch_npu-2.5.1-cp311-cp311-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
 
 # Install optimized torch and torch_npu
 pip install /tmp/torch-2.5.1*.whl --force-reinstall --no-deps
@@ -93,7 +93,7 @@ pip install /tmp/torch_npu-*.whl --force-reinstall --no-deps
 
 # Clear pip cache and download files
 pip cache purge
-rm -rf /tmp/*
+rm -rf /workspace/tmp/*
 
 # Make torch and torch_npu can find the `xxx.so` libs we installed before
 export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
