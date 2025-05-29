@@ -66,6 +66,10 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("C_COMPILER", None),
     "VLLM_VERSION":
     lambda: os.getenv("VLLM_VERSION", None),
+    "DISAGGREGATED_RPEFILL_RANK_TABLE_PATH":
+    lambda: os.getenv("DISAGGREGATED_RPEFILL_RANK_TABLE_PATH", None),
+    "VLLM_LLMDD_CHANNEL_PORT":
+    lambda: os.getenv("VLLM_LLMDD_CHANNEL_PORT", 5557)
 }
 
 # end-env-vars-definition
