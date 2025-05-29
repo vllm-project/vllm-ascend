@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/kernels/test_moe.py
 
+import os
 from typing import Callable, Optional
 
 import torch
