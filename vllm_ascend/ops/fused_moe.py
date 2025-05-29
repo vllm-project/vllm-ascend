@@ -768,7 +768,7 @@ class AscendFusedMoE(FusedMoE):
             self.moe_parallel_config.ep_rank = get_ep_group().rank_in_group
             self.local_num_experts, self.expert_map = (self.global_num_experts,
                                                        None)
-            
+
         self.enable_graph_mode = False
         additional_config = get_current_vllm_config().additional_config
         if additional_config:
