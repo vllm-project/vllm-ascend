@@ -67,10 +67,10 @@ myst_substitutions = {
     # the branch of vllm-ascend, used in vllm-ascend clone and image tag
     # - main branch: 'main'
     # - vX.Y.Z branch: latest vllm-ascend release tag
-    'vllm_ascend_version': 'v0.7.3',
+    'vllm_ascend_version': 'v0.7.3.post1',
     # the newest release version of vllm-ascend and matched vLLM, used in pip install.
     # This value should be updated when cut down release.
-    'pip_vllm_ascend_version': "0.7.3",
+    'pip_vllm_ascend_version': "0.7.3.post1",
     'pip_vllm_version': "0.7.3",
     # The maching MindIE Turbo for vLLM Ascend
     'pip_mindie_turbo_version': "2.0rc1",
