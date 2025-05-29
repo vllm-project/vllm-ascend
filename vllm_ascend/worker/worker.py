@@ -17,13 +17,11 @@
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 
-import gc
 import os
 from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 import msgpack  # type: ignore
 import torch
-import torch.distributed
 import zmq
 from torch import nn
 from vllm import envs
@@ -213,9 +211,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         if self.device_config.device.type == "npu":
             self.device = torch.device(f"npu:{self.local_rank}")
             NPUPlatform.set_device(self.device)
-            gc.collect()
-            NPUPlatform.empty_cache()
-            torch.npu.reset_peak_memory_stats()
+            NPUPlatform.clear_npu_memory()
             self.init_npu_memory = NPUPlatform.mem_get_info()[0]
         else:
             raise RuntimeError(
@@ -282,9 +278,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
-        gc.collect()
-        NPUPlatform.empty_cache()
-        torch.npu.reset_peak_memory_stats()
+        NPUPlatform.clear_npu_memory()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -310,10 +304,8 @@ class NPUWorker(LocalOrDistributedWorkerBase):
                              cache_block_size)
         num_npu_blocks = max(num_npu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
-        gc.collect()
-        # TODO: don`t need impl this func after empty_cache in
-        # Worker.determine_num_available_blocks() unified`
-        NPUPlatform.empty_cache()
+
+        NPUPlatform.clear_npu_memory()
         return num_npu_blocks, num_cpu_blocks
 
     def initialize_cache(self, num_gpu_blocks: int,
