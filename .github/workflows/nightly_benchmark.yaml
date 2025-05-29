@@ -28,6 +28,7 @@ on:
         options:
           - linux-arm64-npu-4
           - linux-arm64-npu-1
+          - linux-arm64-npu-static-8
         default: 'linux-arm64-npu-1'
         description: 'The runner selected to run on'
       image:
