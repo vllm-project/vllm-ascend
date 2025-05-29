@@ -36,7 +36,6 @@ from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 USING_LCCL_COM: bool = envs_ascend.USING_LCCL_COM
-VLLM_ENABLE_CV_PARALLEL: bool = envs_ascend.VLLM_ENABLE_CV_PARALLEL
 
 
 def fused_experts_with_mc2(
@@ -811,6 +810,11 @@ class AscendFusedMoE(FusedMoE):
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
+        self.enable_cv_parallel = False
+        if vllm_config.additional_config:
+            self.enable_cv_parallel = vllm_config.additional_config.get(
+                "enable_cv_parallel", False)
+
     def forward(self,
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
@@ -847,7 +851,7 @@ class AscendFusedMoE(FusedMoE):
             enable_force_load_balance=enable_force_load_balance,
             **kwargs)
 
-        if VLLM_ENABLE_CV_PARALLEL and not is_prefill:
+        if self.enable_cv_parallel and not is_prefill:
             final_hidden_states, shared_output = final_hidden_states
 
         if VLLM_ENABLE_MC2 and not is_prefill:
@@ -857,6 +861,6 @@ class AscendFusedMoE(FusedMoE):
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 
-        if VLLM_ENABLE_CV_PARALLEL and not is_prefill:
+        if self.enable_cv_parallel and not is_prefill:
             return final_hidden_states, shared_output
         return final_hidden_states

@@ -71,7 +71,6 @@ from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
-VLLM_ENABLE_CV_PARALLEL: bool = envs_ascend.VLLM_ENABLE_CV_PARALLEL
 
 
 class CustomDeepseekV2MLP(nn.Module):
@@ -179,6 +178,12 @@ class CustomDeepseekV2MoE(nn.Module):
         else:
             self.gate.e_score_correction_bias = None
 
+        self.enable_cv_parallel = False
+        additional_config = get_current_vllm_config().additional_config
+        if additional_config:
+            self.enable_cv_parallel = additional_config.get(
+                "enable_cv_parallel", False)
+
         self.experts = AscendFusedMoE(
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
@@ -226,7 +231,7 @@ class CustomDeepseekV2MoE(nn.Module):
             enable_force_load_balance = False
         num_tokens, hidden_dim = hidden_states.shape
 
-        cv_parallel = VLLM_ENABLE_CV_PARALLEL and not is_prefill
+        cv_parallel = self.enable_cv_parallel and not is_prefill
 
         if self.n_shared_experts is not None:
             if not cv_parallel:
