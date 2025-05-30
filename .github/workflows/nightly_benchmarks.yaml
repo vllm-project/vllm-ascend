@@ -74,10 +74,10 @@ jobs:
         run: |
           pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 
-      - name: Install system dependencies
-        run: |
-          apt-get update -y
-          apt-get -y install git jq wget curl lsof gcc g++ cmake libnuma-dev
+      # - name: Install system dependencies
+      #   run: |
+      #     apt-get update -y
+      #     apt-get -y install git jq wget curl lsof gcc g++ cmake libnuma-dev
 
       - name: Config git
         run: |
@@ -89,7 +89,7 @@ jobs:
           echo "domain: '${ES_OM_DOMAIN}'"
           echo "authorization: '${ES_OM_AUTHORIZATION}'"
 
-          ehco "secrets: '${{ secrets.ES_OM_DOMAIN }}' '${{ secrets.ES_OM_AUTHORIZATION }}'"
+          echo "secrets: '${{ secrets.ES_OM_DOMAIN }}' '${{ secrets.ES_OM_AUTHORIZATION }}'"
 
       # - name: Checkout vllm-project/vllm-ascend repo
       #   uses: actions/checkout@v4
