@@ -122,7 +122,7 @@ jobs:
         run: |
           # Only get the pull request which may influences performance
           git log --pretty=format:"%H %s" -- '**/*.py' ':!docs/*' ':!tests/*' ':!examples/*' > commit_log.txt
-          escli check commit_log.txt --tag $(git branch --show-current)
+          escli check commit_log.txt
 
       - name: Run benchmark iteration
         run: |
