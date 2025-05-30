@@ -1,0 +1,160 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+name: 'run benchmarks main'
+
+on:
+  schedule:
+    - cron: '00 16 * * *'
+  workflow_dispatch:
+  
+  # after merged, secrets will be available
+  # pull_request:
+  #   branches:
+  #       - 'main'
+  #       - '*-dev'
+  #   paths:
+  #       - '.github/workflows/nightly_benchmarks.yaml'
+
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  test:
+    name: run benchmarks main
+    runs-on: 'linux-arm64-npu-static-8'
+    strategy:
+      matrix:
+        include:
+          - vllm_branch: v0.9.0
+            vllm_ascend_branch: main
+    container:
+      image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
+      volumes:
+        - /usr/local/dcmi:/usr/local/dcmi
+        - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
+        - /usr/local/Ascend/driver/:/usr/local/Ascend/driver/
+        # Use self-host cache speed up pip and model download
+        - /home/action/.cache:/github/home/.cache/
+      options: >-
+        --device /dev/davinci0
+        --device /dev/davinci1
+        --device /dev/davinci_manager
+        --device /dev/devmm_svm
+        --device /dev/hisi_hdc
+      env:
+        HF_ENDPOINT: https://hf-mirror.com
+        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        ES_OM_DOMAIN: ${{ secrets.ES_OM_DOMAIN }}
+        ES_OM_AUTHORIZATION: ${{ secrets.ES_OM_AUTHORIZATION }}
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+      - name: Install system dependencies
+        run: |
+          apt-get update -y
+          apt-get -y install git jq wget curl lsof gcc g++ cmake libnuma-dev
+
+      - name: Config git
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+    
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.vllm_ascend_branch }}
+          
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          path: ./vllm-empty
+          ref: ${{  matrix.vllm_branch }}
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Install vllm-project/vllm-ascend
+        run: |
+          pip install -e .
+          pip install -r benchmarks/requirements-bench.txt
+
+      - name: Checkout cosdt/elastic-tool
+        uses: actions/checkout@v4
+        with:
+          repository: cosdt/elastic-tool
+          path: ./elastic_tool
+          ref: 0.1.0-dev
+
+      - name: Install elastic_tool
+        working-directory: ./elastic_tool
+        run: |
+          pip install -e .
+          
+      - name: Collect pr info from vllm-project/vllm-ascend
+        run: |
+          # Only get the pull request which may influences performance
+          git log --pretty=format:"%H %s" -- '**/*.py' ':!docs/*' ':!tests/*' ':!examples/*' > commit_log.txt
+          escli check commit_log.txt
+
+      - name: Run benchmark iteration
+        run: |
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            commit_id=${line%% *}
+            commit_title=${line#* }
+            commit_time=$(git show -s --format=%cd $commit_hash --date=iso-strict)
+            commit_time_no_tz=${commit_time::19}
+
+            git checkout $commit_id
+            pip install -e .
+            
+            echo "------------------------"
+            echo "commit_id: $commit_id"
+            echo "commit_title: $commit_title"
+            echo "commit_time: $commit_time_no_tz"
+            echo "vllm branch: ${{ matrix.vllm_branch }}"
+            echo "vllm-ascend branch: ${{ matrix.vllm_ascend_branch }}"
+            echo "------------------------"
+
+            bash benchmarks/scripts/run-performance-benchmarks.sh
+            # send the result to es
+            if [[ "${{ github.event_name }}" != "pull request" ]]; then
+              escli add --vllm_branch ${{ matrix.vllm_branch }} \
+              --vllm_ascend_branch ${{ matrix.vllm_ascend_branch }} \
+              --commit_id $commit_id \
+              --commit_title "$commit_title" \
+              --created_at "$commit_time_no_tz" \
+              --res_dir ./benchmarks/results 
+              rm -rf ./benchmarks/results
+            fi
+          done < commit_log.txt
