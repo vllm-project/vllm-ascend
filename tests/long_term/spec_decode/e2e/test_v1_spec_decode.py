@@ -103,7 +103,6 @@ def test_ngram_correctness(
         assert matches > int(0.7 * len(ref_outputs))
         del spec_llm
 
-
 @pytest.mark.parametrize("use_eagle3", [False, True], ids=["eagle", "eagle3"])
 def test_eagle_correctness(
     monkeypatch: pytest.MonkeyPatch,
@@ -116,14 +115,15 @@ def test_eagle_correctness(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using eagle speculative decoding.
     '''
-    pytest.skip("Not current support for the test.")
+    if not use_eagle3:
+        pytest.skip("Not current support for the test.")
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
-        ref_llm = LLM(model=model_name, max_model_len=2048)
+        ref_llm = LLM(model=model_name, max_model_len=2048, enforce_eager=True)
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
-
+    
         spec_model_name = eagle3_model_name(
         ) if use_eagle3 else eagle_model_name()
         spec_llm = LLM(
@@ -132,7 +132,7 @@ def test_eagle_correctness(
             speculative_config={
                 "method": "eagle3" if use_eagle3 else "eagle",
                 "model": spec_model_name,
-                "num_speculative_tokens": 3,
+                "num_speculative_tokens": 2,
                 "max_model_len": 2048,
             },
             max_model_len=2048,
