@@ -101,7 +101,6 @@ def create_scheduler(
         scheduler_config,
         model_config,
         cache_config,
-        lora_config=None,
         kv_cache_config=kv_cache_config,
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),

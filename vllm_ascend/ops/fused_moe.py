@@ -25,6 +25,7 @@ from vllm.distributed import (GroupCoordinator,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import get_dp_group
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEParallelConfig, MoEConfig, UnquantizedFusedMoEMethod,
     determine_expert_map)
@@ -588,6 +589,12 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.local_batch_size = self.global_batch_size // self.ep_size
 
+        self.enable_graph_mode = False
+        additional_config = get_current_vllm_config().additional_config
+        if additional_config:
+            self.enable_graph_mode = additional_config.get(
+                "enable_graph_mode", False)
+
         try:
             device_group = ep_group.device_group
             # TODO: Try local_rank = ep_group.rank_in_group
@@ -665,7 +672,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 top_k=top_k,
                 expert_map=expert_map,
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name)
-        elif get_ep_group().world_size == 1:
+        elif self.enable_graph_mode or get_ep_group().world_size == 1:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
                                  w2=layer.w2_weight,
@@ -771,6 +778,13 @@ class AscendFusedMoE(FusedMoE):
 
             self.local_num_experts, self.expert_map = (self.global_num_experts,
                                                        None)
+
+        self.enable_graph_mode = False
+        additional_config = get_current_vllm_config().additional_config
+        if additional_config:
+            self.enable_graph_mode = additional_config.get(
+                "enable_graph_mode", False)
+
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
@@ -808,7 +822,14 @@ class AscendFusedMoE(FusedMoE):
                 in ("GPTQMarlinMoEMethod", "CompressedTensorsWNA16MoEMethod")):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
+        self.ep_group = get_ep_group()
         self.quant_method.create_weights(layer=self, **moe_quant_params)
+
+        self.enable_graph_mode = False
+        additional_config = get_current_vllm_config().additional_config
+        if additional_config:
+            self.enable_graph_mode = additional_config.get(
+                "enable_graph_mode", False)
 
     def forward(self,
                 hidden_states: torch.Tensor,
@@ -823,11 +844,32 @@ class AscendFusedMoE(FusedMoE):
         else:
             real_top_k = self.top_k
 
-        if VLLM_ENABLE_MC2 and not is_prefill:
-            ...
+        #                MC2   ag/rs  broadcast/all_reduce
+        #  prefill_req     x      x            √
+        #  decode_req     √      x            √
+        #  graph_mode     √      √            x
+        if self.dp_size > 1:
+            if VLLM_ENABLE_MC2 and not is_prefill:
+                ...
+            elif self.enable_graph_mode:
+                if USING_LCCL_COM:  # type: ignore
+                    hidden_states = get_dp_group().all_gather(
+                        hidden_states, 0, False)
+                    router_logits = get_dp_group().all_gather(
+                        router_logits, 0, False)
+                elif self.enable_graph_mode and not is_prefill:
+                    hidden_states = get_dp_group().all_gather(hidden_states, 0)
+                    router_logits = get_dp_group().all_gather(router_logits, 0)
+                else:
+                    cu_tokens_across_dp_cpu = get_forward_context(
+                    ).dp_metadata.cu_tokens_across_dp_cpu
+                    hidden_states = self.naive_multicast(
+                        hidden_states, cu_tokens_across_dp_cpu)
+                    router_logits = self.naive_multicast(
+                        router_logits, cu_tokens_across_dp_cpu)
 
         # Matrix multiply.
-        final_hidden_states = self.quant_method.apply(
+        hidden_states = self.quant_method.apply(
             layer=self,
             x=hidden_states,
             router_logits=router_logits,
@@ -844,11 +886,31 @@ class AscendFusedMoE(FusedMoE):
             is_prefill=is_prefill,
             enable_force_load_balance=enable_force_load_balance)
 
-        if VLLM_ENABLE_MC2 and not is_prefill:
-            ...
+        if self.dp_size > 1:
+            if VLLM_ENABLE_MC2 and not is_prefill:
+                ...
+            elif self.enable_graph_mode:
+                if USING_LCCL_COM:  # type: ignore
+                    hidden_states = dist._functional_collectives.reduce_scatter_tensor(
+                        hidden_states,
+                        "sum",
+                        scatter_dim=0,
+                        group=get_dp_group().device_group)
+                elif self.enable_graph_mode and not is_prefill:
+                    hidden_states = dist._functional_collectives.reduce_scatter_tensor(
+                        hidden_states,
+                        "sum",
+                        scatter_dim=0,
+                        group=get_dp_group().device_group)
+                else:
+                    start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
+                        self.dp_rank - 1]
+                    #print(cu_tokens_across_dp_cpu)
+                    end = cu_tokens_across_dp_cpu[self.dp_rank]
+                    hidden_states = get_dp_group().all_reduce(hidden_states)
+                    hidden_states = hidden_states[start:end, :]
 
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
-            final_hidden_states = tensor_model_parallel_all_reduce(
-                final_hidden_states)
+            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
-        return final_hidden_states
+        return hidden_states
