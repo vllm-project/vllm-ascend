@@ -86,6 +86,8 @@ jobs:
       
       - name: Check env
         run: |
+          echo "HF_ENDPOINT: '${HF_ENDPOINT}'"
+          echo "HF_TOKEN: '${HF_TOKEN}'"
           echo "domain: '${ES_OM_DOMAIN}'"
           echo "authorization: '${ES_OM_AUTHORIZATION}'"
 
