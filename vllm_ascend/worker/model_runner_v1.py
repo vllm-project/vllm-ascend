@@ -240,10 +240,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 device="cpu",
                 pin_memory=True)
 
-        self.inputs_embeds = torch.zeros(
-            (self.max_num_tokens, self.hidden_size),
-            dtype=self.dtype,
-            device=self.device)
+        if self.is_multimodal_model:
+            self.inputs_embeds = torch.zeros(
+                (self.max_num_tokens, self.hidden_size),
+                dtype=self.dtype,
+                device=self.device)
 
         # OPTIMIZATION: Cache the tensors rather than creating them every step.
         self.arange_np: npt.NDArray[np.int32] = np.arange(max(

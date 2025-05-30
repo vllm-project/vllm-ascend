@@ -68,6 +68,7 @@ from vllm.sequence import IntermediateTensors
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+from vllm_ascend.utils import dispose_tensor
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 
@@ -518,8 +519,14 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
+            previous_hidden_states, previous_residual = hidden_states, residual
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
+            # Dispose hidden_states and residual from the previous layer
+            # to save npu memory because they're no longer used.
+            dispose_tensor(previous_hidden_states)
+            dispose_tensor(previous_residual)
+
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
