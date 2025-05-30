@@ -145,10 +145,12 @@ jobs:
 
             bash benchmarks/scripts/run-performance-benchmarks.sh
             # send the result to es
-            escli add --tag $cur_tag \
-            --commit_id $commit_id \
-            --commit_title "$commit_title" \
-            --created_at "$commit_time_no_tz" \
-            --res_dir ./benchmarks/results 
-            rm -rf ./benchmarks/results
+            if [[ "${{ github.event_name }}" != "pull request" ]]; then
+              escli add --tag $cur_tag \
+              --commit_id $commit_id \
+              --commit_title "$commit_title" \
+              --created_at "$commit_time_no_tz" \
+              --res_dir ./benchmarks/results 
+              rm -rf ./benchmarks/results
+            fi
           done < commit_log.txt
