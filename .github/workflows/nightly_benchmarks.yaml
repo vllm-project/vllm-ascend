@@ -79,10 +79,10 @@ jobs:
       #     apt-get update -y
       #     apt-get -y install git jq wget curl lsof gcc g++ cmake libnuma-dev
 
-      - name: Config git
-        run: |
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+      # - name: Config git
+      #   run: |
+      #     git config --global --add safe.directory "$GITHUB_WORKSPACE"
+      #     git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
       
       - name: Check env
         run: |
