@@ -19,7 +19,7 @@
 # Adapted from vllm/model_executor/models/qwen3.py
 # This file is a part of the vllm-ascend project.
 
-from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
