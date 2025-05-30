@@ -111,7 +111,7 @@ jobs:
         with:
           repository: cosdt/elastic-tool
           path: ./elastic_tool
-          ref: main
+          ref: 0.1.0-dev
 
       - name: Install elastic_tool
         working-directory: ./elastic_tool

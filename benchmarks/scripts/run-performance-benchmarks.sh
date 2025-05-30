@@ -1,5 +1,6 @@
 #!/bin/bash
 
+set -e
 
 check_npus() {
   # shellcheck disable=SC2155
@@ -67,6 +68,16 @@ kill_npu_processes() {
 
 }
 
+update_json_field() {
+  local json_file="$1"
+  local field_name="$2"
+  local field_value="$3"
+
+  jq --arg value "$field_value" \
+     --arg key "$field_name" \
+     '.[$key] = $value' "$json_file" > "${json_file}.tmp" && \
+     mv "${json_file}.tmp" "$json_file"
+}
 
 run_latency_tests() {
   # run latency tests using `benchmark_latency.py`
@@ -103,7 +114,9 @@ run_latency_tests() {
 
     # run the benchmark
     eval "$latency_command"
-
+    # echo model_name to result file
+    model_name=$(echo "$latency_params" | jq -r '.model')
+    update_json_field "$RESULTS_FOLDER/${test_name}.json" "model_name" "$model_name"
     kill_npu_processes
 
   done
@@ -144,7 +157,9 @@ run_throughput_tests() {
 
     # run the benchmark
     eval "$throughput_command"
-
+    # echo model_name to result file
+    model_name=$(echo "$throughput_params" | jq -r '.model')
+    update_json_field "$RESULTS_FOLDER/${test_name}.json" "model_name" "$model_name"
     kill_npu_processes
 
   done
@@ -263,7 +278,7 @@ main() {
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
   # turn of the reporting of the status of each request, to clean up the terminal output
   export VLLM_LOG_LEVEL="WARNING"
-
+  
   # set env
   export HF_ENDPOINT="https://hf-mirror.com"
 
