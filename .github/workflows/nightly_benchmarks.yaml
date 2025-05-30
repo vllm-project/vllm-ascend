@@ -83,75 +83,80 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+      
+      - name: Check env
+        run: |
+          echo "domain: '${ES_OM_DOMAIN}'"
+          echo "authorization: '${ES_OM_AUTHORIZATION}'"
 
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ matrix.vllm_ascend_branch }}
+      # - name: Checkout vllm-project/vllm-ascend repo
+      #   uses: actions/checkout@v4
+      #   with:
+      #     ref: ${{ matrix.vllm_ascend_branch }}
           
-      - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v4
-        with:
-          repository: vllm-project/vllm
-          path: ./vllm-empty
-          ref: ${{  matrix.vllm_branch }}
+      # - name: Checkout vllm-project/vllm repo
+      #   uses: actions/checkout@v4
+      #   with:
+      #     repository: vllm-project/vllm
+      #     path: ./vllm-empty
+      #     ref: ${{  matrix.vllm_branch }}
 
-      - name: Install vllm-project/vllm from source
-        working-directory: ./vllm-empty
-        run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
+      # - name: Install vllm-project/vllm from source
+      #   working-directory: ./vllm-empty
+      #   run: |
+      #     VLLM_TARGET_DEVICE=empty pip install -e .
 
-      - name: Install vllm-project/vllm-ascend
-        run: |
-          pip install -e .
-          pip install -r benchmarks/requirements-bench.txt
+      # - name: Install vllm-project/vllm-ascend
+      #   run: |
+      #     pip install -e .
+      #     pip install -r benchmarks/requirements-bench.txt
 
-      - name: Checkout cosdt/elastic-tool
-        uses: actions/checkout@v4
-        with:
-          repository: cosdt/elastic-tool
-          path: ./elastic_tool
-          ref: 0.1.0-dev
+      # - name: Checkout cosdt/elastic-tool
+      #   uses: actions/checkout@v4
+      #   with:
+      #     repository: cosdt/elastic-tool
+      #     path: ./elastic_tool
+      #     ref: 0.1.0-dev
 
-      - name: Install elastic_tool
-        working-directory: ./elastic_tool
-        run: |
-          pip install -e .
+      # - name: Install elastic_tool
+      #   working-directory: ./elastic_tool
+      #   run: |
+      #     pip install -e .
           
-      - name: Collect pr info from vllm-project/vllm-ascend
-        run: |
-          # Only get the pull request which may influences performance
-          git log --pretty=format:"%H %s" -- '**/*.py' ':!docs/*' ':!tests/*' ':!examples/*' > commit_log.txt
-          escli check commit_log.txt
+      # - name: Collect pr info from vllm-project/vllm-ascend
+      #   run: |
+      #     # Only get the pull request which may influences performance
+      #     git log --pretty=format:"%H %s" -- '**/*.py' ':!docs/*' ':!tests/*' ':!examples/*' > commit_log.txt
+      #     escli check commit_log.txt
 
-      - name: Run benchmark iteration
-        run: |
-          while IFS= read -r line || [[ -n "$line" ]]; do
-            commit_id=${line%% *}
-            commit_title=${line#* }
-            commit_time=$(git show -s --format=%cd $commit_hash --date=iso-strict)
-            commit_time_no_tz=$(echo "$commit_time" | sed 's/[+-][0-9][0-9]:[0-9][0-9]$//')
+      # - name: Run benchmark iteration
+      #   run: |
+      #     while IFS= read -r line || [[ -n "$line" ]]; do
+      #       commit_id=${line%% *}
+      #       commit_title=${line#* }
+      #       commit_time=$(git show -s --format=%cd $commit_hash --date=iso-strict)
+      #       commit_time_no_tz=$(echo "$commit_time" | sed 's/[+-][0-9][0-9]:[0-9][0-9]$//')
 
-            git checkout $commit_id
-            pip install -e .
+      #       git checkout $commit_id
+      #       pip install -e .
             
-            echo "------------------------"
-            echo "commit_id: $commit_id"
-            echo "commit_title: $commit_title"
-            echo "commit_time: $commit_time_no_tz"
-            echo "vllm branch: ${{ matrix.vllm_branch }}"
-            echo "vllm-ascend branch: ${{ matrix.vllm_ascend_branch }}"
-            echo "------------------------"
+      #       echo "------------------------"
+      #       echo "commit_id: $commit_id"
+      #       echo "commit_title: $commit_title"
+      #       echo "commit_time: $commit_time_no_tz"
+      #       echo "vllm branch: ${{ matrix.vllm_branch }}"
+      #       echo "vllm-ascend branch: ${{ matrix.vllm_ascend_branch }}"
+      #       echo "------------------------"
 
-            bash benchmarks/scripts/run-performance-benchmarks.sh
-            # send the result to es
-            if [[ "${{ github.event_name }}" != "pull request" ]]; then
-              escli add --vllm_branch ${{ matrix.vllm_branch }} \
-              --vllm_ascend_branch ${{ matrix.vllm_ascend_branch }} \
-              --commit_id $commit_id \
-              --commit_title "$commit_title" \
-              --created_at "$commit_time_no_tz" \
-              --res_dir ./benchmarks/results 
-              rm -rf ./benchmarks/results
-            fi
-          done < commit_log.txt
+      #       bash benchmarks/scripts/run-performance-benchmarks.sh
+      #       # send the result to es
+      #       if [[ "${{ github.event_name }}" != "pull request" ]]; then
+      #         escli add --vllm_branch ${{ matrix.vllm_branch }} \
+      #         --vllm_ascend_branch ${{ matrix.vllm_ascend_branch }} \
+      #         --commit_id $commit_id \
+      #         --commit_title "$commit_title" \
+      #         --created_at "$commit_time_no_tz" \
+      #         --res_dir ./benchmarks/results 
+      #         rm -rf ./benchmarks/results
+      #       fi
+      #     done < commit_log.txt
