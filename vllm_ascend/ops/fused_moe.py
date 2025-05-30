@@ -33,6 +33,7 @@ from vllm.model_executor.layers.quantization.base_config import \
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
+from vllm_ascend.utils import npu_stream_switch, npu_wait_tensor
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 USING_LCCL_COM: bool = envs_ascend.USING_LCCL_COM
@@ -47,6 +48,7 @@ def fused_experts_with_mc2(
     top_k: int,
     expert_map: torch.Tensor = None,
     moe_all_to_all_group_name: Optional[str] = None,
+    shared_experts: Optional[torch.nn.Module] = None,
 ) -> torch.Tensor:
     global_bs = 0
     moe_expert_num = len(expert_map)
@@ -83,10 +85,19 @@ def fused_experts_with_mc2(
     }
     kwargs.update(stage1_kwargs)
 
+    if shared_experts is not None:
+        with npu_stream_switch("expert_secondary"):
+            shared_gate_up, _ = shared_experts.gate_up_proj(hidden_states)
+
     output = torch_npu.npu_moe_distribute_dispatch(**kwargs)
     # comm_stream.wait_stream(torch.npu.current_stream())
     expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[
         0:5]
+
+    if shared_experts is not None:
+        with npu_stream_switch("expert_secondary"):
+            npu_wait_tensor(shared_gate_up, expand_x)
+            shared_act = shared_experts.act_fn(shared_gate_up)
 
     w1 = w1.transpose(1, 2)
     expert_token_nums = torch.cumsum(expert_token_nums,
@@ -118,6 +129,11 @@ def fused_experts_with_mc2(
 
     down_out_list = torch.cat(down_out_list, dim=0)
 
+    if shared_experts is not None:
+        with npu_stream_switch("expert_secondary"):
+            npu_wait_tensor(shared_act, down_out_list)
+            shared_hidden_states, _ = shared_experts.down_proj(shared_act)
+
     # moeCombine
     kwargs = {
         "expand_x": down_out_list,
@@ -145,7 +161,7 @@ def fused_experts_with_mc2(
 
     hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs)
 
-    return hidden_states
+    return hidden_states, shared_hidden_states if shared_experts is not None else None
 
 
 # currently expert parallelism implemented with all2all
@@ -624,6 +640,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = False,
+        shared_experts: Optional[torch.nn.Module] = None,
         **kwargs,
     ):
         # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
@@ -664,28 +681,36 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 topk_ids=topk_ids,
                 top_k=top_k,
                 expert_map=expert_map,
-                moe_all_to_all_group_name=self.moe_all_to_all_group_name)
+                moe_all_to_all_group_name=self.moe_all_to_all_group_name,
+                shared_experts=shared_experts,
+            )
         elif get_ep_group().world_size == 1:
-            return fused_experts(hidden_states=x,
-                                 w1=layer.w13_weight,
-                                 w2=layer.w2_weight,
-                                 topk_weights=topk_weights,
-                                 topk_ids=topk_ids,
-                                 top_k=top_k,
-                                 expert_map=expert_map)
+            router_hidden_states = fused_experts(hidden_states=x,
+                                                 w1=layer.w13_weight,
+                                                 w2=layer.w2_weight,
+                                                 topk_weights=topk_weights,
+                                                 topk_ids=topk_ids,
+                                                 top_k=top_k,
+                                                 expert_map=expert_map)
         else:
             # The current implementation of deepseek moe splits hidden_states
             # according to tp_size before they are feed into fused_moe module.
             # Therefore, all2all is needed no matter how dp/tp is set so as to
             # dispatch/combine tokens.
-            return fused_experts_with_all2all(hidden_states=x,
-                                              w1=layer.w13_weight,
-                                              w2=layer.w2_weight,
-                                              topk_weights=topk_weights,
-                                              topk_ids=topk_ids,
-                                              top_k=top_k,
-                                              expert_map=expert_map,
-                                              ep_group=get_ep_group())
+            router_hidden_states = fused_experts_with_all2all(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                top_k=top_k,
+                expert_map=expert_map,
+                ep_group=get_ep_group())
+
+        if shared_experts is None:
+            return router_hidden_states
+        else:
+            return router_hidden_states, shared_experts(x)
 
 
 class AscendFusedMoE(FusedMoE):
@@ -815,7 +840,8 @@ class AscendFusedMoE(FusedMoE):
                 router_logits: torch.Tensor,
                 is_prefill: bool,
                 enable_force_load_balance: bool = False,
-                top_k=None):
+                top_k: Optional[int] = None,
+                shared_experts: Optional[torch.nn.Module] = None):
         assert self.quant_method is not None
 
         if top_k:
@@ -842,7 +868,9 @@ class AscendFusedMoE(FusedMoE):
             scoring_func=self.scoring_func,
             e_score_correction_bias=self.e_score_correction_bias,
             is_prefill=is_prefill,
-            enable_force_load_balance=enable_force_load_balance)
+            enable_force_load_balance=enable_force_load_balance,
+            shared_experts=shared_experts,
+        )
 
         if VLLM_ENABLE_MC2 and not is_prefill:
             ...
