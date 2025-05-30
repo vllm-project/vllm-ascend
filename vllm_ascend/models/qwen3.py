@@ -19,7 +19,7 @@
 # Adapted from vllm/model_executor/models/qwen3.py
 # This file is a part of the vllm-ascend project.
 
-from typing import Iterable, List, Optional, Set, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -398,6 +398,16 @@ class Qwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             "up_proj",
         ],
     }
+
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "qkv_proj",
+        "o_proj",
+        "gate_up_proj",
+        "down_proj",
+    ]
+    embedding_modules: Dict[str, str] = {}
+    embedding_padding_modules: List[str] = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
