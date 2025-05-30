@@ -21,15 +21,31 @@ on:
   workflow_dispatch:
     inputs:
       vllm-version:
-        description: 'what vllm version to accuracy test?'
+        description: 'vllm version:'
         required: true
-        type: string
+        type: choice
+        options:
+          - main
+          - v0.9.0
+          - v0.8.5.post1
+          - v0.8.5
+          - v0.8.4
+          - v0.7.3
       vllm-ascend-version:
-        description: 'what vllm-ascend version to accuracy test?'
+        description: 'vllm-ascend version:'
         required: true
-        type: string
+        type: choice
+        options:
+          - main
+          - v0.7.3-dev
+          - v0.7.3
+          - v0.8.5rc1
+          - v0.8.4rc2
+          - v0.8.4rc1
+          - v0.7.3rc2
+          - v0.7.3rc1
       models:
-        description: 'choose model(all/Qwen2.5-7B-Instruct/Llama-3.1-8B-Instruct/Qwen2.5-VL-7B-Instruct/Qwen3-8B-Base)'
+        description: 'model:'
         required: true
         type: choice
         options:
@@ -111,37 +127,15 @@ jobs:
           ref: ${{ github.event.inputs.vllm-ascend-version }}
           fetch-depth: 0
 
-      - name: Install pta
-        run: |
-          if [ ! -d /root/.cache/pta ]; then
-            mkdir -p /root/.cache/pta
-          fi
-          if [ ! -f /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl ]; then
-            cd /root/.cache/pta
-            rm -rf pytorch_v2.5.1_py310*
-            wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.5.1/20250320.3/pytorch_v2.5.1_py310.tar.gz
-            tar -zxvf pytorch_v2.5.1_py310.tar.gz
-          fi
-          pip install /root/.cache/pta/torch_npu-2.5.1.dev20250320-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl
-
       - name: Install vllm-project/vllm-ascend
         working-directory: ./vllm-ascend
         run: |
           pip install -r requirements-dev.txt
           pip install -e .
           
-      - name: Checkout EleutherAI/lm-evaluation-harness repo
-        uses: actions/checkout@v4
-        with:
-          repository: EleutherAI/lm-evaluation-harness
-          path: ./lm-eval
-          fetch-depth: 0
-
       - name: Install EleutherAI/lm-evaluation-harness
-        working-directory: ./lm-eval
         run: |
-            pip install -e .
-            pip install ray datasets==2.16.0
+            pip install lm-eval ray datasets==2.16.0
           
       - name: Collect version info
         run: |
