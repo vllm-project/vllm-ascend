@@ -31,10 +31,14 @@ from tests.conftest import VllmRunner
 
 MODELS = [
     "Qwen/Qwen2.5-0.5B-Instruct",
-    "vllm-ascend/Qwen2.5-0.5B-Instruct-w8a8",
     "Qwen/Qwen3-0.6B-Base",
 ]
 MULTIMODALITY_MODELS = ["Qwen/Qwen2.5-VL-3B-Instruct"]
+
+QUANTIZATION_MODELS = [
+    "vllm-ascend/Qwen2.5-0.5B-Instruct-W8A8-new",
+    "vllm-ascend/DeepSeek-V2-Lite-W8A8"
+]
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 
@@ -54,6 +58,21 @@ def test_models(model: str, dtype: str, max_tokens: int) -> None:
                     dtype=dtype,
                     enforce_eager=True,
                     gpu_memory_utilization=0.7) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@pytest.mark.parametrize("model", QUANTIZATION_MODELS)
+@pytest.mark.parametrize("max_tokens", [5])
+def test_quantization_models(model: str, max_tokens: int) -> None:
+    prompt = "The following numbers of the sequence " + ", ".join(
+        str(i) for i in range(1024)) + " are:"
+    example_prompts = [prompt]
+
+    with VllmRunner(model,
+                    max_model_len=8192,
+                    enforce_eager=False,
+                    gpu_memory_utilization=0.7,
+                    quantization="ascend") as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
