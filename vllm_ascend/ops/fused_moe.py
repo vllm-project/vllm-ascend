@@ -36,6 +36,7 @@ from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 USING_LCCL_COM: bool = envs_ascend.USING_LCCL_COM
+VLLM_ENABLE_FIX_ROUTE: bool = envs_ascend.VLLM_ENABLE_FIX_ROUTE
 
 
 def fused_experts_with_mc2(
@@ -50,6 +51,14 @@ def fused_experts_with_mc2(
 ) -> torch.Tensor:
     global_bs = 0
     moe_expert_num = len(expert_map)
+
+    rank = torch.distributed.get_rank()
+    if VLLM_ENABLE_FIX_ROUTE:
+        step = hidden_states.shape[0] * top_k
+        uniform_topk_list = [(i + rank) % moe_expert_num
+                             for i in range(rank * step, (rank + 1) * step)]
+        topk_ids = torch.Tensor(uniform_topk_list).int().view(
+            hidden_states.shape[0], -1).to(hidden_states.device)
     kwargs = {
         "x": hidden_states,
         "expert_ids": topk_ids,
@@ -58,8 +67,6 @@ def fused_experts_with_mc2(
         "moe_expert_num": moe_expert_num,
         "global_bs": global_bs,
     }
-
-    rank = torch.distributed.get_rank()
 
     quant_mode = 0
     ep_group = get_ep_group().device_group
@@ -89,15 +96,20 @@ def fused_experts_with_mc2(
         0:5]
 
     w1 = w1.transpose(1, 2)
-    expert_token_nums = torch.cumsum(expert_token_nums,
-                                     dim=0,
-                                     dtype=torch.int64)
-    group_list = expert_token_nums.to(torch.int64)
+
+    if VLLM_ENABLE_FIX_ROUTE:
+        uniform_group_list = hidden_states.shape[0] * \
+            all_to_all_group_size * top_k // moe_expert_num
+        group_list = torch.Tensor([uniform_group_list] *
+                                  w1.shape[0]).long().to(hidden_states.device)
+    else:
+        group_list = expert_token_nums
     gate_up_out_list = torch_npu.npu_grouped_matmul(
         x=[expand_x],
         weight=[w1],
         split_item=2,
-        group_list_type=0,
+        # 1 means count mode, to avoid cumulative operation of the group list
+        group_list_type=1,
         group_type=0,
         group_list=group_list,
     )
@@ -111,7 +123,7 @@ def fused_experts_with_mc2(
         x=[gate_up_out],
         weight=[w2],
         split_item=2,
-        group_list_type=0,
+        group_list_type=1,
         group_type=0,
         group_list=group_list,
     )
