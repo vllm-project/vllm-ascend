@@ -133,7 +133,7 @@ jobs:
             commit_id=${line%% *}
             commit_title=${line#* }
             commit_time=$(git show -s --format=%cd $commit_hash --date=iso-strict)
-            commit_time_no_tz=$(echo "$commit_time" | sed 's/[+-][0-9][0-9]:[0-9][0-9]$//')
+            commit_time_no_tz=${commit_time::19}
 
             git checkout $commit_id
             pip install -e .
