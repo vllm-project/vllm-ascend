@@ -230,8 +230,7 @@ class CustomDeepseekV2MoE(nn.Module):
             enable_force_load_balance = False
         num_tokens, hidden_dim = hidden_states.shape
 
-        if self.n_shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
+        old_hidden_states = hidden_states.detach()
 
         if self.tp_size > 1:
             # pass
@@ -269,6 +268,9 @@ class CustomDeepseekV2MoE(nn.Module):
                 final_hidden_states = final_hidden_states[:num_tokens]
         else:
             final_hidden_states = router_hidden_states
+
+        if self.n_shared_experts is not None:
+            shared_output = self.shared_experts(old_hidden_states)
 
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output

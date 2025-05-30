@@ -1,0 +1,100 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+from typing import Optional
+
+import torch
+from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler, random_sample
+from vllm.v1.sample.sampler import Sampler
+
+from vllm_ascend import envs
+
+
+def apply_min_p(
+    self,
+    logits: torch.Tensor,
+    min_p: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Filters logits using adaptive probability thresholding.
+    """
+    # Convert logits to probability distribution
+    probability_values = torch.nn.functional.softmax(logits, dim=-1)
+    # Calculate maximum probabilities per sequence
+    max_probabilities = torch.amax(probability_values, dim=-1, keepdim=True)
+    # Reshape min_p for broadcasting
+    adjusted_min_p = min_p.unsqueeze(1) * max_probabilities
+    # Identify valid tokens using threshold comparison
+    # Apply mask using boolean indexing
+    logits = logits.masked_fill(probability_values < adjusted_min_p,
+                                -float('inf'))
+    return logits
+
+
+def _apply_top_k_top_p(
+    logits: torch.Tensor,
+    p: torch.Tensor,
+    k: torch.Tensor,
+) -> torch.Tensor:
+    batch_size, vocab_size = logits.shape
+    logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
+
+    # Apply top-k.
+    boundary = logits_sort.gather(1, (vocab_size - k).unsqueeze(dim=1))
+    top_k_mask = logits_sort < boundary
+    logits_sort.masked_fill_(top_k_mask, -float("inf"))
+
+    # Apply top-p.
+    cutoff = top_k_mask.sum(dim=-1).min()
+    probs_sort = logits_sort.softmax(dim=-1)[:, cutoff:]
+    probs_sum = probs_sort.cumsum(dim=-1)
+    top_p_mask = probs_sum > 1 - p.unsqueeze(dim=1)
+
+    top_p_mask[:, -1] = True
+    strides = torch.arange(0,
+                           batch_size * vocab_size,
+                           vocab_size,
+                           device=logits.device)
+    flatten_idx = logits_idx[:, cutoff:] + strides.unsqueeze(dim=1)
+    valid_idx = torch.masked_select(flatten_idx, top_p_mask)
+    logits_flatten = logits.flatten()
+    valid_logits = torch.index_select(logits_flatten, 0, valid_idx)
+    logits = torch.empty_like(logits_flatten).fill_(-float("inf"))
+    logits[valid_idx] = valid_logits
+    return logits.reshape(batch_size, vocab_size)
+
+
+def topk_topp_forward_native(
+    self,
+    logits: torch.Tensor,
+    generators: dict[int, torch.Generator],
+    k: Optional[torch.Tensor],
+    p: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """
+    PyTorch-native implementation of top-k and top-p sampling.
+
+    The logits tensor may be updated in-place.
+    """
+    logits = _apply_top_k_top_p(logits, k, p)
+    probs = logits.softmax(dim=-1, dtype=torch.float32)
+    return random_sample(probs, generators)
+
+
+Sampler.apply_min_p = apply_min_p
+if envs.VLLM_ENABLE_TOPK_OPTIMZE:
+    TopKTopPSampler.forward_native = topk_topp_forward_native
