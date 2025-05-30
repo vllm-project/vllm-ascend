@@ -130,13 +130,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
 
-        additional_config = vllm_config.additional_config
-        if additional_config and additional_config.get(
-                "ascend_scheduler_config", None) is not None:
-            self.use_v0_scheduler = True
-        else:
-            self.use_v0_scheduler = False
-
         self.graph_block_tables = np.zeros(
             (self.vllm_config.scheduler_config.max_num_seqs,
              (self.model_config.max_model_len + self.block_size - 1) //
@@ -319,15 +312,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.attn_mask_len, self.dtype)
 
         self.sampler = Sampler()
-        self.enable_torchair_graph_mode = False
-        self.use_cached_npu_graph = False
-        additional_config = vllm_config.additional_config
-        if additional_config:
-            self.enable_torchair_graph_mode = additional_config.get(
-                "enable_graph_mode",
-                False) and self.vllm_config.model_config.use_mla
-            self.use_cached_npu_graph = additional_config.get(
-                "use_cached_npu_graph", False)
+
+        from vllm_ascend.ascend_config import ASCEND_CONFIG
+        self.enable_torchair_graph_mode = ASCEND_CONFIG.torchair_graph_config.enabled and self.vllm_config.model_config.use_mla
+        self.use_cached_npu_graph = ASCEND_CONFIG.torchair_graph_config.use_cached_graph
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -581,13 +569,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                block_offsets,
                out=self.slot_mapping_np[:total_num_scheduled_tokens])
 
+        from vllm_ascend.ascend_config import ASCEND_CONFIG
         if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
             attn_state = AscendAttentionState.PrefillNoCache
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
             attn_state = AscendAttentionState.DecodeOnly
         # splitfuse
-        elif not self.use_v0_scheduler or self.chunked_prefill_enabled:
+        elif not ASCEND_CONFIG.ascend_scheduler_config.enabled or self.chunked_prefill_enabled:
             attn_state = AscendAttentionState.ChunkedPrefill
         else:
             attn_state = AscendAttentionState.PrefillCacheHit

@@ -218,7 +218,9 @@ def test_mtp_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
     "common_llm_kwargs",
     [{
         "additional_config": {
-            'enable_graph_mode': True,
+            'torchair_graph_config': {
+                "enabled": True,
+            },
         },
 
         # Print spec metrics.
@@ -262,7 +264,9 @@ def test_mtp_e2e_greedy_correctness_torchair_graph(
     "common_llm_kwargs",
     [{
         "additional_config": {
-            'enable_graph_mode': True,
+            'torchair_graph_config': {
+                "enabled": True,
+            },
         },
 
         # Print spec metrics.
