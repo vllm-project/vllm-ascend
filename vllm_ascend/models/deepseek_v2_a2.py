@@ -625,6 +625,84 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             self.enable_graph_mode = additional_config.get(
                 "enable_graph_mode", False)
 
+    def post_attention_process(self, hidden_states, residual, is_prefill):
+        if is_prefill or not self.enable_graph_mode:
+            if self.dp_size <= 1 or self.layer_idx < self.config.first_k_dense_replace:
+                hidden_states = get_tp_group().all_reduce(hidden_states)
+                hidden_states, residual = self.post_attention_layernorm(
+                    hidden_states, residual)
+            else:
+                # padding hidden_states
+                hidden_states = padding_aligned_tp(self.dp_rank, hidden_states)
+                # RS hidden_states
+                hidden_states = dist._functional_collectives.reduce_scatter_tensor(
+                    hidden_states,
+                    "sum",
+                    scatter_dim=0,
+                    group=get_tp_group().device_group)
+                if self.layer_idx == self.config.first_k_dense_replace:
+                    # padding and slice residual
+                    reduce_scatter_tokens = hidden_states.size(0)
+                    residual = F.pad(residual, (0, 0, 0, reduce_scatter_tokens * self.tp_size - residual.size(0)))
+                    start = self.tp_rank_in_group * reduce_scatter_tokens
+                    residual = residual[start:start + reduce_scatter_tokens]
+                # post layernorm
+                hidden_states, residual = self.post_attention_layernorm(
+                    hidden_states, residual)
+                # 全局 all_gather
+                hidden_states = get_wp_group().all_gather(hidden_states, 0)
+                # unpad
+                hidden_states = unpadding_aligned_tp(hidden_states)
+
+        else:
+            if self.tp_size > 1:
+                hidden_states = get_tp_group().all_reduce(hidden_states)
+            if self.enable_graph_mode and not envs_ascend.VLLM_ENABLE_MC2:
+                hidden_states = get_dp_group().all_gather(hidden_states, 0)
+            hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        return hidden_states, residual
+
+    def post_moe_process(self, shared_output, hidden_states, residual, is_prefill):
+        if is_prefill or not self.enable_graph_mode:
+            hidden_states = shared_output + hidden_states
+            if self.dp_size <= 1:
+                hidden_states = get_wp_group().all_reduce(hidden_states)
+                return hidden_states, None
+            hidden_states = padding_aligned_wp(hidden_states, is_prefill, self.layer_idx)
+
+            # RS hidden_states
+            hidden_states = dist._functional_collectives.reduce_scatter_tensor(
+                hidden_states,
+                "sum",
+                scatter_dim=0,  
+                group=get_wp_group().device_group)
+            # add residual
+            hidden_states = hidden_states + residual
+            residual = hidden_states
+            # 全局 all_gather
+            hidden_states = get_wp_group().all_gather(hidden_states, 0)
+            # unpad
+            hidden_states = unpadding_aligned_wp(self.dp_rank, hidden_states)
+            if self.layer_idx == self.num_hidden_layers - 1:
+                residual = None
+            return hidden_states, residual
+        else:
+            if envs_ascend.VLLM_ENABLE_MC2:
+                shared_output = self.shared_experts(hidden_states, is_prefill = False, reduce_results=True)
+                num_tokens, hidden_dim = hidden_states.shape
+                final_hidden_states = torch.zeros([num_tokens, hidden_dim],
+                                                dtype=self.params_dtype,
+                                                device="npu")
+                dist.all_gather_into_tensor(final_hidden_states, hidden_states,
+                                            self.tp_group)
+                hidden_states = final_hidden_states
+                hidden_states = shared_output + final_hidden_states
+                hidden_states = hidden_states + residual
+            else:
+                hidden_states = shared_output + hidden_states
+                hidden_states = get_wp_group().all_reduce(hidden_states)
+                hidden_states = hidden_states + residual
+            return hidden_states, None
 
     def forward(
         self,
