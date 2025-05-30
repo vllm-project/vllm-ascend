@@ -92,6 +92,7 @@ jobs:
           echo "authorization: '${ES_OM_AUTHORIZATION}'"
 
           echo "secrets: '${{ secrets.ES_OM_DOMAIN }}' '${{ secrets.ES_OM_AUTHORIZATION }}'"
+          sleep 100
 
       # - name: Checkout vllm-project/vllm-ascend repo
       #   uses: actions/checkout@v4
