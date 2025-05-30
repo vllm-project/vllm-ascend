@@ -20,6 +20,10 @@ def get_etp_group() -> GroupCoordinator:
         "expert tensor parallel group is not initialized")
     return _ETP
 
+def get_wp_group() -> GroupCoordinator:
+    assert _WP is not None, (
+        "world group is not initialized")
+    return _WP
 
 def init_ascend_model_parallel(
     tensor_model_parallel_size: int = 1,
@@ -59,6 +63,14 @@ def init_ascend_model_parallel(
                                      backend,
                                      group_name="etp")
 
+    global _WP
+    all_ranks = torch.arange(world_size)
+    group_ranks = all_ranks.view(-1, world_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
+    _WP = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank,
+                                    backend,
+                                    group_name="wp")
 
 def destory_ascend_model_parallel():
     global _EP
@@ -70,3 +82,8 @@ def destory_ascend_model_parallel():
     if _ETP:
         _ETP.destroy()
     _ETP = None
+
+    global _WP
+    if _WP:
+        _WP.destroy()
+    _WP = None
