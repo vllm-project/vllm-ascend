@@ -257,6 +257,11 @@ cleanup() {
   rm -rf ./vllm_benchmarks
 }
 
+cleanup_on_error() {
+  echo "An error occurred. Cleaning up results folder..."
+  rm -rf $RESULTS_FOLDER
+}
+
 get_benchmarks_scripts() {
   git clone -b main --depth=1 https://github.com/vllm-project/vllm.git && \
   mv vllm/benchmarks vllm_benchmarks
@@ -292,6 +297,7 @@ main() {
   declare -g RESULTS_FOLDER=results
   mkdir -p $RESULTS_FOLDER
 
+  trap cleanup_on_error ERR
   ensure_sharegpt_downloaded
   # benchmarks
   run_serving_tests $QUICK_BENCHMARK_ROOT/tests/serving-tests.json

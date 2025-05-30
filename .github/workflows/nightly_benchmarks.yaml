@@ -126,7 +126,6 @@ jobs:
 
       - name: Run benchmark iteration
         run: |
-          cur_tag=$(git branch --show-current)
           while IFS= read -r line || [[ -n "$line" ]]; do
             commit_id=$(awk '{print $1}' <<< "$line")
             commit_title=$(awk '{$1=""; print substr($0, 2)}' <<< "$line")
@@ -140,13 +139,15 @@ jobs:
             echo "commit_id: $commit_id"
             echo "commit_title: $commit_title"
             echo "commit_time: $commit_time_no_tz"
-            echo "cur_tag: $cur_tag"
+            echo "vllm branch: ${{ matrix.vllm_branch }}"
+            echo "vllm-ascend branch: ${{ matrix.vllm_ascend_branch }}"
             echo "------------------------"
 
             bash benchmarks/scripts/run-performance-benchmarks.sh
             # send the result to es
             if [[ "${{ github.event_name }}" != "pull request" ]]; then
-              escli add --tag $cur_tag \
+              escli add --vllm_branch ${{ matrix.vllm_branch }} \
+              --vllm_ascend_branch ${{ matrix.vllm_ascend_branch }} \
               --commit_id $commit_id \
               --commit_title "$commit_title" \
               --created_at "$commit_time_no_tz" \
