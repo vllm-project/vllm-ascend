@@ -15,20 +15,20 @@
 # limitations under the License.
 #
 
-name: 'run benchmarks main'
+name: 'Benchmarks / Performance'
+# This workflow runs nightly benchmarks for vllm-ascend.
 
 on:
   schedule:
+    # Run at 24:00 everyday
     - cron: '00 16 * * *'
   workflow_dispatch:
-  
-  # after merged, secrets will be available
-  # pull_request:
-  #   branches:
-  #       - 'main'
-  #       - '*-dev'
-  #   paths:
-  #       - '.github/workflows/nightly_benchmarks.yaml'
+  pull_request:
+    branches:
+        - 'main'
+        - '*-dev'
+    paths:
+        - '.github/workflows/nightly_benchmarks.yaml'
 
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -40,7 +40,7 @@ defaults:
 
 jobs:
   test:
-    name: run benchmarks main
+    name: Benchmarks/vLLM=${{ matrix.vllm_branch }}, vLLM-Ascend=${{ matrix.vllm_ascend_branch }}
     runs-on: 'linux-arm64-npu-static-8'
     strategy:
       matrix:
@@ -64,6 +64,7 @@ jobs:
       env:
         HF_ENDPOINT: https://hf-mirror.com
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        HF_HOME: /github/home/.cache/huggingface
         ES_OM_DOMAIN: ${{ secrets.ES_OM_DOMAIN }}
         ES_OM_AUTHORIZATION: ${{ secrets.ES_OM_AUTHORIZATION }}
     steps:
@@ -109,23 +110,30 @@ jobs:
           pip install -e .
           pip install -r benchmarks/requirements-bench.txt
 
-      - name: Checkout cosdt/elastic-tool
-        uses: actions/checkout@v4
-        with:
-          repository: cosdt/elastic-tool
-          path: ./elastic_tool
-          ref: 0.1.0-dev
+      # - name: Checkout cosdt/elastic-tool
+      #   uses: actions/checkout@v4
+      #   with:
+      #     repository: cosdt/elastic-tool
+      #     path: ./elastic_tool
+      #     ref: 0.1.0-dev
 
-      - name: Install elastic_tool
-        working-directory: ./elastic_tool
-        run: |
-          pip install -e .
+      # - name: Install elastic_tool
+      #   working-directory: ./elastic_tool
+      #   run: |
+      #     pip install -e .
           
       - name: Collect pr info from vllm-project/vllm-ascend
         run: |
           # Only get the pull request which may influences performance
-          git log --pretty=format:"%H %s" -- '**/*.py' ':!docs/*' ':!tests/*' ':!examples/*' > commit_log.txt
-          escli check commit_log.txt
+          # git log --pretty=format:"%H %s" -- '**/*.py' ':!docs/*' ':!tests/*' ':!examples/*' > commit_log.txt
+          # escli check commit_log.txt
+
+          # make a fake commit log for testing
+          printf "%s\n" \
+          "507ae627cad68d93c62adf3c2409f4ff10a25536 feat: support compile torchair graph while warming up (#839)" \
+          "5a1689fc648c8afa04ee040bf1b3526a6fe3d75e [Fix] Fix update_aclgraph_sizes when running MoE models (#913)" \
+          "3442fbdb235b4c6d72c2bc64a49707a7bd89958e [1/N][UT][v1 MTP] add basic v1 mtp features (#890)" \
+          > commit_log.txt
 
       - name: Run benchmark iteration
         run: |
