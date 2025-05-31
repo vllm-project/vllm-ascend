@@ -27,7 +27,6 @@ on:
     paths:
       - '*.txt'
       - '**/*.py'
-      - '.github/workflows/vllm_ascend_test.yaml'
       - '!docs/**'
       - 'pytest.ini'
       - '!benchmarks/**'
