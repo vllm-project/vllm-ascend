@@ -290,6 +290,7 @@ main() {
   # prepare for benchmarking
   cd benchmarks || exit 1
   get_benchmarks_scripts
+  python3 scripts/patch_benchmark_dataset.py
   trap cleanup EXIT
 
   QUICK_BENCHMARK_ROOT=./
