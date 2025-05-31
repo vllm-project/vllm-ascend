@@ -15,18 +15,14 @@
 # limitations under the License.
 #
 
-name: 'run benchmarks main'
+name: 'Nightly Benchmarks'
+# This workflow runs nightly benchmarks for vllm-ascend.
 
 on:
   schedule:
+    # Run at 24:00 everyday
     - cron: '00 16 * * *'
   workflow_dispatch:
-  pull_request:
-    branches:
-        - 'main'
-        - '*-dev'
-    paths:
-        - '.github/workflows/nightly_benchmarks.yaml'
 
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -38,7 +34,7 @@ defaults:
 
 jobs:
   test:
-    name: run benchmarks main
+    name: Benchmarks/vLLM=${{ matrix.vllm_branch }}, vLLM-Ascend=${{ matrix.vllm_ascend_branch }}
     runs-on: 'linux-arm64-npu-static-8'
     strategy:
       matrix:
