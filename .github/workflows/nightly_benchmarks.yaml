@@ -21,14 +21,12 @@ on:
   schedule:
     - cron: '00 16 * * *'
   workflow_dispatch:
-  
-  # after merged, secrets will be available
-  # pull_request:
-  #   branches:
-  #       - 'main'
-  #       - '*-dev'
-  #   paths:
-  #       - '.github/workflows/nightly_benchmarks.yaml'
+  pull_request:
+    branches:
+        - 'main'
+        - '*-dev'
+    paths:
+        - '.github/workflows/nightly_benchmarks.yaml'
 
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
