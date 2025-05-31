@@ -23,6 +23,12 @@ on:
     # Run at 24:00 everyday
     - cron: '00 16 * * *'
   workflow_dispatch:
+  pull_request:
+    branches:
+        - 'main'
+        - '*-dev'
+    paths:
+        - '.github/workflows/nightly_benchmarks.yaml'
 
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -119,8 +125,15 @@ jobs:
       - name: Collect pr info from vllm-project/vllm-ascend
         run: |
           # Only get the pull request which may influences performance
-          git log --pretty=format:"%H %s" -- '**/*.py' ':!docs/*' ':!tests/*' ':!examples/*' > commit_log.txt
-          escli check commit_log.txt
+          # git log --pretty=format:"%H %s" -- '**/*.py' ':!docs/*' ':!tests/*' ':!examples/*' > commit_log.txt
+          # escli check commit_log.txt
+
+          # make a fake commit log for testing
+          printf "%s\n" \
+          "507ae627cad68d93c62adf3c2409f4ff10a25536 feat: support compile torchair graph while warming up (#839)" \
+          "5a1689fc648c8afa04ee040bf1b3526a6fe3d75e [Fix] Fix update_aclgraph_sizes when running MoE models (#913)" \
+          "3442fbdb235b4c6d72c2bc64a49707a7bd89958e [1/N][UT][v1 MTP] add basic v1 mtp features (#890)" \
+          > commit_log.txt
 
       - name: Run benchmark iteration
         run: |
