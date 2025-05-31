@@ -110,7 +110,7 @@ def generate_md(model_name, tasks_list, args, datasets):
     run_cmd = MODEL_RUN_INFO[model_name].format(model=model_name,
                                                 datasets=datasets)
     model = model_name.split("/")[1]
-    preamble = f"""# {model} Accuracy Test
+    preamble = f"""# 🎯 {model} Accuracy Test
   <div>
     <strong>vLLM version:</strong> vLLM: {args.vllm_version}, vLLM Ascend: {args.vllm_ascend_version} <br>
   </div>

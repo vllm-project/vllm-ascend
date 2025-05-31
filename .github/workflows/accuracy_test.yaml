@@ -15,6 +15,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
+# This test will be triggered:
+# 1. PR labeled with: '*accuracy-test' (ONLY 1 label valid) & 'ready-for-test'
+# 2. workflow_dispatch with models input
+# See detail rule in strategy.matrix note
 name: Benchmarks / accuracy
 
 on:
@@ -26,6 +30,8 @@ on:
         description: 'vllm version:'
         required: true
         type: choice
+        # Please also update this when bump matched version
+        # Current supported vLLM versions
         options:
           - main
           - v0.9.0.1
@@ -46,6 +52,7 @@ on:
           - all
           - Qwen/Qwen2.5-7B-Instruct
           - Qwen/Qwen2.5-VL-7B-Instruct
+          - Qwen/Qwen3-8B-Base
         default: 'all'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -56,16 +63,16 @@ defaults:
     shell: bash -el {0}
 
 jobs:
-  model_tests:
-    # test will be triggered when tag '*-accuracy-test' & 'ready-for-test' or schedule job
+  accuracy_tests:
+    # test will be triggered when tag '*-accuracy-test' & 'ready-for-test' or workflow_dispatch job
     if:  >-
       ${{
-      (contains(github.event.pull_request.labels.*.name, 'vl-accuracy-test') ||
+      (contains(github.event.pull_request.labels.*.name, 'accuracy-test') ||
+      contains(github.event.pull_request.labels.*.name, 'vl-accuracy-test') ||
       contains(github.event.pull_request.labels.*.name, 'dense-accuracy-test')) &&
       contains(github.event.pull_request.labels.*.name, 'ready-for-test') ||
       github.event_name == 'workflow_dispatch'
       }}
-    name: Model Test - ${{ matrix.model_name }}
     runs-on: 'linux-arm64-npu-2'
     strategy:
       matrix:
@@ -74,24 +81,33 @@ jobs:
         #   - all: Qwen/Qwen2.5-7B-Instruct, Qwen/Qwen2.5-VL-7B-Instruct, Qwen/Qwen3-8B-Base
         #   - specified but not all: Qwen/Qwen2.5-7B-Instruct, Qwen/Qwen2.5-VL-7B-Instruct, Qwen/Qwen3-8B-Base
         # 2. PR labeled with "*-accuracy-test"
+        #   - accuracy-test: Qwen/Qwen2.5-7B-Instruct, Qwen/Qwen2.5-VL-7B-Instruct
         #   - dense-accuracy-test: Qwen/Qwen2.5-7B-Instruct
         #   - vl-accuracy-test: Qwen/Qwen2.5-VL-7B-Instruct
         include: ${{ fromJSON(
-          (github.event.inputs.models == 'all' && '[{"model_name":"Qwen/Qwen2.5-7B-Instruct"},{"model_name":"meta-llama/Llama-3.1-8B-Instruct"},{"model_name":"Qwen/Qwen2.5-VL-7B-Instruct"}, {"model_name":"Qwen/Qwen3-8B-Base"}]') ||
+          (github.event.inputs.models == 'all' && '[{"model_name":"Qwen/Qwen2.5-7B-Instruct"},{"model_name":"Qwen/Qwen2.5-VL-7B-Instruct"},{"model_name":"Qwen/Qwen3-8B-Base"}]') ||
           (github.event.inputs.models == 'Qwen/Qwen2.5-7B-Instruct' && '[{"model_name":"Qwen/Qwen2.5-7B-Instruct"}]') ||
           (github.event.inputs.models == 'Qwen/Qwen2.5-VL-7B-Instruct' && '[{"model_name":"Qwen/Qwen2.5-VL-7B-Instruct"}]') ||
+          (github.event.inputs.models == 'Qwen/Qwen3-8B-Base' && '[{"model_name":"Qwen/Qwen3-8B-Base"}]') ||
+          contains(github.event.pull_request.labels.*.name, 'accuracy-test') && '[{"model_name":"Qwen/Qwen2.5-7B-Instruct"},{"model_name":"Qwen/Qwen2.5-VL-7B-Instruct"}]' ||
           contains(github.event.pull_request.labels.*.name, 'dense-accuracy-test') && '[{"model_name":"Qwen/Qwen2.5-7B-Instruct"}]' ||
           contains(github.event.pull_request.labels.*.name, 'vl-accuracy-test') && '[{"model_name":"Qwen/Qwen2.5-VL-7B-Instruct"}]'
          ) }}
       fail-fast: false
-
+    name: ${{ matrix.model_name }} accuracy
     container:
       image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
       env:
-        HF_ENDPOINT: https://hf-mirror.com
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
         DATASET_SOURCE: ModelScope
         VLLM_USE_MODELSCOPE: True
+        # Please also update this when bump matched version
+        GHA_VLLM_VERSION: ${{ github.event.inputs.vllm-version || 'v0.9.0' }}
+        # 1. If version specified (work_dispatch), do specified branch accuracy test
+        # 2. If no version (labeled PR), do accuracy test by default ref:
+        # The branch, tag or SHA to checkout. When checking out the repository that
+        # triggered a workflow, this defaults to the reference or SHA for that event.
+        # Otherwise, uses the default branch.
+        GHA_VLLM_ASCEND_VERSION: ${{ github.event.inputs.vllm-ascend-version }}
 
     steps:
       - name: Checkout repository
@@ -120,8 +136,7 @@ jobs:
         with:
           repository: vllm-project/vllm
           path: ./vllm-empty
-          # Please also change this when bump matched version
-          ref: ${{ github.event.inputs.vllm-version  || 'v0.9.0' }}
+          ref: ${{ env.GHA_VLLM_VERSION }}
 
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
@@ -132,9 +147,7 @@ jobs:
         with:
           repository: vllm-project/vllm-ascend
           path: ./vllm-ascend
-          # 1. If version specified (work_dispatch), do specified branch test
-          # 2. If no version (labeled PR), do PR accuracy test
-          ref: ${{ github.event.inputs.vllm-ascend-version }}
+          ref: ${{ env.GHA_VLLM_ASCEND_VERSION }}
           fetch-depth: 0
 
       - name: Install vllm-project/vllm-ascend
@@ -157,23 +170,24 @@ jobs:
             fi
           done
           INFO_FILE="/usr/local/Ascend/ascend-toolkit/${TOOLKIT_DIR}/$(uname -i)-linux/ascend_toolkit_install.info"
-          CANN_VERSION=$(grep "version=" "$INFO_FILE" \
+          GHA_CANN_VERSION=$(grep "version=" "$INFO_FILE" \
                            | head -n1 \
                            | cut -d'=' -f2 \
                            | tr -d '"')
           {
-            echo "CANN_VERSION=$CANN_VERSION"
-            pip show torch | grep "Version:" | awk '{print "TORCH_VERSION="$2}'
-            pip show torch_npu | grep "Version:" | awk '{print "TORCH_NPU_VERSION="$2}'
-            pip show vllm | grep "Version:" | awk '{print "VLLM_VERSION="$2}' | sed 's/+.*//'
+            echo "GHA_CANN_VERSION=$GHA_CANN_VERSION"
+            pip show torch | grep "Version:" | awk '{print "GHA_TORCH_VERSION="$2}'
+            pip show torch_npu | grep "Version:" | awk '{print "GHA_TORCH_NPU_VERSION="$2}'
+            pip show vllm | grep "Version:" | awk '{print "GHA_VLLM_VERSION="$2}' | sed 's/+.*//'
           } >> "$GITHUB_ENV"
       
       - name: Print versions
         run: |
-          echo "CANN: ${{ env.CANN_VERSION }}"
-          echo "Torch NPU: ${{ env.TORCH_NPU_VERSION }}"
-          echo "Torch: ${{ env.TORCH_VERSION }}"
-          echo "vLLM: ${{ env.VLLM_VERSION }}"
+          echo "CANN: ${{ env.GHA_CANN_VERSION }}"
+          echo "Torch NPU: ${{ env.GHA_TORCH_NPU_VERSION }}"
+          echo "Torch: ${{ env.GHA_TORCH_VERSION }}"
+          echo "vLLM: ${{ env.GHA_VLLM_VERSION }}"
+          echo "vLLM Ascend: ${{ env.GHA_VLLM_ASCEND_VERSION }}"
 
       - name: Run Accuracy Test for V0
         id: report
@@ -186,21 +200,22 @@ jobs:
           echo "model_base_name=$model_base_name"
           echo "model_base_name=$model_base_name" >> $GITHUB_OUTPUT
           mkdir -p ./accuracy/V0
-          echo "test111" > ./accuracy/V0/${model_base_name}.md
+
           python ./scripts/run_accuracy.py \
             --model "${{ matrix.model_name }}" \
             --output "./accuracy/V0/${model_base_name}.md" \
-            --vllm_ascend_version "${{ github.event.inputs.vllm-ascend-version || 'current' }}" \
-            --cann_version "${{ env.CANN_VERSION }}" \
-            --torch_npu_version "${{ env.TORCH_NPU_VERSION }}" \
-            --torch_version "${{ env.TORCH_VERSION }}" \
-            --vllm_version "${{ env.VLLM_VERSION }}"
-          cat ./accuracy/V0/${model_base_name}.md
+            --vllm_ascend_version "${{ env.GHA_VLLM_ASCEND_VERSION || github.ref }}" \
+            --cann_version "${{ env.GHA_CANN_VERSION }}" \
+            --torch_npu_version "${{ env.GHA_TORCH_NPU_VERSION }}" \
+            --torch_version "${{ env.GHA_TORCH_VERSION }}" \
+            --vllm_version "${{ env.GHA_VLLM_VERSION }}"
+
+          cat ./accuracy/V0/${model_base_name}.md >> $GITHUB_STEP_SUMMARY
 
       - name: Upload Report for V0
         uses: actions/upload-artifact@v4
         with:
-          name: "${{ github.event.inputs.vllm-ascend-version }}-${{ steps.report.outputs.model_base_name }}-V0-report"
+          name: "${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.report.outputs.model_base_name }}-V0-report"
           path: ./benchmarks/accuracy/V0/${{ steps.report.outputs.model_base_name }}.md
           if-no-files-found: warn
           retention-days: 90
