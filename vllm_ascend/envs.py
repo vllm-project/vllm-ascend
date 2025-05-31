@@ -68,6 +68,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_VERSION", None),
     "VLLM_ASCEND_TRACE_RECOMPILES":
     lambda: bool(int(os.getenv("VLLM_ASCEND_TRACE_RECOMPILES", '0'))),
+    "VLLM_ENABLE_DBO":
+    lambda: bool(int(os.getenv("VLLM_ENABLE_DBO", '0'))),
 }
 
 # end-env-vars-definition

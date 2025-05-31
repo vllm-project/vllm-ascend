@@ -61,3 +61,22 @@ def test_models_distributed_DeepSeek():
             distributed_executor_backend="mp",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+def test_deepseek_model_with_dbo():
+    os.environ["VLLM_ENABLE_DBO"] = "1"
+    example_prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ] * 10
+    dtype = "half"
+    max_tokens = 5
+    with VllmRunner(
+            "deepseek-ai/DeepSeek-V2-Lite",
+            dtype=dtype,
+            tensor_parallel_size=4,
+            distributed_executor_backend="mp",
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
