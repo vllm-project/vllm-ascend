@@ -53,7 +53,7 @@ MODEL_RUN_INFO = {
      "--apply_chat_template --fewshot_as_multiturn --num_fewshot 5 --batch_size 1"
      ),
     "Qwen/Qwen2.5-VL-7B-Instruct":
-    ("export MODEL_ARGS='pretrained={model}, max_model_len=8192,dtype=auto,tensor_parallel_size=2,max_images=2'\n"
+    ("export MODEL_ARGS='pretrained={model}, max_model_len=8192,dtype=auto,tensor_parallel_size=4,max_images=2'\n"
      "lm_eval --model vllm-vlm --modlel_args $MODEL_ARGS --tasks {datasets} \ \n"
      "--apply_chat_template --fewshot_as_multiturn  --batch_size 1"),
 }
@@ -85,7 +85,7 @@ def run_accuracy_unimodal(queue, model, dataset):
 
 def run_accuracy_multimodal(queue, model, dataset):
     try:
-        model_args = f"pretrained={model},max_model_len=8192,dtype=auto,tensor_parallel_size=2,max_images=2"
+        model_args = f"pretrained={model},max_model_len=8192,dtype=auto,tensor_parallel_size=4,max_images=2"
         results = lm_eval.simple_evaluate(
             model="vllm-vlm",
             model_args=model_args,
