@@ -299,7 +299,7 @@ main() {
   mkdir -p $RESULTS_FOLDER
 
   trap cleanup_on_error ERR
-  ensure_sharegpt_downloaded
+  # ensure_sharegpt_downloaded
   # benchmarks
   run_serving_tests $QUICK_BENCHMARK_ROOT/tests/serving-tests.json
   run_latency_tests $QUICK_BENCHMARK_ROOT/tests/latency-tests.json
