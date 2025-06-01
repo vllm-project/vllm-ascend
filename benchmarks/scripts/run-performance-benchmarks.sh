@@ -19,9 +19,18 @@ check_npus() {
 
 ensure_sharegpt_downloaded() {
   local FILE="/github/home/.cache/datasets/ShareGPT_V3_unfiltered_cleaned_split.json"
+  local DIR
+  DIR=$(dirname "$FILE")
+
   if [ ! -f "$FILE" ]; then
     echo "$FILE not found, downloading from hf-mirror ..."
-    wget https://hf-mirror.com/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+    mkdir -p "$DIR"
+    wget -O "$FILE" https://hf-mirror.com/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+    if [ $? -ne 0 ]; then
+      echo "Download failed!" >&2
+      return 1
+    fi
+    echo "Download completed and saved to $FILE"
   else
     echo "$FILE already exists."
   fi
