@@ -29,6 +29,8 @@ on:
         - '*-dev'
     paths:
         - '.github/workflows/nightly_benchmarks.yaml'
+  pull_request_target:
+    types: [labeled]
 
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -94,8 +96,9 @@ jobs:
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
-        # with:
-        #   ref: ${{ matrix.vllm_ascend_branch }}
+        with:
+          ref: dev-bench
+          repository: Potabk/vllm-ascend
           
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v4
@@ -114,6 +117,25 @@ jobs:
           pip install -e .
           pip install -r benchmarks/requirements-bench.txt
 
+      - name: Run current commit benchmarks
+        if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+        run: |
+          # Sometimes we only want to run benchmarks on the current commit
+          # This is useful for debugging or a release benchmark
+          commit_id=$(git log -1 --pretty=format:"%H")
+          commit_title=$(git log -1 --pretty=format:"%s")
+          commit_time=$(git show -s --format=%cd $commit_hash --date=iso-strict)
+          commit_time_no_tz=${commit_time::19}
+
+          echo "------------------------"
+          echo "commit_id: $commit_id"
+          echo "commit_title: $commit_title"
+          echo "commit_time: $commit_time_no_tz"
+          echo "vllm branch: ${{ matrix.vllm_branch }}"
+          echo "vllm-ascend branch: ${{ matrix.vllm_ascend_branch }}"
+          echo "------------------------"
+          bash benchmarks/scripts/run-performance-benchmarks.sh
+
       # - name: Checkout cosdt/elastic-tool
       #   uses: actions/checkout@v4
       #   with:
@@ -127,6 +149,7 @@ jobs:
       #     pip install -e .
           
       - name: Collect pr info from vllm-project/vllm-ascend
+        if: github.event_name == 'schedule'
         run: |
           # Only get the pull request which may influences performance
           # git log --pretty=format:"%H %s" -- '**/*.py' ':!docs/*' ':!tests/*' ':!examples/*' > commit_log.txt
@@ -140,6 +163,7 @@ jobs:
           > commit_log.txt
 
       - name: Run benchmark iteration
+        if: github.event_name == 'schedule'
         run: |
           while IFS= read -r line || [[ -n "$line" ]]; do
             commit_id=${line%% *}
