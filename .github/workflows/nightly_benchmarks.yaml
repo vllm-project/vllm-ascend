@@ -94,8 +94,8 @@ jobs:
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
-        with:
-          ref: ${{ matrix.vllm_ascend_branch }}
+        # with:
+        #   ref: ${{ matrix.vllm_ascend_branch }}
           
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v4
