@@ -62,6 +62,10 @@ defaults:
   run:
     shell: bash -el {0}
 
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   accuracy_tests:
     # test will be triggered when tag '*-accuracy-test' & 'ready-for-test' or workflow_dispatch job
@@ -73,9 +77,14 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'ready-for-test') ||
       github.event_name == 'workflow_dispatch'
       }}
-    runs-on: ${{ matrix.runner || 'linux-arm64-npu-2' }}
+    runs-on: >-
+      ${{
+          (matrix.model_name == 'Qwen/Qwen2.5-VL-7B-Instruct' && 'linux-arm64-npu-4') ||
+          'linux-arm64-npu-2'
+      }}
     strategy:
       matrix:
+        vllm_use_version: [0, 1]
         # the accuracy test will run:
         # 1. workflow_dispatch with models input
         #   - all: Qwen/Qwen2.5-7B-Instruct, Qwen/Qwen2.5-VL-7B-Instruct, Qwen/Qwen3-8B-Base
@@ -84,17 +93,29 @@ jobs:
         #   - accuracy-test: Qwen/Qwen2.5-7B-Instruct, Qwen/Qwen2.5-VL-7B-Instruct
         #   - dense-accuracy-test: Qwen/Qwen2.5-7B-Instruct
         #   - vl-accuracy-test: Qwen/Qwen2.5-VL-7B-Instruct
-        include: ${{ fromJSON(
-          (github.event.inputs.models == 'all' && '[{"model_name":"Qwen/Qwen2.5-7B-Instruct"},{"model_name":"Qwen/Qwen2.5-VL-7B-Instruct", "runner":"linux-arm64-npu-4"},{"model_name":"Qwen/Qwen3-8B-Base"}]') ||
-          (github.event.inputs.models == 'Qwen/Qwen2.5-7B-Instruct' && '[{"model_name":"Qwen/Qwen2.5-7B-Instruct"}]') ||
-          (github.event.inputs.models == 'Qwen/Qwen2.5-VL-7B-Instruct' && '[{"model_name":"Qwen/Qwen2.5-VL-7B-Instruct", "runner":"linux-arm64-npu-4"}]') ||
-          (github.event.inputs.models == 'Qwen/Qwen3-8B-Base' && '[{"model_name":"Qwen/Qwen3-8B-Base"}]') ||
-          contains(github.event.pull_request.labels.*.name, 'accuracy-test') && '[{"model_name":"Qwen/Qwen2.5-7B-Instruct"},{"model_name":"Qwen/Qwen2.5-VL-7B-Instruct", "runner":"linux-arm64-npu-4"}]' ||
-          contains(github.event.pull_request.labels.*.name, 'dense-accuracy-test') && '[{"model_name":"Qwen/Qwen2.5-7B-Instruct"}]' ||
-          contains(github.event.pull_request.labels.*.name, 'vl-accuracy-test') && '[{"model_name":"Qwen/Qwen2.5-VL-7B-Instruct", "runner":"linux-arm64-npu-4"}]'
+        model_name: ${{ fromJSON(
+          (github.event.inputs.models == 'all' &&
+            '["Qwen/Qwen2.5-7B-Instruct","Qwen/Qwen2.5-VL-7B-Instruct","model_name":"Qwen/Qwen3-8B-Base"]') ||
+          (github.event.inputs.models == 'Qwen/Qwen2.5-7B-Instruct' &&
+            '["Qwen/Qwen2.5-7B-Instruct"]') ||
+          (github.event.inputs.models == 'Qwen/Qwen2.5-VL-7B-Instruct' &&
+            '["Qwen/Qwen2.5-VL-7B-Instruct"]') ||
+          (github.event.inputs.models == 'Qwen/Qwen3-8B-Base' &&
+            '["Qwen/Qwen3-8B-Base"]') ||
+          contains(github.event.pull_request.labels.*.name, 'accuracy-test') &&
+            '["Qwen/Qwen2.5-7B-Instruct","Qwen/Qwen2.5-VL-7B-Instruct"]' ||
+          contains(github.event.pull_request.labels.*.name, 'dense-accuracy-test') &&
+            '["Qwen/Qwen2.5-7B-Instruct"]' ||
+          contains(github.event.pull_request.labels.*.name, 'vl-accuracy-test') &&
+            '["Qwen/Qwen2.5-VL-7B-Instruct"]'
          ) }}
+        # Remove exclude after https://github.com/vllm-project/vllm-ascend/issues/1044 resolved
+        exclude:
+          - model_name: Qwen/Qwen2.5-VL-7B-Instruct
+            vllm_use_version: 1
+
       fail-fast: false
-    name: ${{ matrix.model_name }} accuracy
+    name: ${{ matrix.model_name }} accuracy V${{ matrix.vllm_use_version }}
     container:
       image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
       env:
@@ -189,34 +210,38 @@ jobs:
           echo "vLLM: ${{ env.GHA_VLLM_VERSION }}"
           echo "vLLM Ascend: ${{ env.GHA_VLLM_ASCEND_VERSION || github.ref }}"
 
-      - name: Run Accuracy Test for V0
+      - name: Run Accuracy Test for V${{ matrix.vllm_use_version }}
         id: report
         working-directory: ./benchmarks
         env:
-          VLLM_USE_V1: 0
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+          VLLM_USE_V1: ${{ matrix.vllm_use_version }}
         run: |
           model_base_name=$(basename ${{ matrix.model_name }})
-          echo "model_base_name=$model_base_name"
-          echo "model_base_name=$model_base_name" >> $GITHUB_OUTPUT
-          mkdir -p ./accuracy/V0
+          markdown_name="${model_base_name}-V${{ matrix.vllm_use_version }}"
+          echo "markdown_name=$markdown_name"
+          echo "markdown_name=$markdown_name" >> $GITHUB_OUTPUT
+          mkdir -p ./accuracy
 
           python ./scripts/run_accuracy.py \
             --model "${{ matrix.model_name }}" \
-            --output "./accuracy/V0/${model_base_name}.md" \
+            --output "./accuracy/${markdown_name}.md" \
             --vllm_ascend_version "${{ env.GHA_VLLM_ASCEND_VERSION || github.ref }}" \
             --cann_version "${{ env.GHA_CANN_VERSION }}" \
             --torch_npu_version "${{ env.GHA_TORCH_NPU_VERSION }}" \
             --torch_version "${{ env.GHA_TORCH_VERSION }}" \
             --vllm_version "${{ env.GHA_VLLM_VERSION }}"
 
-          cat ./accuracy/V0/${model_base_name}.md >> $GITHUB_STEP_SUMMARY
+      - name: Generate step summary
+        if: ${{ always() }}
+        run: |
+          cat ./benchmarks/accuracy/${{ steps.report.outputs.markdown_name }}.md >> $GITHUB_STEP_SUMMARY
 
-      - name: Upload Report for V0
+      - name: Upload Report for V${{ matrix.vllm_use_version }}
         uses: actions/upload-artifact@v4
         with:
-          name: "${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.report.outputs.model_base_name }}-V0-report"
-          path: ./benchmarks/accuracy/V0/${{ steps.report.outputs.model_base_name }}.md
+          name: "${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.report.outputs.markdown_name }}-report"
+          path: ./benchmarks/accuracy/${{ steps.report.outputs.markdown_name }}.md
           if-no-files-found: warn
           retention-days: 90
           overwrite: true
