@@ -1,16 +1,14 @@
-# TODO:在get_finished方法里，如果对端挂了，添加一个num_error_req[],返回到docode scheduler
-
 # SPDX-License-Identifier: Apache-2.0
 import contextlib
 import math
 import threading
 import time
 import random
+import socket
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Dict, List, Tuple, Union
-
 
 import msgspec
 import torch
@@ -36,11 +34,12 @@ if TYPE_CHECKING:
 
 import numpy as np
 import numpy.typing as npt
+import hashlib
 import pickle
+import struct
 
 GET_META_MSG = b"get_meta_msg"
-NOTIFY_MSG = b"notify_msg"
-NO_NEED_TRANS = b"no_need_trans_msg"
+DONE_RECVING_MSG = b"done_recving_msg"
 
 logger = init_logger(__name__)
 
@@ -49,11 +48,11 @@ try:
 except ImportError as e:
     raise ImportError(
         "Please install mooncake by following the instructions at "
-        "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "  # noqa: E501
+        "https://github.com/kvcache-ai/Mooncake/blob/main/doc/en/build.md "
         "to run vLLM with MooncakeTransferEngine."
     ) from e
 
-class MooncakeEngineMetadata(
+class MooncakeAgentMetadata(
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
     # required for @cached_property.
@@ -90,43 +89,20 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
             remote_port=kv_transfer_params["remote_port"],
         )
 
-
 class MooncakeConnector(KVConnectorBase_V1):
 
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
-        # get prefill tp size from extra config
-        self._prefill_parallel_config: dict[
-            str,
-            Any] = vllm_config.kv_transfer_config.get_from_extra_config("prefill", {})
-        assert "tp_size" in self._prefill_parallel_config.keys()
-        self.prefill_tp_size = self._prefill_parallel_config["tp_size"]
-        # get decode tp size from extra config
-        self._decode_parallel_config: dict[
-            str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("decode", {})
-        assert "tp_size" in self._decode_parallel_config.keys()
-        self.decode_tp_size = self._decode_parallel_config["tp_size"]
-
-        if self.prefill_tp_size < self.decode_tp_size:
-            raise ValueError(
-                f"prefill_tp_size: {self._prefill_tp_size} must be "
-                f"greater than or equal to the decode_tp_size: {self._decode_tp_size}")
-
         assert vllm_config.kv_transfer_config is not None
         self.engine_id = vllm_config.kv_transfer_config.engine_id
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: Optional[MooncakeConnectorScheduler] = \
-                MooncakeConnectorScheduler(vllm_config, str(self.engine_id), self.prefill_tp_size, self.decode_tp_size)
+                MooncakeConnectorScheduler(vllm_config, str(self.engine_id))
             self.connector_worker: Optional[MooncakeConnectorWorker] = None
         elif role == KVConnectorRole.WORKER:
             self.connector_scheduler = None
             self.connector_worker = MooncakeConnectorWorker(
-                vllm_config, str(self.engine_id),  self.prefill_tp_size, self.decode_tp_size)
-
-    def _get_prefill_tp_ranks_for_req(self) -> list[int]:
-        if self._prefill_tp_size == self._decode_tp_size:
-            return generate_unique_list(self._prefill_tp_size)
-        return generate_unique_list(self._decode_tp_size)
+                vllm_config, str(self.engine_id))
 
     ############################################################
     # Scheduler Side Methods
@@ -197,9 +173,7 @@ class MooncakeConnector(KVConnectorBase_V1):
 class MooncakeConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
-    def __init__(self, vllm_config: VllmConfig, engine_id: str,  prefill_tp_size: int, decode_tp_size: int):
-        self._prefill_tp_size = prefill_tp_size
-        self._decode_tp_size = decode_tp_size
+    def __init__(self, vllm_config: VllmConfig, engine_id: str):
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id = engine_id
@@ -345,28 +319,29 @@ class MooncakeConnectorScheduler:
             remote_port=envs.VLLM_TE_PORT,
         )
 
-# TASK: 适配TE，主要修改worker
 class MooncakeConnectorWorker:
     """Implementation of Worker side methods"""
 
-    def __init__(self, vllm_config: VllmConfig, engine_id: str, prefill_tp_size: int, decode_tp_size: int):
-        self._prefill_tp_size = prefill_tp_size
-        self._decode_tp_size = decode_tp_size
+    def __init__(self, vllm_config: VllmConfig, engine_id: str):
+        self._get_prefill_decode_tp_size(vllm_config)
+        if self._prefill_tp_size < self._decode_tp_size:
+            raise ValueError(
+                f"prefill_tp_size: {self._prefill_tp_size} must be "
+                f"greater than or equal to the decode_tp_size: {self._decode_tp_size}")
+
         if TransferEngine is None:
             logger.error("mooncake is not available")
             raise RuntimeError("mooncake is not available")
-        logger.info("Initializing TransferEngine")
-        logger.info("Initializing TransferEngine %s", engine_id)
+        logger.info("Initializing Mooncake work %s", engine_id)
 
         self.engine = TransferEngine()
         self.hostname = get_local_ip_by_remote()
+        # TODO Initialize TE
         self.ib_device = None
-
         self._initialize(
             hostname=self.hostname,
             device_name=self.ib_device,
         )
-        self.session_id = f"{self.hostname}:{self.engine.get_rpc_port()}"
 
         # Map of engine_id -> agent_name.
         self._remote_engine: dict[str, tuple] = {}
@@ -382,12 +357,7 @@ class MooncakeConnectorWorker:
         # Map of engine_id -> kv_caches_base_addr
         self.kv_caches_base_addr: dict[str, list[int]] = {}
 
-        # Currently one region per cache (so 1 per layer for MLA, otherwise 2 per layer)
-        self.num_regions = 0
         self.num_layers = 0
-
-        # Map of engine_id -> num_blocks.
-        self.dst_num_blocks: dict[str, int] = {}
 
         # # Complete transfer tracker. Used by the rank 0 to track finished
         # # transactions on ranks 1 to N-1.
@@ -403,10 +373,18 @@ class MooncakeConnectorWorker:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
 
-        # TODO(mgoin): remove this once we have hybrid memory allocator
-        # Optimization for models with local attention (Llama 4)
-        # List of block window sizes for each layer for local attention
-        self.block_window_per_layer: list[Optional[int]] = []
+    def _get_prefill_decode_tp_size(self, vllm_config: VllmConfig):
+        # get prefill tp size from extra config
+        prefill_parallel_config: dict[
+            str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("prefill", {})
+        assert "tp_size" in prefill_parallel_config.keys()
+        self._prefill_tp_size = prefill_parallel_config["tp_size"]
+
+        # get decode tp size from extra config
+        decode_parallel_config: dict[
+            str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("decode", {})
+        assert "tp_size" in decode_parallel_config.keys()
+        self._decode_tp_size = decode_parallel_config["tp_size"]
 
     def _initialize(
             self,
@@ -424,30 +402,22 @@ class MooncakeConnectorWorker:
             logger.error("Mooncake Transfer Engine initialization failed.")
             raise RuntimeError("Mooncake Transfer Engine initialization failed.")
 
-    def _message_listener(self, metadata: MooncakeEngineMetadata,
+    def _message_listener(self, metadata: MooncakeAgentMetadata,
                           ready_event: threading.Event, rank: int):
         """Background thread for getting new Mooncake handshakes."""
-        # NOTE(rob): this is a simple implementation. We will move
-        # to a better approach like an ETCD server in the future.
-
-        # NOTE(rob): to support heterogeneous TP, we will have to
-        # move this into the scheduler rather than worker, since
-        # each rank needs the metadata of all other ranks (whereas
-        # in this setup, each rank only gets one other rank's meta.
 
         encoder = msgspec.msgpack.Encoder()
         encoded_data = encoder.encode(metadata)
         size_in_bytes = len(encoded_data)
-        logger.debug("Size of encoded MooncakeEngineMetadata: %s bytes",
+        logger.debug("Size of encoded MooncakeAgentMetadata: %s bytes",
                      str(size_in_bytes))
 
         # Listen for new requests for metadata.
-        host = envs.VLLM_TE_HOST
         # NOTE(rob): we need each rank to have a unique port. This
         # hack to keeps us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
         port = envs.VLLM_TE_PORT + rank
-        path = make_zmq_path("tcp", host, port)
+        path = make_zmq_path("tcp", self.hostname, port)
         logger.debug("Starting listening on path: %s", path)
         with zmq_ctx(zmq.ROUTER, path) as sock:
             ready_event.set()
@@ -456,12 +426,12 @@ class MooncakeConnectorWorker:
                 msg = pickle.loads(msg)
                 if msg[0] == "get_meta_msg":
                     sock.send_multipart((identity, b"", encoded_data))
-                elif msg[0] == "notify_msg":
+                elif msg[0] == "done_recving_msg":
                     logger.debug("Got notify from remote engine that load kv is done")
                     self._done_sending_count[msg[1]] += 1
-                elif msg[0] == "no_need_trans_msg":
-                    logger.debug("Got notify from remote engine that no need transfer")
-                    # TODO: maybe free the no need transfer blocks or do something
+                # elif msg[0] == "no_need_trans_msg":
+                #    logger.debug("Got notify from remote engine that no need transfer")
+                #   TODO: maybe free the no need transfer blocks or do something
                 else:
                     logger.warning(
                         "Connection listener got unexpected message %s", msg)
@@ -482,33 +452,29 @@ class MooncakeConnectorWorker:
                 logger.debug("Sending query for metadata")
                 data_bytes = pickle.dumps(msg)
                 sock.send(data_bytes)
-            elif msg[0] == NOTIFY_MSG:
+                metadata_bytes = sock.recv()
+                decoder = msgspec.msgpack.Decoder(MooncakeAgentMetadata)
+                metadata = decoder.decode(metadata_bytes)
+
+                # Register Remote agent.
+                self.add_remote_agent(metadata)
+            elif msg[0] == DONE_RECVING_MSG:
                 logger.debug("Sending notify to prefill that load is done")
                 # 将元组序列化为字节
                 data_bytes = pickle.dumps(msg)
                 sock.send(data_bytes)
-            elif msg[0] == NO_NEED_TRANS:
-                logger.debug("Sending notify to prefill that no need transfer")
+            #elif msg[0] == NO_NEED_TRANS:
+            #    logger.debug("Sending notify to prefill that no need transfer")
                 # 将元组序列化为字节
-                data_bytes = pickle.dumps(msg)
-                sock.send(data_bytes)
+            #    data_bytes = pickle.dumps(msg)
+            #    sock.send(data_bytes)
             else:
                 logger.warning("Connection listener got unexpected message %s", msg)
                 raise RuntimeError(f"Unexpected message: {msg}")
 
-            msg_bytes = sock.recv()
-            decoder = msgspec.msgpack.Decoder(MooncakeEngineMetadata)
-            metadata = decoder.decode(msg_bytes)
-            got_metadata_time = time.perf_counter()
-
-            # Register Remote agent.
-            self.add_remote_agent(metadata)
-            setup_agent_time = time.perf_counter()
-
-            logger.debug("handshake: get metadata took: %s",
-                         got_metadata_time - start_time)
-            logger.debug("handshake: add agent took: %s",
-                         setup_agent_time - got_metadata_time)
+            end_time = time.perf_counter()
+            logger.debug("send %s message took: %s",
+                         msg[0], end_time - start_time)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """Register the KV Cache data."""
@@ -538,10 +504,8 @@ class MooncakeConnectorWorker:
         logger.debug("num_blocks: %s, block_shape: %s", self.num_blocks,
                      block_shape)
         logger.debug("Per layer kv cache size: %s", first_kv_cache.shape)
-        self.dst_num_blocks[self.engine_id] = self.num_blocks
         self.kv_caches = kv_caches
         kv_caches_base_addr = []
-        caches_data = []
 
         for cache_or_caches in kv_caches.values():
             # Normalize to always be a list of caches
@@ -549,35 +513,13 @@ class MooncakeConnectorWorker:
             for cache in cache_list:
                 base_addr = cache.data_ptr()
                 region_len = self.num_blocks * self.block_len
-                caches_data.append((base_addr, region_len, self.rank, ""))
                 kv_caches_base_addr.append(base_addr)
                 self._register(base_addr, region_len)
         self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
-        self.num_regions = len(caches_data)
         self.num_layers = len(self.kv_caches.keys())
 
-        # TODO(mgoin): remove this once we have hybrid memory allocator
-        # Optimization for models with local attention (Llama 4)
-        if self.vllm_config.model_config.hf_config.model_type == "llama4":
-            from transformers import Llama4TextConfig
-            assert isinstance(self.vllm_config.model_config.hf_text_config,
-                              Llama4TextConfig)
-            llama4_config = self.vllm_config.model_config.hf_text_config
-            no_rope_layers = llama4_config.no_rope_layers
-            chunk_size = llama4_config.attention_chunk_size
-            chunk_block_size = math.ceil(chunk_size / self.block_size)
-            for layer_idx in range(self.num_layers):
-                # no_rope_layers[layer_idx] == 0 means NoPE (global)
-                # Any other value means RoPE (local chunked)
-                is_local_attention = no_rope_layers[layer_idx] != 0
-                block_window = chunk_block_size if is_local_attention else None
-                self.block_window_per_layer.append(block_window)
-            logger.debug("Llama 4 block window per layer mapping: %s",
-                         self.block_window_per_layer)
-            assert len(self.block_window_per_layer) == self.num_layers
-
         # After KV Caches registered, listen for new connections.
-        metadata = MooncakeEngineMetadata(
+        metadata = MooncakeAgentMetadata(
             engine_id=self.engine_id,
             tp_rank=self.rank,
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
@@ -598,19 +540,17 @@ class MooncakeConnectorWorker:
             logger.error("Mooncake memory registration failed.")
             raise RuntimeError("Mooncake memory registration failed.")
 
-    def add_remote_agent(self, engine_meta: MooncakeEngineMetadata):
-        engine_id = engine_meta.engine_id
+    def add_remote_agent(self, agent_meta: MooncakeAgentMetadata):
+        engine_id = agent_meta.engine_id
         assert engine_id != self.engine_id, "Conflict engine id found!"
         if engine_id in self._remote_engine:
             return
 
         self._remote_engine[engine_id] = (True,)
         self.kv_caches_base_addr[
-            engine_id] = engine_meta.kv_caches_base_addr
+            engine_id] = agent_meta.kv_caches_base_addr
 
     def get_finished(self) -> tuple[set[str], set[str]]:
-
-        # 提取键并转为集合
         done_sending = set(self._done_sending_count.keys())
         done_recving = set(self._done_recving_count.keys())
 
@@ -639,15 +579,19 @@ class MooncakeConnectorWorker:
 
             all_done_sending: set[str] = set()
             for req_id in list(self._done_sending_count.keys()):
-                if self._done_sending_count[req_id] == self.world_size:
+                if (self._done_sending_count[req_id] == self.world_size
+                        or self._done_sending_count[req_id] == self._decode_tp_size):
                     del self._done_sending_count[req_id]
                     all_done_sending.add(req_id)
 
             return all_done_sending, all_done_recving
 
+        # Ranks 1 to N-1: send finished ids to Rank 0.
         else:
             finished_req_ids = list(done_recving.union(done_sending))
             self.tp_group.send_object(finished_req_ids, dst=0)
+
+            # Unused as only Rank 0 results are sent to scheduler.
             return done_sending, done_recving
 
     def _get_new_notifs(self) -> set[str]:
@@ -672,8 +616,8 @@ class MooncakeConnectorWorker:
                 "Num local_block_ids: %s. Num remote_block_ids: %s. ", req_id,
                 meta.remote_engine_id, len(meta.local_block_ids),
                 len(meta.remote_block_ids))
-
-            self._done_sending_count[req_id] += self._prefill_tp_size-self._decode_tp_size
+            # 在这里写是错误的，会导致每个rank都会增加
+            # self._done_sending_count[req_id] += self._prefill_tp_size-self._decode_tp_size
             self._read_blocks(
                 request_id=req_id,
                 dst_engine_id=meta.remote_engine_id,
@@ -712,11 +656,13 @@ class MooncakeConnectorWorker:
 
         # Full prefix cache hit: do not need to read remote blocks,
         # just notify P worker that we have the blocks we need.
-        # TASK:通知remote不需要传
         num_local_blocks = len(local_block_ids)
         if num_local_blocks == 0:
-            msg = (NO_NEED_TRANS, request_id)
-            self._message_req(remote_host, remote_port, msg)
+            # msg = (NO_NEED_TRANS, request_id)
+            # self._message_req(remote_host, remote_port, remote_tp_rank, msg)
+            self._done_recving_count[request_id] += 1
+            msg = (DONE_RECVING_MSG, request_id)
+            self._message_req(remote_host, remote_port, remote_tp_rank, msg)
             return
 
         # Partial prefix cache hit: just read uncomputed blocks.
@@ -728,9 +674,8 @@ class MooncakeConnectorWorker:
 
         # 构造transfer_sync所需参数,需要构造length入参
         from concurrent.futures import ThreadPoolExecutor
-        grouped_remote_block_ids, grouped_local_block_ids = self._group_concurrent_contiguous(remote_block_ids,
+        grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(remote_block_ids,
                                                                                               local_block_ids)
-
         success_count = 0  # 用于记录成功次数
         futures = []
 
@@ -761,37 +706,16 @@ class MooncakeConnectorWorker:
 
         if success_count == len(futures):
             self._done_recving_count[request_id] += 1
-            msg = (NOTIFY_MSG, request_id)
-            self._message_req(remote_host, remote_port, msg)
+            msg = (DONE_RECVING_MSG, request_id)
+            self._message_req(remote_host, remote_port, remote_tp_rank, msg)
             return
-
-    def _group_concurrent_contiguous(
-            self, src: List[int], dst: List[int]
-    ) -> Tuple[List[npt.NDArray[np.int64]], List[npt.NDArray[np.int64]]]:
-        """Vectorised NumPy implementation."""
-
-        # 转换为 npt.NDArray[np.int64]
-        src_indices: npt.NDArray[np.int64] = np.array(src, dtype=np.int64)
-        dst_indices: npt.NDArray[np.int64] = np.array(dst, dtype=np.int64)
-
-        if src_indices.size == 0:
-            return [], []
-
-        brk = np.where((np.diff(src_indices) != 1) | (np.diff(dst_indices) != 1))[0] + 1
-        src_groups = np.split(src_indices, brk)
-        dst_groups = np.split(dst_indices, brk)
-
-        src_groups = [g.tolist() for g in src_groups]
-        dst_groups = [g.tolist() for g in dst_groups]
-
-        return src_groups, dst_groups
 
     def _transfer_sync(
             self, session_id: str, buffer: int, peer_buffer_address: int, length: int
     ) -> int:
         """Synchronously transfer data to the specified address."""
 
-        ret = self.engine.transfer_sync_write(
+        ret = self.engine.transfer_sync_read(
             session_id, buffer, peer_buffer_address, length
         )
         if ret < 0:
@@ -799,14 +723,15 @@ class MooncakeConnectorWorker:
             raise RuntimeError("Mooncake Transfer Engine Return Error.")
         return ret
 
-    def _get_remote_tp_rank(self, req_id: int) -> int:
-        return self._get_prefill_tp_ranks_for_req(req_id)[
-            self.rank]
-    def _get_remote_tp_ranks_for_req(self, req_id: int) -> list[int]:
+    def _get_remote_tp_rank(self, req_id: str) -> int:
+        return self._get_remote_tp_ranks_for_req(req_id)[self.rank]
+
+    def _get_remote_tp_ranks_for_req(self, req_id: str) -> list[int]:
         if self._prefill_tp_size == self._decode_tp_size:
             return list(range(self._prefill_tp_size))
 
-        rand = random.Random(req_id)
+        seed = string_to_int64_hash(req_id)
+        rand = random.Random(seed)
         sampled_nums = rand.sample(range(self._prefill_tp_size), self._decode_tp_size)
         return sampled_nums
 
@@ -829,10 +754,7 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
         if ctx is not None:
             ctx.destroy(linger=0)
 
-
-# TASK: 获取local的ip地址
 def get_local_ip_by_remote() -> str:
-    import socket
     # try ipv4
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
@@ -850,3 +772,32 @@ def get_local_ip_by_remote() -> str:
         return s.getsockname()[0]
     except Exception:
         raise ValueError("Can not get local ip")
+
+def group_concurrent_contiguous(src: List[int], dst: List[int]
+) -> Tuple[List[npt.NDArray[np.int64]], List[npt.NDArray[np.int64]]]:
+    """Vectorised NumPy implementation."""
+
+    # 转换为 npt.NDArray[np.int64]
+    src_indices: npt.NDArray[np.int64] = np.array(src, dtype=np.int64)
+    dst_indices: npt.NDArray[np.int64] = np.array(dst, dtype=np.int64)
+
+    if src_indices.size == 0:
+        return [], []
+
+    brk = np.where((np.diff(src_indices) != 1) | (np.diff(dst_indices) != 1))[0] + 1
+    src_groups = np.split(src_indices, brk)
+    dst_groups = np.split(dst_indices, brk)
+
+    src_groups = [g.tolist() for g in src_groups]
+    dst_groups = [g.tolist() for g in dst_groups]
+
+    return src_groups, dst_groups
+
+def string_to_int64_hash(input_str):
+    """
+    Hash the string using SHA-256 and convert it into an int64 integer.
+    """
+    hashed_bytes = hashlib.sha256(input_str.encode("utf-8")).digest()
+    trunked_bytes = hashed_bytes[:8]
+    uint64_value = struct.unpack("<Q", trunked_bytes)[0]
+    return uint64_value
