@@ -5,7 +5,7 @@ import libcst.matchers as m
 
 # Patch the benchmark_dataset.py file to set streaming=False in load_dataset calls
 
-
+# TDOO(Potabk): Remove this patch when the issue is fixed in the upstream
 class StreamingFalseTransformer(cst.CSTTransformer):
 
     def __init__(self):

@@ -23,12 +23,7 @@ on:
     # Run at 24:00 everyday
     - cron: '00 16 * * *'
   workflow_dispatch:
-  pull_request:
-    branches:
-        - 'main'
-        - '*-dev'
-    paths:
-        - '.github/workflows/nightly_benchmarks.yaml'
+
   pull_request_target:
     types: [labeled]
 
@@ -97,8 +92,7 @@ jobs:
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
         with:
-          ref: dev-bench
-          repository: Potabk/vllm-ascend
+          ref: ${{  matrix.vllm_ascend_branch }}
           
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v4
