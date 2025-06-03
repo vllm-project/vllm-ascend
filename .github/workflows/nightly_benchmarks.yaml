@@ -20,7 +20,7 @@ name: 'Benchmarks / Performance'
 
 on:
   schedule:
-    # Run at 24:00 everyday
+    # Run at 02:00 everyday
     - cron: '00 18 * * *'
 
   pull_request:
