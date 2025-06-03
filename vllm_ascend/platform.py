@@ -46,7 +46,7 @@ else:
     FlexibleArgumentParser = None
 
 os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
-os.environ["ACL_OP_INIT_MODE"] = "1"
+os.environ["ACL_OP_INIT_MODE"] = envs.VLLM_ASCEND_ACL_OP_INIT_MODE
 
 
 class NPUPlatform(Platform):
