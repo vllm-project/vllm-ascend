@@ -15,21 +15,17 @@
 # limitations under the License.
 #
 
-name: 'run benchmarks main'
+name: 'Benchmarks / Performance'
+# This workflow runs nightly benchmarks for vllm-ascend.
 
 on:
   schedule:
+    # Run at 24:00 everyday
     - cron: '00 16 * * *'
   workflow_dispatch:
-  
-  # after merged, secrets will be available
-  # pull_request:
-  #   branches:
-  #       - 'main'
-  #       - '*-dev'
-  #   paths:
-  #       - '.github/workflows/nightly_benchmarks.yaml'
 
+  pull_request:
+    types: [ labeled ]
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -38,9 +34,15 @@ defaults:
   run:
     shell: bash -el {0}
 
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   test:
-    name: run benchmarks main
+    if: ${{ contains(github.event.pull_request.labels.*.name, 'performance-test') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') || github.event_name == 'schedule' }}
+
+    name: Benchmarks/vLLM=${{ matrix.vllm_branch }}, vLLM-Ascend=${{ matrix.vllm_ascend_branch }}
     runs-on: 'linux-arm64-npu-static-8'
     strategy:
       matrix:
@@ -85,13 +87,10 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
-    
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
-        with:
-          ref: ${{ matrix.vllm_ascend_branch }}
-          
+
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v4
         with:
@@ -109,25 +108,44 @@ jobs:
           pip install -e .
           pip install -r benchmarks/requirements-bench.txt
 
-      - name: Checkout cosdt/elastic-tool
-        uses: actions/checkout@v4
+      - name: Run current commit benchmarks
+        if: github.event_name != 'schedule'
+        run: |
+          # Sometimes we only want to run benchmarks on the current commit
+          # This is useful for debugging or a release benchmark
+          bash benchmarks/scripts/run-performance-benchmarks.sh
+          # Convert the benchmark results to markdown format
+          python3 benchmarks/scripts/convert_json_to_markdown.py
+
+      - name: Generate step summary
+        if: github.event_name != 'schedule'
+        run: |
+          cat ./benchmarks/results/benchmark_results.md >> $GITHUB_STEP_SUMMARY
+
+      - name: Upload benchmark artifacts
+        if: github.event_name != 'schedule'
+        uses: actions/upload-artifact@v4
         with:
-          repository: cosdt/elastic-tool
-          path: ./elastic_tool
-          ref: 0.1.0-dev
+          name: "benchmark-performance-${{ matrix.vllm_branch }}-${{ matrix.vllm_ascend_branch }}-report"
+          path: ./benchmarks/results/benchmark_results.md
+          if-no-files-found: warn
+          retention-days: 90
+          overwrite: true
 
       - name: Install elastic_tool
-        working-directory: ./elastic_tool
+        if: github.event_name == 'schedule'
         run: |
-          pip install -e .
+          pip install escli-tool==0.2.0
           
       - name: Collect pr info from vllm-project/vllm-ascend
+        if: github.event_name == 'schedule'
         run: |
           # Only get the pull request which may influences performance
           git log --pretty=format:"%H %s" -- '**/*.py' ':!docs/*' ':!tests/*' ':!examples/*' > commit_log.txt
           escli check commit_log.txt
 
       - name: Run benchmark iteration
+        if: github.event_name == 'schedule'
         run: |
           while IFS= read -r line || [[ -n "$line" ]]; do
             commit_id=${line%% *}
