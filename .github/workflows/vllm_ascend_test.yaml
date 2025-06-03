@@ -30,6 +30,7 @@ on:
       - '.github/workflows/vllm_ascend_test.yaml'
       - '!docs/**'
       - 'pytest.ini'
+      - '!benchmarks/**'
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
 # It's used to activate ascend-toolkit environment variables.
@@ -108,8 +109,7 @@ jobs:
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
             VLLM_USE_MODELSCOPE=True pytest -sv tests/singlecard/test_offline_inference.py
-            # AscendScheduler doesn't work, fix it later
-            # pytest -sv tests/singlecard/tets_schedule.py
+            pytest -sv tests/singlecard/test_scheduler.py
             # guided decoding doesn't work, fix it later
             # pytest -sv tests/singlecard/test_guided_decoding.py.py
             pytest -sv tests/singlecard/ --ignore=tests/singlecard/test_offline_inference.py --ignore=tests/singlecard/test_scheduler.py --ignore=tests/singlecard/test_guided_decoding.py
@@ -124,8 +124,7 @@ jobs:
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
             VLLM_USE_MODELSCOPE=True  pytest -sv tests/singlecard/test_offline_inference.py
-            # AscendScheduler doesn't work, fix it later
-            # pytest -sv tests/singlecard/tets_schedule.py
+            pytest -sv tests/singlecard/test_scheduler.py
             # guided decoding doesn't work, fix it later
             # pytest -sv tests/singlecard/test_guided_decoding.py.py
             pytest -sv tests/singlecard/ --ignore=tests/singlecard/test_offline_inference.py --ignore=tests/singlecard/test_scheduler.py --ignore=tests/singlecard/test_guided_decoding.py
