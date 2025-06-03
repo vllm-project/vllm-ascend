@@ -681,7 +681,7 @@ class MooncakeConnectorWorker:
 
         with ThreadPoolExecutor() as executor:
             # TODO Distinguish whether ascend transport or rdma transport
-            mooncake_session_id = f"{remote_host}:{remote_port}:{remote_tp_rank}"
+            mooncake_session_id = f"{remote_host}:{remote_port}_{remote_tp_rank}"
 
             for src_layer_base_addr, dst_layer_base_addr in zip(self.kv_caches_base_addr[self.engine_id],
                                                                 self.kv_caches_base_addr[dst_engine_id]):
