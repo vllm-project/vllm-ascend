@@ -126,6 +126,11 @@ jobs:
           # Convert the benchmark results to markdown format
           python3 benchmarks/scripts/convert_json_to_markdown.py
 
+      - name: Generate step summary
+        if: github.event_name != 'schedule'
+        run: |
+          cat ./benchmarks/results/benchmark_results.md >> $GITHUB_STEP_SUMMARY
+
       - name: Upload benchmark artifacts
         if: github.event_name != 'schedule'
         uses: actions/upload-artifact@v4
@@ -136,31 +141,24 @@ jobs:
           retention-days: 90
           overwrite: true
 
-      # - name: Checkout cosdt/elastic-tool
-      #   uses: actions/checkout@v4
-      #   with:
-      #     repository: cosdt/elastic-tool
-      #     path: ./elastic_tool
-      #     ref: 0.1.0-dev
+      - name: Checkout cosdt/elastic-tool
+        uses: actions/checkout@v4
+        with:
+          repository: cosdt/elastic-tool
+          path: ./elastic_tool
+          ref: 0.1.0-dev
 
-      # - name: Install elastic_tool
-      #   working-directory: ./elastic_tool
-      #   run: |
-      #     pip install -e .
+      - name: Install elastic_tool
+        working-directory: ./elastic_tool
+        run: |
+          pip install -e .
           
       - name: Collect pr info from vllm-project/vllm-ascend
         if: github.event_name == 'schedule'
         run: |
           # Only get the pull request which may influences performance
-          # git log --pretty=format:"%H %s" -- '**/*.py' ':!docs/*' ':!tests/*' ':!examples/*' > commit_log.txt
-          # escli check commit_log.txt
-
-          # make a fake commit log for testing
-          printf "%s\n" \
-          "507ae627cad68d93c62adf3c2409f4ff10a25536 feat: support compile torchair graph while warming up (#839)" \
-          "5a1689fc648c8afa04ee040bf1b3526a6fe3d75e [Fix] Fix update_aclgraph_sizes when running MoE models (#913)" \
-          "3442fbdb235b4c6d72c2bc64a49707a7bd89958e [1/N][UT][v1 MTP] add basic v1 mtp features (#890)" \
-          > commit_log.txt
+          git log --pretty=format:"%H %s" -- '**/*.py' ':!docs/*' ':!tests/*' ':!examples/*' > commit_log.txt
+          escli check commit_log.txt
 
       - name: Run benchmark iteration
         if: github.event_name == 'schedule'
