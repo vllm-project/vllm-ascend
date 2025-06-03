@@ -141,17 +141,10 @@ jobs:
           retention-days: 90
           overwrite: true
 
-      - name: Checkout cosdt/elastic-tool
-        uses: actions/checkout@v4
-        with:
-          repository: cosdt/elastic-tool
-          path: ./elastic_tool
-          ref: 0.1.0-dev
-
       - name: Install elastic_tool
         working-directory: ./elastic_tool
         run: |
-          pip install -e .
+          pip install escli-tool==0.2.0
           
       - name: Collect pr info from vllm-project/vllm-ascend
         if: github.event_name == 'schedule'
