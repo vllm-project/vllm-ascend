@@ -1,5 +1,6 @@
 #!/bin/bash
 
+set -e
 
 check_npus() {
   # shellcheck disable=SC2155
@@ -48,7 +49,7 @@ wait_for_server() {
   # wait for vllm server to start
   # return 1 if vllm server crashes
   timeout 1200 bash -c '
-    until curl -X POST localhost:8000/v1/completions; do
+    until curl -s -X POST localhost:8000/v1/completions || curl -s -X POST localhost:8000/v1/chat/completions; do
       sleep 1
     done' && return 0 || return 1
 }
@@ -67,6 +68,16 @@ kill_npu_processes() {
 
 }
 
+update_json_field() {
+  local json_file="$1"
+  local field_name="$2"
+  local field_value="$3"
+
+  jq --arg value "$field_value" \
+     --arg key "$field_name" \
+     '.[$key] = $value' "$json_file" > "${json_file}.tmp" && \
+     mv "${json_file}.tmp" "$json_file"
+}
 
 run_latency_tests() {
   # run latency tests using `benchmark_latency.py`
@@ -103,7 +114,9 @@ run_latency_tests() {
 
     # run the benchmark
     eval "$latency_command"
-
+    # echo model_name to result file
+    model_name=$(echo "$latency_params" | jq -r '.model')
+    update_json_field "$RESULTS_FOLDER/${test_name}.json" "model_name" "$model_name"
     kill_npu_processes
 
   done
@@ -144,7 +157,9 @@ run_throughput_tests() {
 
     # run the benchmark
     eval "$throughput_command"
-
+    # echo model_name to result file
+    model_name=$(echo "$throughput_params" | jq -r '.model')
+    update_json_field "$RESULTS_FOLDER/${test_name}.json" "model_name" "$model_name"
     kill_npu_processes
 
   done
@@ -242,8 +257,13 @@ cleanup() {
   rm -rf ./vllm_benchmarks
 }
 
+cleanup_on_error() {
+  echo "An error occurred. Cleaning up results folder..."
+  rm -rf $RESULTS_FOLDER
+}
+
 get_benchmarks_scripts() {
-  git clone -b main --depth=1 git@github.com:vllm-project/vllm.git && \
+  git clone -b main --depth=1 https://github.com/vllm-project/vllm.git && \
   mv vllm/benchmarks vllm_benchmarks
   rm -rf ./vllm
 }
@@ -263,9 +283,8 @@ main() {
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
   # turn of the reporting of the status of each request, to clean up the terminal output
   export VLLM_LOG_LEVEL="WARNING"
-
+  
   # set env
-  export VLLM_USE_MODELSCOPE="True"
   export HF_ENDPOINT="https://hf-mirror.com"
 
   # prepare for benchmarking
@@ -278,6 +297,7 @@ main() {
   declare -g RESULTS_FOLDER=results
   mkdir -p $RESULTS_FOLDER
 
+  trap cleanup_on_error ERR
   ensure_sharegpt_downloaded
   # benchmarks
   run_serving_tests $QUICK_BENCHMARK_ROOT/tests/serving-tests.json

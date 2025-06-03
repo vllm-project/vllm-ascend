@@ -534,7 +534,6 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             backend: str = "hccl") -> None:
         """Initialize the distributed environment."""
         parallel_config = self.parallel_config
-        additional_config = self.vllm_config.additional_config
         set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
         init_distributed_environment(parallel_config.world_size, rank,
                                      distributed_init_method, local_rank,
@@ -542,13 +541,11 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size)
-        expert_tensor_parallel_size = 1
-        if additional_config:
-            expert_tensor_parallel_size = additional_config.get(
-                "expert_tensor_parallel_size", 1)
-        init_ascend_model_parallel(parallel_config.tensor_parallel_size,
-                                   parallel_config.pipeline_parallel_size,
-                                   expert_tensor_parallel_size)
+        init_ascend_model_parallel(
+            parallel_config.expert_parallel_size,
+            parallel_config.expert_tensor_parallel_size,
+            parallel_config.world_size,
+        )
         ensure_kv_transfer_initialized(vllm_config)
 
 
