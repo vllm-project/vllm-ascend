@@ -1016,7 +1016,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 or self.max_num_encoder_input_tokens <= 0
                 or self.encoder_cache_size <= 0):
             return
-
         max_tokens_by_modality_dict = (
             MULTIMODAL_REGISTRY.get_max_tokens_per_item_by_nonzero_modality(
                 self.model_config))

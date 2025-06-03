@@ -142,7 +142,6 @@ jobs:
           overwrite: true
 
       - name: Install elastic_tool
-        working-directory: ./elastic_tool
         run: |
           pip install escli-tool==0.2.0
           
