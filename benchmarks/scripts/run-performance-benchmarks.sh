@@ -1,6 +1,5 @@
 #!/bin/bash
 
-set -e
 
 check_npus() {
   # shellcheck disable=SC2155
@@ -19,10 +18,19 @@ check_npus() {
 }
 
 ensure_sharegpt_downloaded() {
-  local FILE=ShareGPT_V3_unfiltered_cleaned_split.json
+  local FILE="/github/home/.cache/datasets/ShareGPT_V3_unfiltered_cleaned_split.json"
+  local DIR
+  DIR=$(dirname "$FILE")
+
   if [ ! -f "$FILE" ]; then
     echo "$FILE not found, downloading from hf-mirror ..."
-    wget https://hf-mirror.com/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/$FILE
+    mkdir -p "$DIR"
+    wget -O "$FILE" https://hf-mirror.com/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+    if [ $? -ne 0 ]; then
+      echo "Download failed!" >&2
+      return 1
+    fi
+    echo "Download completed and saved to $FILE"
   else
     echo "$FILE already exists."
   fi
@@ -49,7 +57,8 @@ wait_for_server() {
   # wait for vllm server to start
   # return 1 if vllm server crashes
   timeout 1200 bash -c '
-    until curl -s -X POST localhost:8000/v1/completions || curl -s -X POST localhost:8000/v1/chat/completions; do
+    until curl -s -X GET localhost:8000/health; do
+      echo "Waiting for vllm server to start..."
       sleep 1
     done' && return 0 || return 1
 }
@@ -290,6 +299,7 @@ main() {
   # prepare for benchmarking
   cd benchmarks || exit 1
   get_benchmarks_scripts
+  python3 scripts/patch_benchmark_dataset.py --path vllm_benchmarks/benchmark_dataset.py
   trap cleanup EXIT
 
   QUICK_BENCHMARK_ROOT=./

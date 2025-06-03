@@ -5,7 +5,7 @@
       "model": "Qwen/Qwen3-8B",
       "tensor_parallel_size": 1,
       "load_format": "dummy",
-      "dataset_path": "/root/.cache/datasets/sharegpt/ShareGPT_V3_unfiltered_cleaned_split.json",
+      "dataset_path": "/github/home/.cache/datasets/ShareGPT_V3_unfiltered_cleaned_split.json",
       "num_prompts": 200,
       "backend": "vllm"
     }
