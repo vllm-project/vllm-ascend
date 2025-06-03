@@ -993,8 +993,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 prompt_logprobs_dict={},
             )
 
-        capture_name = "Decode" if self.attn_state == AscendAttentionState.DecodeOnly else "Prefill"
-        ProfileExecuteDuration().pop_captured_sync(capture_name)
+        durations = ProfileExecuteDuration().pop_captured_sync()
+        if durations:
+            durations_str = [f"[{tag}]:{duration:.2f}ms" for tag, duration in durations.items()]
+            captured_name = "Decode" if self.attn_state == AscendAttentionState.DecodeOnly else "Prefill"
+            print(f"Profile execute duration [{captured_name}]:", " ".join(durations_str))
+
         return model_runner_output
 
     def _profile_multimodal(self) -> None:
