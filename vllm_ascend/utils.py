@@ -216,7 +216,7 @@ class ProfileExecuteDuration:
 
     def pop_captured_sync(self) -> dict:
         """Pop and synchronize all events in the observation list"""
-        durations = {}
+        durations: dict[str, float] = {}
         if not envs.VLLM_MODEL_EXECUTE_TIME_OBSERVE:
             return durations
 
@@ -225,5 +225,5 @@ class ProfileExecuteDuration:
                 tag, observe_start, observe_end = self._observations.pop()
             observe_end.synchronize()
             durations[tag] = observe_start.elapsed_time(observe_end)
-        
+
         return durations

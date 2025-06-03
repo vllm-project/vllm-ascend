@@ -1,4 +1,4 @@
-# Profile Execute Duration Observation
+# Profile Execute Duration
 
 The execution duration of each stage (including pre/post-processing, model forward, etc.) usually needs to be captured during a complete inference process. Typically, this is done by using `torch.npu.synchronize()` and obtaining CPU timestamps, which increases the performance overhead of host/device synchronization.
 
