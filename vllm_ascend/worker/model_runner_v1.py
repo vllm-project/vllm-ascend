@@ -24,6 +24,7 @@ import weakref
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from multiprocessing import Manager
 
 import numpy as np
 import numpy.typing as npt
@@ -61,6 +62,10 @@ from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
+
+from vllm_ascend.eplb.core.worker.eplb_forwarder import  EplbForwarder
+from vllm_ascend.eplb.core.worker..eplb_planner import  EplbPlanner
+from vllm_ascend.eplb.core.worker..eplb_process_handler import do_eplb_mp, launch_eplb_process
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -318,6 +323,32 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 False) and self.vllm_config.model_config.use_mla
             self.use_cached_npu_graph = additional_config.get(
                 "use_cached_npu_graph", False)
+
+        self.enable_eplb = True
+        # if additional_config:
+        #     self.enable_torchair_graph_mode = additional_config.get(
+        #         "enable_graph_mode",
+        #         False) and self.vllm_config.model_config.use_mla
+        #     self.use_cached_npu_graph = additional_config.get(
+        #         "use_cached_npu_graph", False)
+        #     self.enable_eplb = additional_config.get("enable_eplb", False)
+        
+        if self.enable_eplb == True:
+            import multiprocessing
+            self.expert_map_initialized = False
+            self.ctx = multiprocessing.get_context("spawn")
+            self.manager = self.ctx.Manager()
+            self.shared_dict = self.manager.dict()
+            self.forwarder = EplbForwarder(self.shared_dict)
+            self.planner = EplbPlanner(self.shared_dict)
+            self.response_queue = self.ctx.Queue()
+            self.planner_block_queue, self.block_update_queue, self.eplb_process = launch_eplb_process(
+                device=self.device,
+                eplb_forwarder=self.forwarder,
+                eplb_planner=self.planner,
+            )
+
+            logger.info(f"[ModelRunner] Launched EPLB process (pid={self.eplb_process.pid})")
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -941,7 +972,54 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             logprobs=logprobs_lists,
             prompt_logprobs_dict={},
         )
+                if self.enable_eplb:
+            try:
+                # Only call get_expert_map() on the first execute()
+
+                if not self.expert_map_initialized:
+                    self.get_expert_map()
+                    self.expert_map_initialized = True
+
+                moe_load = self.compute_and_set_moe_load()
+
+                self.planner_block_queue.put(1)
+
+                self.block_update_queue.get()
+
+                new_expert_map = self.shared_dict["expert_map"]
+                self.model.update_all_expert_map(new_expert_map, self.num_moe_layers)
+                
+
+            except Exception as e:
+                logger.warning(f"[ModelRunner] Failed to wake EPLB process: {e}", exc_info=True)
+
         return model_runner_output
+
+    def compute_and_set_moe_load(self):
+        self.num_moe_layers = 2
+        moe_load = self.model.get_all_moe_loads(self.num_moe_layers).to(torch.device("cpu"))
+
+        self.shared_dict["moe_load"] = moe_load
+        logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] = {moe_load}")
+
+        return moe_load
+
+
+    def get_expert_map(self):
+        self.num_moe_layers = 2
+        expert_map = self.model.get_all_expert_map(self.num_moe_layers).to(torch.device("cpu"))
+        self.shared_dict["expert_map"] = expert_map
+        logger.debug(f"[ModelRunner] Updated shared_dict['expert_map'] = {expert_map}")
+        return expert_map
+
+    def shutdown(self):
+        """
+        Clean up the EPLB process.
+        """
+        if self.eplb_process.is_alive():
+            self.eplb_process.terminate()
+            self.eplb_process.join()
+            logger.info("[ModelRunner] EPLB process terminated")
 
     def _profile_multimodal(self) -> None:
         # TODO: handle encoder-decoder models once we support them.

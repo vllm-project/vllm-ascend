@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+# Copyright Huawei Technologies Co., Ltd. 2023-2024. All rights reserved.
 
 import time
 import numpy as np

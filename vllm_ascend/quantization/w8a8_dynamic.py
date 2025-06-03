@@ -628,7 +628,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 topk_ids=topk_ids,
                 top_k=top_k,
                 expert_map=expert_map,
-                moe_all_to_all_group_name=self.moe_all_to_all_group_name)
+                moe_all_to_all_group_name=self.moe_all_to_all_group_name),topk_ids
         elif self.ep_group.world_size == 1:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
@@ -638,7 +638,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                                  topk_weights=topk_weights,
                                  topk_ids=topk_ids,
                                  top_k=top_k,
-                                 expert_map=expert_map)
+                                 expert_map=expert_map),topk_ids
         else:
             # The current implementation of deepseek moe splits hidden_states
             # according to tp_size before they are feed into fused_moe module.
@@ -653,7 +653,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                                               topk_ids=topk_ids,
                                               top_k=top_k,
                                               expert_map=expert_map,
-                                              ep_group=self.ep_group)
+                                              ep_group=self.ep_group),topk_ids
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:

@@ -1,5 +1,6 @@
+# Copyright Huawei Technologies Co., Ltd. 2023-2024. All rights reserved.
+
 import torch
-from vllm_ascend.eplb.eplb_planner.eplb_expert_data_collect import EplbExpertLoadCollect, EplbExpertMapCollect
 
 class EplbForwarder:
     def __init__(self, shared_dict):
