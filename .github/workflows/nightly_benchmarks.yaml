@@ -124,7 +124,7 @@ jobs:
           # This is useful for debugging or a release benchmark
           bash benchmarks/scripts/run-performance-benchmarks.sh
           # Convert the benchmark results to markdown format
-          python3 benchmarks/scripts/convert-benchmark-results.py
+          python3 benchmarks/scripts/convert_json_to_markdown.py
 
       - name: Upload benchmark artifacts
         if: github.event_name != 'schedule'
