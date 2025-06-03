@@ -135,7 +135,7 @@ jobs:
       - name: Install elastic_tool
         if: github.event_name == 'schedule'
         run: |
-          pip install escli-tool==0.2.0
+          pip install escli-tool==0.2.1
           
       - name: Collect pr info from vllm-project/vllm-ascend
         if: github.event_name == 'schedule'
