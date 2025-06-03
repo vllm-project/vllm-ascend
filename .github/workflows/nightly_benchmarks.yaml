@@ -24,9 +24,8 @@ on:
     - cron: '00 16 * * *'
   workflow_dispatch:
 
-  pull_request_target:
-    types: [labeled]
-
+  pull_request:
+    types: [ labeled ]
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -87,13 +86,10 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
-    
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
-        with:
-          ref: ${{  matrix.vllm_ascend_branch }}
-          
+
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v4
         with:
