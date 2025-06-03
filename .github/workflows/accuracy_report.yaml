@@ -60,16 +60,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Query artifact run id for Llama-3.1-8B-Instruct V0 latest artifact
-        id: get_Llama_3_1_8B_Instruct_latest_run_id_V0
-        run: |
-          ARTIFACT_JSON=$(gh api "repos/${{ github.repository }}/actions/artifacts")
-          RUN_ID=$(echo "$ARTIFACT_JSON" | \
-            jq -r '[.artifacts[] | select(.name=="${{ github.event.inputs.vllm-ascend-version }}-Llama-3.1-8B-Instruct-V0-report")] | sort_by(.created_at) | last | .workflow_run.id')
-          echo "runid=$RUN_ID" >> "$GITHUB_OUTPUT"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Query artifact run id for Qwen3-8B-Base V0 latest artifact
         id: get_Qwen3_8B_Base_latest_run_id_V0
         run: |
@@ -98,15 +88,6 @@ jobs:
           repository: vllm-project/vllm-ascend
           run-id: ${{ steps.get_Qwen2_5_7B_Instruct_latest_run_id_V0.outputs.runid }}
 
-      - name: Download meta-llama/Llama-3.1-8B-Instruct Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ github.event.inputs.vllm-ascend-version }}-Llama-3.1-8B-Instruct-V0-report
-          path: ./docs/source/developer_guide/evaluation/accuracy_report
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: vllm-project/vllm-ascend
-          run-id: ${{ steps.get_Llama_3_1_8B_Instruct_latest_run_id_V0.outputs.runid }}
-
       - name: Download Qwen/Qwen3-8B-Base Artifact
         uses: actions/download-artifact@v4
         with:
@@ -120,7 +101,6 @@ jobs:
         working-directory: ./docs/source/developer_guide/evaluation/accuracy_report
         run: |
           cat ./Qwen2.5-VL-7B-Instruct.md
-          cat ./Llama-3.1-8B-Instruct.md
           cat ./Qwen2.5-7B-Instruct.md
           cat ./Qwen3-8B-Base.md
       
@@ -128,7 +108,7 @@ jobs:
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.PR_TOKEN }}
-          base: ${{ github.ref_name }}
+          base: ${{ github.event.inputs.branch }}
           branch: auto-pr/accuracy-test
           commit-message: "Update accuracy report for ${{ github.event.inputs.branch }}"
           add-paths: ./docs/source/developer_guide/evaluation/accuracy_report/*.md
@@ -139,12 +119,10 @@ jobs:
 
             - [Workflow run][1]
             - [Qwen2.5-7B-Instruct accuracy report][2]
-            - [Llama-3.1-8B-Instruct accuracy report][3]
-            - [Qwen2.5-VL-7B-Instruct accuracy report][4]
-            - [Qwen3-8B-Base accuracy report][5]
+            - [Qwen2.5-VL-7B-Instruct accuracy report][3]
+            - [Qwen3-8B-Base accuracy report][4]
 
             [1]: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
             [2]: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.get_Qwen2_5_7B_Instruct_latest_run_id_V0.outputs.runid }}
-            [3]: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.get_Llama_3_1_8B_Instruct_latest_run_id_V0.outputs.runid }}
-            [4]: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.get_Qwen2_5_VL_7B_Instruct_latest_run_id_V0.outputs.runid }}
-            [5]: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.get_Qwen3_8B_Base_latest_run_id_V0.outputs.runid }}
+            [3]: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.get_Qwen2_5_VL_7B_Instruct_latest_run_id_V0.outputs.runid }}
+            [4]: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.get_Qwen3_8B_Base_latest_run_id_V0.outputs.runid }}
