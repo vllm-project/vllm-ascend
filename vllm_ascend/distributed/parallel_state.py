@@ -21,12 +21,18 @@ def get_etp_group() -> GroupCoordinator:
     return _ETP
 
 
+def model_parallel_initialized():
+    return (_ETP is not None and _EP is not None)
+
+
 def init_ascend_model_parallel(
     expert_parallel_size: int = 1,
     expert_tensor_parallel_size: int = 1,
     world_size: Optional[int] = None,
     backend: Optional[str] = None,
 ):
+    if model_parallel_initialized():
+        return
     assert torch.distributed.is_initialized()
     world_size = world_size or torch.distributed.get_world_size()
     backend = backend or torch.distributed.get_backend(
