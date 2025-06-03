@@ -132,6 +132,7 @@ jobs:
           overwrite: true
 
       - name: Install elastic_tool
+        if: github.event_name == 'schedule'
         run: |
           pip install escli-tool==0.2.0
           
