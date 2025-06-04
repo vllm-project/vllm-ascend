@@ -83,6 +83,9 @@ class NPUPlatform(Platform):
         from vllm_ascend.quantization.quant_config import \
             AscendQuantConfig  # noqa: F401
 
+    def is_npu(self) -> bool:
+        return self._enum == PlatformEnum.OOT
+
     @classmethod
     def get_device_capability(cls, device_id: int = 0):
         return None

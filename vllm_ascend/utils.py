@@ -25,6 +25,8 @@ from packaging.version import InvalidVersion, Version
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs
+from vllm_ascend.usage_lib import (UsageContext, is_usage_stats_enabled,
+                                   usage_message)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -175,3 +177,46 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
 
 def dispose_tensor(x: torch.Tensor):
     x.set_(torch.empty((0, ), device=x.device, dtype=x.dtype))
+
+
+def report_usage_stats(
+        vllm_config,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT) -> None:
+    """Report usage statistics if enabled."""
+
+    if not is_usage_stats_enabled():
+        return
+
+    from vllm.model_executor.model_loader import get_architecture_class_name
+    usage_message.report_usage(
+        get_architecture_class_name(vllm_config.model_config),
+        usage_context,
+        extra_kvs={
+            # Common configuration
+            "dtype":
+            str(vllm_config.model_config.dtype),
+            "tensor_parallel_size":
+            vllm_config.parallel_config.tensor_parallel_size,
+            "block_size":
+            vllm_config.cache_config.block_size,
+            "gpu_memory_utilization":
+            vllm_config.cache_config.gpu_memory_utilization,
+
+            # Quantization
+            "quantization":
+            vllm_config.model_config.quantization,
+            "kv_cache_dtype":
+            str(vllm_config.cache_config.cache_dtype),
+
+            # Feature flags
+            "enable_lora":
+            bool(vllm_config.lora_config),
+            "enable_prompt_adapter":
+            bool(vllm_config.prompt_adapter_config),
+            "enable_prefix_caching":
+            vllm_config.cache_config.enable_prefix_caching,
+            "enforce_eager":
+            vllm_config.model_config.enforce_eager,
+            "disable_custom_all_reduce":
+            vllm_config.parallel_config.disable_custom_all_reduce,
+        })
