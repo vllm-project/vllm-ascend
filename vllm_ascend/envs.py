@@ -66,6 +66,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("C_COMPILER", None),
     "VLLM_VERSION":
     lambda: os.getenv("VLLM_VERSION", None),
+    "VLLM_ASCEND_TRACE_RECOMPILES":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_TRACE_RECOMPILES", '0'))),
 }
 
 # end-env-vars-definition
