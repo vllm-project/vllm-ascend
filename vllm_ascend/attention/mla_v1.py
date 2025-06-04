@@ -1,4 +1,3 @@
-import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Tuple, Type, TypeVar
 
@@ -17,6 +16,7 @@ from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
+import vllm_ascend.envs as envs_ascend
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -465,8 +465,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         if additional_config:
             self.enable_graph_mode = additional_config.get(
                 "enable_graph_mode", False)
-        
-        self.enable_kv_nz = int(os.environ.get("VLLM_ENABLE_KV_NZ", "0"))
+        self.enable_kv_nz = envs_ascend.VLLM_ENABLE_KV_NZ
 
     def _v_up_proj_and_o_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
@@ -653,7 +652,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv = self.kv_a_proj_with_mqa(hidden_states)[0]
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv = kv.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-        cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
+        cache_mode = "PA_BLK_NZ" if self.enable_kv_nz else "PA"
         _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv,
             self.kv_a_layernorm.weight,
@@ -700,6 +699,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             device=q.device)
         if self.running_in_graph:
             # TorchAir's shape is [bs, num_heads_per_rank, seq_len, dim]
+            q_nope = q_nope.transpose(1, 2).contiguous()
+            q_pe = q_pe.transpose(1, 2).contiguous()
             q_nope = q_nope.view(num_tokens, 1, self.num_heads, -1)
             q_pe = q_pe.view(num_tokens, 1, self.num_heads, -1)
             # shape of knope/k_pe for npu graph mode should be:
