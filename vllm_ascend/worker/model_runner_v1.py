@@ -982,7 +982,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict={},
         )
         #如果上一轮更新尚未完成，就不重复触发
-       if self.enable_eplb and not self.update_in_flight:
+        if self.enable_eplb and not self.update_in_flight:
             try:
                 # 只有首次 execute() 时，需要从 model 读取并初始化 expert_map
                 if not self.expert_map_initialized:

@@ -72,7 +72,9 @@ class EplbWorker:
   
 
     #
-    def alg():
+    def alg(self,new_expert_map):
+        #根据new_expert_map，对D2D流程进行编排
+        pass
 
 
     def load_impl(self, new_expert_table):
