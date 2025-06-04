@@ -18,8 +18,8 @@
 from typing import Callable, List, Optional
 
 import torch
-import torch_npu
 import torch.distributed as dist
+import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (GroupCoordinator,
                               get_tensor_model_parallel_world_size,
