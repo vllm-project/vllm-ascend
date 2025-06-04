@@ -24,7 +24,8 @@ create_vllm_venv
 
 _info "====> Install vllm and vllm-ascend from ${VLLM_VERSION}"
 if [[ "$VLLM_VERSION" == "main" ]]; then
-    pip install vllm==0.9.0
+    # TODO: Update to the vllm version when vllm-ascend v0.9.0rc1 is released
+    pip install vllm==0.8.5.post1
     pip install vllm-ascend==0.8.5rc1
 fi
 

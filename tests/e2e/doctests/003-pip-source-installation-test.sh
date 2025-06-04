@@ -24,6 +24,7 @@ function install_from_source() {
     mkdir -p "$SOURCE_CODE_DIR" && cd "$SOURCE_CODE_DIR"
     _info "====> Install vllm and vllm-ascend from ${VLLM_VERSION}"
     if [[ "$VLLM_VERSION" == "main" ]]; then
+        # TODO: Update to the vllm version when vllm-ascend v0.9.0rc1 is released
         git clone --depth 1 --branch v0.8.5.post1 https://github.com/vllm-project/vllm
         cd vllm
         VLLM_TARGET_DEVICE=empty pip install -v -e .
