@@ -29,12 +29,11 @@ from tests.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
+
 GuidedDecodingBackendV0 = [
-    "outlines",
-    "lm-format-enforcer",
-    "xgrammar",
+    "outlines", "lm-format-enforcer", "xgrammar", "guidance"
 ]
-GuidedDecodingBackendV1 = ["xgrammar", "guidance:disable-any-whitespace"]
+GuidedDecodingBackendV1 = ["xgrammar", "guidance"]
 GuidedDecodingBackend = list(
     set(GuidedDecodingBackendV0 + GuidedDecodingBackendV1))
 
@@ -90,23 +89,19 @@ def sample_json_schema():
 @pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
 def test_guided_json_completion(guided_decoding_backend: str,
                                 sample_json_schema):
-    if guided_decoding_backend == "xgrammar":
-        # xgrammar does not support json schema, will fall back to outlines, skip it
-        pytest.skip(
-            f"{guided_decoding_backend} will fall back to outlines, skip it")
-    if guided_decoding_backend not in GuidedDecodingBackendV0 and os.getenv(
-            "VLLM_USE_V1") == "0":
-        # guidance does not support on v0, skip it
-        pytest.skip(
-            f"{guided_decoding_backend} does not support on v0, skip it")
+    # if guided_decoding_backend == "xgrammar":
+    #     # xgrammar does not support json schema, will fall back to outlines, skip it
+    #     pytest.skip(
+    #         f"{guided_decoding_backend} will fall back to outlines, skip it.")
     if guided_decoding_backend not in GuidedDecodingBackendV1 and os.getenv(
             "VLLM_USE_V1") == "1":
-        pytest.skip(f"{guided_decoding_backend} does not support v1, skip it")
+        pytest.skip(f"{guided_decoding_backend} does not support v1, skip it.")
 
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=1000,
         guided_decoding=GuidedDecodingParams(json=sample_json_schema))
+
     with VllmRunner(
             MODEL_NAME,
             seed=0,
@@ -138,19 +133,15 @@ def test_guided_json_completion(guided_decoding_backend: str,
 
 @pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
 def test_guided_regex(guided_decoding_backend: str, sample_regex):
-    if guided_decoding_backend not in GuidedDecodingBackendV0 and os.getenv(
-            "VLLM_USE_V1") == "0":
-        # guidance does not support on v0, skip it
-        pytest.skip(
-            f"{guided_decoding_backend} does not support on v0, skip it")
     if guided_decoding_backend not in GuidedDecodingBackendV1 and os.getenv(
             "VLLM_USE_V1") == "1":
         pytest.skip(f"{guided_decoding_backend} does not support v1, skip it")
 
-    sampling_params = SamplingParams(temperature=0.8,
-                                     top_p=0.95,
-                                     guided_decoding=GuidedDecodingParams(
-                                         regex=sample_regex, ))
+    sampling_params = SamplingParams(
+        temperature=0.8,
+        top_p=0.95,
+        guided_decoding=GuidedDecodingParams(regex=sample_regex))
+
     with VllmRunner(
             MODEL_NAME,
             seed=0,
