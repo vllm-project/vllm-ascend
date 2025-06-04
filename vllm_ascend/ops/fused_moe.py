@@ -963,8 +963,7 @@ class AscendFusedMoE(FusedMoE):
             e_score_correction_bias=self.e_score_correction_bias,
             is_prefill=is_prefill,
             enable_force_load_balance=enable_force_load_balance,
-            dp_size=self.dp_size,
-            token_dispatcher=self.token_dispatcher)
+            dp_size=self.dp_size)
 
         if VLLM_ENABLE_MC2 and not is_prefill:
             ...
