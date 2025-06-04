@@ -991,9 +991,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
                 moe_load = self.compute_and_set_moe_load()
 
-                #唤醒子进程，基于写入的 shared_dict["expert_map"] 和当前 moe_load 计算新映射
+                #唤醒子进程，基于写入的 shared_dict["expert_map"] 和当前 moe_load 计算专家表
                 self.planner_block_queue.put(1)
                 self.update_in_flight = True
+                
                 logger.debug("[ModelRunner] 已异步唤醒 EPLB 子进程进行 expert_map 更新")
                 
             except Exception as e:
