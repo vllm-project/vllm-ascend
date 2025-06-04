@@ -138,7 +138,7 @@ class NPUPlatform(Platform):
 
             # Calculate expert parallel size based on world size
             parallel_config.expert_parallel_size = (
-                parallel_config.world_size //
+                parallel_config.world_size_across_dp //
                 parallel_config.expert_tensor_parallel_size)
 
         if model_config is None:
@@ -167,6 +167,8 @@ class NPUPlatform(Platform):
                         raise NotImplementedError(
                             "enable_graph_mode only works with deepseek model."
                         )
+                # Set compilation level to NO_COMPILATION to disable ACL Graph
+                compilation_config.level = CompilationLevel.NO_COMPILATION
 
         elif envs.VLLM_USE_V1 and model_config is not None and not enforce_eager:
             model_type = model_config.hf_config.model_type
