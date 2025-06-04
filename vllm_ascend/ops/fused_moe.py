@@ -706,6 +706,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         try:
             device_group = ep_group.device_group
+            # TODO: Try local_rank = ep_group.rank_in_group
             local_rank = torch.distributed.get_rank(group=device_group)
             backend = device_group._get_backend(torch.device("npu"))
             self.moe_all_to_all_group_name = backend.get_hccl_comm_name(
@@ -738,9 +739,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
-        is_prefill: bool = True,
+        is_prefill: bool = False,
         enable_force_load_balance: bool = False,
-        dp_size: int = 1,
         **kwargs,
     ) -> torch.Tensor:
 
