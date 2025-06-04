@@ -690,6 +690,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
 class AscendFusedMoE(FusedMoE):
 
+    moe_counter = -1
+
     def __init__(
         self,
         num_experts: int,  # Global number of experts
@@ -750,6 +752,11 @@ class AscendFusedMoE(FusedMoE):
         self.e_score_correction_bias = e_score_correction_bias
         self.expert_map = None
         self.activation = activation
+
+        AscendFusedMoE.moe_counter += 1
+        self.moe_instance_id = AscendFusedMoE.moe_counter
+        self.moe_load = None
+        self.topk_ids =  None
 
         if self.ep_size > 1:
             # Create a tensor of size num_experts filled with -1
@@ -827,7 +834,7 @@ class AscendFusedMoE(FusedMoE):
             ...
 
         # Matrix multiply.
-        final_hidden_states = self.quant_method.apply(
+        final_hidden_states， self.topk_ids = self.quant_method.apply(
             layer=self,
             x=hidden_states,
             router_logits=router_logits,
@@ -844,6 +851,8 @@ class AscendFusedMoE(FusedMoE):
             is_prefill=is_prefill,
             enable_force_load_balance=enable_force_load_balance)
 
+        self.calculate_moe_load()
+
         if VLLM_ENABLE_MC2 and not is_prefill:
             ...
 
@@ -852,3 +861,26 @@ class AscendFusedMoE(FusedMoE):
                 final_hidden_states)
 
         return final_hidden_states
+        
+    def update_map(self,new_expert_map):
+        self.expert_map = new_expert_map
+
+    def get_map(self):
+        return self.expert_map
+
+    def get_moe_load(self):
+        return self.moe_load
+
+    def calculate_moe_load(self):
+        if self.moe_load is None:
+            self.moe_load = torch.zeros(self.num_experts,
+                                        dtype=torch.int64,
+                                        device=self.topk_ids.device) 
+
+        ids     = self.topk_ids.flatten().to(torch.int64)
+        counts  = torch.bincount(ids, minlength=self.num_experts)
+        # optional: all_reduce to gather across ranks
+        import torch.distributed as dist
+        if dist.is_initialized():
+            dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+        self.moe_load += counts
