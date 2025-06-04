@@ -41,6 +41,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.worker_base import WorkerBase
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import try_register_lib
@@ -230,7 +231,18 @@ class NPUWorker(WorkerBase):
         return self.model_runner.pin_lora(lora_id)
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1)
+        runner = self.model_runner
+        num_tokens = 1
+        if runner.dp_size > 1:
+            max_num_tokens, with_prefill = runner._get_forward_metadata_across_dp(
+                1, False)
+        if envs_ascend.VLLM_ENABLE_MC2 or runner.enable_torchair_graph_mode:
+            if not with_prefill:
+                num_tokens = max_num_tokens
+            num_tokens = runner.select_torchair_padded_batch_size(num_tokens)
+        runner._dummy_run(num_tokens,
+                          is_compile=False,
+                          with_prefill=with_prefill)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
@@ -246,7 +258,7 @@ class NPUWorker(WorkerBase):
         init_ascend_model_parallel(
             parallel_config.expert_parallel_size,
             parallel_config.expert_tensor_parallel_size,
-            parallel_config.world_size,
+            parallel_config.world_size_across_dp,
         )
         ensure_kv_transfer_initialized(self.vllm_config)
 

@@ -21,6 +21,7 @@ import torch
 import torch.distributed as dist
 import torch_npu
 import torchair as tng  # type: ignore
+from vllm.config import get_current_vllm_config
 from vllm.distributed import GroupCoordinator, tensor_model_parallel_all_reduce
 
 import vllm_ascend.envs as envs_ascend
@@ -548,6 +549,12 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         self.ep_group = get_ep_group()
 
+        self.enable_graph_mode = False
+        additional_config = get_current_vllm_config().additional_config
+        if additional_config:
+            self.enable_graph_mode = additional_config.get(
+                "enable_graph_mode", False)
+
         try:
             device_group = self.ep_group.device_group
             # TODO: Try local_rank = ep_group.rank_in_group
@@ -657,6 +664,8 @@ class AscendW8A8DynamicFusedMoEMethod:
         if enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
+        topk_weights = topk_weights.to(x.dtype)
+
         if VLLM_ENABLE_MC2 and not is_prefill:
             return fused_experts_with_mc2(
                 hidden_states=x,
@@ -670,7 +679,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 expert_map=expert_map,
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name,
                 **kwargs)
-        elif self.ep_group.world_size == 1:
+        elif self.enable_graph_mode or self.ep_group.world_size == 1:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
                                  w1_scale=layer.w13_weight_scale,
