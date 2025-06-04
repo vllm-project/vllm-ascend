@@ -738,8 +738,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = True,
-        enable_force_load_balance: bool = True,
-        dp_size: int = 1,
+        enable_force_load_balance: bool = False,
         **kwargs,
     ) -> torch.Tensor:
 
@@ -772,6 +771,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 e_score_correction_bias=e_score_correction_bias,
             )
 
+        topk_weights = topk_weights.to(x.dtype)
+        # this is a naive implementation for experts load balance so as
+        # to avoid accumulating too much tokens on a single rank.
+        # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
