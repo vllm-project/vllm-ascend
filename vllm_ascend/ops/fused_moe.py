@@ -18,8 +18,8 @@
 from typing import Callable, List, Optional
 
 import torch
-import torch.distributed as dist
 import torch_npu
+import torch.distributed as dist
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (GroupCoordinator,
                               get_tensor_model_parallel_world_size,
@@ -739,6 +739,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = True,
         enable_force_load_balance: bool = False,
+        dp_size: int = 1,
         **kwargs,
     ) -> torch.Tensor:
 
