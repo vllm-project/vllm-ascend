@@ -629,6 +629,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = False,
+        enable_force_load_balance: bool = False,
         **kwargs,
     ):
         # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
@@ -659,6 +660,13 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias,
             )
+
+        topk_weights = topk_weights.to(x.dtype)
+        # this is a naive implementation for experts load balance so as
+        # to avoid accumulating too much tokens on a single rank.
+        # currently it is only activated when doing profile runs.
+        if enable_force_load_balance:
+            topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
         if VLLM_ENABLE_MC2 and not is_prefill:
             return fused_experts_with_mc2(

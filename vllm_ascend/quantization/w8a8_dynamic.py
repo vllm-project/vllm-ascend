@@ -624,6 +624,8 @@ class AscendW8A8DynamicFusedMoEMethod:
         if enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
+        topk_weights = topk_weights.to(x.dtype)
+
         if VLLM_ENABLE_MC2 and not is_prefill:
             return fused_experts_with_mc2(
                 hidden_states=x,
