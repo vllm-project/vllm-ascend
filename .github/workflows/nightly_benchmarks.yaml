@@ -89,6 +89,8 @@ jobs:
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v4
