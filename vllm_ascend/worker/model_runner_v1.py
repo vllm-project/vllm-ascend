@@ -994,8 +994,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 #唤醒子进程，基于写入的 shared_dict["expert_map"] 和当前 moe_load 计算专家表
                 self.planner_block_queue.put(1)
                 self.update_in_flight = True
-                
-                logger.debug("[ModelRunner] 已异步唤醒 EPLB 子进程进行 expert_map 更新")
+
+                logger.debug("[ModelRunner] 异步唤醒 EPLB 子进程进行 expert_map 更新")
                 
             except Exception as e:
                 logger.warning(f"[ModelRunner] Failed to wake EPLB process: {e}", exc_info=True)            
