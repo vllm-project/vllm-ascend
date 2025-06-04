@@ -335,7 +335,7 @@ def fused_experts_with_all2all(
                            group=ep_group.device_group)
     mask = expert_idx_buffer_gather != global_num_experts
     local_expert_idx = expert_idx_buffer_gather[mask] - ep_group.rank * (
-            global_num_experts // ep_group.world_size)
+        global_num_experts // ep_group.world_size)
     hidden_states = hidden_states_buffer_gather[mask]
     idx_type = local_expert_idx.dtype
     sorted_local_expert_idx, sorted_idx = torch.sort(local_expert_idx.float())
