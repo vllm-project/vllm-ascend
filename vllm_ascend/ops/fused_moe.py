@@ -272,9 +272,7 @@ def apply_mlp(hidden_states_wrapper: List[torch.Tensor],
 def fused_experts_with_all2all(
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
-        w1_scale: torch.Tensor,
         w2: torch.Tensor,
-        w2_scale: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         top_k: int,
@@ -353,9 +351,7 @@ def fused_experts_with_all2all(
 
     hidden_states = apply_mlp(hidden_states_wrapper,
                               w1,
-                              w1_scale,
                               w2,
-                              w2_scale,
                               expert_tokens,
                               group_list_type=group_list_type)
 
