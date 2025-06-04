@@ -46,6 +46,8 @@ def test_models_distributed_QwQ():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "1",
+                    reason="wait for mla issue fixed on v1")
 def test_models_distributed_DeepSeek():
     example_prompts = [
         "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
