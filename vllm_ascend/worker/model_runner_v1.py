@@ -64,6 +64,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import CommonAttentionMetadata
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
+from vllm_ascend.utils import vllm_version_is
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 
 if TYPE_CHECKING:
@@ -1265,15 +1266,27 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         import torch_npu
         kv_caches: Dict[str, torch.Tensor] = {}
 
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.model_config.max_model_len,
-            max_num_batched_tokens=self.max_num_tokens,
-            device=self.device,
-            pin_memory=True,
-            vocab_size=self.model_config.get_vocab_size(),
-            block_size=self.cache_config.block_size,
-        )
+        # Remove this after we drop 0.9.0 support
+        if vllm_version_is("0.9.0"):
+            self.input_batch = InputBatch(
+                max_num_reqs=self.max_num_reqs,
+                max_model_len=self.model_config.max_model_len,
+                max_num_batched_tokens=self.max_num_tokens,
+                device=self.device,
+                pin_memory=True,
+                vocab_size=self.model_config.get_vocab_size(),
+                block_size=self.cache_config.block_size,
+            )
+        else:
+            self.input_batch = InputBatch(
+                max_num_reqs=self.max_num_reqs,
+                max_model_len=self.model_config.max_model_len,
+                max_num_batched_tokens=self.max_num_tokens,
+                device=self.device,
+                pin_memory=True,
+                vocab_size=self.model_config.get_vocab_size(),
+                block_sizes=[self.cache_config.block_size],
+            )
 
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
