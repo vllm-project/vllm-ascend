@@ -1,15 +1,5 @@
 [
   {
-    "test_name": "latency_qwen2_5vl_7B_tp1",
-    "parameters": {
-      "model": "Qwen/Qwen2.5-VL-7B-Instruct",
-      "tensor_parallel_size": 1,
-      "max_model_len": 16384,
-      "num_iters_warmup": 5,
-      "num_iters": 15
-    }
-  },
-  {
     "test_name": "latency_qwen3_8B_tp1",
     "parameters": {
       "model": "Qwen/Qwen3-8B",

@@ -46,7 +46,7 @@
       "model": "Qwen/Qwen3-8B",
       "backend": "vllm",
       "dataset_name": "sharegpt",
-      "dataset_path": "/root/.cache/datasets/sharegpt/ShareGPT_V3_unfiltered_cleaned_split.json",
+      "dataset_path": "/github/home/.cache/datasets/ShareGPT_V3_unfiltered_cleaned_split.json",
       "num_prompts": 200
     }
   }
