@@ -133,8 +133,6 @@ jobs:
               --ignore=tests/singlecard/test_scheduler.py \
               --ignore=tests/singlecard/test_guided_decoding.py \
               --ignore=tests/singlecard/test_camem.py
-            pytest -sv tests/singlecard/test_ilama_lora.py
-            pytest -sv tests/singlecard/test_pyhccl.py
           else
             pytest -sv tests/multicard/test_ilama_lora_tp2.py
             # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py will raise error.
