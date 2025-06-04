@@ -87,5 +87,15 @@ jobs:
 
       - name: Run vllm-ascend/tests/e2e/run_doctests.sh
         run: |
+          # PWD: /__w/vllm-ascend/vllm-ascend
+          echo "Replacing /vllm-workspace/vllm-ascend/tests/e2e ..."
+          rm -rf /vllm-workspace/vllm-ascend/tests/e2e
+          mkdir -p /vllm-workspace/vllm-ascend/tests
+          cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
+
+          # Simulate container to enter directory
+          cd /workspace
+          # Run real test
           echo "Test:"
-          bash tests/e2e/run_doctests.sh "${{ matrix.vllm_verison }}"
+          /vllm-workspace/vllm-ascend/tests/e2e/run_doctests.sh "${{ matrix.vllm_verison }}"
+
