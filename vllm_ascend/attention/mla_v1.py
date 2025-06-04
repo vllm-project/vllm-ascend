@@ -9,10 +9,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               MLAAttentionImpl)
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import get_current_vllm_config
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearBase, RowParallelLinear,
+from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
@@ -422,20 +420,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         blocksparse_params: Optional[dict[str, Any]],
         logits_soft_cap: Optional[float],
         attn_type: str,
-        # MLA Specific Arguments
-        q_lora_rank: Optional[int],
-        kv_lora_rank: int,
-        qk_nope_head_dim: int,
-        qk_rope_head_dim: int,
-        qk_head_dim: int,
-        v_head_dim: int,
-        rotary_emb: RotaryEmbedding,
-        # q_proj should be q_b_proj if q_lora_rank is not None, but from an
-        # attention backend perspective we rely on the layer to pass in the
-        # correct matrix
-        q_proj: ColumnParallelLinear,
-        kv_b_proj: ColumnParallelLinear,
-        o_proj: RowParallelLinear,
+        kv_sharing_target_layer_name: Optional[str] = None,
         **kwargs,
     ) -> None:
         self.num_heads = num_heads
@@ -444,25 +429,20 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.num_kv_heads = num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype
 
-        self.q_lora_rank = q_lora_rank
-        self.kv_lora_rank = kv_lora_rank
-        self.qk_nope_head_dim = qk_nope_head_dim
-        self.qk_rope_head_dim = qk_rope_head_dim
-        self.qk_head_dim = qk_head_dim
-        self.v_head_dim = v_head_dim
-
-        # Hack for V1 for now to avoid torch library overhead (since we are
-        # already inside an attention custom op), pull out the forward
-        # method from the rotary embedding and call it directly
-        # TODO(lucas): we should probably find a cleaner way to do this
-        self.rotary_emb = rotary_emb
-
-        self.q_proj = q_proj
-        self.kv_b_proj = kv_b_proj
-        self.o_proj = o_proj
-
+        # MLA Args
+        self.q_lora_rank = kwargs['q_lora_rank']
+        self.kv_lora_rank = kwargs['kv_lora_rank']
+        self.qk_nope_head_dim = kwargs['qk_nope_head_dim']
+        self.qk_rope_head_dim = kwargs['qk_rope_head_dim']
+        self.qk_head_dim = kwargs['qk_head_dim']
+        self.v_head_dim = kwargs['v_head_dim']
+        self.rotary_emb = kwargs['rotary_emb']
+        self.q_proj = kwargs['q_proj']
+        self.kv_b_proj = kwargs['kv_b_proj']
+        self.o_proj = kwargs['o_proj']
         self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
+
         # Handle the differences between the flash_attn_varlen from flash_attn
         # and the one from vllm_flash_attn. The former is used on RoCM and the
         # latter has an additional parameter to control FA2 vs FA3
