@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/kernels/test_moe.py
 
-from typing import Callable, Optional, List
+from typing import Callable, List, Optional
 
 import torch
 import torch_npu
