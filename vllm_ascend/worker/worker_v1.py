@@ -43,7 +43,7 @@ from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import try_register_lib
+from vllm_ascend.utils import report_usage_stats, try_register_lib
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -113,6 +113,10 @@ class NPUWorker(WorkerBase):
 
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = NPUModelRunner(self.vllm_config, self.device)
+
+        if self.rank == 0:
+            # If usage stat is enabled, collect relevant info.
+            report_usage_stats(self.vllm_config)
 
     def determine_available_memory(self) -> int:
         kv_caches: Dict[str, torch.Tensor] = {}
