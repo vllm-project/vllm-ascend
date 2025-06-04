@@ -89,10 +89,6 @@ def sample_json_schema():
 @pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
 def test_guided_json_completion(guided_decoding_backend: str,
                                 sample_json_schema):
-    # if guided_decoding_backend == "xgrammar":
-    #     # xgrammar does not support json schema, will fall back to outlines, skip it
-    #     pytest.skip(
-    #         f"{guided_decoding_backend} will fall back to outlines, skip it.")
     if guided_decoding_backend not in GuidedDecodingBackendV1 and os.getenv(
             "VLLM_USE_V1") == "1":
         pytest.skip(f"{guided_decoding_backend} does not support v1, skip it.")
