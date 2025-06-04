@@ -1272,7 +1272,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
             pin_memory=True,
             vocab_size=self.model_config.get_vocab_size(),
-            block_size=self.cache_config.block_size,
+            block_sizes=[self.cache_config.block_size],
         )
 
         for kv_cache_group in kv_cache_config.kv_cache_groups:
