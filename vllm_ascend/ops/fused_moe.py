@@ -377,6 +377,7 @@ def fused_experts_with_all2all(
                                     device=hidden_states.device)
         hidden_states[unpad_indices != -1] = hidden_states_gatter
     else:
+        # TODO: Reorder device memory 2 times here, replace the current
         hidden_states = hidden_states_gatter
     final_hidden_states = torch_npu.npu_moe_finalize_routing(
         hidden_states,
