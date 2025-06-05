@@ -27,6 +27,7 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 from vllm_ascend.ops.fused_moe import select_experts
 from vllm_ascend.utils import dispose_tensor
+import vllm_ascend.envs as envs
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 
@@ -593,10 +594,10 @@ class AscendW8A8DynamicFusedMoEMethod:
                 "enable_graph_mode", False)
         
         self.enable_fused_routing = False
-            if envs.VLLM_ENABLE_FUSED_ROUTING and \
-                torch.distributed.get_world_size(ep_group.device_group) > 1 and \
-                torch.distributed.get_world_size(etp_group.device_group) == 1:
-                self.enable_fused_routing = True
+        if envs.VLLM_ENABLE_FUSED_ROUTING and \
+            torch.distributed.get_world_size(self.ep_group.device_group) > 1 and \
+            torch.distributed.get_world_size(self.etp_group.device_group) == 1:
+            self.enable_fused_routing = True
 
         try:
             device_group = self.ep_group.device_group
