@@ -213,6 +213,7 @@ jobs:
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
           VLLM_USE_V1: ${{ matrix.vllm_use_version }}
+          VLLM_LOGGING_LEVEL: DEBUG
         run: |
           model_base_name=$(basename ${{ matrix.model_name }})
           markdown_name="${model_base_name}-V${{ matrix.vllm_use_version }}"
