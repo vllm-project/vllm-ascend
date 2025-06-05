@@ -16,6 +16,7 @@
 #
 import torch
 import torch.distributed as dist
+from vllm.distributed import get_tensor_model_parallel_world_size
 
 from vllm_ascend.eplb.core.loader.abstract_loader import ExpertWeightLoader
 
@@ -27,7 +28,8 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
         self.param_dict = dict(self.model.name_parameters())
         # TO DO: init expert_params_name map depending on different conguration in self.model
         config = self.model.vllm_config.model_config.hf_config
-        intermediate_size_per_partition = config.moe_intermediate_size
+        tp_size = get_tensor_model_parallel_world_size()
+        intermediate_size_per_partition = config.moe_intermediate_size // tp_size
         hidden_sizes = config.hidden_size
         self.expert_params_name = {
             "w13_weight":(2 * intermediate_size_per_partition, hidden_sizes),
@@ -41,13 +43,17 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
         num_buffer_tensor = 1 # TO DO: provide number of buffer tensor by vllm configuration
         params_dtype = torch.int8 # TO DO: provide number of buffer tensor by vllm configuration
         self.init_buffer_tensor_dict(num_buffer_tensor, params_dtype)
-        self.expert_map = None
+        self.expert_map = dict()
+        num_moe_layers = 2 # TO DO: provide number of num_moe_layers by vllm configuration
+        for layer_idx in range(num_moe_layers):
+            self.expert_map[layer_idx] = self.get_expert_map(3+layer_idx)
         self.updated_expert_map = None
         self.layer_id = -1
         # 0: waiting for updated expert_map by EplbWorker
         # 1: ready for d2d expert weights updating
         # 2: d2d finished and waiting for updating expert_map into model
         self.state = 0
+        self.pull_tensor_list = []
 
     def update_expert_weights_update_info(self, expert_transfer_info, expert_pull_info,
         updated_expert_map, layer_id):
@@ -64,9 +70,11 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
                 self.comm_op_list.append(dist.P2POp(dist.isend, src_tensor, dst_rank))
 
         buffer_tensor_id = 0
-        for pull_rank in expert_pull_info:
+        for pull_info in expert_pull_info:
+            pull_rank, global_expert_id_to_pull = transfer_info
             for buffer_tensor in self.get_buffer_tensor(buffer_tensor_id):
                 self.comm_op_list.append(dist.P2POp(dist.irecv, buffer_tensor, pull_rank))
+            self.pull_tensor_list.append((self.updated_expert_map[layer_id][global_expert_id_to_pull].item(), buffer_tensor_id))
         buffer_tensor_id += 1
 
         self.state = 1
@@ -89,6 +97,10 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
         if self.comm_op_list is not None:
             self.comm_op_list = None
         self.expert_map[self.layer_id] = self.updated_expert_map
+        for pull_info in self.pull_tensor_list:
+            local_expert_id, buffer_tensor_id = pull_info
+            self.copy_buffer_tensor(self.layer_id, local_expert_id, buffer_tensor_id)
+        self.pull_tensor_list = []
         self.state = 0
         return 0
 
