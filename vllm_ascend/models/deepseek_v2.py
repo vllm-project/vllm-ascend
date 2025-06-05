@@ -286,10 +286,10 @@ class CustomDeepseekV2MoE(nn.Module):
             top_k=CustomDeepseekV2MoE.top_k,
             enable_force_load_balance=enable_force_load_balance,
             **kwargs)
-        
+
         if multistream:
             hidden_states, shared_output = hidden_states
-        
+
         hidden_states = hidden_states * self.routed_scaling_factor
 
         if self.tp_size > 1:

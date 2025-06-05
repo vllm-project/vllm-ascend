@@ -20,7 +20,6 @@ from typing import Callable, Optional
 import torch
 import torch.distributed as dist
 import torch_npu
-import torchair as tng  # type: ignore
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (GroupCoordinator,
                               get_tensor_model_parallel_world_size,
@@ -87,13 +86,6 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
     expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[
         0:5]
 
-    shared_experts = kwargs.get('shared_experts', None)
-    if shared_experts:
-        shared_gate_up = kwargs.get('shared_gate_up', None)
-        with tng.scope.npu_stream_switch('cv'):
-            tng.scope.npu_wait_tensor(shared_gate_up, expand_x)
-            shared_x = shared_experts.act_fn(shared_gate_up)
-
     w1 = w1.transpose(1, 2)
     expert_token_nums = torch.cumsum(expert_token_nums,
                                      dim=0,
@@ -121,11 +113,6 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
         group_type=0,
         group_list=group_list,
     )
-
-    if shared_experts:
-        with tng.scope.npu_stream_switch('cv'):
-            tng.scope.npu_wait_tensor(shared_x, down_out_list)
-            shared_output = shared_experts.down_proj(shared_x)
 
     down_out_list = torch.cat(down_out_list, dim=0)
 
@@ -156,8 +143,6 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
 
     hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
 
-    if shared_experts:
-        return hidden_states, shared_output
     return hidden_states
 
 
