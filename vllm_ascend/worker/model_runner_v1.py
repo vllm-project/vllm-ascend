@@ -333,31 +333,32 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         #     self.enable_eplb = additional_config.get("enable_eplb", False)
         
         if self.enable_eplb == True:
-            import multiprocessing
-            # 标记是否已完成从模型读取初始 expert_map 并写入 shared_dict
-            self.expert_map_initialized = False
-            #标记当前是否处于“等待子进程加载完成”的状态
-            self.update_in_flight = False
+            self.init_eplb()
 
-            self.ctx = multiprocessing.get_context("spawn")
-            self.manager = self.ctx.Manager()
-            self.shared_dict = self.manager.dict({
-                "expert_map": None,
-                "moe_load": None
-            })
 
-            #通过启动子进程
-            self.eplb = EplbProcess(
-                device_id=self.device,
-                shared_dict=self.shared_dict,
-                policy_type=1,
-                enable_d2d=True
-            )
-           
-            self.planner_block_queue, self.block_update_queue, self.eplb_process = \
-                self.eplb._launch_process()
+    def init_eplb(self):
+        self.num_moe_layers = 2
+        import multiprocessing
+        self.expert_map_initialized = False
+        self.update_in_flight = False
 
-            logger.info(f"[ModelRunner] Launched EPLB process (pid={self.eplb_process.pid})")
+        ctx = multiprocessing.get_context("spawn")
+        self.manager = ctx.Manager()
+        self.shared_dict = self.manager.dict({
+            "expert_map": None,
+            "moe_load": None
+        })
+        self.eplb = EplbProcess(
+            device_id=self.device,
+            shared_dict=self.shared_dict,
+            policy_type=1,
+            enable_d2d=True
+        )
+        
+        self.planner_block_queue, self.block_update_queue, self.eplb_process = \
+            self.eplb._launch_process()
+
+        logger.info(f"[ModelRunner] Launched EPLB process (pid={self.eplb_process.pid})")
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -981,48 +982,49 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             logprobs=logprobs_lists,
             prompt_logprobs_dict={},
         )
-        #如果上一轮更新尚未完成，就不重复触发
-        if self.enable_eplb and not self.update_in_flight:
+    
+        if self.enable_eplb:
+            self.do_eplb() 
+
+        return model_runner_output
+
+    def do_eplb(self):
+        if not self.update_in_flight:
             try:
-                # 只有首次 execute() 时，需要从 model 读取并初始化 expert_map
                 if not self.expert_map_initialized:
                     self.get_expert_map()
                     self.expert_map_initialized = True
 
                 moe_load = self.compute_and_set_moe_load()
 
-                #唤醒子进程，基于写入的 shared_dict["expert_map"] 和当前 moe_load 计算专家表
                 self.planner_block_queue.put(1)
                 self.update_in_flight = True
-
-                logger.debug("[ModelRunner] 异步唤醒 EPLB 子进程进行 expert_map 更新")
                 
             except Exception as e:
                 logger.warning(f"[ModelRunner] Failed to wake EPLB process: {e}", exc_info=True)            
 
-                
-        if self.enable_eplb and self.update_in_flight:
+        if  self.update_in_flight:
                 if not self.block_update_queue.empty(): 
                     self.block_update_queue.get()
                     new_expert_map = self.shared_dict["expert_map"]
                     self.model.update_all_expert_map(new_expert_map, self.num_moe_layers)
-                    logger.debug("[ModelRunner] 模型 expert_map 已更新")    
+                    #ssd加载权重
                     self.update_in_flight = False
- 
-        return model_runner_output
 
     def compute_and_set_moe_load(self):
-        self.num_moe_layers = 2
-        moe_load = self.model.get_all_moe_loads(self.num_moe_layers).to(torch.device("cpu"))
+        moe_load = self.model.get_all_moe_loads(self.num_moe_layers)
 
-        self.shared_dict["moe_load"] = moe_load
+        import torch.distributed as dist
+        if dist.is_initialized():
+            dist.all_reduce(moe_load, op=dist.ReduceOp.SUM)
+        self.shared_dict["moe_load"] = moe_load.to(torch.device("cpu"))
+
         logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] = {moe_load}")
 
         return moe_load
 
 
     def get_expert_map(self):
-        self.num_moe_layers = 2
         expert_map = self.model.get_all_expert_map(self.num_moe_layers).to(torch.device("cpu"))
         self.shared_dict["expert_map"] = expert_map
         logger.debug(f"[ModelRunner] Updated shared_dict['expert_map'] = {expert_map}")

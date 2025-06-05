@@ -880,7 +880,7 @@ class AscendFusedMoE(FusedMoE):
         ids     = self.topk_ids.flatten().to(torch.int64)
         counts  = torch.bincount(ids, minlength=self.num_experts)
         # optional: all_reduce to gather across ranks
-        import torch.distributed as dist
-        if dist.is_initialized():
-            dist.all_reduce(counts, op=dist.ReduceOp.SUM)
+        # import torch.distributed as dist
+        # if dist.is_initialized():
+        #     dist.all_reduce(counts, op=dist.ReduceOp.SUM)
         self.moe_load += counts
