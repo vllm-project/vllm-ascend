@@ -22,6 +22,9 @@ on:
   schedule:
     # Run at 02:00 everyday
     - cron: '00 18 * * *'
+  
+  workflow_dispatch:
+    # Allow manual triggering of the workflow
 
   pull_request:
     types: [ labeled ]
@@ -40,7 +43,7 @@ concurrency:
 
 jobs:
   test:
-    if: ${{ contains(github.event.pull_request.labels.*.name, 'performance-test') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') || github.event_name == 'schedule' }}
+    if: ${{ contains(github.event.pull_request.labels.*.name, 'performance-test') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
 
     name: Benchmarks/vLLM=${{ matrix.vllm_branch }}, vLLM-Ascend=${{ matrix.vllm_ascend_branch }}
     runs-on: 'linux-arm64-npu-static-8'
@@ -111,7 +114,7 @@ jobs:
           pip install -r benchmarks/requirements-bench.txt
 
       - name: Run current commit benchmarks
-        if: github.event_name != 'schedule'
+        if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
         run: |
           # Sometimes we only want to run benchmarks on the current commit
           # This is useful for debugging or a release benchmark
@@ -120,12 +123,12 @@ jobs:
           python3 benchmarks/scripts/convert_json_to_markdown.py
 
       - name: Generate step summary
-        if: github.event_name != 'schedule'
+        if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
         run: |
           cat ./benchmarks/results/benchmark_results.md >> $GITHUB_STEP_SUMMARY
 
       - name: Upload benchmark artifacts
-        if: github.event_name != 'schedule'
+        if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: "benchmark-performance-${{ matrix.vllm_branch }}-${{ matrix.vllm_ascend_branch }}-report"
@@ -135,19 +138,28 @@ jobs:
           overwrite: true
 
       - name: Install elastic_tool
-        if: github.event_name == 'schedule'
+        if: github.event_name != 'pull_request'
         run: |
           pip install escli-tool==0.2.1
           
       - name: Collect pr info from vllm-project/vllm-ascend
-        if: github.event_name == 'schedule'
+        if: github.event_name != 'pull_request'
         run: |
           # Only get the pull request which may influences performance
-          git log --pretty=format:"%H %s" -- '**/*.py' ':!docs/*' ':!tests/*' ':!examples/*' > commit_log.txt
+          git log --pretty=format:"%H %s" -- '**/*.py' ':!docs/*' ':!tests/*' ':!examples/*' ':!benchmarks/*' > commit_log.txt
           escli check commit_log.txt
+      
+      - name: Prepare benchmark script in advance
+        if: github.event_name != 'pull_request'
+        # This is for the benchmark iteration, which will change the benchmark scripts while checkouting each commit.
+        # We need ensure the benchmark scripts always available.
+        run: |
+          # Prepare the benchmark script in advance
+          mkdir -p /github/home/benchmarks
+          cp -r benchmarks/* /github/home/benchmarks/
 
       - name: Run benchmark iteration
-        if: github.event_name == 'schedule'
+        if: github.event_name != 'pull_request'
         run: |
           while IFS= read -r line || [[ -n "$line" ]]; do
             commit_id=${line%% *}
@@ -165,8 +177,9 @@ jobs:
             echo "vllm branch: ${{ matrix.vllm_branch }}"
             echo "vllm-ascend branch: ${{ matrix.vllm_ascend_branch }}"
             echo "------------------------"
-
+            cd /github/home
             bash benchmarks/scripts/run-performance-benchmarks.sh
+            cd -
             # send the result to es
             if [[ "${{ github.event_name }}" != "pull request" ]]; then
               escli add --vllm_branch ${{ matrix.vllm_branch }} \
