@@ -129,9 +129,6 @@ class AscendMetadata:
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
     attn_mask: Optional[torch.Tensor] = None
 
-    # For logging.
-    num_input_tokens: int = 0  # Number of tokens including padding.
-
 
 class AscendAttentionMetadataBuilder:
 
