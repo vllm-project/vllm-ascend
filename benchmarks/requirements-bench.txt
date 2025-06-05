@@ -1,5 +1,3 @@
 pandas
 datasets
 modelscope
-libcst
-tabulate

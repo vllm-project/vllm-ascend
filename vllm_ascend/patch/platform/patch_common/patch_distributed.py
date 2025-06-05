@@ -20,7 +20,6 @@
 import torch
 import vllm
 import vllm.distributed
-import vllm.envs as envs
 from torch.distributed import ProcessGroup
 from torch.distributed.distributed_c10d import (Backend, PrefixStore,
                                                 _get_default_timeout,
@@ -165,9 +164,10 @@ def parallel_config_get_dp_port(self) -> int:
     """
     answer = self.data_parallel_master_port
     self.data_parallel_master_port += 1
+    import os
 
     # NOTE: Get port from envs directly when using torchrun
-    port = envs.VLLM_DP_MASTER_PORT if envs.VLLM_DP_MASTER_PORT else answer
+    port = int(os.environ.get("MASTER_PORT", answer))  # type: ignore
     return port
 
 

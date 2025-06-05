@@ -391,6 +391,7 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
         self.sliding_window = self.runner.sliding_window
         self.block_size = self.runner.block_size
         self.enable_lora = self.runner.lora_config is not None
+        self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
         self.finished_requests_ids = finished_requests_ids
         self.decode_only = True
         self.is_encoder_decoder = self.runner.model_config.is_encoder_decoder
@@ -785,14 +786,22 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
     def _compute_multi_modal_input(self, inter_data: InterDataForSeqGroup,
                                    seq_group_metadata: SequenceGroupMetadata):
         """If multi-modal data is given, add it to the input."""
-        # NOTE: mm_kwargs only includes the subset of multi-modal items that
+        # NOTE: mm_data only includes the subset of multi-modal items that
         # intersect with the current prefill positions.
         positions = inter_data.input_positions[0]
-        mm_kwargs, placeholder_maps = MultiModalPlaceholderMap.from_seq_group(
+        mm_data, placeholder_maps = MultiModalPlaceholderMap.from_seq_group(
             seq_group_metadata,
             range(positions[0], positions[0] + len(positions)))
-        if not mm_kwargs:
+        if not mm_data:
             return
+
+        if self.runner.mm_registry.has_processor(self.runner.model_config):
+            mm_kwargs = mm_data
+        else:
+            mm_kwargs = self.multi_modal_input_mapper(
+                mm_data,
+                seq_group_metadata.mm_processor_kwargs,
+            )
 
         inter_data.multi_modal_kwargs = mm_kwargs
         inter_data.multi_modal_placeholder_maps = placeholder_maps
@@ -909,6 +918,9 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         # Multi-modal data support
         self.input_registry = input_registry
         self.mm_registry = mm_registry
+        self.multi_modal_input_mapper = mm_registry \
+            .create_input_mapper(model_config)
+        self.mm_registry.init_mm_limits_per_prompt(self.model_config)
 
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
@@ -1104,8 +1116,8 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
 
                 dummy_data = self.input_registry \
                     .dummy_data_for_profiling(self.model_config,
-                                              seq_len,
-                                              self.mm_registry)
+                                            seq_len,
+                                            self.mm_registry)
 
                 seq = SequenceGroupMetadata(
                     request_id=str(group_id),
