@@ -184,6 +184,24 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
     }
     kwargs_mc2.update(stage1_kwargs)
 
+    shared_experts = kwargs.get('shared_experts', None)
+    if shared_experts:
+        shared_hidden_states = kwargs.get('shared_hidden_states', None)
+        with tng.scope.npu_stream_switch('cv'):
+            tng.scope.npu_wait_tensor(shared_hidden_states, hidden_states)
+            shared_x, shared_dynamic_scale = torch_npu.npu_dynamic_quant(
+                shared_hidden_states)
+            shared_gate_up = torch_npu.npu_quant_matmul(
+                shared_x,
+                shared_experts.gate_up_proj.weight,
+                shared_experts.gate_up_proj.weight_scale,
+                output_dtype=torch.int32,
+            )
+        kwargs.update({
+            "shared_gate_up": shared_gate_up,
+            "shared_dynamic_scale": shared_dynamic_scale,
+        })
+
     output = torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
     # comm_stream.wait_stream(torch.npu.current_stream())
     expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[

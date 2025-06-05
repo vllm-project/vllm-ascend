@@ -180,12 +180,6 @@ class CustomDeepseekV2MoE(nn.Module):
         else:
             self.gate.e_score_correction_bias = None
 
-        self.enable_cv_parallel = False
-        additional_config = get_current_vllm_config().additional_config
-        if additional_config:
-            self.enable_cv_parallel = additional_config.get(
-                "enable_cv_parallel", False)
-
         self.experts = AscendFusedMoE(
             num_experts=config.n_routed_experts,
             top_k=config.num_experts_per_tok,
@@ -222,10 +216,13 @@ class CustomDeepseekV2MoE(nn.Module):
         self.params_dtype = torch.get_default_dtype()
 
         self.enable_graph_mode = False
+        self.enable_multistream_shared_expert = False
         additional_config = get_current_vllm_config().additional_config
         if additional_config:
             self.enable_graph_mode = additional_config.get(
                 "enable_graph_mode", False)
+            self.enable_multistream_shared_expert = additional_config.get(
+                "enable_multistream_shared_expert", False)
 
     def forward(
             self,
@@ -248,10 +245,10 @@ class CustomDeepseekV2MoE(nn.Module):
 
         num_tokens, hidden_size = hidden_states.shape
 
-        cv_parallel = self.enable_cv_parallel and not is_prefill
+        multistream = self.enable_multistream_shared_expert and not is_prefill
 
         if self.n_shared_experts is not None:
-            if not cv_parallel:
+            if not multistream:
                 shared_output = self.shared_experts(hidden_states)
             else:
                 shared_hidden_states = hidden_states
@@ -275,41 +272,25 @@ class CustomDeepseekV2MoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        if self.n_shared_experts is not None and cv_parallel:
-            with tng.scope.npu_stream_switch('cv'):
-                tng.scope.npu_wait_tensor(shared_hidden_states, router_logits)
-                dynamic_scale = None
-                if self.shared_experts.is_dynamic_quant:
-                    x, dynamic_scale = torch_npu.npu_dynamic_quant(
-                        shared_hidden_states)
-                    gate_up = torch_npu.npu_quant_matmul(
-                        x,
-                        self.shared_experts.gate_up_proj.weight,
-                        self.shared_experts.gate_up_proj.weight_scale,
-                        output_dtype=torch.int32,
-                    )
-                else:
-                    gate_up, _ = self.gate_up_proj(shared_hidden_states)
+        kwargs = {}
+        if multistream:
+            kwargs.update({
+                "shared_experts": self.shared_experts,
+                "shared_hidden_states": shared_hidden_states
+            })
 
-        if cv_parallel:
-            hidden_states, shared_output = self.experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                is_prefill=is_prefill,
-                top_k=CustomDeepseekV2MoE.top_k,
-                enable_force_load_balance=enable_force_load_balance,
-                shared_experts=self.shared_experts,
-                shared_gate_up=gate_up,
-                shared_dynamic_scale=dynamic_scale)
-            hidden_states = hidden_states * self.routed_scaling_factor
-        else:
-            hidden_states = self.experts(
-                hidden_states=hidden_states,
-                router_logits=router_logits,
-                is_prefill=is_prefill,
-                top_k=CustomDeepseekV2MoE.top_k,
-                enable_force_load_balance=enable_force_load_balance,
-            ) * self.routed_scaling_factor
+        hidden_states = self.experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            is_prefill=is_prefill,
+            top_k=CustomDeepseekV2MoE.top_k,
+            enable_force_load_balance=enable_force_load_balance,
+            **kwargs)
+        
+        if multistream:
+            hidden_states, shared_output = hidden_states
+        
+        hidden_states = hidden_states * self.routed_scaling_factor
 
         if self.tp_size > 1:
             if self.enable_graph_mode:

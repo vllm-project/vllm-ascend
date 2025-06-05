@@ -834,13 +834,13 @@ class AscendFusedMoE(FusedMoE):
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         self.enable_graph_mode = False
-        self.enable_cv_parallel = False
+        self.enable_multistream_shared_expert = False
         additional_config = get_current_vllm_config().additional_config
         if additional_config:
             self.enable_graph_mode = additional_config.get(
                 "enable_graph_mode", False)
-            self.enable_cv_parallel = additional_config.get(
-                "enable_cv_parallel", False)
+            self.enable_multistream_shared_expert = additional_config.get(
+                "enable_multistream_shared_expert", False)
 
     def forward(self,
                 hidden_states: torch.Tensor,
@@ -895,7 +895,7 @@ class AscendFusedMoE(FusedMoE):
             enable_force_load_balance=enable_force_load_balance,
             **kwargs)
 
-        if self.enable_cv_parallel and not is_prefill:
+        if self.enable_multistream_shared_expert and not is_prefill:
             hidden_states, shared_output = hidden_states
 
         if self.dp_size > 1:
@@ -920,6 +920,6 @@ class AscendFusedMoE(FusedMoE):
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
-        if self.enable_cv_parallel and not is_prefill:
+        if self.enable_multistream_shared_expert and not is_prefill:
             return hidden_states, shared_output
         return hidden_states
