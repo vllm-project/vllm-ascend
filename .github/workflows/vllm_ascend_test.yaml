@@ -127,7 +127,12 @@ jobs:
             pytest -sv tests/singlecard/test_scheduler.py
             # guided decoding doesn't work, fix it later
             # pytest -sv tests/singlecard/test_guided_decoding.py.py
-            pytest -sv tests/singlecard/ --ignore=tests/singlecard/test_offline_inference.py --ignore=tests/singlecard/test_scheduler.py --ignore=tests/singlecard/test_guided_decoding.py
+            pytest -sv tests/singlecard/test_camem.py
+            pytest -sv tests/singlecard/ \
+              --ignore=tests/singlecard/test_offline_inference.py \
+              --ignore=tests/singlecard/test_scheduler.py \
+              --ignore=tests/singlecard/test_guided_decoding.py \
+              --ignore=tests/singlecard/test_camem.py
           else
             pytest -sv tests/multicard/test_ilama_lora_tp2.py
             # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py will raise error.

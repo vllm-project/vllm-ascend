@@ -30,8 +30,9 @@ defaults:
   run:
     shell: bash -el {0}
 
+# only cancel in-progress runs of the same workflow
 concurrency:
-  group: pr-${{ github.event.pull_request.number }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -41,9 +42,10 @@ jobs:
     strategy:
       max-parallel: 2
       matrix:
+        os: [linux-arm64-npu-1, linux-arm64-npu-4]
         vllm_version: [main, v0.9.0]
     name: vLLM Ascend long term test
-    runs-on: linux-arm64-npu-1
+    runs-on: ${{ matrix.os }}
     container:
       # TODO(yikun): Remove m.daocloud.io prefix when infra proxy ready
       image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
@@ -92,8 +94,13 @@ jobs:
 
       - name: Run vllm-project/vllm-ascend long term test
         run: |
-          # spec decode test
-          VLLM_USE_MODELSCOPE=True pytest -sv tests/long_term/spec_decode/e2e/test_v1_mtp_correctness.py
-          VLLM_USE_MODELSCOPE=true pytest -sv tests/long_term/spec_decode/e2e/test_v1_spec_decode.py
-          VLLM_USE_MODELSCOPE=True pytest -sv tests/long_term/spec_decode/e2e/test_mtp_correctness.py  # it needs a clean process
-          pytest -sv tests/long_term/spec_decode --ignore=tests/long_term/spec_decode/e2e/test_mtp_correctness.py --ignore=tests/long_term/spec_decode/e2e/test_v1_spec_decode.py --ignore=tests/long_term/spec_decode/e2e/test_v1_mtp_correctness.py
+          if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
+            # spec decode test
+            VLLM_USE_MODELSCOPE=True pytest -sv tests/long_term/spec_decode/e2e/test_v1_mtp_correctness.py
+            VLLM_USE_MODELSCOPE=True pytest -sv tests/long_term/spec_decode/e2e/test_v1_spec_decode.py
+            VLLM_USE_MODELSCOPE=True pytest -sv tests/long_term/spec_decode/e2e/test_mtp_correctness.py  # it needs a clean process
+            pytest -sv tests/long_term/spec_decode --ignore=tests/long_term/spec_decode/e2e/test_mtp_correctness.py --ignore=tests/long_term/spec_decode/e2e/test_v1_spec_decode.py --ignore=tests/long_term/spec_decode/e2e/test_v1_mtp_correctness.py
+            pytest -sv tests/long_term/test_accuracy.py
+          else
+            VLLM_USE_MODELSCOPE=True pytest -sv tests/long_term/test_deepseek_v2_lite_tp2_accuracy.py
+          fi
