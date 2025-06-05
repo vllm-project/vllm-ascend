@@ -446,6 +446,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
 
+        self.cos = None
+        self.sin = None
+        self.debug_layer_idx = kwargs.get('debug_layer_idx', 0)
+
     def _v_up_proj_and_o_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
@@ -738,19 +742,20 @@ class AscendMLAImpl(MLAAttentionImpl):
             decode_ql_nope, decode_q_pe = \
                 self._q_proj_and_k_up_proj(decode_hs_or_q_c)
             if self.running_in_graph:
-                seq_len = self.rotary_emb.max_position_embeddings
-                cos = self.rotary_emb.cos_cached[:seq_len].to(
-                    dtype=decode_q_pe.dtype)
-                sin = self.rotary_emb.sin_cached[:seq_len].to(
-                    dtype=decode_q_pe.dtype)
-                cos = cos[attn_metadata.decode.input_positions]
-                sin = sin[attn_metadata.decode.input_positions]
-                cos = cos[:, None, None, :]
-                sin = sin[:, None, None, :]
-
-                decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
+                # During the autoregressive decoding process, the cos and sin values are exactly the same for each layer
+                if self.debug_layer_idx == 0 or self.cos is None or self.sin is None:
+                    seq_len = self.rotary_emb.max_position_embeddings
+                    self.cos = self.rotary_emb.cos_cached[:seq_len].to(
+                        dtype=decode_q_pe.dtype)
+                    self.sin = self.rotary_emb.sin_cached[:seq_len].to(
+                        dtype=decode_q_pe.dtype)
+                    self.cos = self.cos[attn_metadata.decode.input_positions]
+                    self.sin = self.sin[attn_metadata.decode.input_positions]
+                    self.cos = self.cos[:, None, None, :]
+                    self.sin = self.sin[:, None, None, :]
+                decode_q_pe = self.rope_single(decode_q_pe, self.cos, self.sin)
                 decode_k_pe, decode_k_nope = self.exec_kv(
-                    hidden_states_or_kv_c_normed, cos, sin, kv_cache,
+                    hidden_states_or_kv_c_normed, self.cos, self.sin, kv_cache,
                     attn_metadata.slot_mapping)
             else:
                 decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
