@@ -35,8 +35,7 @@ import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
-                         get_current_vllm_config)
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
                               get_tp_group, tensor_model_parallel_all_reduce)
@@ -68,6 +67,7 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import dispose_tensor
@@ -215,14 +215,10 @@ class CustomDeepseekV2MoE(nn.Module):
 
         self.params_dtype = torch.get_default_dtype()
 
-        self.enable_graph_mode = False
-        self.enable_multistream_shared_expert = False
-        additional_config = get_current_vllm_config().additional_config
-        if additional_config:
-            self.enable_graph_mode = additional_config.get(
-                "enable_graph_mode", False)
-            self.enable_multistream_shared_expert = additional_config.get(
-                "enable_multistream_shared_expert", False)
+        ascend_config = get_ascend_config()
+        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+        self.enable_multistream_shared_expert = \
+            ascend_config.torchair_graph_config.enable_multistream_shared_expert
 
     def forward(
             self,
@@ -247,17 +243,13 @@ class CustomDeepseekV2MoE(nn.Module):
 
         multistream = self.enable_multistream_shared_expert and not is_prefill
 
-        if self.n_shared_experts is not None:
-            if not multistream:
-                shared_output = self.shared_experts(hidden_states)
-            else:
-                shared_hidden_states = hidden_states
+        old_hidden_states = hidden_states.clone()
 
         if self.tp_size > 1:
             if envs_ascend.VLLM_ENABLE_MC2 and not is_prefill:
                 chunks = torch.chunk(hidden_states, self.tp_size, dim=0)
                 hidden_states = chunks[self.tp_rank]
-            elif not self.enable_graph_mode:
+            elif not self.torchair_graph_enabled:
                 num_padding_tokens = (self.tp_size -
                                       num_tokens % self.tp_size) % self.tp_size
                 # Pad hidden_states to make it divisible by tp_size to avoid cross-ring AllGatherV on 910B2C
@@ -276,7 +268,7 @@ class CustomDeepseekV2MoE(nn.Module):
         if multistream:
             kwargs.update({
                 "shared_experts": self.shared_experts,
-                "shared_hidden_states": shared_hidden_states
+                "shared_hidden_states": old_hidden_states
             })
 
         hidden_states = self.experts(
@@ -293,7 +285,7 @@ class CustomDeepseekV2MoE(nn.Module):
         hidden_states = hidden_states * self.routed_scaling_factor
 
         if self.tp_size > 1:
-            if self.enable_graph_mode:
+            if self.torchair_graph_enabled:
                 if envs_ascend.VLLM_ENABLE_MC2 and not is_prefill:
                     final_hidden_states = torch.zeros(
                         [num_tokens, hidden_size],
@@ -311,6 +303,10 @@ class CustomDeepseekV2MoE(nn.Module):
                 hidden_states = torch.cat(chunk_hidden_states, dim=0)
                 if num_padding_tokens > 0:
                     hidden_states = hidden_states[:-num_padding_tokens]
+
+        if self.n_shared_experts is not None:
+            if not multistream:
+                shared_output = self.shared_experts(old_hidden_states)
 
         if shared_output is not None:
             hidden_states = hidden_states + shared_output
@@ -444,11 +440,9 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
 
         self.prefix = prefix
         self.debug_layer_idx = int(self.prefix.split(".")[-2])
-        self.enable_graph_mode = False
-        additional_config = get_current_vllm_config().additional_config
-        if additional_config:
-            self.enable_graph_mode = additional_config.get(
-                "enable_graph_mode", False)
+
+        ascend_config = get_ascend_config()
+        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
 
     def forward(
             self,
@@ -461,7 +455,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             hidden_states_or_q_c = self.q_a_layernorm(ckq)
         else:
             hidden_states_or_q_c = hidden_states
-        if self.enable_graph_mode:
+        if self.torchair_graph_enabled:
             forward_kwargs = {}
             if envs.VLLM_USE_V1:
                 output_shape = hidden_states.shape

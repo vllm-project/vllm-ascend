@@ -28,16 +28,12 @@ from vllm import LLM, SamplingParams
 
 from tests.conftest import VllmRunner
 from tests.model_utils import check_outputs_equal
-from vllm_ascend.utils import vllm_version_is
 
 MODELS = ["Qwen/Qwen2.5-0.5B-Instruct"]
 
 
 @pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
                     reason="aclgraph only support on v1")
-@pytest.mark.skipif(
-    (vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1")),
-    reason="aclgraph not supported in v0.8.5 and v0.8.5.post1")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 def test_models(
@@ -88,9 +84,6 @@ def test_models(
 
 @pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
                     reason="aclgraph only support on v1")
-@pytest.mark.skipif(
-    (vllm_version_is("0.8.5") or vllm_version_is("0.8.5.post1")),
-    reason="aclgraph not supported in v0.8.5 and v0.8.5.post1")
 def test_deepseek_raises_error(monkeypatch: pytest.MonkeyPatch) -> None:
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_MODELSCOPE", "True")

@@ -23,4 +23,5 @@ import vllm_ascend.patch.worker.patch_common.patch_eagle  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_metrics  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_minicpm  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_multi_step_worker  # noqa
+import vllm_ascend.patch.worker.patch_common.patch_sampler  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_spec_decode_worker  # noqa

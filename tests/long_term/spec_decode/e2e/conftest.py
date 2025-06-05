@@ -167,17 +167,17 @@ def run_equality_correctness_test(
 
     # TODO current torchair graph mode needs clean torchair cache.
     # if do not clean, it will raise error
-    additional_config = common_llm_kwargs.get("additional_config")
-    enable_graph_mode = additional_config.get(
-        "enable_graph_mode") if additional_config else False
+    torchair_graph_enabled = common_llm_kwargs.get(
+        "additional_config", {}).get("torchair_graph_config",
+                                     {}).get("enabled", False)
 
     with vllm_runner(**org_args) as vllm_model:
-        if enable_graph_mode:
+        if torchair_graph_enabled:
             _clean_torchair_cache()
         org_outputs = vllm_model.generate_w_logprobs(prompts, sampling_params)
 
     with vllm_runner(**sd_args) as vllm_model:
-        if enable_graph_mode:
+        if torchair_graph_enabled:
             _clean_torchair_cache()
         if ensure_all_accepted or expected_acceptance_rate is not None:
             # Force log interval to be 0 to catch all metrics.
