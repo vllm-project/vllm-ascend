@@ -179,7 +179,6 @@ jobs:
             echo "------------------------"
             cd /github/home
             bash benchmarks/scripts/run-performance-benchmarks.sh
-            cd -
             # send the result to es
             if [[ "${{ github.event_name }}" != "pull request" ]]; then
               escli add --vllm_branch ${{ matrix.vllm_branch }} \
@@ -190,4 +189,5 @@ jobs:
               --res_dir ./benchmarks/results 
               rm -rf ./benchmarks/results
             fi
+            cd -
           done < commit_log.txt
