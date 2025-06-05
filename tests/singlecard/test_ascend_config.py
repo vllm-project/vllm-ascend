@@ -114,5 +114,6 @@ def test_ascend_config_load_error():
             },
         }
         with VllmRunner("facebook/opt-125m",
+                        enforce_eager=False,
                         additional_config=input_additional_config_fake_2):
             pass
