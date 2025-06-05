@@ -101,6 +101,41 @@ class CustomDeepseekV2SiluAndMul(SiluAndMul):
             return super().forward_oot(x)
 
 
+class CustomDeepseekV2MergedReplicatedLinear(ReplicatedLinear):
+
+    def __init__(
+        self,
+        input_size: int,
+        output_sizes: list[int],
+        bias: bool = True,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
+        self.output_sizes = output_sizes
+        super().__init__(input_size,
+                         sum(output_sizes),
+                         bias=bias,
+                         quant_config=quant_config,
+                         prefix=prefix)
+
+    def weight_loader(self, param: torch.nn.Parameter,
+                      loaded_weight: torch.Tensor, loaded_shard_id: int):
+        # With no support for GGUF format yet.
+        assert not getattr(param, "is_gguf_weight", False)
+        assert not getattr(param, "is_gguf_weight_type", False)
+
+        assert loaded_shard_id < len(self.output_sizes)
+        shard_offset = sum(self.output_sizes[:loaded_shard_id])
+        shard_size = self.output_sizes[loaded_shard_id]
+        shard = param.data.narrow(param.output_dim, shard_offset, shard_size)
+
+        assert shard.size() == loaded_weight.size(), (
+            f"Tried to load weights of size {loaded_weight.size()}"
+            f"to a parameter shard of id {loaded_shard_id} size {shard.size()}"
+        )
+        shard.copy_(loaded_weight)
+
+
 class CustomDeepseekV2MLP(nn.Module):
 
     def __init__(
@@ -110,20 +145,33 @@ class CustomDeepseekV2MLP(nn.Module):
         hidden_act: str,
         quant_config: Optional[QuantizationConfig] = None,
         reduce_results: bool = True,
+        force_replicate: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj")
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           quant_config=quant_config,
-                                           reduce_results=reduce_results,
-                                           prefix=f"{prefix}.down_proj")
+        if not force_replicate:
+            self.gate_up_proj = MergedColumnParallelLinear(
+                hidden_size, [intermediate_size] * 2,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.gate_up_proj")
+            self.down_proj = RowParallelLinear(intermediate_size,
+                                               hidden_size,
+                                               bias=False,
+                                               quant_config=quant_config,
+                                               reduce_results=reduce_results,
+                                               prefix=f"{prefix}.down_proj")
+        else:
+            self.gate_up_proj = CustomDeepseekV2MergedReplicatedLinear(
+                hidden_size, [intermediate_size] * 2,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.gate_up_proj")
+            self.down_proj = ReplicatedLinear(intermediate_size,
+                                              hidden_size,
+                                              bias=False,
+                                              quant_config=quant_config,
+                                              prefix=f"{prefix}.down_proj")
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -189,6 +237,12 @@ class CustomDeepseekV2MoE(nn.Module):
             raise ValueError(f"Unsupported activation: {config.hidden_act}. "
                              "Only silu is supported for now.")
 
+        ascend_config = get_ascend_config()
+        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+        # NOTE: multistream only effective when `VLLM_ENABLE_MC2` is on
+        self.enable_multistream_moe = \
+            ascend_config.torchair_graph_config.enable_multistream_moe and VLLM_ENABLE_MC2
+
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.n_routed_experts,
                                      bias=False,
@@ -224,6 +278,7 @@ class CustomDeepseekV2MoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=True,
+                force_replicate=self.enable_multistream_moe,
                 prefix=f"{prefix}.shared_experts",
             )
         else:
@@ -237,12 +292,6 @@ class CustomDeepseekV2MoE(nn.Module):
         self.ep_group = get_ep_group()
 
         self.params_dtype = torch.get_default_dtype()
-
-        ascend_config = get_ascend_config()
-        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
-        # NOTE: multistream only effective when `VLLM_ENABLE_MC2` is on
-        self.enable_multistream_moe = \
-            ascend_config.torchair_graph_config.enable_multistream_moe and VLLM_ENABLE_MC2
 
     def forward(
             self,
@@ -282,27 +331,22 @@ class CustomDeepseekV2MoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        kwargs = {}
-        if not use_separated_shared_experts:
-            kwargs.update({
-                "shared_experts": self.shared_experts,
-                "shared_experts_input": old_hidden_states
-            })
-
         experts_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
             is_prefill=is_prefill,
             top_k=CustomDeepseekV2MoE.top_k,
             enable_force_load_balance=enable_force_load_balance,
-            **kwargs)
+            shared_experts=(self.shared_experts
+                            if not use_separated_shared_experts else None),
+        )
 
         if not isinstance(experts_hidden_states, tuple):
             hidden_states = experts_hidden_states * self.routed_scaling_factor
         else:
-            hidden_states = experts_hidden_states[
-                0] * self.routed_scaling_factor
-            shared_hidden_states = experts_hidden_states[1]
+            hidden_states = (
+                experts_hidden_states[0] * self.routed_scaling_factor +
+                experts_hidden_states[1])
 
         if self.tp_size > 1:
             if (VLLM_ENABLE_MC2
@@ -317,10 +361,8 @@ class CustomDeepseekV2MoE(nn.Module):
                 hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
         if use_separated_shared_experts:
-            shared_hidden_states = self.shared_experts(old_hidden_states)
-
-        if self.shared_experts is not None:
-            hidden_states = hidden_states + shared_hidden_states
+            hidden_states = hidden_states + self.shared_experts(
+                old_hidden_states)
 
         return hidden_states.view(num_tokens, hidden_size)
 

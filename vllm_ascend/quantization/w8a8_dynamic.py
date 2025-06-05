@@ -105,19 +105,21 @@ def apply_mlp(hidden_states: torch.Tensor,
     return hidden_states
 
 
-def fused_experts_with_mc2(hidden_states: torch.Tensor,
-                           w1: torch.Tensor,
-                           w2: torch.Tensor,
-                           w1_scale: torch.Tensor,
-                           w2_scale: torch.Tensor,
-                           topk_weights: torch.Tensor,
-                           topk_ids: torch.Tensor,
-                           top_k: int,
-                           expert_map: torch.Tensor = None,
-                           moe_all_to_all_group_name: str = "",
-                           log2phy: torch.Tensor = None,
-                           global_redundant_expert_num: int = 0,
-                           **kwargs) -> torch.Tensor:
+def fused_experts_with_mc2(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    top_k: int,
+    expert_map: torch.Tensor = None,
+    moe_all_to_all_group_name: str = "",
+    log2phy: torch.Tensor = None,
+    global_redundant_expert_num: int = 0,
+    shared_experts: Optional[Any] = None,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     if log2phy:
         topk_ids = log2phy[topk_ids]
     global_bs = 0
@@ -161,13 +163,10 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
     expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[
         0:5]
 
-    shared_experts = kwargs.get("shared_experts", None)
-    shared_experts_input = kwargs.get("shared_experts_input", None)
     if shared_experts is not None:
         with npu_stream_switch("moe_secondary", 0):
-            npu_wait_tensor(shared_experts_input, topk_weights)
-            shared_gate_up, _ = shared_experts.gate_up_proj(
-                shared_experts_input)
+            npu_wait_tensor(hidden_states, topk_weights)
+            shared_gate_up, _ = shared_experts.gate_up_proj(hidden_states)
             npu_wait_tensor(shared_gate_up[0], expand_x)
             shared_act = shared_experts.act_fn(shared_gate_up)
 
@@ -618,6 +617,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         enable_force_load_balance: bool = True,
         log2phy: torch.Tensor = None,
         global_redundant_expert_num: int = 0,
+        shared_experts: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
@@ -674,7 +674,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name,
                 log2phy=log2phy,
                 global_redundant_expert_num=global_redundant_expert_num,
-                **kwargs)
+                shared_experts=shared_experts)
         elif self.torchair_graph_enabled or self.ep_group.world_size == 1:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,

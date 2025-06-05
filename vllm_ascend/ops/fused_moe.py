@@ -16,7 +16,7 @@
 # Adapted from vllm/tests/kernels/test_moe.py
 
 import os
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional
 
 import torch
 import torch.distributed as dist
@@ -1099,8 +1099,8 @@ class AscendFusedMoE(FusedMoE):
                 router_logits: torch.Tensor,
                 is_prefill: bool,
                 enable_force_load_balance: bool = False,
-                top_k=None,
-                **kwargs):
+                top_k: Optional[int] = None,
+                shared_experts: Optional[Any] = None):
         assert self.quant_method is not None
 
         if top_k:
@@ -1147,14 +1147,13 @@ class AscendFusedMoE(FusedMoE):
             enable_force_load_balance=enable_force_load_balance,
             log2phy=self.log2phy,
             global_redundant_expert_num=self.global_redundant_expert_num,
-            **kwargs)
+            shared_experts=shared_experts,
+        )
 
-        shared_experts = kwargs.get("shared_experts", None)
-        shared_experts_input = kwargs.get("shared_experts_input", None)
         if shared_experts is not None:
             # Provide dummy implementation of "non-separated" shared experts.
             if not isinstance(e_hidden_states, tuple):
-                return e_hidden_states, shared_experts(shared_experts_input)
+                return e_hidden_states, shared_experts(hidden_states)
             else:
                 return e_hidden_states
 
