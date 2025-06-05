@@ -981,11 +981,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOuptut if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
+        # TO DO: read shared memory from asyn process
+        # self.eplb_loader.update_expert_weights_update_info
+        reqs = []
+        self.eplb_loader.asyn_expert_weight_transfer(reqs)
         (attn_metadata, hidden_states, spec_decode_metadata, positions,
          num_scheduled_tokens,
          sample_indices) = (self._process_reqs(scheduler_output,
                                                intermediate_tensors))
         logits = self.model.compute_logits(hidden_states[sample_indices], None)
+        self.eplb_loader.update_expert_map(reqs)
 
         # Apply structured output bitmasks if present
         if scheduler_output.grammar_bitmask is not None:
@@ -1345,6 +1350,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
+            self.eplb_loader = D2DExpertWeightLoader(model=self.model)
             if hasattr(self, "drafter"):
                 logger.info("Loading drafter model...")
                 self.drafter.load_model()
