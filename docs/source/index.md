@@ -58,6 +58,14 @@ developer_guide/versioning_policy
 developer_guide/evaluation/index
 :::
 
+% How to involve vLLM Ascend
+:::{toctree}
+:caption: Community
+:maxdepth: 1
+community/governance
+community/contributors
+:::
+
 % User stories about vLLM Ascend project
 :::{toctree}
 :caption: User Story
