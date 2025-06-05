@@ -33,7 +33,7 @@ class AscendSchedulerConfig(SchedulerConfig):
     def initialize_from_config(
         cls,
         vllm_scheduler_config: SchedulerConfig,
-        ascend_scheduler_config: dict,
+        ascend_scheduler_config,
     ):
         scheduler_config = {
             field.name: getattr(vllm_scheduler_config, field.name)
@@ -45,9 +45,10 @@ class AscendSchedulerConfig(SchedulerConfig):
         scheduler_config["num_scheduler_steps"] = 1
         scheduler_config["scheduler_cls"] = (
             "vllm_ascend.core.scheduler.AscendScheduler")
-        # Override params in original SchedulerConfig with params in additional_config.ascend_scheduler_config
-        for k, v in ascend_scheduler_config.items():
-            scheduler_config[k] = v
+        # Override params in original SchedulerConfig with params in ascend_scheduler_config
+        for k, _ in scheduler_config.items():
+            if hasattr(ascend_scheduler_config, k):
+                scheduler_config[k] = getattr(ascend_scheduler_config, k)
         return cls(**scheduler_config)
 
     def __post_init__(self) -> None:

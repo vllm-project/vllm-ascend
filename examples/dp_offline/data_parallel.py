@@ -62,7 +62,9 @@ def main():
               max_num_seqs=num_seqs,
               additional_config={
                   'expert_tensor_parallel_size': etp_size,
-                  'enable_graph_mode': False,
+                  'torchair_graph_config': {
+                      'enabled': False,
+                  },
               })
 
     outputs = llm.generate(prompts, sampling_params)

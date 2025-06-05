@@ -24,6 +24,7 @@ import vllm.envs as envs
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
+from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
 from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD, update_aclgraph_sizes
 
 CUSTOM_OP_ENABLED = False
@@ -117,10 +118,12 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        # initialize ascend config from vllm additional_config
+        ascend_config = init_ascend_config(vllm_config)
+
         from vllm.config import CompilationLevel  # noqa: E402
         compilation_config = vllm_config.compilation_config
         model_config = vllm_config.model_config
-        additional_config = vllm_config.additional_config
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
 
@@ -130,11 +133,8 @@ class NPUPlatform(Platform):
 
             # NOTE: When enable_expert_parallel is True, we follow vLLM convention:
             # ep_size = world_size, which means expert_tensor_parallel_size must be 1
-            if (additional_config
-                    and "expert_tensor_parallel_size" in additional_config
-                    and not parallel_config.enable_expert_parallel):
-                parallel_config.expert_tensor_parallel_size = int(
-                    additional_config["expert_tensor_parallel_size"])
+            if ascend_config.expert_tensor_parallel_size > 1 and not parallel_config.enable_expert_parallel:
+                parallel_config.expert_tensor_parallel_size = ascend_config.expert_tensor_parallel_size
 
             # Calculate expert parallel size based on world size
             parallel_config.expert_parallel_size = (
@@ -148,41 +148,7 @@ class NPUPlatform(Platform):
         else:
             enforce_eager = getattr(model_config, "enforce_eager", False)
 
-        if additional_config is not None:
-            enable_graph_mode = additional_config.get("enable_graph_mode",
-                                                      False)
-            if enable_graph_mode:
-                if enforce_eager:
-                    raise RuntimeError(
-                        "Can't enable graph mode and eager mode at the same time. Please set `enforce_eager=False` if you attempt to enable NPU graph mode."
-                    )
-                elif envs.VLLM_USE_V1 and envs.VLLM_MLA_DISABLE:
-                    logger.warning(
-                        "NPU graph mode is still experimental and not supported for V1 without mla currently, "
-                        "it has been disabled automatically.")
-                    additional_config["enable_graph_mode"] = False
-                if model_config:
-                    model_type = model_config.hf_config.model_type
-                    if "deepseek" not in model_type:
-                        raise NotImplementedError(
-                            "enable_graph_mode only works with deepseek model."
-                        )
-                # Set compilation level to NO_COMPILATION to disable ACL Graph
-                compilation_config.level = CompilationLevel.NO_COMPILATION
-
-        elif envs.VLLM_USE_V1 and model_config is not None and not enforce_eager:
-            model_type = model_config.hf_config.model_type
-            if "deepseek" in model_type:
-                raise NotImplementedError(
-                    "ACL Graph does not support deepseek. Please "
-                    "adopt additional_config={'enable_graph_mode': True} "
-                    "to serve deepseek models with NPU graph mode on vllm-ascend with V1 engine."
-                    " Or set `enforce_eager=True` to use eager mode.")
-            elif "qwen" not in model_type:
-                logger.warning(
-                    "ACL Graph is currently experimental. Please "
-                    "raise an issue on https://github.com/vllm-project/vllm-ascend/issues"
-                    " if you encourage any Error")
+        check_ascend_config(vllm_config, enforce_eager)
 
         if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:
             logger.info("Compilation disabled, using eager mode by default")
@@ -191,6 +157,11 @@ class NPUPlatform(Platform):
             logger.warning(
                 "NPU does not support %s compilation level. Setting level to NO_COMPILATION",
                 compilation_config.level)
+            compilation_config.level = CompilationLevel.NO_COMPILATION
+        elif ascend_config.torchair_graph_config.enabled:
+            logger.info(
+                "Torchair compilation enabled on NPU. Setting level to NO_COMPILATION"
+            )
             compilation_config.level = CompilationLevel.NO_COMPILATION
         else:
             logger.info(
@@ -224,17 +195,15 @@ class NPUPlatform(Platform):
         if envs.VLLM_USE_V1:
             # Activate custom ops for v1.
             compilation_config.custom_ops = ["all"]
-            # If ascend_scheduler_config exists in additional_config,
-            # extents original scheduler_config to use AscendScheduler.
 
-            if additional_config and additional_config.get(
-                    "ascend_scheduler_config", None) is not None:
-                additional_scheduler_config = additional_config.get(
-                    "ascend_scheduler_config")
+            # If ascend_scheduler_config is enabled,
+            # extents original scheduler_config to use AscendScheduler.
+            if ascend_config.ascend_scheduler_config.enabled:
                 from vllm_ascend.core.schedule_config import \
                     AscendSchedulerConfig
                 ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
-                    vllm_config.scheduler_config, additional_scheduler_config)
+                    vllm_config.scheduler_config,
+                    ascend_config.ascend_scheduler_config)
                 vllm_config.scheduler_config = ascend_scheduler_config
 
     @classmethod
