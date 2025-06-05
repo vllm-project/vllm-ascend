@@ -77,7 +77,7 @@ def run_accuracy_unimodal(queue, model, dataset):
 
 def run_accuracy_multimodal(queue, model, dataset):
     try:
-        model_args = f"pretrained={model},max_model_len=8192,dtype=auto,tensor_parallel_size=4,max_images=2"
+        model_args = f"pretrained={model},max_model_len=8192,dtype=auto,tensor_parallel_size=4,max_images=2,enforce_eager=True"
         results = lm_eval.simple_evaluate(
             model="vllm-vlm",
             model_args=model_args,
