@@ -64,6 +64,7 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import CommonAttentionMetadata
+from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.utils import vllm_version_is
@@ -365,6 +366,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+
+        if envs_ascend.VLLM_ENABLE_MC2:
+            if torch.distributed.get_world_size(
+                    get_ep_group().device_group) <= 4:
+                raise ValueError(
+                    "MC2 is only supported with expert parallel size bigger "
+                    "than 4.")
+        if envs_ascend.VLLM_ENABLE_FUSED_ROUTING and \
+            torch.distributed.get_world_size(get_ep_group().device_group) > 1 and \
+            torch.distributed.get_world_size(get_etp_group().device_group) == 1:
+            logger.info("enable allgather EP by MoeInitRoutingV3 and GroupedMatmulFinalizeRouting, "
+                "now only support DeepSeek V3/R1")
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
