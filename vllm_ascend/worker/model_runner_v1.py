@@ -1209,11 +1209,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # assert self.lora_manager is not None, "LoRA is not enabled"
         # TODO: call maybe_profile_with_lora()
 
-        dummy_kv_caches = [
-            torch.tensor((), dtype=torch.float32, device=self.device)
-            for _ in range(self.num_attn_layers)
-        ]
-
         # Trigger compilation for general shape.
         hidden_states = self._dummy_run(self.max_num_tokens)
 
@@ -1224,7 +1219,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             logits = None
 
         NPUPlatform.synchronize()
-        del hidden_states, logits, dummy_kv_caches
+        del hidden_states, logits
         self.encoder_cache.clear()
         gc.collect()
 
