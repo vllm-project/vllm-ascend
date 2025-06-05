@@ -23,11 +23,10 @@ from vllm.distributed.kv_events import KVEventBatch
 from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.utils import cdiv
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-from vllm.v1.core.sched.utils import check_stop
-from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs, EngineCoreEventType
+from vllm.v1.engine import EngineCoreEventType, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -52,7 +51,6 @@ class AscendScheduler(Scheduler):
                          include_finished_set, log_stats)
         self.scheduled_req_ids: set[str] = set()
         self.running: list[Request] = []
-
 
     def schedule(self) -> SchedulerOutput:
         if self.scheduler_config.chunked_prefill_enabled:
@@ -128,7 +126,7 @@ class AscendScheduler(Scheduler):
 
                 # Total computed tokens (local + external).
                 num_computed_tokens = (num_native_computed_tokens +
-                                        num_external_computed_tokens)
+                                       num_external_computed_tokens)
             else:
                 # P/D: skip checking prefix cache if loaded from remote kvs.
                 new_computed_blocks = KVCacheBlocks.create_empty()
@@ -153,7 +151,7 @@ class AscendScheduler(Scheduler):
                 # requests, which have output tokens.
                 num_new_tokens = request.num_tokens - num_computed_tokens
                 max_tokens_in_kvcache = (self.kv_cache_config.num_blocks *
-                                        self.block_size)
+                                         self.block_size)
                 prompt_limit = min(prompt_limit, max_tokens_in_kvcache)
 
                 # Finish request that exceeds prompt_limit or kv cache size.
@@ -165,7 +163,8 @@ class AscendScheduler(Scheduler):
                         prompt_limit,
                     )
                     request.status = RequestStatus.FINISHED_IGNORED
-                    self.finished_req_ids.add(request.request_id)  # type: ignore
+                    self.finished_req_ids.add(  # type: ignore
+                        request.request_id)  # type: ignore
                     self.waiting.popleft()
                     continue
 
@@ -189,8 +188,7 @@ class AscendScheduler(Scheduler):
                 num_native_computed_tokens,
                 new_computed_blocks=computed_blocks,
                 num_lookahead_tokens=self.num_lookahead_tokens,
-                delay_cache_blocks=load_kv_async
-            )
+                delay_cache_blocks=load_kv_async)
             if new_blocks is None:
                 # The request cannot be scheduled.
                 break
@@ -216,7 +214,7 @@ class AscendScheduler(Scheduler):
             self.running.append(request)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.SCHEDULED,
-                                        scheduled_timestamp)
+                                     scheduled_timestamp)
             self.scheduled_req_ids.add(request.request_id)
             # Check request status.
             if request.status == RequestStatus.WAITING:
@@ -294,8 +292,7 @@ class AscendScheduler(Scheduler):
                         request,
                         num_new_tokens,
                         num_draft_tokens=num_draft_tokens,
-                        num_lookahead_tokens=self.num_lookahead_tokens
-                    )
+                        num_lookahead_tokens=self.num_lookahead_tokens)
                     if new_blocks is None:
                         # The request cannot be scheduled.
                         # Preempt the lowest-priority request.
@@ -305,7 +302,8 @@ class AscendScheduler(Scheduler):
                         preempted_req.num_computed_tokens = 0
                         if self.log_stats:
                             preempted_req.record_event(
-                                EngineCoreEventType.PREEMPTED, scheduled_timestamp)
+                                EngineCoreEventType.PREEMPTED,
+                                scheduled_timestamp)
                         self.waiting.appendleft(preempted_req)
                         preempted_reqs.append(preempted_req)
                         if preempted_req == request:
@@ -339,7 +337,7 @@ class AscendScheduler(Scheduler):
                         del request.spec_token_ids[num_scheduled_spec_tokens:]
                         scheduled_spec_decode_tokens[request.request_id] = (
                             request.spec_token_ids)
-                
+
                 # Record scheduled LoRA requests.
                 if self.lora_config and request.lora_request:
                     scheduled_loras.add(request.lora_request.lora_int_id)
