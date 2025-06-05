@@ -33,18 +33,16 @@ from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.worker_base import WorkerBase
-from vllm.utils import GiB_bytes, bind_kv_cache, get_ip
 
-from vllm_ascend.device_allocator.camem import CaMemAllocator
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import try_register_lib
@@ -219,7 +217,7 @@ class NPUWorker(WorkerBase):
             context = allocator.use_memory_pool(tag="kv_cache")
         else:
             from contextlib import nullcontext
-            context = nullcontext()
+            context = nullcontext() # type: ignore
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
