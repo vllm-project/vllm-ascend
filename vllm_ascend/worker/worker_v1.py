@@ -42,6 +42,7 @@ from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.worker_base import WorkerBase
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import try_register_lib
@@ -67,6 +68,8 @@ class NPUWorker(WorkerBase):
         from vllm_ascend import ops
         ops.register_dummy_fusion_op()
         _register_atb_extensions()
+        # init ascend config
+        init_ascend_config(vllm_config)
 
         super().__init__(vllm_config=vllm_config,
                          local_rank=local_rank,
@@ -236,7 +239,7 @@ class NPUWorker(WorkerBase):
         if runner.dp_size > 1:
             max_num_tokens, with_prefill = runner._get_forward_metadata_across_dp(
                 1, False)
-        if envs_ascend.VLLM_ENABLE_MC2 or runner.enable_torchair_graph_mode:
+        if envs_ascend.VLLM_ENABLE_MC2 or runner.torchair_graph_enabled:
             if not with_prefill:
                 num_tokens = max_num_tokens
             num_tokens = runner.select_torchair_padded_batch_size(num_tokens)
