@@ -10,15 +10,17 @@ from typing import Dict, List, Tuple, Optional, Generator, Any
 
 import torch
 import torch_npu                       
-from safetensors import safe_open      
+from safetensors import safe_open
+from vllm_ascend.eplb.core.loader.abstract_loader import ExpertWeightLoader
 
 
 def log_debug(msg: str):
     print(f"[DEBUG] {msg}")
 
 
-class WeightLoader:
-    """
+class SSDExpertWeightLoader:
+
+        """
     Load all tensors that belong to one (layer, expert_id) pair, CPU only.
     """
 
@@ -75,7 +77,6 @@ class WeightLoader:
                     result[p] = reader.get_tensor(p)
         return result
 
-
 class EplbLoaderProcess(mp.Process):
     """
     Independent process for blocking SSD reads.
@@ -95,7 +96,7 @@ class EplbLoaderProcess(mp.Process):
         self.res_q = res_q
         self.quit_evt = quit_evt
         self.index_file = index_file
-        self.loader = WeightLoader()
+        self.loader = SSDExpertWeightLoader()
 
     # ---------- process loop -------------------------------------------------#
     def run(self) -> None:
@@ -208,7 +209,7 @@ class EplbRebalanceLoader:
                 res_q=self.res_q
             )
 
-        loader = WeightLoader()
+        loader = SSDExpertWeightLoader()
         return loader.load_expert_weight_from_ssd(
             self.model_dir,
             layer_prefix=layer_prefix,
