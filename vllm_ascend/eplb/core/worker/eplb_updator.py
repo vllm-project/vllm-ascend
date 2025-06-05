@@ -25,7 +25,7 @@ from multiprocessing import Process, Queue
 import multiprocessing
 from abc import ABC, abstractmethod
 
-from vllm_ascend.eplb.core.loader.device_transfer_loader import D2DExpertWeightLoader, SSD2DExpertWeightLoader
+# from vllm_ascend.eplb.core.loader.device_transfer_loader import D2DExpertWeightLoader, SSD2DExpertWeightLoader
 from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory,DynamicConfig
 
 logger = logging.getLogger(__name__)
@@ -49,6 +49,10 @@ class EplbWorker:
         # async stream 
         # D2D
         # H2D
+
+        #获取初始expert_map
+        if self.old_expert_map == None:
+            self.old_expert_map = self.get_init_expert_map()
 
         #获取moe负载信息
         load_info = self.fetch_and_sum_load_info(self.shared_dict)
@@ -193,7 +197,7 @@ class EplbProcess:
         proc = ctx.Process(
             target=self.worker_process,
             args=(),
-            daemon=False
+            daemon=True
         )
         proc.start()
         return planner_q, block_update_q, proc
