@@ -26,8 +26,8 @@ from vllm.utils import GiB_bytes
 from tests.utils import fork_new_process_for_each_test
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 
-if os.getenv("VLLM_USE_V1") == "1":
-    pytest.skip("Skip in vllm v1", allow_module_level=True)
+# if os.getenv("VLLM_USE_V1") == "1":
+#     pytest.skip("Skip in vllm v1", allow_module_level=True)
 
 
 @fork_new_process_for_each_test

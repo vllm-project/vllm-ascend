@@ -40,7 +40,9 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.worker_base import WorkerBase
+from vllm.utils import GiB_bytes, bind_kv_cache, get_ip
 
+from vllm_ascend.device_allocator.camem import CaMemAllocator
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
@@ -95,10 +97,22 @@ class NPUWorker(WorkerBase):
         self.profiler = self._init_profiler()
 
     def sleep(self, level: int = 1) -> None:
-        logger.error("Sleep mode is only supported on v0")
+        NPUPlatform.set_device(self.device)
+        free_bytes_before_sleep = NPUPlatform.mem_get_info()[0]
+        allocator = CaMemAllocator.get_instance()
+        allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
+        free_bytes_after_sleep, total = NPUPlatform.mem_get_info()
+        freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+        used_bytes = total - free_bytes_after_sleep
+        assert freed_bytes >= 0, "Memory usage increased after sleeping."
+        logger.info(
+            "Sleep mode freed %.2f GiB memory, "
+            "%.2f GiB memory is still in use.", freed_bytes / GiB_bytes,
+            used_bytes / GiB_bytes)
 
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
-        logger.error("Sleep mode is only supported on v0")
+        allocator = CaMemAllocator.get_instance()
+        allocator.wake_up(tags=tags)
 
     def init_device(self):
         if self.device_config.device.type == "npu":
@@ -143,7 +157,7 @@ class NPUWorker(WorkerBase):
 
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
-        NPUPlatform.empty_cache()
+        NPUPlatform.clear_npu_memory()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -180,7 +194,17 @@ class NPUWorker(WorkerBase):
         return output if self.is_driver_worker else None
 
     def load_model(self) -> None:
-        self.model_runner.load_model()
+        if self.vllm_config.model_config.enable_sleep_mode:
+            allocator = CaMemAllocator.get_instance()
+            assert allocator.get_current_usage() == 0, (
+                "Sleep mode can only be "
+                "used for one instance per process.")
+            context = allocator.use_memory_pool(tag="weights")
+        else:
+            from contextlib import nullcontext
+            context = nullcontext()  # type: ignore
+        with context:
+            self.model_runner.load_model()
 
     def compile_or_warm_up_model(self) -> None:
         warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
@@ -206,12 +230,19 @@ class NPUWorker(WorkerBase):
 
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
-        self.model_runner.initialize_kv_cache(kv_cache_config)
+        if self.vllm_config.model_config.enable_sleep_mode:
+            allocator = CuMemAllocator.get_instance()
+            context = allocator.use_memory_pool(tag="kv_cache")
+        else:
+            from contextlib import nullcontext
+            context = nullcontext()
+        with context:
+            self.model_runner.initialize_kv_cache(kv_cache_config)
 
-    def initialize_cache(self, kv_cache_configs: List[KVCacheConfig]) -> None:
-        """Allocate GPU KV cache with the specified kv_cache_config."""
-        kv_cache_config = kv_cache_configs[self.rank]
-        self.model_runner.initialize_kv_cache(kv_cache_config)
+    # def initialize_cache(self, kv_cache_configs: List[KVCacheConfig]) -> None:
+    #     """Allocate GPU KV cache with the specified kv_cache_config."""
+    #     kv_cache_config = kv_cache_configs[self.rank]ß
+    #     self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:
