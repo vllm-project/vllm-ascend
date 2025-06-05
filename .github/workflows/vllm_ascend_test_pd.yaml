@@ -30,9 +30,10 @@ defaults:
   run:
     shell: bash -el {0}
 
+# only 1 job can runs on static-8-01-cards
 concurrency:
-  group: pr-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: static-8-01-cards
+  cancel-in-progress: false
 
 jobs:
   prefilling-decoding-disaggregation:
