@@ -65,6 +65,7 @@ from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 
 
 from vllm_ascend.eplb.core.worker.eplb_updator import EplbProcess
+from vllm_ascend.eplb.core.loader.device_transfer_loader import D2DExpertWeightLoader
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -331,7 +332,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         #     self.use_cached_npu_graph = additional_config.get(
         #         "use_cached_npu_graph", False)
         #     self.enable_eplb = additional_config.get("enable_eplb", False)
-        
+
         if self.enable_eplb == True:
             self.init_eplb()
 
@@ -354,7 +355,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             policy_type=1,
             enable_d2d=True
         )
-        
+
         self.planner_block_queue, self.block_update_queue, self.eplb_process = \
             self.eplb._launch_process()
 
@@ -987,9 +988,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             logprobs=logprobs_lists,
             prompt_logprobs_dict={},
         )
-    
+
         if self.enable_eplb:
-            self.do_eplb() 
+            self.do_eplb()
 
         return model_runner_output
 
@@ -1004,12 +1005,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
                 self.planner_block_queue.put(1)
                 self.update_in_flight = True
-                
+
             except Exception as e:
-                logger.warning(f"[ModelRunner] Failed to wake EPLB process: {e}", exc_info=True)            
+                logger.warning(f"[ModelRunner] Failed to wake EPLB process: {e}", exc_info=True)
 
         if  self.update_in_flight:
-                if not self.block_update_queue.empty(): 
+                if not self.block_update_queue.empty():
                     self.block_update_queue.get()
                     new_expert_map = self.shared_dict["expert_map"]
                     self.model.update_all_expert_map(new_expert_map, self.num_moe_layers)
