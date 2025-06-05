@@ -53,6 +53,8 @@ class TorchairGraphConfig:
             "graph_batch_sizes", [])
         self.graph_batch_sizes_init = torchair_graph_config.get(
             "graph_batch_sizes_init", False)
+        self.enable_multistream_shared_expert = torchair_graph_config.get(
+            "enable_multistream_shared_expert", False)
 
         if not isinstance(self.graph_batch_sizes, list):
             raise TypeError("graph_batch_sizes must be list[int]")
@@ -105,7 +107,7 @@ def check_ascend_config(vllm_config, enforce_eager):
     ascend_config = get_ascend_config()
 
     # Both for V0 and V1 Engine, torchair_graph cannot be enabled with eager mode.
-    if ascend_config.torchair_graph_config.enabled and not enforce_eager:
+    if ascend_config.torchair_graph_config.enabled and enforce_eager:
         raise RuntimeError(
             "Can't enable graph mode and eager mode at the same time. Please set `enforce_eager=False` if you attempt to enable NPU graph mode."
         )

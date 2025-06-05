@@ -30,7 +30,6 @@ from typing import Any, Dict, List, Optional, Union
 import torch
 import torch.distributed as dist
 import torch_npu
-import torchair as tng  # type: ignore
 import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
