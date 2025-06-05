@@ -32,9 +32,9 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
                                            compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
-from vllm.config import get_current_vllm_config
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.cache import concat_and_cache_mla
 from vllm_ascend.platform import CUSTOM_OP_ENABLED
 from vllm_ascend.worker.model_runner import (
@@ -1002,11 +1002,8 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         self.w_kc = None
         self.w_vc = None
 
-        self.enable_graph_mode = False
-        additional_config = get_current_vllm_config().additional_config
-        if additional_config:
-            self.enable_graph_mode = additional_config.get(
-                "enable_graph_mode", False)
+        ascend_config = get_ascend_config()
+        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
 
     def exec_kv(
         self,
@@ -1179,7 +1176,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                                                        self.num_heads, -1)
 
         # TODO: Replace the env with more flexible expressions
-        if self.enable_graph_mode:
+        if self.torchair_graph_enabled:
             if len(kv_cache) > 0 and kv_cache[0].numel(
             ) > 0 and attn_metadata.num_prefills > 0:
                 slots = attn_metadata.slot_mapping
@@ -1230,7 +1227,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                 )
         elif attn_metadata.decode_metadata:
             assert kv_cache is not None
-            if self.enable_graph_mode:
+            if self.torchair_graph_enabled:
                 # shape of query for npu graph mode should be:
                 # [bs, num_heads_per_rank, seq_len, dim]
                 q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1)

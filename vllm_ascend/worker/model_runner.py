@@ -64,6 +64,8 @@ from vllm.worker.model_runner_base import (
     _init_attn_metadata_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
 
+from vllm_ascend.ascend_config import get_ascend_config
+
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
@@ -540,7 +542,7 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
         }
 
         # Add graph_pad_size here
-        if self.runner.enable_graph_mode:
+        if self.runner.torchair_graph_enabled:
             graph_pad_size = self.runner.scheduler_config.max_num_seqs - len(
                 seq_lens)
         else:
@@ -603,7 +605,7 @@ class ModelInputForNPUBuilder(ModelRunnerInputBuilderBase[ModelInputForNPU]):
         ]
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
-        if self.runner.enable_graph_mode:
+        if self.runner.torchair_graph_enabled:
             torch._dynamo.mark_static(input_tokens_tensor)
             torch._dynamo.mark_static(input_positions_tensor)
             torch._dynamo.mark_static(attn_metadata.block_tables)
@@ -864,14 +866,9 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         self.max_batchsize_to_capture = \
             self.vllm_config.compilation_config.max_capture_size
 
-        self.enable_graph_mode = False
-        self.use_cached_npu_graph = False
-        additional_config = vllm_config.additional_config
-        if additional_config:
-            self.enable_graph_mode = additional_config.get(
-                "enable_graph_mode", False)
-            self.use_cached_npu_graph = additional_config.get(
-                "use_cached_npu_graph", False)
+        ascend_config = get_ascend_config()
+        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+        self.use_cached_npu_graph = ascend_config.torchair_graph_config.use_cached_graph
 
         self.has_inner_state = model_config.has_inner_state
 
@@ -971,7 +968,7 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
             self.model = self.lora_manager.create_lora_manager(self.model)
 
         # adapter torch compile with npu_backend
-        if self.enable_graph_mode:
+        if self.torchair_graph_enabled:
             import torchair  # type: ignore
             from torchair import patch_for_hcom  # type: ignore
 
@@ -1290,7 +1287,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
 
         assert model_input.attn_metadata is not None
         # TODO(zzzzwwjj): Do we need to do it every time?
-        if self.enable_graph_mode:
+        if self.torchair_graph_enabled:
             torch._dynamo.mark_static(model_input.input_tokens)
             torch._dynamo.mark_static(model_input.input_positions)
             torch._dynamo.mark_static(model_input.attn_metadata.block_tables)
@@ -1305,7 +1302,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
         virtual_engine = model_input.virtual_engine
         prefill_meta = model_input.attn_metadata.prefill_metadata
         previous_hidden_states = kwargs.get("previous_hidden_states")
-        if prefill_meta is None and self.enable_graph_mode:
+        if prefill_meta is None and self.torchair_graph_enabled:
             model_executable = self.compile_model
             # Note: graph_batch_size value not same as GPU
             graph_batch_size = model_input.input_tokens.shape[  # type: ignore
@@ -1359,7 +1356,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
             "request_ids_to_seq_ids": model_input.request_ids_to_seq_ids,
         } if self.has_inner_state else {}
 
-        if self.enable_graph_mode:
+        if self.torchair_graph_enabled:
             model_kwargs: Dict[str, Any] = {"inputs_embeds": None}
         else:
             model_kwargs = {}
@@ -1377,7 +1374,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                                      self.vllm_config, virtual_engine):
                 if model_input.attn_metadata is not None:
                     model_input.attn_metadata.input_positions = model_input.input_positions
-                if self.enable_graph_mode:
+                if self.torchair_graph_enabled:
                     model_kwargs["kv_caches"] = kv_caches
                     model_kwargs["attn_metadata"] = model_input.attn_metadata
                 hidden_or_intermediate_states = model_executable(
@@ -1461,7 +1458,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                 hidden_states = hidden_or_intermediate_states.index_select(
                     0, indices)
                 output.prefill_hidden_states = hidden_or_intermediate_states
-            elif self.enable_graph_mode:
+            elif self.torchair_graph_enabled:
                 hidden_states = hidden_or_intermediate_states[:len(indices)]
             else:
                 hidden_states = hidden_or_intermediate_states

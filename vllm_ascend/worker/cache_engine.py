@@ -20,9 +20,10 @@
 from typing import Any, List
 
 import torch
-from vllm.config import get_current_vllm_config
 from vllm.utils import is_pin_memory_available
 from vllm.worker.cache_engine import CacheEngine
+
+from vllm_ascend.ascend_config import get_ascend_config
 
 
 def allocate_kv_cache(
@@ -36,8 +37,8 @@ def allocate_kv_cache(
     pin_memory = is_pin_memory_available() if device == "cpu" else False
     kv_cache: List[Any] = []
 
-    additional_config = get_current_vllm_config().additional_config
-    if additional_config and additional_config.get("enable_graph_mode", False):
+    ascend_config = get_ascend_config()
+    if ascend_config.torchair_graph_config.enabled:
         # Align entries so they are 256 byte aligned for better performance
         # Primarily targets MLA as this typically only ends up having entries
         # be 128 byte aligned.
