@@ -16,15 +16,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+import os
 import time
+from unittest.mock import patch
 
 import torch
 import vllm  # noqa: F401
 
-import vllm_ascend.envs as envs
 from vllm_ascend.utils import ProfileExecuteDuration
 
 
+@patch.dict(os.environ, {"VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE": "1"})
 def test_execue_duration_enabled_discrepancy():
     a = torch.randn(10000, 10000).npu()
     b = torch.randn(10000, 10000).npu()
@@ -33,7 +35,6 @@ def test_execue_duration_enabled_discrepancy():
     torch.matmul(a, b)
     torch.npu.synchronize()
 
-    envs.VLLM_MODEL_EXECUTE_TIME_OBSERVE = True
     cpu_start = time.perf_counter()
     with ProfileExecuteDuration().capture_async("forward"):
         torch.matmul(a, b)
@@ -54,7 +55,6 @@ def test_execue_duration_disabled():
     a = torch.randn(100, 100).npu()
     b = torch.randn(100, 100).npu()
 
-    envs.VLLM_MODEL_EXECUTE_TIME_OBSERVE = False
     with ProfileExecuteDuration().capture_async("forward"):
         torch.matmul(a, b)
         torch.npu.synchronize()

@@ -36,8 +36,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
     "VLLM_ENABLE_MC2":
     lambda: bool(int(os.getenv("VLLM_ENABLE_MC2", '0'))),
-    "VLLM_MODEL_EXECUTE_TIME_OBSERVE":
-    lambda: bool(int(os.getenv("VLLM_MODEL_EXECUTE_TIME_OBSERVE", '0'))),
     "USING_LCCL_COM":
     lambda: bool(int(os.getenv("USING_LCCL_COM", '0'))),
     "SOC_VERSION":
@@ -70,6 +68,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_VERSION", None),
     "VLLM_ASCEND_TRACE_RECOMPILES":
     lambda: bool(int(os.getenv("VLLM_ASCEND_TRACE_RECOMPILES", '0'))),
+    "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE", '0'))
+                 ),
 }
 
 # end-env-vars-definition

@@ -199,7 +199,7 @@ class ProfileExecuteDuration:
 
     @contextmanager
     def capture_async(self, duration_tag: str):
-        if not envs.VLLM_MODEL_EXECUTE_TIME_OBSERVE:
+        if not envs.VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE:
             yield
             return
 
@@ -217,7 +217,7 @@ class ProfileExecuteDuration:
     def pop_captured_sync(self) -> dict:
         """Pop and synchronize all events in the observation list"""
         durations: dict[str, float] = {}
-        if not envs.VLLM_MODEL_EXECUTE_TIME_OBSERVE:
+        if not envs.VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE:
             return durations
 
         while self._observations:
