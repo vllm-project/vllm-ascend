@@ -72,7 +72,7 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
 
         buffer_tensor_id = 0
         for pull_info in expert_pull_info:
-            pull_rank, global_expert_id_to_pull = transfer_info
+            pull_rank, global_expert_id_to_pull = pull_info
             for buffer_tensor in self.get_buffer_tensor(buffer_tensor_id):
                 self.comm_op_list.append(dist.P2POp(dist.irecv, buffer_tensor, pull_rank))
             self.pull_tensor_list.append((self.updated_expert_map[global_expert_id_to_pull].item(), buffer_tensor_id))
@@ -107,10 +107,9 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
 
     def init_buffer_tensor_dict(self, num_buffer_tensor, params_dtype):
         for name,dim in self.expert_params_name.items():
-            num_row, num_col = dim
-            self.buffer_tensor_dict[name] = torch.empty(
-                num_buffer_tensor, num_row, num_col, dtype=params_dtype
-            ).npu()
+            complete_name = "model.layers.3.mlp.experts." + name
+            expert_tensor = self.param_dict[complete_name].data[0:num_buffer_tensor]
+            self.buffer_tensor_dict[name] = torch.empty_like(expert_tensor)
 
     def get_buffer_tensor(self, buffer_tensor_id):
         for name in self.expert_params_name.keys():
@@ -132,28 +131,28 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
     def generate_mock_update_info(self, rank_id):
         if rank_id == 0:
             expert_transfer_info = [(1, 0)]
-            expert_pull_info = [(1, 63)]
+            expert_pull_info = [(1, 64)]
             updated_expert_map_list = [-1] + [i for i in range(1, 64)] + [0] + [j for j in [-1] * 128]
             updated_expert_map = torch.tensor(updated_expert_map_list)
             layer_id = 3
 
         if rank_id == 1:
-            expert_transfer_info = [(0, 63)]
+            expert_transfer_info = [(0, 64)]
             expert_pull_info = [(0, 0)]
             updated_expert_map_list = [0] + [k for k in [-1] * 63] + [i for i in range(1, 64)] + [j for j in [-1] * 128]
             updated_expert_map = torch.tensor(updated_expert_map_list)
             layer_id = 3
 
         if rank_id == 2:
-            expert_transfer_info = [(3, 127)]
-            expert_pull_info = [(3, 191)]
+            expert_transfer_info = [(3, 128)]
+            expert_pull_info = [(3, 192)]
             updated_expert_map_list = [k for k in [-1] * 129] + [i for i in range(1, 64)] + [0] + [j for j in [-1] * 63]
             updated_expert_map = torch.tensor(updated_expert_map_list)
             layer_id = 3
 
         if rank_id == 3:
-            expert_transfer_info = [(2, 191)]
-            expert_pull_info = [(2, 127)]
+            expert_transfer_info = [(2, 192)]
+            expert_pull_info = [(2, 128)]
             updated_expert_map_list = [k for k in [-1] * 128] + [0] + [k for k in [-1] * 64] + [i for i in range(1, 64)]
             updated_expert_map = torch.tensor(updated_expert_map_list)
             layer_id = 3
