@@ -363,7 +363,7 @@ def fused_experts(
                             num_experts)).to(topk_ids.dtype)
 
         # Sort by local expert IDs
-        sort_indices = torch.argsort(filtered_experts)
+        sort_indices = torch.argsort(filtered_experts.view(torch.float32))
         sorted_token_indices = token_indices[sort_indices]
         sorted_weights = filtered_weights[sort_indices]
 

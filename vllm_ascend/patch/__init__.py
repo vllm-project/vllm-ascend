@@ -166,3 +166,30 @@
 #    Future Plan:
 #       Revert it when the ascend support triton kernel.
 #
+# ** File: v1/sample/sampler.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.sample.sampler.Sampler.apply_top_k_top_p`
+#    Why:
+#       We need to use the patched `apply_top_k_top_p` in `sample`.
+#       The mainly reason to overwrite `apply_top_k_top_p` is
+#       to improve performance.
+#    How：
+#       Re-implementation the `apply_top_k_top_p` function by pytorch
+#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
+#       - https://github.com/vllm-project/vllm-ascend/pull/970
+#    Future Plan:
+#       Revert it when the ascend scatter performance improves.
+#
+# ** File: v1/sample/sampler.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~s
+#   1. `vllm.v1.sample.sampler.Sampler.apply_min_p`
+#    Why:
+#       We need to use the patched `apply_min_p` in `sample`.
+#       The mainly reason to overwrite `apply_min_p` is
+#       to improve performance.
+#    How：
+#       Re-implementation the `apply_min_p` function by pytorch
+#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
+#       - https://github.com/vllm-project/vllm-ascend/pull/970
+#    Future Plan:
+#       Revert it when the ascend indexput performance improves.

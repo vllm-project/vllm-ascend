@@ -238,8 +238,7 @@ class CustomDeepseekV2MoE(nn.Module):
 
         num_tokens, hidden_size = hidden_states.shape
 
-        if self.n_shared_experts is not None:
-            shared_output = self.shared_experts(hidden_states)
+        old_hidden_states = hidden_states.clone()
 
         if self.tp_size > 1:
             if envs_ascend.VLLM_ENABLE_MC2 and not is_prefill:
@@ -287,6 +286,9 @@ class CustomDeepseekV2MoE(nn.Module):
                 hidden_states = torch.cat(chunk_hidden_states, dim=0)
                 if num_padding_tokens > 0:
                     hidden_states = hidden_states[:-num_padding_tokens]
+
+        if self.n_shared_experts is not None:
+            shared_output = self.shared_experts(old_hidden_states)
 
         if shared_output is not None:
             hidden_states = hidden_states + shared_output

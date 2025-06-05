@@ -36,6 +36,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
     "VLLM_ENABLE_MC2":
     lambda: bool(int(os.getenv("VLLM_ENABLE_MC2", '0'))),
+    "VLLM_ASCEND_ENABLE_TOPK_OPTIMZE":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_OPTIMZE", '0'))),
     "USING_LCCL_COM":
     lambda: bool(int(os.getenv("USING_LCCL_COM", '0'))),
     "SOC_VERSION":
