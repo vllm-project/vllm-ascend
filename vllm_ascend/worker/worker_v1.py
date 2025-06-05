@@ -17,8 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py
 #
 
-import gc
-from typing import Dict, List, Optional
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -35,8 +34,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheSpec)
+from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 
@@ -217,14 +215,9 @@ class NPUWorker(WorkerBase):
             context = allocator.use_memory_pool(tag="kv_cache")
         else:
             from contextlib import nullcontext
-            context = nullcontext() # type: ignore
+            context = nullcontext()  # type: ignore
         with context:
             self.model_runner.initialize_kv_cache(kv_cache_config)
-
-    # def initialize_cache(self, kv_cache_configs: List[KVCacheConfig]) -> None:
-    #     """Allocate GPU KV cache with the specified kv_cache_config."""
-    #     kv_cache_config = kv_cache_configs[self.rank]ß
-    #     self.model_runner.initialize_kv_cache(kv_cache_config)
 
     def profile(self, is_start: bool = True):
         if self.profiler is None:
