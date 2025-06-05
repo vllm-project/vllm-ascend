@@ -105,6 +105,7 @@ def process_topk_ids(topk_ids: torch.Tensor, expert_num: int, ep_size: int,
         topk_ids_pad = temp_pad_buffer[:output_len]
     return topk_ids_pad, unpad_indices
 
+
 def fused_experts_with_mc2(hidden_states: torch.Tensor,
                            w1: torch.Tensor,
                            w2: torch.Tensor,
@@ -724,6 +725,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         try:
             device_group = ep_group.device_group
+            # TODO: Try local_rank = ep_group.rank_in_group
             local_rank = torch.distributed.get_rank(group=device_group)
             backend = device_group._get_backend(torch.device("npu"))
             self.moe_all_to_all_group_name = backend.get_hccl_comm_name(

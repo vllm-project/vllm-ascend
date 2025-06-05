@@ -21,14 +21,12 @@
 # limitations under the License.
 
 import torch
+import torch_npu
 
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 from vllm_ascend.distributed.tensor_parallel import gather_from_sequence_parallel_region, all_to_all_sp2hp, \
     reduce_scatter_to_sequence_parallel_region, all_gather_last_dim_from_tensor_parallel_region, all_to_all_hp2sp, \
     reduce_scatter_last_dim_to_tensor_parallel_region
-from vllm_ascend.ops.moe_dispatcher.ops.npu_moe_token_permute import npu_moe_token_permute
-from vllm_ascend.ops.moe_dispatcher.ops.npu_moe_token_unpermute import npu_moe_token_unpermute
-
 
 from vllm_ascend.ops.comm_utils import async_all_to_all
 from vllm_ascend.ops.moe_dispatcher.moe_utils import get_capacity, permute, sort_chunks_by_idxs, unpermute, \
@@ -387,7 +385,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
                     num_out_tokens=self.num_out_tokens,
                 )
             else:
-                permutated_local_input_tokens, reversed_local_input_permutation_mapping = npu_moe_token_permute(
+                permutated_local_input_tokens, reversed_local_input_permutation_mapping = torch_npu.npu_moe_token_permute(
                     tokens=hidden_states,
                     indices=self.top_indices,
                     num_out_tokens=self.num_out_tokens,
@@ -498,7 +496,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
             if self.config.is_fused:
                 permuted_probs = (self.probs.T.contiguous().masked_select(self.routing_map.T.contiguous())
                                   .view(-1, self.config.moe_router_topk))
-                output = npu_moe_token_unpermute(
+                output = torch_npu.npu_moe_token_unpermute(
                     permuted_tokens=permutated_local_input_tokens,
                     sorted_indices=self.reversed_local_input_permutation_mapping.to(torch.int32),
                     probs=permuted_probs,
