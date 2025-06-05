@@ -46,7 +46,7 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
         self.expert_map = dict()
         num_moe_layers = 2 # TO DO: provide number of num_moe_layers by vllm configuration
         for layer_idx in range(num_moe_layers):
-            self.expert_map[layer_idx] = self.model.get_expert_map(3+layer_idx)
+            self.expert_map[3 + layer_idx] = self.model.get_expert_map(3 + layer_idx)
         self.updated_expert_map = None
         self.layer_id = -1
         # 0: waiting for updated expert_map by EplbWorker
@@ -75,7 +75,7 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
             pull_rank, global_expert_id_to_pull = transfer_info
             for buffer_tensor in self.get_buffer_tensor(buffer_tensor_id):
                 self.comm_op_list.append(dist.P2POp(dist.irecv, buffer_tensor, pull_rank))
-            self.pull_tensor_list.append((self.updated_expert_map[layer_id][global_expert_id_to_pull].item(), buffer_tensor_id))
+            self.pull_tensor_list.append((self.updated_expert_map[global_expert_id_to_pull].item(), buffer_tensor_id))
         buffer_tensor_id += 1
 
         self.state = 1
@@ -118,14 +118,14 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
 
     def get_expert_tensor(self, layer_id, global_expert_id_to_transfer):
         for name in self.expert_params_name.keys():
-            complete_name = "model.layers." + str(layer_id) + "mlp.experts." + name
-            local_expert_id = self.expert_map[global_expert_id_to_transfer].item()
+            complete_name = "model.layers." + str(layer_id) + ".mlp.experts." + name
+            local_expert_id = self.expert_map[layer_id][global_expert_id_to_transfer].item()
             yield self.param_dict[complete_name].data[local_expert_id]
 
     def copy_buffer_tensor(self, layer_id, expert_id_before_replace, buffer_tensor_id):
         for name in self.expert_params_name.keys():
-            complete_name = "model.layers." + str(layer_id) + "mlp.experts." + name
-            local_expert_id = self.expert_map[expert_id_before_replace].item()
+            complete_name = "model.layers." + str(layer_id) + ".mlp.experts." + name
+            local_expert_id = self.expert_map[layer_id][expert_id_before_replace].item()
             expert_tensor = self.param_dict[complete_name].data[local_expert_id]
             expert_tensor.copy_(self.buffer_tensor_dict[name][buffer_tensor_id])
 
