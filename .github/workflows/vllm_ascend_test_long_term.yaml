@@ -30,8 +30,9 @@ defaults:
   run:
     shell: bash -el {0}
 
+# only cancel in-progress runs of the same workflow
 concurrency:
-  group: pr-${{ github.event.pull_request.number }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -43,15 +44,6 @@ jobs:
       matrix:
         os: [linux-arm64-npu-1, linux-arm64-npu-4]
         vllm_version: [main, v0.9.0]
-    concurrency:
-      group: >
-        ${{
-        matrix.os == 'linux-arm64-npu-4'
-          && github.event.pull_request.number
-          && format('pr-{0}-limit-npu-4-long-term', github.event.pull_request.number)
-        || format('job-{0}-{1}-{2}-long-term', matrix.os, matrix.vllm_version, github.event.pull_request.number)
-        }}
-      cancel-in-progress: false
     name: vLLM Ascend long term test
     runs-on: ${{ matrix.os }}
     container:

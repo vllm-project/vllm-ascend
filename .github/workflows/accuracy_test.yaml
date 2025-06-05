@@ -62,8 +62,9 @@ defaults:
   run:
     shell: bash -el {0}
 
+# only cancel in-progress runs of the same workflow
 concurrency:
-  group: pr-${{ github.event.pull_request.number }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
