@@ -9,18 +9,29 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               MLAAttentionImpl)
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import get_current_vllm_config
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               LinearBase, RowParallelLinear,
+from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
+
+
+@dataclass
+class CommonAttentionMetadata:
+    """
+    Attention metadata attributes that can be shared by layers in different KV
+    cache groups and thus having different block table.
+    """
+
+    query_start_loc: torch.Tensor
+    """(batch_size + 1,), the start location of each request in query Tensor"""
+    seq_lens: torch.Tensor
+    """(batch_size,), the length of each request including both computed tokens
+    and newly scheduled tokens"""
 
 
 class AscendMLABackend(AttentionBackend):
@@ -57,6 +68,7 @@ class AscendMLAPrefillMetadata:
     seq_lens: list[int]
     context_lens: torch.Tensor
     input_positions: torch.Tensor
+    query_start_loc: torch.Tensor
     block_table: torch.Tensor
     max_query_len: int
     max_seq_lens: int
@@ -90,6 +102,9 @@ class AscendMLAMetadata:
 
     num_actual_tokens: int  # Number of tokens excluding padding.
     slot_mapping: torch.Tensor
+    query_start_loc: torch.Tensor
+    seq_lens: torch.Tensor
+    block_tables: torch.Tensor
 
     # New for MLA (compared to FlashAttention)
     # For handling prefill decode split
@@ -99,6 +114,8 @@ class AscendMLAMetadata:
 
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
+
+    with_prefill_across_dp: bool = False
 
     # The dimension of the attention heads
     head_dim: Optional[int] = None
@@ -130,7 +147,7 @@ class AscendMLAMetadataBuilder:
 
     # _attn_mask_builder = None
     def __init__(self,
-                 runner: "NPUModelRunner",
+                 runner,
                  metadata_cls: Optional[AscendMLAMetadata] = None):
         self.metadata_cls: Optional[AscendMLAMetadata] = metadata_cls \
             if metadata_cls is not None else AscendMLAMetadata  # type: ignore
@@ -224,14 +241,62 @@ class AscendMLAMetadataBuilder:
                                max_blocks] = block_tables[:num_seqs, :
                                                           max_blocks]
 
-        return graph_block_tables
+        return graph_block_tables[:num_seqs, :max_blocks]
 
-    def build(self,
-              num_reqs: int,
-              num_actual_tokens: int,
-              max_query_len: int,
-              common_prefix_len: Optional[int] = None,
-              graph_pad_size: int = -1) -> AscendMLAMetadata:
+    def build_dummy(self, num_reqs: int,
+                    num_actual_tokens: int) -> AscendMLAMetadata:
+        device = self.runner.device
+        _, max_blocks = self.runner.graph_block_tables.shape
+        block_table = torch.zeros((num_reqs, max_blocks),
+                                  dtype=torch.int32,
+                                  device=device)
+        block_table = self._get_graph_runner_block_tables(
+            num_reqs, block_table)
+        seq_lens = torch.ones(num_reqs, dtype=torch.int32, device=device)
+        input_positions = torch.zeros(num_reqs,
+                                      dtype=torch.int32,
+                                      device=device).long()
+        slot_mapping = torch.full((num_reqs, ),
+                                  PAD_SLOT_ID,
+                                  dtype=torch.int32,
+                                  device=device)
+        query_start_loc = torch.full((num_reqs, ),
+                                     -1,
+                                     dtype=torch.int32,
+                                     device=device)
+        decode_metadata = AscendMLADecodeMetadata(
+            input_positions=input_positions,
+            block_table=block_table,
+            seq_lens=seq_lens,
+            seq_lens_list=seq_lens.tolist(),
+            max_seq_lens=1)
+        return self.metadata_cls(  # type: ignore
+            num_input_tokens=num_actual_tokens,
+            num_actual_tokens=num_actual_tokens,
+            slot_mapping=slot_mapping,
+            head_dim=self.runner.model_config.get_head_size(),
+            num_decodes=1,
+            num_decode_tokens=1,
+            num_prefills=0,
+            attn_mask=self.runner.attn_mask,
+            attn_state=AscendAttentionState.DecodeOnly,
+            prefill=None,
+            decode=decode_metadata,
+            query_start_loc=query_start_loc,
+            seq_lens=seq_lens,
+            block_tables=block_table,
+        )
+
+    def build(
+        self,
+        num_reqs: int,
+        num_actual_tokens: int,
+        max_query_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        common_prefix_len: Optional[int] = None,
+        graph_pad_size: int = -1,
+        with_prefill_across_dp: bool = False,
+    ) -> AscendMLAMetadata:
         assert self._num_decodes + self._num_prefills == num_reqs
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
@@ -252,6 +317,7 @@ class AscendMLAMetadataBuilder:
         seq_lens = seq_lens_cpu
         max_query_len = query_lens.max().item()
         max_seq_lens = seq_lens.max().item()
+        query_start_loc = None
 
         prefill_metadata = None
         if self._num_prefills > 0:
@@ -259,6 +325,9 @@ class AscendMLAMetadataBuilder:
             tokens_start = self._num_decode_tokens
             max_query_len = query_lens[tokens_start:].max().item()
             max_seq_lens = seq_lens[tokens_start:].max().item()
+            query_start_loc = common_attn_metadata.query_start_loc
+            prefill_query_start_loc = query_start_loc[
+                reqs_start:] - query_start_loc[reqs_start]
 
             prefill_metadata = AscendMLAPrefillMetadata(
                 attn_mask=self.runner.attn_mask,
@@ -269,6 +338,7 @@ class AscendMLAMetadataBuilder:
                 block_table=block_table[reqs_start:, ...],
                 max_query_len=max_query_len,
                 max_seq_lens=max_seq_lens,
+                query_start_loc=prefill_query_start_loc,
             )
 
         decode_metadata = None
@@ -301,7 +371,7 @@ class AscendMLAMetadataBuilder:
                 block_table = torch.cat([block_table, block_table_padding],
                                         dim=0)
                 block_table = self._get_graph_runner_block_tables(
-                    num_seqs, block_table)
+                    num_seqs + graph_pad_size, block_table)
                 padding_0 = torch.zeros(graph_pad_size,
                                         dtype=input_positions.dtype,
                                         device=input_positions.device)
@@ -325,6 +395,10 @@ class AscendMLAMetadataBuilder:
             attn_state=self.runner.attn_state,
             prefill=prefill_metadata,
             decode=decode_metadata,
+            query_start_loc=query_start_loc,
+            block_tables=block_table,
+            seq_lens=seq_lens,
+            with_prefill_across_dp=with_prefill_across_dp,
         )
 
 
@@ -346,20 +420,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         blocksparse_params: Optional[dict[str, Any]],
         logits_soft_cap: Optional[float],
         attn_type: str,
-        # MLA Specific Arguments
-        q_lora_rank: Optional[int],
-        kv_lora_rank: int,
-        qk_nope_head_dim: int,
-        qk_rope_head_dim: int,
-        qk_head_dim: int,
-        v_head_dim: int,
-        rotary_emb: RotaryEmbedding,
-        # q_proj should be q_b_proj if q_lora_rank is not None, but from an
-        # attention backend perspective we rely on the layer to pass in the
-        # correct matrix
-        q_proj: ColumnParallelLinear,
-        kv_b_proj: ColumnParallelLinear,
-        o_proj: RowParallelLinear,
+        kv_sharing_target_layer_name: Optional[str] = None,
         **kwargs,
     ) -> None:
         self.num_heads = num_heads
@@ -368,25 +429,20 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.num_kv_heads = num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype
 
-        self.q_lora_rank = q_lora_rank
-        self.kv_lora_rank = kv_lora_rank
-        self.qk_nope_head_dim = qk_nope_head_dim
-        self.qk_rope_head_dim = qk_rope_head_dim
-        self.qk_head_dim = qk_head_dim
-        self.v_head_dim = v_head_dim
-
-        # Hack for V1 for now to avoid torch library overhead (since we are
-        # already inside an attention custom op), pull out the forward
-        # method from the rotary embedding and call it directly
-        # TODO(lucas): we should probably find a cleaner way to do this
-        self.rotary_emb = rotary_emb
-
-        self.q_proj = q_proj
-        self.kv_b_proj = kv_b_proj
-        self.o_proj = o_proj
-
+        # MLA Args
+        self.q_lora_rank = kwargs['q_lora_rank']
+        self.kv_lora_rank = kwargs['kv_lora_rank']
+        self.qk_nope_head_dim = kwargs['qk_nope_head_dim']
+        self.qk_rope_head_dim = kwargs['qk_rope_head_dim']
+        self.qk_head_dim = kwargs['qk_head_dim']
+        self.v_head_dim = kwargs['v_head_dim']
+        self.rotary_emb = kwargs['rotary_emb']
+        self.q_proj = kwargs['q_proj']
+        self.kv_b_proj = kwargs['kv_b_proj']
+        self.o_proj = kwargs['o_proj']
         self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
+
         # Handle the differences between the flash_attn_varlen from flash_attn
         # and the one from vllm_flash_attn. The former is used on RoCM and the
         # latter has an additional parameter to control FA2 vs FA3
@@ -558,7 +614,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv = self.kv_a_proj_with_mqa(hidden_states)[0]
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv = kv.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-        k_pe, k_nope, _, _ = torch.ops.npu_inference.npu_kv_rmsnorm_rope_cache(
+        k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv,
             self.kv_a_layernorm.weight,
             cos,
@@ -580,7 +636,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         B, N, D = x.shape
         S = 1
         x = x.view(B, N, S, D)
-        x = torch.ops.npu_inference.npu_interleave_rope(x, cos, sin)
+        x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
     def _forward_decode(
@@ -703,6 +759,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 sin = sin[attn_metadata.decode.input_positions]
                 cos = cos[:, None, None, :]
                 sin = sin[:, None, None, :]
+
                 decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
                 decode_k_pe, decode_k_nope = self.exec_kv(
                     hidden_states_or_kv_c_normed, cos, sin, kv_cache,

@@ -29,11 +29,15 @@ from multiprocessing import Manager
 import numpy as np
 import numpy.typing as npt
 import torch
+import torch._dynamo.cache_size
+import torch.distributed as dist
 import torch.nn as nn
+from torch.distributed import ReduceOp
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed.parallel_state import get_dp_group, get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import logger
@@ -60,8 +64,11 @@ from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.mla_v1 import CommonAttentionMetadata
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
+from vllm_ascend.utils import vllm_version_is
+from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 
 
 from vllm_ascend.eplb.core.worker.eplb_updator import EplbProcess
@@ -72,7 +79,9 @@ if TYPE_CHECKING:
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 
-import vllm.envs as envs
+import vllm.envs as envs_vllm
+
+import vllm_ascend.envs as envs_ascend
 
 
 @dataclass
@@ -205,6 +214,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 elif self.speculative_config.method == "eagle":
                     self.drafter = EagleProposer(self.vllm_config,
                                                  self.device)  # type: ignore
+                elif self.speculative_config.method == 'deepseek_mtp':
+                    self.drafter = MtpProposer(self.vllm_config, self)
                 else:
                     raise ValueError("Unknown speculative decoding method: "
                                      f"{self.speculative_config.method}")
@@ -220,6 +231,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=self.device)
+        self.query_start_loc = torch.zeros(self.max_num_reqs + 1,
+                                           dtype=torch.int32,
+                                           device=self.device)
+        self.seq_lens = torch.zeros(self.max_num_reqs,
+                                    dtype=torch.int32,
+                                    device=self.device)
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: Optional[IntermediateTensors] = None
 
@@ -315,6 +332,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.sampler = Sampler()
         self.enable_torchair_graph_mode = False
         self.use_cached_npu_graph = False
+        self.torchair_graph_batch_sizes = []
         additional_config = vllm_config.additional_config
         if additional_config:
             self.enable_torchair_graph_mode = additional_config.get(
@@ -322,6 +340,35 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 False) and self.vllm_config.model_config.use_mla
             self.use_cached_npu_graph = additional_config.get(
                 "use_cached_npu_graph", False)
+            self.torchair_graph_batch_sizes = additional_config.get(
+                "torchair_graph_batch_sizes", [])
+            if not isinstance(self.torchair_graph_batch_sizes, list):
+                logger.warning("torchair_graph_batch_sizes must be list[int]")
+                self.torchair_graph_batch_sizes = []
+            if len(self.torchair_graph_batch_sizes
+                   ) == 0 and additional_config.get(
+                       "torchair_graph_batch_sizes_init", False):
+                self.init_torchair_graph_batch_sizes()
+
+        if len(self.torchair_graph_batch_sizes) == 0:
+            #If MC2 is enabled, torchair_graph_batch_size should pad to tp_size
+            if envs_ascend.VLLM_ENABLE_MC2:
+                self.torchair_graph_batch_sizes = [
+                    self.scheduler_config.max_num_seqs
+                ]
+            else:
+                self.torchair_graph_batch_sizes = [
+                    1, self.scheduler_config.max_num_seqs
+                ]
+
+        torch._dynamo.cache_size.config.cache_size_limit += len(
+            self.torchair_graph_batch_sizes)
+        torch._dynamo.config.capture_dynamic_output_shape_ops = True
+        torch._logging.set_logs(
+            recompiles=envs_ascend.VLLM_ASCEND_TRACE_RECOMPILES)
+
+        self.dp_size = vllm_config.parallel_config.data_parallel_size
+        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 
         self.enable_eplb = True
         # if additional_config:
@@ -511,6 +558,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if batch_changed:
             self.input_batch.refresh_sampling_metadata()
 
+    def _get_forward_metadata_across_dp(
+            self, batch_size: int, with_prefill: bool) -> tuple[int, bool]:
+        forward_metadata = torch.tensor([batch_size, with_prefill],
+                                        device="cpu",
+                                        dtype=torch.int32)
+        dist.all_reduce(forward_metadata,
+                        op=ReduceOp.MAX,
+                        group=get_dp_group().cpu_group)
+        return int(forward_metadata[0]), bool(forward_metadata[1] > 0)
+
     def get_model(self) -> nn.Module:
         return self.model
 
@@ -632,18 +689,58 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         extra_builder_kwargs = {}
 
+        self.query_start_loc_np[0] = 0
+        self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
+        self.query_start_loc[:num_reqs + 1].copy_(
+            self.query_start_loc_cpu[:num_reqs + 1], non_blocking=True)
+        self.seq_lens[:num_reqs].copy_(self.seq_lens_cpu[:num_reqs],
+                                       non_blocking=True)
+
+        # Fill unused with -1. Needed for reshape_and_cache
+        self.seq_lens[num_reqs:].fill_(0)
+        self.query_start_loc[num_reqs + 1:].fill_(-1)
+
+        query_start_loc = self.query_start_loc[:num_reqs + 1]
+        seq_lens = self.seq_lens[:num_reqs]
+        common_attn_metadata = CommonAttentionMetadata(
+            query_start_loc=query_start_loc, seq_lens=seq_lens)
+        with_prefill = attn_state != AscendAttentionState.DecodeOnly
+
+        if self.dp_size > 1:
+            max_num_tokens, with_prefill = self._get_forward_metadata_across_dp(
+                total_num_scheduled_tokens, with_prefill)
+            extra_builder_kwargs['with_prefill_across_dp'] = with_prefill
+
         # Add graph_pad_size here
-        if self.enable_torchair_graph_mode:
-            graph_pad_size = self.scheduler_config.max_num_seqs - len(seq_lens)
+        if envs_ascend.VLLM_ENABLE_MC2 or (self.enable_torchair_graph_mode
+                                           and not with_prefill):
+            batch_size = len(seq_lens)
+            if self.dp_size > 1:
+                padded_batch_size = self.select_torchair_padded_batch_size(
+                    max_num_tokens)
+            else:
+                padded_batch_size = self.select_torchair_padded_batch_size(
+                    batch_size)
+            graph_pad_size = padded_batch_size - batch_size
             extra_builder_kwargs['graph_pad_size'] = graph_pad_size
 
-        attn_metadata = self.attn_metadata_builder.build(  # type: ignore
-            num_reqs=num_reqs,
-            num_actual_tokens=total_num_scheduled_tokens,
-            max_query_len=max_num_scheduled_tokens,
-            common_prefix_len=None,
-            **extra_builder_kwargs,
-        )
+        if self.vllm_config.model_config.use_mla:
+            attn_metadata = self.attn_metadata_builder.build(  # type: ignore
+                num_reqs=num_reqs,
+                num_actual_tokens=total_num_scheduled_tokens,
+                max_query_len=max_num_scheduled_tokens,
+                common_attn_metadata=common_attn_metadata,
+                common_prefix_len=None,
+                **extra_builder_kwargs,
+            )
+        else:
+            attn_metadata = self.attn_metadata_builder.build(  # type: ignore
+                num_reqs=num_reqs,
+                num_actual_tokens=total_num_scheduled_tokens,
+                max_query_len=max_num_scheduled_tokens,
+                common_prefix_len=None,
+                **extra_builder_kwargs,
+            )
         attn_metadata.num_input_tokens = num_input_tokens
 
         # Prepare input_ids
@@ -658,12 +755,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
         input_ids = self.input_ids[:num_input_tokens]
 
-        if self.enable_torchair_graph_mode and attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-            padding = torch.zeros(graph_pad_size,
-                                  dtype=input_ids.dtype,
-                                  device=input_ids.device)
-            input_ids = torch.cat([input_ids, padding])
-            positions = torch.cat([positions, padding])
+        if (envs_ascend.VLLM_ENABLE_MC2
+                or self.enable_torchair_graph_mode) and not with_prefill:
+            input_ids = self.input_ids[:padded_batch_size]
+            positions = self.positions[:padded_batch_size]
 
         # Run forward pass
         with set_forward_context(attn_metadata,
@@ -673,16 +768,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.enable_torchair_graph_mode:
                 model_kwargs["kv_caches"] = self.kv_caches
                 model_kwargs["attn_metadata"] = attn_metadata
-            if self.enable_torchair_graph_mode and attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                torch._dynamo.mark_static(input_ids)
-                torch._dynamo.mark_static(positions)
-                torch._dynamo.mark_static(attn_metadata.decode.block_table)
-                torch._dynamo.mark_static(attn_metadata.decode.input_positions)
-                torch._dynamo.mark_static(attn_metadata.slot_mapping)
-                for kv in self.kv_caches:
-                    if isinstance(kv, tuple):
-                        torch._dynamo.mark_static(kv[0])
-                        torch._dynamo.mark_static(kv[1])
+            if self.enable_torchair_graph_mode and not with_prefill:
                 hidden_states = self.compile_model(
                     input_ids=input_ids,
                     positions=positions,
@@ -877,6 +963,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             raise NotImplementedError(
                 "eagle method for spec decode doesn't work on vllm-ascend currently"
             )
+        elif self.speculative_config.method == 'deepseek_mtp':
+            assert isinstance(self.drafter, MtpProposer)
+            spec_token_ids = self._generate_mtp_token_ids(
+                valid_sampled_token_ids, sampling_metadata, scheduler_output,
+                spec_decode_metadata, positions, num_scheduled_tokens,
+                hidden_states, attn_metadata)
         return spec_token_ids
 
     @torch.inference_mode()
@@ -1123,7 +1215,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
     @torch.inference_mode()
-    def _dummy_run(self, num_tokens: int) -> torch.Tensor:
+    def _dummy_run(
+        self,
+        num_tokens: int,
+        is_compile: bool = False,
+        with_prefill: bool = True,
+    ) -> torch.Tensor:
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
@@ -1166,13 +1263,41 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     for k, v in self.intermediate_tensors.items()
                 })
 
-            with set_forward_context(None, self.vllm_config):
-                hidden_states = model(
-                    input_ids=input_ids,
-                    positions=positions,
-                    intermediate_tensors=intermediate_tensors,
-                    inputs_embeds=inputs_embeds)
-            return hidden_states
+            with set_forward_context(None,
+                                     self.vllm_config,
+                                     num_tokens=num_tokens):
+                if self.enable_torchair_graph_mode and not with_prefill:
+                    attn_metadata = self.attn_metadata_builder.build_dummy(
+                        num_reqs=num_tokens, num_actual_tokens=1)
+                    # Only mark static while compiling
+                    if is_compile:
+                        torch._dynamo.mark_static(input_ids)
+                        torch._dynamo.mark_static(positions)
+                        torch._dynamo.mark_static(
+                            attn_metadata.decode.block_table)
+                        torch._dynamo.mark_static(
+                            attn_metadata.decode.input_positions)
+                        torch._dynamo.mark_static(attn_metadata.slot_mapping)
+                        for kv in self.kv_caches:
+                            assert isinstance(
+                                kv, tuple), "kv_cache must be a tuple"
+                            torch._dynamo.mark_static(kv[0])
+                            torch._dynamo.mark_static(kv[1])
+                    hidden_states = self.compile_model(
+                        input_ids=input_ids,
+                        positions=positions,
+                        intermediate_tensors=intermediate_tensors,
+                        inputs_embeds=None,
+                        kv_caches=self.kv_caches,
+                        attn_metadata=attn_metadata,
+                    )
+                else:
+                    hidden_states = model(
+                        input_ids=input_ids,
+                        positions=positions,
+                        intermediate_tensors=intermediate_tensors,
+                        inputs_embeds=inputs_embeds)
+                return hidden_states
 
     def profile_run(self) -> None:
         # Profile with multimodal encoder & encoder cache.
@@ -1222,7 +1347,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.model = get_model(vllm_config=self.vllm_config)
             if hasattr(self, "drafter"):
                 logger.info("Loading drafter model...")
-                self.drafter.load_model(self.model)
+                self.drafter.load_model()
             if self.lora_config:
                 self.model = self.load_lora_model(self.model,
                                                   self.model_config,
@@ -1247,13 +1372,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.compile_model = torch.compile(
                     self.model,
                     dynamic=True,
-                    fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
                     backend=npu_backend)
             else:
                 self.compile_model = torchair.inference.cache_compile(
                     self.model.forward,
                     dynamic=True,
-                    fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
                     config=config,
                     ge_cache=False)
 
@@ -1267,15 +1392,27 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         import torch_npu
         kv_caches: Dict[str, torch.Tensor] = {}
 
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.model_config.max_model_len,
-            max_num_batched_tokens=self.max_num_tokens,
-            device=self.device,
-            pin_memory=True,
-            vocab_size=self.model_config.get_vocab_size(),
-            block_size=self.cache_config.block_size,
-        )
+        # Remove this after we drop 0.9.0 support
+        if vllm_version_is("0.9.0"):
+            self.input_batch = InputBatch(
+                max_num_reqs=self.max_num_reqs,
+                max_model_len=self.model_config.max_model_len,
+                max_num_batched_tokens=self.max_num_tokens,
+                device=self.device,
+                pin_memory=True,
+                vocab_size=self.model_config.get_vocab_size(),
+                block_size=self.cache_config.block_size,
+            )
+        else:
+            self.input_batch = InputBatch(
+                max_num_reqs=self.max_num_reqs,
+                max_model_len=self.model_config.max_model_len,
+                max_num_batched_tokens=self.max_num_tokens,
+                device=self.device,
+                pin_memory=True,
+                vocab_size=self.model_config.get_vocab_size(),
+                block_sizes=[self.cache_config.block_size],
+            )
 
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
@@ -1371,25 +1508,48 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return kv_cache_spec
 
     def capture_model(self) -> None:
-        if not self.use_aclgraph:
-            logger.warning(
-                "Skipping NPU graph capture. Please add "
-                "-O %s to use NPU graphs.", CompilationLevel.PIECEWISE)
-            return
-
         start_time = time.perf_counter()
         start_free_npu_memory = torch.npu.mem_get_info()[0]
-
-        # Trigger ACL graph capture for specific shapes.
-        # Capture the large shapes first so that the smaller shapes
-        # can reuse the memory pool allocated for the large shapes.
-        with graph_capture(device=self.device):
-            for num_tokens in reversed(self.aclgraph_batch_sizes):
+        # TODO(NeverRaR): Calling graph_capture(device=self.device) in
+        # torchair graph capture can cause some issues, so now we just
+        # temporarily split the codepath for the two different graph patterns.
+        if self.enable_torchair_graph_mode:
+            torchair_graph_batch_sizes = self.torchair_graph_batch_sizes
+            graph_num = len(torchair_graph_batch_sizes)
+            logger.info(
+                "Capturing torchair graph, this usually takes %.1f~%.1f mins.",
+                0.5 * graph_num, 1.5 * graph_num)
+            # Trigger torchair graph capture for specific shapes.
+            # Capture the large shapes first so that the smaller shapes
+            # can reuse the memory pool allocated for the large shapes.
+            for idx, num_tokens in enumerate(
+                    reversed(torchair_graph_batch_sizes)):
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
+                    self._dummy_run(num_tokens,
+                                    is_compile=True,
+                                    with_prefill=False)
+                self._dummy_run(num_tokens,
+                                is_compile=True,
+                                with_prefill=False)
+                logger.info("Batchsize %d is compiled successfully: %d/%d.",
+                            num_tokens, idx + 1, graph_num)
+        elif self.use_aclgraph:
+            # Trigger ACL graph capture for specific shapes.
+            # Capture the large shapes first so that the smaller shapes
+            # can reuse the memory pool allocated for the large shapes.
+            with graph_capture(device=self.device):
+                for num_tokens in reversed(self.aclgraph_batch_sizes):
+                    for _ in range(self.vllm_config.compilation_config.
+                                   cudagraph_num_of_warmups):
+                        self._dummy_run(num_tokens)
                     self._dummy_run(num_tokens)
-                self._dummy_run(num_tokens)
-
+        else:
+            logger.warning(
+                "Skipping NPU graph capture. Please add -O %s to use ACL graphs. "
+                "Or add --additional_config={'enable_graph_mode': True} to use torchair graphs",
+                CompilationLevel.PIECEWISE)
+            return
         end_time = time.perf_counter()
         end_free_npu_memory = torch.npu.mem_get_info()[0]
         elapsed_time = end_time - start_time
@@ -1429,3 +1589,96 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             else:
                 draft_token_ids.append(drafter_output.tolist())
         return draft_token_ids
+
+    def _generate_mtp_token_ids(
+        self,
+        valid_sampled_token_ids: list[list[int]],
+        sampling_metadata: SamplingMetadata,
+        scheduler_output: "SchedulerOutput",
+        spec_decode_metadata: SpecDecodeMetadata,
+        positions: torch.Tensor,
+        num_scheduled_tokens: int,
+        hidden_states: torch.Tensor,
+        attn_metadata: SpecDecodeMetadata,
+    ):
+        next_token_ids: list[int] = []
+        for i, token_ids in enumerate(valid_sampled_token_ids):
+            if token_ids:
+                # Common case.
+                next_token_id = token_ids[-1]
+            else:
+                # Partial prefill (rare case).
+                # Get the next token id from the request state.
+                req_id = self.input_batch.req_ids[i]
+                req_state = self.requests[req_id]
+                seq_len = (req_state.num_computed_tokens +
+                           scheduler_output.num_scheduled_tokens[req_id])
+                next_token_id = req_state.get_token_id(seq_len)
+            next_token_ids.append(next_token_id)
+        next_token_ids = torch.tensor(next_token_ids,
+                                      dtype=torch.int32,
+                                      device=self.device)
+
+        if spec_decode_metadata is None:
+            # input_ids can be None for multimodal models.
+            target_token_ids = self.input_ids[:num_scheduled_tokens]
+            target_positions = positions[:num_scheduled_tokens]
+            target_hidden_states = hidden_states[:num_scheduled_tokens]
+            target_slot_mapping = attn_metadata.slot_mapping
+            cu_num_tokens = attn_metadata.query_start_loc
+        else:
+            # TODO(woosuk): Refactor this.
+            num_draft_tokens = spec_decode_metadata.num_draft_tokens
+            num_rejected_tokens = [
+                n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
+                for i, n in enumerate(num_draft_tokens)
+            ]
+            num_rejected_tokens = torch.tensor(
+                num_rejected_tokens,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            cu_num_tokens, token_indices = self.drafter.prepare_inputs(
+                attn_metadata.query_start_loc,
+                num_rejected_tokens,
+            )
+            target_token_ids = self.input_ids[token_indices]
+            target_positions = positions[token_indices]
+            target_hidden_states = hidden_states[token_indices]
+            target_slot_mapping = attn_metadata.slot_mapping[token_indices]
+
+        draft_token_ids = self.drafter.propose(
+            target_token_ids=target_token_ids,
+            target_positions=target_positions,
+            target_hidden_states=target_hidden_states,
+            target_slot_mapping=target_slot_mapping,
+            next_token_ids=next_token_ids,
+            cu_num_tokens=cu_num_tokens,
+            block_table=attn_metadata.block_tables,
+            sampling_metadata=sampling_metadata,
+        )
+        spec_token_ids = draft_token_ids.tolist()
+        return spec_token_ids
+
+    def init_torchair_graph_batch_sizes(self):
+        tp_size = get_tensor_model_parallel_world_size()
+        batch_size_step = 8
+        largest_batch_size = 1
+
+        if envs_ascend.VLLM_ENABLE_MC2:
+            batch_size_step = max(batch_size_step, tp_size)
+            largest_batch_size = batch_size_step
+        while (largest_batch_size < 8):
+            self.torchair_graph_batch_sizes.append(largest_batch_size)
+            largest_batch_size *= 2
+
+        while (largest_batch_size <= self.scheduler_config.max_num_seqs):
+            self.torchair_graph_batch_sizes.append(largest_batch_size)
+            largest_batch_size += batch_size_step
+
+    def select_torchair_padded_batch_size(self, batch_size: int):
+        selected_batch_size = self.max_num_reqs
+        for padded_batch_size in self.torchair_graph_batch_sizes:
+            if batch_size <= padded_batch_size < selected_batch_size:
+                selected_batch_size = padded_batch_size
+        return selected_batch_size

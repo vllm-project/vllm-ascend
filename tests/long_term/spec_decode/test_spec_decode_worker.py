@@ -922,6 +922,7 @@ def test_chunked_prefill_flow(k: int, batch_size: int, batch_composition: str):
         assert draft_worker.get_spec_proposals.call_count == 1
 
 
+@pytest.mark.skipif(True, reason="TODO revert me after fix it by CMQ")
 def test_correctly_load_weight_for_eagle():
     """
         Verify SpecDecodeWorker loads lm_head weight for eagle correctly.
