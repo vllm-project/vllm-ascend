@@ -133,58 +133,42 @@ class NPUWorker(WorkerBase):
         self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
     def determine_available_memory(self) -> int:
-        kv_caches: Dict[str, torch.Tensor] = {}
-        kv_cache_spec = self.model_runner.get_kv_cache_spec()
-        for layer_name, layer_spec in kv_cache_spec.items():
-            if isinstance(layer_spec, FullAttentionSpec):
-                # Use an empty tensor instead of `None`` to force Dynamo to pass
-                # it by reference, rather by specializing on the value ``None``.
-                npu_k_cache = torch.tensor([],
-                                           dtype=layer_spec.dtype,
-                                           device=self.device)
-                npu_v_cache = torch.tensor([],
-                                           dtype=layer_spec.dtype,
-                                           device=self.device)
-                kv_caches[layer_name] = (npu_k_cache, npu_v_cache)
-            else:
-                raise NotImplementedError
-
-        runner_kv_caches: List[torch.Tensor] = []
-        bind_kv_cache(
-            kv_caches,
-            self.vllm_config.compilation_config.static_forward_context,
-            runner_kv_caches)
-
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         NPUPlatform.clear_npu_memory()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
+        _, total_npu_memory = NPUPlatform.mem_get_info()
         self.model_runner.profile_run()
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
-        free_npu_memory, total_npu_memory = NPUPlatform.mem_get_info()
+        free_npu_memory, _ = NPUPlatform.mem_get_info()
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
-        peak_memory = self.init_npu_memory - free_npu_memory
-        assert peak_memory > 0, (
+        assert self.init_npu_memory > free_npu_memory, (
             "Error in memory profiling. "
             f"Initial free memory {self.init_npu_memory}, current free memory"
             f" {free_npu_memory}. This happens when the NPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
 
-        gc.collect()
+        # Get the peak memory allocation recorded by torch
+        peak_memory = torch_npu.npu.memory_stats()["allocated_bytes.all.peak"]
         # TODO: don`t need impl this func after empty_cache in
         # Worker.determine_num_available_blocks() unified`
         NPUPlatform.empty_cache()
-        usable_memory_size = total_npu_memory * self.cache_config.gpu_memory_utilization - peak_memory
-        npu_kv_cache_bytes = max(usable_memory_size, 0)
-        logger.info(
-            f"Available memory: {usable_memory_size}, total memory: {total_npu_memory}"
-        )
-        return int(npu_kv_cache_bytes)
+        torch_allocated_bytes = torch_npu.npu.memory_stats(
+        )["allocated_bytes.all.current"]
+        total_allocated_bytes = torch_npu.npu.mem_get_info(
+        )[1] - torch_npu.npu.mem_get_info()[0]
+        non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
+        if non_torch_allocations > 0:
+            peak_memory += non_torch_allocations
+        available_kv_cache_memory = (
+            total_npu_memory * self.cache_config.gpu_memory_utilization -
+            peak_memory)
+        return int(available_kv_cache_memory)
 
     def execute_model(
         self,
@@ -231,7 +215,7 @@ class NPUWorker(WorkerBase):
     def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
         """Allocate NPU KV cache with the specified kv_cache_config."""
         if self.vllm_config.model_config.enable_sleep_mode:
-            allocator = CuMemAllocator.get_instance()
+            allocator = CaMemAllocator.get_instance()
             context = allocator.use_memory_pool(tag="kv_cache")
         else:
             from contextlib import nullcontext
