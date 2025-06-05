@@ -145,6 +145,15 @@ jobs:
           # Only get the pull request which may influences performance
           git log --pretty=format:"%H %s" -- '**/*.py' ':!docs/*' ':!tests/*' ':!examples/*' > commit_log.txt
           escli check commit_log.txt
+      
+      - name: Prepare benchmark script in advance
+        if: github.event_name == 'schedule'
+        # This is for the benchmark iteration, which will change the benchmark scripts while checkouting each commit.
+        # We need ensure the benchmark scripts always available.
+        run: |
+          # Prepare the benchmark script in advance
+          mkdir -p /github/home/benchmarks
+          cp -r benchmarks/* /github/home/benchmarks/
 
       - name: Run benchmark iteration
         if: github.event_name == 'schedule'
@@ -165,8 +174,9 @@ jobs:
             echo "vllm branch: ${{ matrix.vllm_branch }}"
             echo "vllm-ascend branch: ${{ matrix.vllm_ascend_branch }}"
             echo "------------------------"
-
+            cd /github/home
             bash benchmarks/scripts/run-performance-benchmarks.sh
+            cd -
             # send the result to es
             if [[ "${{ github.event_name }}" != "pull request" ]]; then
               escli add --vllm_branch ${{ matrix.vllm_branch }} \
