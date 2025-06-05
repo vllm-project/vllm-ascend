@@ -72,6 +72,7 @@ from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 
 
 from vllm_ascend.eplb.core.worker.eplb_updator import EplbProcess
+from vllm_ascend.eplb.core.loader.device_transfer_loader import D2DExpertWeightLoader
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -378,7 +379,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         #     self.use_cached_npu_graph = additional_config.get(
         #         "use_cached_npu_graph", False)
         #     self.enable_eplb = additional_config.get("enable_eplb", False)
-        
+
         if self.enable_eplb == True:
             self.init_eplb()
 
@@ -401,7 +402,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             policy_type=1,
             enable_d2d=True
         )
-        
+
         self.planner_block_queue, self.block_update_queue, self.eplb_process = \
             self.eplb._launch_process()
 
@@ -983,6 +984,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             return EMPTY_MODEL_RUNNER_OUTPUT
         # TO DO: read shared memory from asyn process
         # self.eplb_loader.update_expert_weights_update_info
+        # Run a demo for testing D2D transfering
+        if self.eplb_loader.mock_flag:
+            rank_id = torch.distributed.get_rank()
+            (expert_transfer_info, expert_pull_info, updated_expert_map, layer_id) = \
+                self.eplb_loader.generate_mock_update_info(rank_id)
+            self.eplb_loader.update_expert_weights_update_info(expert_transfer_info,
+                expert_pull_info, updated_expert_map, layer_id)
         reqs = []
         self.eplb_loader.asyn_expert_weight_transfer(reqs)
         (attn_metadata, hidden_states, spec_decode_metadata, positions,
@@ -1079,9 +1087,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             logprobs=logprobs_lists,
             prompt_logprobs_dict={},
         )
-    
+
         if self.enable_eplb:
-            self.do_eplb() 
+            self.do_eplb()
 
         return model_runner_output
 
@@ -1096,12 +1104,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
                 self.planner_block_queue.put(1)
                 self.update_in_flight = True
-                
+
             except Exception as e:
-                logger.warning(f"[ModelRunner] Failed to wake EPLB process: {e}", exc_info=True)            
+                logger.warning(f"[ModelRunner] Failed to wake EPLB process: {e}", exc_info=True)
 
         if  self.update_in_flight:
-                if not self.block_update_queue.empty(): 
+                if not self.block_update_queue.empty():
                     self.block_update_queue.get()
                     new_expert_map = self.shared_dict["expert_map"]
                     self.model.update_all_expert_map(new_expert_map, self.num_moe_layers)

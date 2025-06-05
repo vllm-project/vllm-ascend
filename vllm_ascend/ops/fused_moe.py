@@ -866,7 +866,7 @@ class AscendFusedMoE(FusedMoE):
                         hidden_states, router_logits)
 
         # Matrix multiply.
-        final_hidden_states， self.topk_ids = self.quant_method.apply(
+        final_hidden_states, self.topk_ids = self.quant_method.apply(
             layer=self,
             x=hidden_states,
             router_logits=router_logits,
@@ -892,7 +892,7 @@ class AscendFusedMoE(FusedMoE):
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
         return final_hidden_states
-        
+
     def update_map(self,new_expert_map):
         self.expert_map = new_expert_map
 
@@ -906,7 +906,7 @@ class AscendFusedMoE(FusedMoE):
         if self.moe_load is None:
             self.moe_load = torch.zeros(self.num_experts,
                                         dtype=torch.int64,
-                                        device=self.topk_ids.device) 
+                                        device=self.topk_ids.device)
 
         ids     = self.topk_ids.flatten().to(torch.int64)
         counts  = torch.bincount(ids, minlength=self.num_experts)
