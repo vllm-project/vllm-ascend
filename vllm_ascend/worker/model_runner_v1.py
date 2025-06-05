@@ -892,6 +892,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             return EMPTY_MODEL_RUNNER_OUTPUT
         # TO DO: read shared memory from asyn process
         # self.eplb_loader.update_expert_weights_update_info
+        # Run a demo for testing D2D transfering
+        if self.eplb_loader.mock_flag:
+            rank_id = torch.distributed.get_rank()
+            (expert_transfer_info, expert_pull_info, updated_expert_map, layer_id) = \
+                self.eplb_loader.generate_mock_update_info(rank_id)
+            self.eplb_loader.update_expert_weights_update_info(expert_transfer_info,
+                expert_pull_info, updated_expert_map, layer_id)
         reqs = []
         self.eplb_loader.asyn_expert_weight_transfer(reqs)
         (attn_metadata, hidden_states, spec_decode_metadata, positions,
