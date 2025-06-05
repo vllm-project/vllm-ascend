@@ -346,8 +346,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         ctx = multiprocessing.get_context("spawn")
         self.manager = ctx.Manager()
         self.shared_dict = self.manager.dict({
-            "expert_map": None,
-            "moe_load": None
+            "expert_map": None,  #当前rank_id的专家表[num_layers,num_experts]
+            "moe_load": None,    #热度负载信息 [num_layers,num_experts]
+            "expert_maps": None  #所有的专家表[num_layers, world_size, num_experts]
         })
         self.eplb = EplbProcess(
             device_id=self.device,
@@ -1019,9 +1020,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if  self.update_in_flight:
                 if not self.block_update_queue.empty():
                     self.block_update_queue.get()
-                    new_expert_map = self.shared_dict["expert_map"]
+                    rank_id = dist.get_rank()
+                    new_expert_map = self.shared_dict["expert_maps"][:, rank_id, :]
                     self.model.update_all_expert_map(new_expert_map, self.num_moe_layers)
-                    #ssd加载权重
+                    #加载权重
                     self.update_in_flight = False
 
     def compute_and_set_moe_load(self):
@@ -1038,10 +1040,23 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
 
     def get_expert_map(self):
-        expert_map = self.model.get_all_expert_map(self.num_moe_layers).to(torch.device("cpu"))
-        self.shared_dict["expert_map"] = expert_map
+        expert_map = self.model.get_all_expert_map(self.num_moe_layers)
+        if dist.is_initialized():
+                    world_size = dist.get_world_size()
+        rank = dist.get_rank()
+
+        tensor_list = [
+            torch.zeros_like(expert_map) for _ in range(world_size)
+        ]
+
+        dist.all_gather(tensor_list, expert_map)
+        gathered = torch.stack(tensor_list, dim=0)           
+        all_maps = gathered.permute(1, 0, 2).contiguous()    
+
+        all_expert_maps = all_maps.to(torch.device("cpu")) 
+        self.shared_dict["expert_maps"] = all_expert_maps
         logger.debug(f"[ModelRunner] Updated shared_dict['expert_map'] = {expert_map}")
-        return expert_map
+        return all_expert_maps
 
     def shutdown(self):
         """
