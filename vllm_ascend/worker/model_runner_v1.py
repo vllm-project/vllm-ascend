@@ -53,7 +53,6 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -68,6 +67,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import CommonAttentionMetadata
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
+from vllm_ascend.sample.sampler_v1 import AscendSampler
 from vllm_ascend.utils import ProfileExecuteDuration, vllm_version_is
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 
@@ -320,7 +320,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.attn_mask_builder = AttentionMaskBuilder.initialize_from_len(
             self.attn_mask_len, self.dtype)
 
-        self.sampler = Sampler()
+        self.sampler = AscendSampler()
 
         self.torchair_compiled_model = None  # type: ignore
         self.torchair_compiled_models = {}  # type: ignore

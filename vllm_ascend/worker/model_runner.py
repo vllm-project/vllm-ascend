@@ -43,8 +43,7 @@ from vllm.lora.request import LoRARequest
 from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor import SamplingMetadata, SamplingMetadataCache
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
-from vllm.model_executor.layers.sampler import (Sampler, SamplerOutput,
-                                                get_sampler)
+from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models import supports_lora, supports_multimodal
@@ -66,6 +65,7 @@ from vllm.worker.model_runner_base import (
     _init_sampling_metadata_from_tensor_dict)
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.sample.sampler import AscendSampler
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -986,7 +986,7 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         self.sampling_metadata_cache: SamplingMetadataCache = \
               SamplingMetadataCache() \
                 if self.parallel_config.pipeline_parallel_size == 1 else None
-        self.sampler = get_sampler()
+        self.sampler = AscendSampler()
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -1487,7 +1487,7 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
                 model_input.async_callback()
 
             # Sample the next token.
-            assert isinstance(self.sampler, Sampler)
+            assert isinstance(self.sampler, AscendSampler)
             orig_include_gpu_probs = self.sampler.include_gpu_probs_tensor
             if model_input.inputs_embeds is not None:
                 self.sampler.include_gpu_probs_tensor = True
