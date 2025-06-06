@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Optional, Dict, List, Tuple, Union
 import os
+import json
 import msgspec
 import torch
 import zmq
@@ -210,17 +211,8 @@ class MooncakeConnectorScheduler:
         if params is not None and params.get("do_remote_prefill"):
             assert num_computed_tokens % self.block_size == 0
             count = max(len(request.prompt_token_ids) - num_computed_tokens, 0)
-            if count == 0:
-                # NOTE: if count is 0 here, we have less than block_size
-                # tokens to pull after subtracting the local prefix cache hit.
-                # The remote only sends fully computed blocks, so there is
-                # nothing to transfer but we still need to notify the
-                # prefill worker so that the remote blocks are freed.
-                if all(p in params for p in ("remote_engine_id", "remote_host",
-                                             "remote_port")):
-                    self._reqs_need_recv[request.request_id] = (request, [])
-
-            return count, count > 0
+            if count > 0:
+                return count, True
 
         # No remote prefill for this request.
         return 0, False
@@ -263,12 +255,6 @@ class MooncakeConnectorScheduler:
             # For the case where there are no remote blocks to pull
             # (block_ids is empty), we don't need to schedule
             # an async read on the worker side.
-            if not block_ids:
-                logger.debug(
-                    "Skipping adding request %s to MooncakeConnectorMetadata, "
-                    "as there are no remote blocks to pull", req_id)
-                continue
-
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
@@ -373,8 +359,6 @@ class MooncakeConnectorWorker:
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
         
-        # get mooncake config json content
-        self.mooncake_config = MooncakeStoreConfig.load_from_env()
 
     def _initialize(
         self,
@@ -382,13 +366,19 @@ class MooncakeConnectorWorker:
         device_name: Optional[str],
     ) -> None:
         """Initialize the mooncake instance."""
+        # get mooncake config json content
+        assert envs.MOONCAKE_CONFIG_PATH, "Please set path of rank_table to env variable MOONCAKE_CONFIG_PATH"
+        rank_table_path = envs.MOONCAKE_CONFIG_PATH
+        with open(rank_table_path, "r", encoding="utf-8") as f:
+            mooncake_config = json.load(f)
+
         self.engine.initialize_ext(
             hostname + self.port,
             # "P2PHANDSHAKE",  ##TODO need to debug with new cpp code
-            self.mooncake_config.metadata_server,   # like "http://xx.xx.xx.xx:8080/metadata"
-            self.mooncake_config.protocol,          # like "ascend"
+            mooncake_config["metadata_server"],   # like "http://xx.xx.xx.xx:8080/metadata"
+            mooncake_config["protocol"],          # like "ascend"
             device_name if device_name is not None else "",
-            self.mooncake_config.metadata_backend,  # like "http"
+            mooncake_config["metadata_backend"],  # like "http"
             ##TODO local_rank need config, and cpp code need adpat
             0,
         )
@@ -717,14 +707,6 @@ class MooncakeConnectorWorker:
                                    self._decode_tp_size)
         return sampled_nums
 
-    @staticmethod
-    def load_from_env() -> 'MooncakeStoreConfig':
-        """Load config from a file specified in the environment variable."""
-        config_file_path = os.getenv('MOONCAKE_CONFIG_PATH')
-        if config_file_path is None:
-            raise ValueError(
-                "The environment variable 'MOONCAKE_CONFIG_PATH' is not set.")
-        return MooncakeStoreConfig.from_file(config_file_path)
 
 
 @contextlib.contextmanager
