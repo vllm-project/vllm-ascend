@@ -11,9 +11,9 @@ from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
 
 if TYPE_CHECKING:
