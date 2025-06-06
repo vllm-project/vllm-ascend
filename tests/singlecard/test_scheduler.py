@@ -25,7 +25,7 @@ from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec)
+                                        KVCacheGroupSpec, KVCacheTensor)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
@@ -88,14 +88,26 @@ def create_scheduler(
                              model_config=model_config,
                              cache_config=cache_config)
 
-    kv_cache_config = KVCacheConfig(
-        num_blocks=10000,  # A large number of blocks to hold all requests
-        tensors={},
-        kv_cache_groups=[
-            KVCacheGroupSpec(['layer'],
-                             FullAttentionSpec(16, 1, 1, torch.float32, False))
-        ],
-    )
+    if vllm_version_is("0.9.0"):
+        kv_cache_config = KVCacheConfig(
+            num_blocks=10000,  # A large number of blocks to hold all requests
+            tensors={},
+            kv_cache_groups=[
+                KVCacheGroupSpec(['layer'],
+                                 FullAttentionSpec(16, 1, 1, torch.float32,
+                                                   False))
+            ],
+        )
+    else:
+        kv_cache_config = KVCacheConfig(
+            num_blocks=10000,  # A large number of blocks to hold all requests
+            kv_cache_tensors=[KVCacheTensor(size=1024, shared_by=[1])],
+            kv_cache_groups=[
+                KVCacheGroupSpec(['layer'],
+                                 FullAttentionSpec(16, 1, 1, torch.float32,
+                                                   False, None))
+            ],
+        )
     cache_config.num_gpu_blocks = 10000
     return AscendScheduler(
         vllm_config,
