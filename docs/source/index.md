@@ -47,6 +47,7 @@ user_guide/suppoted_features
 user_guide/supported_models
 user_guide/env_vars
 user_guide/additional_config
+user_guide/graph_mode.md
 user_guide/release_notes
 :::
 
