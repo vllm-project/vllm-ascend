@@ -237,6 +237,8 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         ep_size = self.ep_size
         if self.drop_and_pad:
             # Drop and pad the input to capacity.
+            if self.config.moe_expert_capacity_factor is None:
+                raise ValueError("Capacity must be set before processing tokens")
             num_tokens = routing_map.size(0) * self.config.moe_router_topk
             self.capacity = get_capacity(
                 num_tokens=num_tokens,
@@ -482,6 +484,9 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
 
             # Unpermutation 2: expert output to AlltoAll input
             if hidden_states.shape[0] > 0 and self.num_local_experts > 1:
+                if self.num_global_tokens_per_local_expert_cpu is None:
+                    raise ValueError("num_global_tokens_per_local_expert_cpu "
+                "should be set before used.")
                 hidden_states = sort_chunks_by_idxs(
                     hidden_states,
                     self.num_global_tokens_per_local_expert_cpu.T.ravel(),
