@@ -70,6 +70,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("VLLM_VERSION", None),
     "VLLM_ASCEND_TRACE_RECOMPILES":
     lambda: bool(int(os.getenv("VLLM_ASCEND_TRACE_RECOMPILES", '0'))),
+    "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE", '0'))
+                 ),
 }
 
 # end-env-vars-definition
