@@ -1321,12 +1321,25 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 block_sizes=[self.cache_config.block_size],
             )
 
+        if not vllm_version_is("0.9.0"):
+            kv_cache_sizes = {}
+            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+                assert len(kv_cache_tensor.shared_by) == 1, (
+                    "KV cache tensor shared by multiple layers is not supported in "
+                    "NPU.")
+                kv_cache_sizes[
+                    kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
+
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for layer_name in kv_cache_group.layer_names:
-                tensor_config = kv_cache_config.tensors[layer_name]
-                assert tensor_config.size % kv_cache_spec.page_size_bytes == 0
-                num_blocks = tensor_config.size // kv_cache_spec.page_size_bytes
+                if vllm_version_is("0.9.0"):
+                    tensor_size = kv_cache_config.tensors[layer_name].size
+                else:
+                    tensor_size = kv_cache_sizes[layer_name]
+                assert tensor_size % kv_cache_spec.page_size_bytes == 0
+                num_blocks = tensor_size // kv_cache_spec.page_size_bytes
+
                 # `num_blocks` is the number of blocks the model runner can use.
                 # `kv_cache_config.num_blocks` is the number of blocks that
                 # KVCacheManager may allocate.
