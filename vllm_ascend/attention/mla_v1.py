@@ -11,7 +11,6 @@ from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
@@ -444,9 +443,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
 
-        self.enable_kv_nz = envs_ascend.VLLM_ENABLE_KV_NZ
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+        self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
 
     def _v_up_proj_and_o_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)

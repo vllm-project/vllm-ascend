@@ -55,9 +55,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Find more detail here: https://www.hiascend.com/document/detail/zh/canncommercial/81RC1/developmentguide/opdevg/ascendcbestP/atlas_ascendc_best_practices_10_0043.html
     "VLLM_ENABLE_MC2":
     lambda: bool(int(os.getenv("VLLM_ENABLE_MC2", '0'))),
-    # Whether to enable the kvcache nz optimization, the default value is False.
-    "VLLM_ENABLE_KV_NZ":
-    lambda: bool(int(os.getenv("VLLM_ENABLE_KV_NZ", '0'))),
     # Whether to enable the topk optimization. It's disabled by default for experimental support
     # We'll make it enabled by default in the future.
     "VLLM_ASCEND_ENABLE_TOPK_OPTIMZE":
