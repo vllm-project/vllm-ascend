@@ -473,7 +473,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
 
         def alltoall_token_unpermutation1(hidden_states):
             assert bias is None, "Bias is not supported in MoEAlltoAllSeqTokenDispatcher"
-            assert self.num_global_tokens_per_local_expert_cpu is None, (
+            assert self.num_global_tokens_per_local_expert_cpu is not None, (
                 "num_global_tokens_per_local_expert_cpu "
                 "should be set before used.")
             # Perform tensor parallel Reduce-Scatter
