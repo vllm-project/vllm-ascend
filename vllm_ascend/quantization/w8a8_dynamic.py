@@ -110,9 +110,12 @@ def fused_experts_with_mc2(
     top_k: int,
     expert_map: torch.Tensor = None,
     moe_all_to_all_group_name: str = "",
+    log2phy: torch.Tensor = None,
+    global_redundant_expert_num: int = 0,
 ) -> torch.Tensor:
+    topk_ids = log2phy[topk_ids]
     global_bs = 0
-    moe_expert_num = len(expert_map)
+    moe_expert_num = len(expert_map) + global_redundant_expert_num
     # hidden_states = hidden_states.bfloat16()
     kwargs = {
         "x": hidden_states,
@@ -212,7 +215,10 @@ def fused_experts_with_all2all(
     top_k: int,
     expert_map: torch.Tensor = None,
     ep_group: GroupCoordinator = None,
+    log2phy: torch.Tensor = None,
+    global_redundant_expert_num: int = 0,
 ):
+    topk_ids = log2phy[topk_ids]
     original_shape = hidden_states.shape
     if len(original_shape) == 3:
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
@@ -222,7 +228,7 @@ def fused_experts_with_all2all(
     device = hidden_states.device
 
     if expert_map is not None:
-        global_num_experts = len(expert_map)
+        global_num_experts = len(expert_map) + global_redundant_expert_num
         local_num_experts = global_num_experts // ep_group.world_size
         row_idx_len = num_tokens * top_k
         row_idx = (torch.arange(0,
@@ -286,10 +292,10 @@ def fused_experts_with_all2all(
 
     hidden_states = apply_mlp(hidden_states_wrapper,
                               w1,
-                              w1_scale,
+                              w1_scale,#17
                               w2,
                               w2_scale,
-                              expert_tokens,
+                              expert_tokens,#16
                               group_list_type=group_list_type)
 
     if expert_map is not None:
@@ -583,6 +589,8 @@ class AscendW8A8DynamicFusedMoEMethod:
         is_prefill: bool = True,
         enable_force_load_balance: bool = True,
         dp_size: int = 1,
+        log2phy: torch.Tensor = None,
+        global_redundant_expert_num: int = 0,
         **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
@@ -634,7 +642,10 @@ class AscendW8A8DynamicFusedMoEMethod:
                 topk_ids=topk_ids,
                 top_k=top_k,
                 expert_map=expert_map,
-                moe_all_to_all_group_name=self.moe_all_to_all_group_name)
+                moe_all_to_all_group_name=self.moe_all_to_all_group_name,
+                log2phy=log2phy,
+                global_redundant_expert_num=global_redundant_expert_num,
+            )
         elif dp_size == 1:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
@@ -655,7 +666,10 @@ class AscendW8A8DynamicFusedMoEMethod:
                                               topk_ids=topk_ids,
                                               top_k=top_k,
                                               expert_map=expert_map,
-                                              ep_group=self.ep_group)
+                                              ep_group=self.ep_group,
+                                              log2phy=log2phy,
+                                              global_redundant_expert_num=global_redundant_expert_num,
+                                              )
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:

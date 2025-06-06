@@ -40,6 +40,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
+from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 USING_LCCL_COM: bool = envs_ascend.USING_LCCL_COM
@@ -547,31 +548,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                                  expert_map=expert_map)
 
 
-def get_expert_map(expert_map_path, moe_instance_id, ep_rank, num_replicas):
-    with open(expert_map_path, "r") as f:
-        data = json.load(f)
-    layers = data["moe_layer_count"]
-    num_gpus = data["layer_list"][0]["device_count"]
-
-    tensor_data = []
-    for layer in data["layer_list"]:
-        device_data = []
-        for device in layer["device_list"]:
-            device_data.append(device["device_expert"])
-        tensor_data.append(device_data)
-    eplb_tensor = torch.tensor(tensor_data, dtype=torch.int)
-
-    eplb_maps = torch.full((layers, num_gpus, num_replicas), -1, dtype=torch.int32)
-    for layer_id in range(layers):
-        for gpu_id in range(num_gpus):
-            e_ids = eplb_tensor[layer_id, gpu_id]
-            eplb_maps[layer_id, gpu_id, e_ids] = torch.arange(len(e_ids), dtype=torch.int32)
-
-    layer_expert_map = eplb_maps[moe_instance_id]
-    expert_map = layer_expert_map[ep_rank].to(torch.npu.current_device())
-    local_num_experts = torch.sum(torch.ne(expert_map, -1)).item()
-    return local_num_experts, expert_map
-
 class AscendFusedMoE(FusedMoE):
 
     moe_counter = -1
@@ -644,16 +620,22 @@ class AscendFusedMoE(FusedMoE):
         self.e_score_correction_bias = e_score_correction_bias
         self.expert_map = None
         self.activation = activation
+        self.log2phy = None
+        self.global_redundant_expert_num = 0
 
         if self.ep_size > 1:
             vllm_config = get_current_vllm_config()
-            if not vllm_config.additional_config:
-                expert_map_path = None
-            else:
+            expert_map_path = None
+            if vllm_config.additional_config:
                 expert_map_path = vllm_config.additional_config.get("expert_map_path", None)
             if expert_map_path and os.path.exists(expert_map_path):
-                self.local_num_experts, self.expert_map = get_expert_map(
-                    expert_map_path, self.moe_instance_id, get_ep_group().rank_in_group, self.global_num_experts)
+                # moe expert load balance
+                expert_load_balancer = ExpertLoadBalancer(expert_map_path, self.global_num_experts)
+                self.local_num_experts, self.expert_map = expert_load_balancer.get_rank_placement_map(
+                    self.moe_instance_id, get_ep_group().rank_in_group)
+                self.log2phy = expert_load_balancer.get_rank_log2phy_map(
+                    self.moe_instance_id, get_ep_group().rank_in_group)
+                self.global_redundant_expert_num = expert_load_balancer.get_global_redundant_expert_num()
             else:
                 # Create a tensor of size num_experts filled with -1
                 self.local_num_experts, self.expert_map = determine_expert_map(
@@ -762,7 +744,10 @@ class AscendFusedMoE(FusedMoE):
             e_score_correction_bias=self.e_score_correction_bias,
             is_prefill=is_prefill,
             enable_force_load_balance=enable_force_load_balance,
-            dp_size=self.dp_size)
+            dp_size=self.dp_size,
+            log2phy=self.log2phy,
+            global_redundant_expert_num=self.global_redundant_expert_num,
+        )
 
         if VLLM_ENABLE_MC2 and not is_prefill:
             ...
