@@ -17,7 +17,6 @@
 # Adapted from vllm/model_executor/models/qwen2_vl.py
 # This file is a part of the vllm-ascend project.
 
-import torch
 import vllm
 import vllm.distributed
 import vllm.envs as envs
