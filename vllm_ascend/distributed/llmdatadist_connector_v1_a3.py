@@ -1,4 +1,5 @@
 import msgspec
+import os
 from dataclasses import dataclass
 
 from typing import Optional, Any, Tuple
@@ -28,6 +29,7 @@ from vllm.v1.request import RequestStatus
 # from .llmdatadist_connector_v1 import TORCH_DTYPE_TO_NPU_DTYPE
 from vllm.v1.request import Request
 from vllm.utils import logger
+from vllm_ascend.soc_info import NPUSocInfo
 
 import llm_datadist
 from llm_datadist import LLMDataDist, LLMRole, CacheDesc, BlocksCacheKey, LLMConfig, LLMException
@@ -314,6 +316,7 @@ class LLMDataDistConnectorWorker():
       self.llm_datadist = LLMDataDist(self.llm_datadist_role, self.local_agent_metadata.cluster_id)
       self.init_llm_datadist()
       self.finished_reqs = set()
+      self.soc_info = NPUSocInfo()
       # remote_ip, remote_rank = self.get_remote_ip_and_rank()
       # for idx in range(len(remote_ip)):
       #   remote_agent_meta = self.read_agent_metadata(global_rank_table, remote_ip[idx], remote_rank[idx], self.llm_datadist_remote_role)
@@ -321,7 +324,7 @@ class LLMDataDistConnectorWorker():
 
 
   def listen_for_agent_metadat_req(self, event: threading.Event):
-    port = envs.VLLM_LLMDD_CHANNEL_PORT + self.local_dp_rank * self.tp_size
+    port = envs.VLLM_LLMDD_CHANNEL_PORT + self.local_dp_rank * self.tp_size + self.tp_rank
     url = f"tcp://0.0.0.0:{port}"
     msg_encoder = msgspec.msgpack.Encoder()
     msg_decoder = msgspec.msgpack.Decoder()
@@ -394,11 +397,11 @@ class LLMDataDistConnectorWorker():
           continue
         if device_info["device_id"] != str(device_id):
           continue
-        super_pod_id_ = device_info["super_pod_id"]
+        super_pod_id_ = device_info.get("super_pod_id", None)
         server_id_ = device_info["server_id"]
         device_id_ = device_info["device_id"]
         device_ip_ = device_info["device_ip"]
-        super_device_id_ = device_info["super_device_id"]
+        super_device_id_ = device_info.get("super_device_id", None)
         cluster_id_ = int(device_info["cluster_id"])
         agent_metadata = LLMDataDistAgentMetadata(
           super_pod_id=super_pod_id_,
@@ -537,32 +540,38 @@ class LLMDataDistConnectorWorker():
     decode_server_device_info = None
     prefill_server_device_info = {
       "device": [
-        {
-          "device_id": prefill_metadata.device_id,
-          "device_ip": prefill_metadata.device_ip,
-          "super_device_id": prefill_metadata.super_device_id,
-          "rank_id": "0"
+        { 
+          k: v for k, v in [
+          ("device_id", prefill_metadata.device_id),
+          ("device_ip", prefill_metadata.device_ip),
+          ("super_device_id", prefill_metadata.super_device_id),
+          ("rank_id", "0")]
+          if v is not None
         }
       ],
       "server_id": prefill_metadata.server_id
     }
     if is_same_server:
       prefill_server_device_info["device"].append(
-        {
-          "device_id": decode_metadata.device_id,
-          "device_ip": decode_metadata.device_ip,
-          "super_device_id": decode_metadata.super_device_id,
-          "rank_id": "1"
+        { 
+          k: v for k, v in [
+          ("device_id", decode_metadata.device_id),
+          ("device_ip", decode_metadata.device_ip),
+          ("super_device_id", decode_metadata.super_device_id),
+          ("rank_id", "1")]
+          if v is not None
         }
       )
     else:
       decode_server_device_info = {
         "device": [
-          {
-            "device_id": decode_metadata.device_id,
-            "device_ip": decode_metadata.device_ip,
-            "super_device_id": decode_metadata.super_device_id,
-            "rank_id": "1"
+          { 
+            k: v for k, v in [
+            ("device_id", decode_metadata.device_id),
+            ("device_ip", decode_metadata.device_ip),
+            ("super_device_id", decode_metadata.super_device_id),
+            ("rank_id", "1")]
+            if v is not None
           }
         ],
         "server_id": decode_metadata.server_id
@@ -571,28 +580,29 @@ class LLMDataDistConnectorWorker():
     if decode_server_device_info is not None:
       rank_table["server_list"].append(decode_server_device_info)
 
-    # generate super_pod_list for rank table
-    super_pod_list = []
-    prefill_super_pod_info = {
-       "super_pod_id": prefill_metadata.super_pod_id,
-       "server_list": [
-          {"server_id": prefill_metadata.server_id}
-        ],
-    }
-    if is_same_pod and not is_same_server:
-      prefill_super_pod_info["server_list"].append(
-        {"server_id": decode_metadata.server_id}
-      )
-    super_pod_list.append(prefill_super_pod_info)
-    if not is_same_pod:
-      decode_super_pod_id = {
-        "super_pod_id": decode_metadata.super_pod_id,
+    if self.soc_info.is_a3:
+      # generate super_pod_list for rank table
+      super_pod_list = []
+      prefill_super_pod_info = {
+        "super_pod_id": prefill_metadata.super_pod_id,
         "server_list": [
-          {"server_id": decode_metadata.server_id}
-        ],
+            {"server_id": prefill_metadata.server_id}
+          ],
       }
-      super_pod_list.append(decode_super_pod_id)
-    rank_table["super_pod_list"] = super_pod_list
+      if is_same_pod and not is_same_server:
+        prefill_super_pod_info["server_list"].append(
+          {"server_id": decode_metadata.server_id}
+        )
+      super_pod_list.append(prefill_super_pod_info)
+      if not is_same_pod:
+        decode_super_pod_id = {
+          "super_pod_id": decode_metadata.super_pod_id,
+          "server_list": [
+            {"server_id": decode_metadata.server_id}
+          ],
+        }
+        super_pod_list.append(decode_super_pod_id)
+      rank_table["super_pod_list"] = super_pod_list
     logger.info(f"LLMDataDistConnectorWorker: try link with remote, comm id: {comm_name}")
     logger.info(f"rank table \n{rank_table}")
     logger.info(f"comm name: {comm_name}")
