@@ -16,6 +16,7 @@
 
 import math
 from typing import Optional
+
 import torch
 import torch_npu
 
