@@ -27,49 +27,88 @@ from typing import Any, Callable, Dict
 # begin-env-vars-definition
 
 env_variables: Dict[str, Callable[[], Any]] = {
-    # max compile thread num
+    # max compile thread number for package building. Usually, it is set to
+    # the number of CPU cores. If not set, the default value is None, which
+    # means all number of CPU cores will be used.
     "MAX_JOBS":
     lambda: os.getenv("MAX_JOBS", None),
+    # The build type of the package. It can be one of the following values:
+    # Release, Debug, RelWithDebugInfo. If not set, the default value is Release.
     "CMAKE_BUILD_TYPE":
     lambda: os.getenv("CMAKE_BUILD_TYPE"),
+    # Whether to compile custom kernels. If not set, the default value is True.
+    # If set to False, the custom kernels will not be compiled. Please note that
+    # the sleep mode feature will be disabled as well if custom kernels are not
+    # compiled.
     "COMPILE_CUSTOM_KERNELS":
     lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
+    # The CXX compiler used for compiling the package. If not set, the default
+    # value is None, which means the system default CXX compiler will be used.
+    "CXX_COMPILER":
+    lambda: os.getenv("CXX_COMPILER", None),
+    # The C compiler used for compiling the package. If not set, the default
+    # value is None, which means the system default C compiler will be used.
+    "C_COMPILER":
+    lambda: os.getenv("C_COMPILER", None),
+    # Whether to enable MC2 for DeepSeek. If not set, the default value is False.
+    # MC2 is a fusion operator provided by Ascend to speed up computing and communication.
+    # Find more detail here: https://www.hiascend.com/document/detail/zh/canncommercial/81RC1/developmentguide/opdevg/ascendcbestP/atlas_ascendc_best_practices_10_0043.html
     "VLLM_ENABLE_MC2":
     lambda: bool(int(os.getenv("VLLM_ENABLE_MC2", '0'))),
+    # Whether to enable the topk optimization. It's disabled by default for experimental support
+    # We'll make it enabled by default in the future.
     "VLLM_ASCEND_ENABLE_TOPK_OPTIMZE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_OPTIMZE", '0'))),
+    # Whether to use LCCL communication. If not set, the default value is False.
     "USING_LCCL_COM":
     lambda: bool(int(os.getenv("USING_LCCL_COM", '0'))),
+    # The version of the Ascend chip. If not set, the default value is
+    # ASCEND910B1. It's used for package building. Please make sure that the
+    # version is correct.
     "SOC_VERSION":
     lambda: os.getenv("SOC_VERSION", "ASCEND910B1"),
     # If set, vllm-ascend will print verbose logs during compilation
     "VERBOSE":
     lambda: bool(int(os.getenv('VERBOSE', '0'))),
+    # The home path for CANN toolkit. If not set, the default value is
+    # /usr/local/Ascend/ascend-toolkit/latest
     "ASCEND_HOME_PATH":
     lambda: os.getenv("ASCEND_HOME_PATH", None),
-    "LD_LIBRARY_PATH":
-    lambda: os.getenv("LD_LIBRARY_PATH", None),
-    # Used for disaggregated prefilling
+    # The path for HCCN Tool, the tool will be called by disaggregated prefilling
+    # case.
     "HCCN_PATH":
     lambda: os.getenv("HCCN_PATH", "/usr/local/Ascend/driver/tools/hccn_tool"),
+    # The path for HCCL library, it's used by pyhccl communicator backend. If
+    # not set, the default value is libhccl.so。
     "HCCL_SO_PATH":
+    # The prefill device id for disaggregated prefilling case.
     lambda: os.environ.get("HCCL_SO_PATH", None),
     "PROMPT_DEVICE_ID":
     lambda: os.getenv("PROMPT_DEVICE_ID", None),
+    # The decode device id for disaggregated prefilling case.
     "DECODE_DEVICE_ID":
     lambda: os.getenv("DECODE_DEVICE_ID", None),
+    # The port number for llmdatadist communication. If not set, the default
+    # value is 26000.
     "LLMDATADIST_COMM_PORT":
     lambda: os.getenv("LLMDATADIST_COMM_PORT", "26000"),
+    # The wait time for llmdatadist sync cache. If not set, the default value is
+    # 5000ms.
     "LLMDATADIST_SYNC_CACHE_WAIT_TIME":
     lambda: os.getenv("LLMDATADIST_SYNC_CACHE_WAIT_TIME", "5000"),
-    "CXX_COMPILER":
-    lambda: os.getenv("CXX_COMPILER", None),
-    "C_COMPILER":
-    lambda: os.getenv("C_COMPILER", None),
+    # The version of vllm is installed. This value is used for developers who
+    # installed vllm from source locally. In this case, the version of vllm is
+    # usually changed. For example, if the version of vllm is "0.9.0", but when
+    # it's installed from source, the version of vllm is usually set to "0.9.1".
+    # In this case, developers need to set this value to "0.9.0" to make sure
+    # that the correct package is installed.
     "VLLM_VERSION":
     lambda: os.getenv("VLLM_VERSION", None),
+    # Whether to enable the trace recompiles from pytorch.
     "VLLM_ASCEND_TRACE_RECOMPILES":
     lambda: bool(int(os.getenv("VLLM_ASCEND_TRACE_RECOMPILES", '0'))),
+    # Whether to enable the model execute time observe profile. Disable it when
+    # running vllm ascend in production environment.
     "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE", '0'))
                  ),
