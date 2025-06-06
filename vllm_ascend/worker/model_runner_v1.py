@@ -64,14 +64,9 @@ from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
-
-from vllm.v1.worker.utils import (gather_mm_placeholders, sanity_check_mm_encoder_outputs,
-                    scatter_mm_placeholders)
-
-from vllm.multimodal.utils import group_mm_inputs_by_modality
-
-from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
+from vllm.v1.worker.utils import (gather_mm_placeholders,
+                                  sanity_check_mm_encoder_outputs,
+                                  scatter_mm_placeholders)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention import AttentionMaskBuilder
