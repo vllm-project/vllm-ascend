@@ -21,12 +21,12 @@ import torch_npu
 
 
 def group_limited_topk(
-        scores: torch.Tensor,
-        topk: int,
-        num_tokens: int,
-        num_experts: int,
-        num_groups: int,
-        group_topk: int,
+    scores: torch.Tensor,
+    topk: int,
+    num_tokens: int,
+    num_experts: int,
+    num_groups: int,
+    group_topk: int,
 ):
     """Perform top-k routing on a subset of expert groups.
 
@@ -58,21 +58,17 @@ def group_limited_topk(
     """
     # Organize the experts into groups
     # Select groups based on sum of top-(num_groups/group_topk) routing scores within each group
-    group_scores = (
-        scores.view(num_tokens, num_groups, -1)
-        .topk(num_groups // group_topk, dim=-1)[0]
-        .sum(dim=-1)
-    )
+    group_scores = (scores.view(num_tokens,
+                                num_groups, -1).topk(num_groups // group_topk,
+                                                     dim=-1)[0].sum(dim=-1))
     group_idx = torch.topk(group_scores, k=group_topk, dim=-1, sorted=False)[1]
     group_mask = torch.zeros_like(group_scores)
     group_mask.scatter_(1, group_idx, 1)
 
     # Mask the experts based on selection groups
-    score_mask = (
-        group_mask.unsqueeze(-1)
-        .expand(num_tokens, num_groups, num_experts // num_groups)
-        .reshape(num_tokens, -1)
-    )
+    score_mask = (group_mask.unsqueeze(-1).expand(
+        num_tokens, num_groups,
+        num_experts // num_groups).reshape(num_tokens, -1))
 
     masked_scores = scores.masked_fill(~score_mask.bool(), float('-inf'))
     probs, top_indices = torch.topk(masked_scores, k=topk, dim=-1)
@@ -81,18 +77,18 @@ def group_limited_topk(
 
 
 def topk_softmax_with_capacity(
-        logits: torch.Tensor,
-        topk: int,
-        capacity_factor: Optional[float] = None,
-        pad_to_capacity: bool = False,
-        drop_policy: str = "probs",
-        use_pre_softmax: bool = False,
-        num_groups: Optional[int] = None,
-        group_topk: Optional[int] = None,
-        scaling_factor: Optional[float] = None,
-        deterministic_mode: bool = False,
-        score_function: str = "sigmoid",
-        expert_bias: Optional[torch.Tensor] = None,
+    logits: torch.Tensor,
+    topk: int,
+    capacity_factor: Optional[float] = None,
+    pad_to_capacity: bool = False,
+    drop_policy: str = "probs",
+    use_pre_softmax: bool = False,
+    num_groups: Optional[int] = None,
+    group_topk: Optional[int] = None,
+    scaling_factor: Optional[float] = None,
+    deterministic_mode: bool = False,
+    score_function: str = "sigmoid",
+    expert_bias: Optional[torch.Tensor] = None,
 ):
     """Apply capacity and padding to the top-k selection.
     Args:
@@ -123,7 +119,8 @@ def topk_softmax_with_capacity(
             - tokens_per_expert (torch.Tensor): A tensor of shape [num_experts] containing
               the number of local tokens assigned to each expert before dropping and padding.
     """
-    assert logits.dim() == 2, f"Expected 2D logits [num_tokens, num_experts], got {logits.dim()}."
+    assert logits.dim(
+    ) == 2, f"Expected 2D logits [num_tokens, num_experts], got {logits.dim()}."
     num_tokens, num_experts = logits.shape
 
     def compute_topk(scores, topk, num_groups=None, group_topk=None):
@@ -141,11 +138,15 @@ def topk_softmax_with_capacity(
 
     if score_function == "softmax":
         if use_pre_softmax:
-            scores = torch.softmax(logits, dim=-1, dtype=torch.float32).type_as(logits)
-            probs, top_indices = compute_topk(scores, topk, num_groups, group_topk)
+            scores = torch.softmax(logits, dim=-1,
+                                   dtype=torch.float32).type_as(logits)
+            probs, top_indices = compute_topk(scores, topk, num_groups,
+                                              group_topk)
         else:
-            scores, top_indices = compute_topk(logits, topk, num_groups, group_topk)
-            probs = torch.softmax(scores, dim=-1, dtype=torch.float32).type_as(logits)
+            scores, top_indices = compute_topk(logits, topk, num_groups,
+                                               group_topk)
+            probs = torch.softmax(scores, dim=-1,
+                                  dtype=torch.float32).type_as(logits)
         if scaling_factor:
             probs = probs * scaling_factor
     elif score_function == "sigmoid":
@@ -166,8 +167,10 @@ def topk_softmax_with_capacity(
         raise ValueError(f"Invalid score_function: {score_function}")
 
     # Try using element-wise operations instead of scatter?
-    topk_masked_gates = torch.zeros_like(logits).scatter(1, top_indices.type(torch.int64), probs)
-    topk_map = torch.zeros_like(logits).int().scatter(1, top_indices.type(torch.int64), 1).bool()
+    topk_masked_gates = torch.zeros_like(logits).scatter(
+        1, top_indices.type(torch.int64), probs)
+    topk_map = torch.zeros_like(logits).int().scatter(
+        1, top_indices.type(torch.int64), 1).bool()
     tokens_per_expert = topk_map.sum(dim=0)
 
     if capacity_factor is None:
@@ -175,19 +178,25 @@ def topk_softmax_with_capacity(
         return topk_masked_gates, topk_map, tokens_per_expert, top_indices
     else:
         # TopK with capacity
-        expert_capacity = get_capacity(
-            num_tokens=num_tokens * topk, num_experts=num_experts, capacity_factor=capacity_factor
-        )
+        expert_capacity = get_capacity(num_tokens=num_tokens * topk,
+                                       num_experts=num_experts,
+                                       capacity_factor=capacity_factor)
 
         # Maskout exceeded tokens
         if drop_policy == "probs":
-            _, capacity_indices = torch.topk(
-                topk_masked_gates, k=expert_capacity, dim=0, sorted=False
-            )
-            capacity_mask = torch.zeros_like(logits).scatter(0, capacity_indices, 1).bool()
+            _, capacity_indices = torch.topk(topk_masked_gates,
+                                             k=expert_capacity,
+                                             dim=0,
+                                             sorted=False)
+            capacity_mask = torch.zeros_like(logits).scatter(
+                0, capacity_indices, 1).bool()
         elif drop_policy == "position":
-            _, capacity_indices = torch.topk(topk_map.int(), k=expert_capacity, dim=0, sorted=False)
-            capacity_mask = torch.zeros_like(logits).scatter(0, capacity_indices, 1).bool()
+            _, capacity_indices = torch.topk(topk_map.int(),
+                                             k=expert_capacity,
+                                             dim=0,
+                                             sorted=False)
+            capacity_mask = torch.zeros_like(logits).scatter(
+                0, capacity_indices, 1).bool()
         else:
             raise ValueError(f"Invalid drop_policy: {drop_policy}")
 
@@ -201,7 +210,10 @@ def topk_softmax_with_capacity(
         return final_probs, final_map, tokens_per_expert, top_indices
 
 
-def get_capacity(num_tokens: int, num_experts: int, capacity_factor: float, min_capacity=None):
+def get_capacity(num_tokens: int,
+                 num_experts: int,
+                 capacity_factor: float,
+                 min_capacity=None):
     """
     Calculate the capacity of each expert.
 
@@ -221,11 +233,11 @@ def get_capacity(num_tokens: int, num_experts: int, capacity_factor: float, min_
 
 
 def permute(
-        tokens,
-        routing_map,
-        num_out_tokens: Optional[int] = None,
-        fused: bool = False,
-        drop_and_pad: bool = False,
+    tokens,
+    routing_map,
+    num_out_tokens: Optional[int] = None,
+    fused: bool = False,
+    drop_and_pad: bool = False,
 ):
     """Permute the tokens and probs based on the mask.
     Tokens with the same designated expert will be grouped together.
@@ -256,9 +268,8 @@ def permute(
         routing_map = routing_map.to(dtype=torch.int8).T.contiguous()
         # use argsort to put indices of all non-zeros in the beginning of list
         # and keep the first `capacity` number of indices
-        sorted_indices = routing_map.argsort(dim=-1, descending=True, stable=True)[
-                         :, :capacity
-                         ].contiguous()
+        sorted_indices = routing_map.argsort(
+            dim=-1, descending=True, stable=True)[:, :capacity].contiguous()
         # flatten from [num_experts, capacity] to 1D
         sorted_indices = sorted_indices.view(-1)
     else:
@@ -266,9 +277,9 @@ def permute(
         routing_map = routing_map.bool().T.contiguous()
 
         # Create a dense expert-to-token mapping from the sparse token-to-expert mapping
-        token_indices = (
-            torch.arange(num_tokens, device=routing_map.device).unsqueeze(0).expand(num_experts, -1)
-        )
+        token_indices = (torch.arange(
+            num_tokens,
+            device=routing_map.device).unsqueeze(0).expand(num_experts, -1))
         sorted_indices = token_indices.masked_select(routing_map)
 
     # use the mapping to permute the tokens
@@ -278,13 +289,13 @@ def permute(
 
 
 def unpermute(
-        permuted_tokens: torch.Tensor,
-        sorted_indices: torch.Tensor,
-        restore_shape: torch.Size,
-        probs: torch.Tensor = None,
-        routing_map: torch.Tensor = None,
-        fused: bool = False,
-        drop_and_pad: bool = False,
+    permuted_tokens: torch.Tensor,
+    sorted_indices: torch.Tensor,
+    restore_shape: torch.Size,
+    probs: torch.Tensor = None,
+    routing_map: torch.Tensor = None,
+    fused: bool = False,
+    drop_and_pad: bool = False,
 ):
     """
     Restore the original order of tokens after permutation. If probs are provided, it
@@ -326,14 +337,17 @@ def unpermute(
             probs_T_1D = probs.T.contiguous().view(-1)
 
             # get 1D indices of the probs selected by routing_map
-            indices_dim0 = torch.arange(num_experts, device=routing_map.device).unsqueeze(-1)
+            indices_dim0 = torch.arange(
+                num_experts, device=routing_map.device).unsqueeze(-1)
             indices_dim1 = sorted_indices.view(num_experts, capacity)
-            indices_1D = (indices_dim0 * num_unpermuted_tokens + indices_dim1).view(-1)
+            indices_1D = (indices_dim0 * num_unpermuted_tokens +
+                          indices_dim1).view(-1)
 
             # get probs from indices
             permuted_probs = probs_T_1D.index_select(0, indices_1D)
         else:
-            permuted_probs = probs.T.contiguous().masked_select(routing_map.T.contiguous())
+            permuted_probs = probs.T.contiguous().masked_select(
+                routing_map.T.contiguous())
         # Here may promote permuted_tokens to higher precision (fp32/fp64) if probs is in
         # higher precision due to moe_router_dtype being enabled. This can lead to
         # additional GPU memory usage. Use --moe-permute-fusion flag to avoid this extra memory
@@ -341,17 +355,20 @@ def unpermute(
         permuted_tokens = permuted_tokens * permuted_probs.unsqueeze(-1)
 
     # Create an output tensor filled with zeros
-    output_tokens = torch.zeros(
-        restore_shape, dtype=permuted_tokens.dtype, device=permuted_tokens.device
-    )
+    output_tokens = torch.zeros(restore_shape,
+                                dtype=permuted_tokens.dtype,
+                                device=permuted_tokens.device)
     # Scatter add the permuted_input back to the original positions
-    output_tokens.scatter_add_(0, sorted_indices.unsqueeze(1).expand(-1, hidden), permuted_tokens)
+    output_tokens.scatter_add_(0,
+                               sorted_indices.unsqueeze(1).expand(-1, hidden),
+                               permuted_tokens)
     return output_tokens.to(dtype=input_dtype)
 
 
-def sort_chunks_by_idxs(
-        input: torch.Tensor, split_sizes: torch.Tensor, sorted_idxs: torch.Tensor, fused: bool = False
-):
+def sort_chunks_by_idxs(input: torch.Tensor,
+                        split_sizes: torch.Tensor,
+                        sorted_idxs: torch.Tensor,
+                        fused: bool = False):
     """Split and sort the input tensor based on the split_sizes and sorted indices."""
     if input.shape[0] == 0:
         return input

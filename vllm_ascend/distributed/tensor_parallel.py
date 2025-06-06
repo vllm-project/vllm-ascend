@@ -39,12 +39,19 @@ def _gather_along_first_dim(input_, group, output_split_sizes=None):
     if output_split_sizes is None:
         dim_size[0] = dim_size[0] * world_size
 
-        output = torch.empty(dim_size, dtype=input_.dtype, device=torch.npu.current_device())
-        torch.distributed.all_gather_into_tensor(output, input_.contiguous(), group=group)
+        output = torch.empty(dim_size,
+                             dtype=input_.dtype,
+                             device=torch.npu.current_device())
+        torch.distributed.all_gather_into_tensor(output,
+                                                 input_.contiguous(),
+                                                 group=group)
     else:
         dim_size[0] = sum(output_split_sizes)
-        output = torch.empty(dim_size, dtype=input_.dtype, device=torch.npu.current_device())
-        output_tensor_list = list(torch.split(output, output_split_sizes, dim=0))
+        output = torch.empty(dim_size,
+                             dtype=input_.dtype,
+                             device=torch.npu.current_device())
+        output_tensor_list = list(
+            torch.split(output, output_split_sizes, dim=0))
         torch.distributed.all_gather(output_tensor_list, input_, group=group)
 
     return output
@@ -61,19 +68,22 @@ def _gather_along_last_dim(input_, group):
     dim_size = list(input_.size())
     dim_size[0] = dim_size[0] * world_size
 
-    output = torch.empty(dim_size, dtype=input_.dtype, device=torch.npu.current_device())
-    torch.distributed.all_gather_into_tensor(
-        output, input_.contiguous(), group=group
-    )
+    output = torch.empty(dim_size,
+                         dtype=input_.dtype,
+                         device=torch.npu.current_device())
+    torch.distributed.all_gather_into_tensor(output,
+                                             input_.contiguous(),
+                                             group=group)
     tensor_list = output.chunk(world_size, dim=0)
     output = torch.cat(tensor_list, dim=-1).contiguous()
 
     return output
 
 
-def _reduce_scatter_along_first_dim(
-        input_, group, input_split_sizes=None, use_global_buffer=False
-):
+def _reduce_scatter_along_first_dim(input_,
+                                    group,
+                                    input_split_sizes=None,
+                                    use_global_buffer=False):
     """Reduce-scatter the input tensor across model parallel group.
 
     Args:
@@ -90,19 +100,25 @@ def _reduce_scatter_along_first_dim(
     if input_split_sizes is None:
         dim_size = list(input_.size())
         assert (
-                dim_size[0] % world_size == 0
+            dim_size[0] % world_size == 0
         ), "First dimension of the tensor should be divisible by tensor parallel size"
 
         dim_size[0] = dim_size[0] // world_size
 
-        output = torch.empty(dim_size, dtype=input_.dtype, device=torch.npu.current_device())
-        torch.distributed.reduce_scatter_tensor(output, input_.contiguous(), group=group)
+        output = torch.empty(dim_size,
+                             dtype=input_.dtype,
+                             device=torch.npu.current_device())
+        torch.distributed.reduce_scatter_tensor(output,
+                                                input_.contiguous(),
+                                                group=group)
     else:
         rank = torch.distributed.get_rank(group)
         input_tensor_list = list(torch.split(input_, input_split_sizes, dim=0))
 
         output = torch.empty_like(input_tensor_list[rank])
-        torch.distributed.reduce_scatter(output, input_tensor_list, group=group)
+        torch.distributed.reduce_scatter(output,
+                                         input_tensor_list,
+                                         group=group)
     return output
 
 
@@ -112,11 +128,13 @@ def _reduce_scatter_along_last_dim(input_, group):
     target_shape = list(input_.size())
     target_shape[-1] = target_shape[-1] // world_size
     input_ = input_.reshape(-1, input_.shape[-1])
-    split_tensors = torch.split(
-        input_, split_size_or_sections=input_.shape[-1] // world_size, dim=1
-    )
+    split_tensors = torch.split(input_,
+                                split_size_or_sections=input_.shape[-1] //
+                                world_size,
+                                dim=1)
     concat_tensor = torch.cat(split_tensors, dim=0)
-    output = _reduce_scatter_along_first_dim(concat_tensor, group).reshape(target_shape)
+    output = _reduce_scatter_along_first_dim(concat_tensor,
+                                             group).reshape(target_shape)
     return output
 
 
@@ -125,9 +143,9 @@ def all_gather_last_dim_from_tensor_parallel_region(input_, group):
     return _gather_along_last_dim(input_, group)
 
 
-def reduce_scatter_to_sequence_parallel_region(
-        input_, group, input_split_sizes=None
-):
+def reduce_scatter_to_sequence_parallel_region(input_,
+                                               group,
+                                               input_split_sizes=None):
     """Wrapper for autograd function: forward: RS, backward AG <fisrt dim>"""
     return _reduce_scatter_along_first_dim(input_, group, input_split_sizes)
 
@@ -138,9 +156,9 @@ def reduce_scatter_last_dim_to_tensor_parallel_region(input_, group):
 
 
 def gather_from_sequence_parallel_region(
-        input_,
-        group,
-        output_split_sizes=None,
+    input_,
+    group,
+    output_split_sizes=None,
 ):
     """Wrapper for autograd function: forward: AG, backward: RS <first dim>"""
     return _gather_along_first_dim(input_, group, output_split_sizes)
@@ -190,9 +208,10 @@ def all_to_all_sp2hp(input_, group):
     world_size = torch.distributed.get_world_size(group=group)
     tp_group = get_tensor_model_parallel_group()
     input_ = input_.reshape(-1, input_.shape[-1])
-    split_tensors = torch.split(
-        input_, split_size_or_sections=input_.shape[-1] // world_size, dim=1
-    )
+    split_tensors = torch.split(input_,
+                                split_size_or_sections=input_.shape[-1] //
+                                world_size,
+                                dim=1)
     concat_tensor = torch.cat(split_tensors, dim=0)
     output = all_to_all(tp_group, concat_tensor)
     return output
@@ -217,7 +236,8 @@ def all_to_all_hp2sp(input_, group):
     input_exchanged = all_to_all(tp_group, input_)
     input_reshaped = input_exchanged.reshape(-1, input_exchanged.shape[-1])
     split_tensors = torch.split(
-        input_reshaped, split_size_or_sections=input_reshaped.shape[0] // world_size, dim=0
-    )
+        input_reshaped,
+        split_size_or_sections=input_reshaped.shape[0] // world_size,
+        dim=0)
     output = torch.cat(split_tensors, dim=-1)
     return output
