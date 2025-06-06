@@ -34,6 +34,7 @@ from vllm.utils import is_list_of
 
 from tests.model_utils import (PROMPT_TEMPLATES, TokensTextLogprobs,
                                TokensTextLogprobsPromptLogprobs)
+from vllm_ascend.platform import NPUPlatform
 # TODO: remove this part after the patch merged into vllm, if
 # we not explicitly patch here, some of them might be effectiveless
 # in pytest scenario
@@ -56,8 +57,7 @@ PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 def cleanup_dist_env_and_memory():
     destroy_model_parallel()
     destroy_distributed_environment()
-    gc.collect()
-    torch.npu.empty_cache()
+    NPUPlatform.clear_npu_memory()
 
 
 class VllmRunner:
