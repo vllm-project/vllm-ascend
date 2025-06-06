@@ -136,12 +136,14 @@ jobs:
             pytest -sv tests/singlecard/test_camem.py
             # test_ascend_config.py should be ran separately because it will regenerate the global config many times.
             pytest -sv tests/singlecard/test_ascend_config.py
+            pytest -sv tests/singlecard/test_prompt_embedding.py
             pytest -sv tests/singlecard/ \
               --ignore=tests/singlecard/test_offline_inference.py \
               --ignore=tests/singlecard/test_scheduler.py \
               --ignore=tests/singlecard/test_guided_decoding.py \
               --ignore=tests/singlecard/test_camem.py \
-              --ignore=tests/singlecard/test_ascend_config.py
+              --ignore=tests/singlecard/test_ascend_config.py \
+              --ignore=tests/singlecard/test_prompt_embedding.py
           else
             pytest -sv tests/multicard/test_ilama_lora_tp2.py
             # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py will raise error.
