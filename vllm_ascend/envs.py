@@ -73,6 +73,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE", '0'))
                  ),
+    "MOE_ALL2ALL_BUFFER":
+    lambda: bool(int(os.getenv("MOE_ALL2ALL_BUFFER", '0'))),
 }
 
 # end-env-vars-definition
