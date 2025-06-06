@@ -8,10 +8,10 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
 from vllm.attention.backends.utils import PAD_SLOT_ID
-from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
 
@@ -443,20 +443,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
 
-        # Handle the differences between the flash_attn_varlen from flash_attn
-        # and the one from vllm_flash_attn. The former is used on RoCM and the
-        # latter has an additional parameter to control FA2 vs FA3
-        # self.flash_attn_varlen_func = flash_attn_varlen_func
-        # if self.vllm_flash_attn_version is not None:
-        #     self.flash_attn_varlen_func = \
-        #         functools.partial(flash_attn_varlen_func,
-        #                           fa_version=self.vllm_flash_attn_version)
-
-        self.enable_graph_mode = False
-        additional_config = get_current_vllm_config().additional_config
-        if additional_config:
-            self.enable_graph_mode = additional_config.get(
-                "enable_graph_mode", False)
+        ascend_config = get_ascend_config()
+        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
 
     def _v_up_proj_and_o_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
@@ -713,7 +701,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output
-        self.running_in_graph = self.enable_graph_mode and attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+        self.running_in_graph = self.torchair_graph_enabled and attn_metadata.attn_state == AscendAttentionState.DecodeOnly
         num_actual_toks = attn_metadata.num_actual_tokens
         if k_pe is None and not self.running_in_graph:
             kv_c, k_pe = self.kv_a_proj_with_mqa(
@@ -776,7 +764,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 .view(-1, self.num_heads, self.qk_head_dim)
             prefill_q_pe = prefill_q[..., self.qk_nope_head_dim:]
             prefill_q_nope = prefill_q[..., :self.qk_nope_head_dim]
-            if self.enable_graph_mode:
+            if self.torchair_graph_enabled:
                 num_tokens = prefill_hs_or_q_c.shape[0]
                 prefill_k_pe = prefill_k_pe.view(num_tokens, self.num_kv_heads,
                                                  -1)
@@ -801,7 +789,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     prefill_q_pe.contiguous(),
                     prefill_k_pe,
                     max_seq_len=attn_metadata.prefill.max_seq_lens)
-        if self.enable_graph_mode:
+        if self.torchair_graph_enabled:
             if len(kv_cache) > 0 and kv_cache[0].numel(
             ) > 0 and attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
                 slots = attn_metadata.slot_mapping

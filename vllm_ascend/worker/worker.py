@@ -47,6 +47,7 @@ from vllm.worker.model_runner_base import ModelRunnerBase
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
+from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
@@ -74,6 +75,9 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         adapt_patch()
         # Register ops when worker init.
         from vllm_ascend import ops  # noqa: F401
+
+        # init ascend config
+        init_ascend_config(vllm_config)
 
         WorkerBase.__init__(self, vllm_config=vllm_config)
         # Try to import mindie_turbo to accelerate vLLM inference.
