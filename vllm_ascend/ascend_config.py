@@ -56,7 +56,8 @@ class TorchairGraphConfig:
             "graph_batch_sizes_init", False)
         self.enable_multistream_shared_expert = torchair_graph_config.get(
             "enable_multistream_shared_expert", False)
-        self.enable_kv_nz = bool(int(os.getenv("VLLM_ASCEND_ENABLE_KV_NZ", '0')))
+        self.enable_kv_nz = bool(
+            int(os.getenv("VLLM_ASCEND_ENABLE_KV_NZ", '0')))
 
         if not isinstance(self.graph_batch_sizes, list):
             raise TypeError("graph_batch_sizes must be list[int]")
