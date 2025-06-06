@@ -19,13 +19,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from typing import Optional
 
 import torch
 import torch_npu
 
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 from vllm_ascend.distributed.tensor_parallel import gather_from_sequence_parallel_region, all_to_all_sp2hp, \
-    reduce_scatter_to_sequence_parallel_region, all_gather_last_dim_from_tensor_parallel_region, all_to_all_hp2sp, \
+    all_gather_last_dim_from_tensor_parallel_region, all_to_all_hp2sp, \
     reduce_scatter_last_dim_to_tensor_parallel_region
 
 from vllm_ascend.ops.comm_utils import async_all_to_all
@@ -48,13 +49,13 @@ class MoeDispatcherConfig:
         self.num_local_experts: int = 0
         self.num_moe_experts: int = 0
         self.moe_pad_expert_input_to_capacity: bool = False
-        self.moe_expert_capacity_factor: float = None
+        self.moe_expert_capacity_factor: Optional[float] = None
         self.moe_router_topk: int = 2
         self.moe_grouped_gemm: bool = False
         self.group_topk: int = 0
         self.num_groups: int = 1
         self.expert_bias: torch.Tensor = None
-        self.scaling_factor: float = None
+        self.scaling_factor: Optional[float] = None
         self.is_fused: bool = True
 
     def set_num_local_experts(self, num_local_experts):
@@ -177,7 +178,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         for i in range(len(self.local_expert_indices) - 1):
             assert (self.local_expert_indices[i] ==
                     self.local_expert_indices[i + 1] -
-                    1), "local_expert_indices must be continous"
+                    1), "local_expert_indices must be continuous"
         self.probs = None
         self.input_splits = None
         self.output_splits = None
@@ -241,6 +242,8 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
                 num_experts=self.num_experts,
                 capacity_factor=self.config.moe_expert_capacity_factor,
             )
+            if self.capacity is None:
+                raise ValueError("Capacity must be set before processing tokens")
             self.num_out_tokens = self.capacity * self.num_experts
             num_tokens_per_local_expert = torch.full(
                 (self.num_local_experts, ),
@@ -282,6 +285,8 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
                 group=self.ep_group).reshape(ep_size, self.num_experts)
             self.num_global_tokens_per_local_expert = num_global_tokens_per_expert[:, self.local_expert_indices[
                 0]:self.local_expert_indices[-1] + 1]
+            if self.num_global_tokens_per_local_expert is None:
+                raise ValueError("num_global_tokens_per_local_expert must be set before sum.")
             self.output_splits = (self.num_global_tokens_per_local_expert.sum(
                 axis=-1).to(torch.device("cpu"), non_blocking=True).numpy())
             num_tokens_per_local_expert = self.num_global_tokens_per_local_expert.sum(
@@ -297,6 +302,8 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
             num_tokens_per_local_expert = num_local_tokens_per_expert
 
         if self.num_local_experts > 1:
+            if self.num_global_tokens_per_local_expert is None:
+                raise ValueError("num_global_tokens_per_local_expert must be set before operations.")
             self.num_global_tokens_per_local_expert_cpu = (
                 self.num_global_tokens_per_local_expert.view(
                     -1, self.num_local_experts).to(torch.device("cpu"),
@@ -361,6 +368,8 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
 
         # Permutation 1: input to AlltoAll input
         def alltoall_token_permutation1(hidden_states, routing_map):
+            if self.hidden_shape is None:
+                raise ValueError("hidden_shape should be set before indices.")
             hidden_states = hidden_states.view(-1, self.hidden_shape[-1])
             tokens_per_expert = self.preprocess_overlap(routing_map)
             if self.tp_ep_size > 1:
@@ -413,6 +422,8 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         def alltoall_token_permutation2(global_input_tokens):
             # Permutation 2: Sort tokens by local expert.
             if self.num_local_experts > 1:
+                if self.num_global_tokens_per_local_expert_cpu is None:
+                    raise ValueError("num_global_tokens_per_local_expert_cpu must be set before used.")
                 global_input_tokens = sort_chunks_by_idxs(
                     global_input_tokens,
                     self.num_global_tokens_per_local_expert_cpu.ravel(),
@@ -452,6 +463,8 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
 
         def alltoall_token_unpermutation1(hidden_states):
             assert bias is None, "Bias is not supported in MoEAlltoAllSeqTokenDispatcher"
+            assert self.num_global_tokens_per_local_expert_cpu is None, ("num_global_tokens_per_local_expert_cpu "
+                                                                         "should be set before used.")
             # Perform tensor parallel Reduce-Scatter
             # hidden_states: [SEQL, H] -> [SEQL, H/TP]
             if self.tp_ep_size > 1:
@@ -479,7 +492,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
 
         def alltoall_token_unpermutation2(permutated_local_input_tokens):
             # Unpermutation 1: AlltoAll output to output
-            if self.config.is_fused:
+            if self.config.is_fused and self.probs is not None and self.routing_map is not None:
                 permuted_probs = (self.probs.T.contiguous().masked_select(
                     self.routing_map.T.contiguous()).view(
                         -1, self.config.moe_router_topk))

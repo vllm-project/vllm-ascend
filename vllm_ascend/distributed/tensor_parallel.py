@@ -14,7 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 import torch
-from vllm.distributed import get_tensor_model_parallel_world_size, get_tensor_model_parallel_group
+from vllm.distributed import get_tensor_model_parallel_group
 
 
 def _gather_along_first_dim(input_, group, output_split_sizes=None):
@@ -58,7 +58,7 @@ def _gather_along_first_dim(input_, group, output_split_sizes=None):
 
 
 def _gather_along_last_dim(input_, group):
-    """Gather tensors and concatinate along the last dimension."""
+    """Gather tensors and concatenate along the last dimension."""
 
     world_size = torch.distributed.get_world_size(group)
     # Bypass the function if we are using only 1 GPU.
@@ -146,7 +146,7 @@ def all_gather_last_dim_from_tensor_parallel_region(input_, group):
 def reduce_scatter_to_sequence_parallel_region(input_,
                                                group,
                                                input_split_sizes=None):
-    """Wrapper for autograd function: forward: RS, backward AG <fisrt dim>"""
+    """Wrapper for autograd function: forward: RS, backward AG <first dim>"""
     return _reduce_scatter_along_first_dim(input_, group, input_split_sizes)
 
 

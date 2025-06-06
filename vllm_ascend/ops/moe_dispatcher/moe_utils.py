@@ -261,7 +261,7 @@ def permute(
 
     num_tokens, hidden = tokens.shape
     num_experts = routing_map.shape[1]
-    if drop_and_pad and not (num_out_tokens is None):
+    if drop_and_pad and (num_out_tokens is not None):
         capacity = num_out_tokens // num_experts
         assert not routing_map.requires_grad
         # mask [num_tokens, num_experts] -> [num_experts, num_tokens]
