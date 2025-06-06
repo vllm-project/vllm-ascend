@@ -243,7 +243,8 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
                 capacity_factor=self.config.moe_expert_capacity_factor,
             )
             if self.capacity is None:
-                raise ValueError("Capacity must be set before processing tokens")
+                raise ValueError(
+                    "Capacity must be set before processing tokens")
             self.num_out_tokens = self.capacity * self.num_experts
             num_tokens_per_local_expert = torch.full(
                 (self.num_local_experts, ),
@@ -286,7 +287,9 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
             self.num_global_tokens_per_local_expert = num_global_tokens_per_expert[:, self.local_expert_indices[
                 0]:self.local_expert_indices[-1] + 1]
             if self.num_global_tokens_per_local_expert is None:
-                raise ValueError("num_global_tokens_per_local_expert must be set before sum.")
+                raise ValueError(
+                    "num_global_tokens_per_local_expert must be set before sum."
+                )
             self.output_splits = (self.num_global_tokens_per_local_expert.sum(
                 axis=-1).to(torch.device("cpu"), non_blocking=True).numpy())
             num_tokens_per_local_expert = self.num_global_tokens_per_local_expert.sum(
@@ -303,7 +306,9 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
 
         if self.num_local_experts > 1:
             if self.num_global_tokens_per_local_expert is None:
-                raise ValueError("num_global_tokens_per_local_expert must be set before operations.")
+                raise ValueError(
+                    "num_global_tokens_per_local_expert must be set before operations."
+                )
             self.num_global_tokens_per_local_expert_cpu = (
                 self.num_global_tokens_per_local_expert.view(
                     -1, self.num_local_experts).to(torch.device("cpu"),
@@ -423,7 +428,9 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
             # Permutation 2: Sort tokens by local expert.
             if self.num_local_experts > 1:
                 if self.num_global_tokens_per_local_expert_cpu is None:
-                    raise ValueError("num_global_tokens_per_local_expert_cpu must be set before used.")
+                    raise ValueError(
+                        "num_global_tokens_per_local_expert_cpu must be set before used."
+                    )
                 global_input_tokens = sort_chunks_by_idxs(
                     global_input_tokens,
                     self.num_global_tokens_per_local_expert_cpu.ravel(),
@@ -463,8 +470,9 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
 
         def alltoall_token_unpermutation1(hidden_states):
             assert bias is None, "Bias is not supported in MoEAlltoAllSeqTokenDispatcher"
-            assert self.num_global_tokens_per_local_expert_cpu is None, ("num_global_tokens_per_local_expert_cpu "
-                                                                         "should be set before used.")
+            assert self.num_global_tokens_per_local_expert_cpu is None, (
+                "num_global_tokens_per_local_expert_cpu "
+                "should be set before used.")
             # Perform tensor parallel Reduce-Scatter
             # hidden_states: [SEQL, H] -> [SEQL, H/TP]
             if self.tp_ep_size > 1:

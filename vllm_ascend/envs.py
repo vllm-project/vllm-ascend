@@ -75,7 +75,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
                  ),
     "ENABLE_MOE_ALLTOALLV":
     lambda: bool(int(os.getenv("ENABLE_MOE_ALLTOALLV", '0'))),
-
 }
 
 # end-env-vars-definition
