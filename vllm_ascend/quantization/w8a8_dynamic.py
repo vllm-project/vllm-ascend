@@ -798,8 +798,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                                               topk_weights=topk_weights,
                                               topk_ids=topk_ids,
                                               top_k=top_k,
-                                              expert_map=expert_map,
-                                              ep_group=self.ep_group) 
+                                              expert_map=expert_map) 
         else:
             # The current implementation of deepseek moe splits hidden_states
             # according to tp_size before they are feed into fused_moe module.
