@@ -789,7 +789,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                                  topk_ids=topk_ids,
                                  top_k=top_k,
                                  expert_map=expert_map)
-        elif self.enable_fused_routing and is_deepseek_v3_r1:
+        elif self.enable_fused_routing and is_deepseek_v3_r1 and self.etp_group.world_size == 1:
             return fused_experts_allgather_ep(hidden_states=x,
                                               w1=layer.w13_weight,
                                               w1_scale=layer.w13_weight_scale,
