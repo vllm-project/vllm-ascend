@@ -33,7 +33,6 @@ from vllm_ascend.ops.comm_utils import async_all_to_all
 from vllm_ascend.ops.moe_dispatcher.moe_utils import (
     get_capacity, permute, sort_chunks_by_idxs, topk_softmax_with_capacity,
     unpermute)
-
 """ We use the following notation throughout this file:
      H: hidden size
      B: micro batch size
