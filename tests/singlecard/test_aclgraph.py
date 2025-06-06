@@ -25,6 +25,7 @@ import os
 import pytest
 import torch
 from vllm import LLM, SamplingParams
+from vllm_ascend.platform import NPUPlatform
 
 from tests.conftest import VllmRunner
 from tests.model_utils import check_outputs_equal
@@ -57,12 +58,12 @@ def test_models(
         vllm_model = LLM(model)
         vllm_aclgraph_outputs = vllm_model.generate(prompts, sampling_params)
         del vllm_model
-        torch.npu.empty_cache()
+        NPUPlatform.clear_npu_memory()
 
         vllm_model = LLM(model, enforce_eager=True)
         vllm_eager_outputs = vllm_model.generate(prompts, sampling_params)
         del vllm_model
-        torch.npu.empty_cache()
+        NPUPlatform.clear_npu_memory()
 
     vllm_aclgraph_outputs_list = []
     for output in vllm_aclgraph_outputs:
