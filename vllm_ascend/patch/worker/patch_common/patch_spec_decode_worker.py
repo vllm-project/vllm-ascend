@@ -56,6 +56,12 @@ def create_worker(
         draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
     ngram_prompt_lookup_min = (
         draft_worker_kwargs.pop("ngram_prompt_lookup_min"))
+
+    # TODO(Yizhou): A quick fix, must be refactored ASAP
+    draft_worker_kwargs["vllm_config"].parallel_config.expert_parallel_size = 1
+    draft_worker_kwargs[
+        "vllm_config"].parallel_config.expert_tensor_parallel_size = 1
+
     draft_model_config = draft_worker_kwargs["vllm_config"].model_config
     draft_parallel_config: ParallelConfig = draft_worker_kwargs[
         'vllm_config'].parallel_config
@@ -90,12 +96,6 @@ def create_worker(
             # Load lm_head weight for eagle in init_device
             if draft_model_config.hf_config.model_type == "eagle":
                 enable_lm_head_weight_load = True
-
-            # TODO(Yizhou): A quick fix, must be refactored ASAP
-            draft_worker_kwargs[
-                "vllm_config"].parallel_config.expert_parallel_size = 1
-            draft_worker_kwargs[
-                "vllm_config"].parallel_config.expert_tensor_parallel_size = 1
 
             proposer_worker = MultiStepWorker(**draft_worker_kwargs)
             if draft_model_config.hf_config.model_type == "deepseek_mtp":
