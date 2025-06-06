@@ -37,7 +37,7 @@ class AscendConfig:
             ascend_scheduler_config)
 
         self.expert_tensor_parallel_size = int(
-            additional_config.get("expert_tensor_parallel_size", 1))
+            additional_config.get("expert_tensor_parallel_size", 0))
 
 
 class TorchairGraphConfig:
@@ -82,8 +82,11 @@ _ASCEND_CONFIG: Optional[AscendConfig] = None
 
 
 def init_ascend_config(vllm_config):
+    additional_config = vllm_config.additional_config if vllm_config.additional_config is not None else {}
+    refresh = additional_config.get("refresh",
+                                    False) if additional_config else False
     global _ASCEND_CONFIG
-    if _ASCEND_CONFIG is not None:
+    if _ASCEND_CONFIG is not None and not refresh:
         return _ASCEND_CONFIG
     _ASCEND_CONFIG = AscendConfig(vllm_config)
     return _ASCEND_CONFIG
@@ -106,35 +109,52 @@ def get_ascend_config():
 def check_ascend_config(vllm_config, enforce_eager):
     ascend_config = get_ascend_config()
 
-    # Both for V0 and V1 Engine, torchair_graph cannot be enabled with eager mode.
-    if ascend_config.torchair_graph_config.enabled and enforce_eager:
-        raise RuntimeError(
-            "Can't enable graph mode and eager mode at the same time. Please set `enforce_eager=False` if you attempt to enable NPU graph mode."
-        )
-
-    # torchair_graph only work with deepseek model and mla enabled.
-    if ascend_config.torchair_graph_config.enabled:
-        if envs.VLLM_MLA_DISABLE:
-            logger.warning(
-                "Torchair graph mode is still experimental and not supported for V1 without mla currently, "
-                "it has been disabled automatically.")
-            ascend_config.ascend_scheduler_config.enabled = False
-        if vllm_config.model_config:
-            model_type = vllm_config.model_config.hf_config.model_type
-            if "deepseek" not in model_type:
-                raise NotImplementedError(
-                    "Torchair graph mode only works with deepseek model.")
-
-    # for V1 Engine, aclgraph doesn't work with deepseek model and only qwen model is well tested.
-    if envs.VLLM_USE_V1 and vllm_config.model_config is not None and not enforce_eager:
-        model_type = vllm_config.model_config.hf_config.model_type
-        if "deepseek" in model_type:
+    # for v0 engine
+    if not envs.VLLM_USE_V1:
+        if ascend_config.torchair_graph_config.enabled:
             raise NotImplementedError(
-                "ACL Graph does not support deepseek. Please "
-                "try torchair graph mode to serve deepseek models on vllm-ascend."
-                " Or set `enforce_eager=True` to use eager mode.")
-        if "qwen" not in model_type:
-            logger.warning(
-                "ACL Graph is currently experimental. Please "
-                "raise an issue on https://github.com/vllm-project/vllm-ascend/issues"
-                " if you encourage any Error")
+                "Torchair graph mode is only supported for V1 Engine.")
+        if ascend_config.ascend_scheduler_config.enabled:
+            raise NotImplementedError(
+                "Ascend scheduler is only supported for V1 Engine.")
+    # for v1 engine
+    else:
+        # for eager mode
+        if enforce_eager:
+            # torchair_graph cannot be enabled with eager mode.
+            if ascend_config.torchair_graph_config.enabled:
+                raise RuntimeError(
+                    "Can't enable graph mode and eager mode at the same time. Please set `enforce_eager=False` if you attempt to enable NPU graph mode."
+                )
+        # for graph mode
+        else:
+            # torchair_graph case
+            if ascend_config.torchair_graph_config.enabled:
+                # torchair_graph is not supported for V1 without mla currently.
+                if envs.VLLM_MLA_DISABLE:
+                    logger.warning(
+                        "Torchair graph mode is still experimental and not supported for V1 without mla currently, "
+                        "it has been disabled automatically.")
+                    ascend_config.torchair_graph_config.enabled = False
+                # torchair_graph is supported for deepseek model only currently.
+                if vllm_config.model_config:
+                    model_type = vllm_config.model_config.hf_config.model_type
+                    if "deepseek" not in model_type:
+                        raise NotImplementedError(
+                            "Torchair graph mode only works with deepseek model."
+                        )
+            # aclgraph case
+            else:
+                # aclgraph doesn't work with deepseek model and only qwen model is well tested.
+                if vllm_config.model_config:
+                    model_type = vllm_config.model_config.hf_config.model_type
+                    if "deepseek" in model_type:
+                        raise NotImplementedError(
+                            "ACL Graph does not support deepseek. Please "
+                            "try torchair graph mode to serve deepseek models on vllm-ascend."
+                            " Or set `enforce_eager=True` to use eager mode.")
+                    if "qwen" not in model_type:
+                        logger.warning(
+                            "ACL Graph is currently experimental. Please "
+                            "raise an issue on https://github.com/vllm-project/vllm-ascend/issues"
+                            " if you encourage any Error")

@@ -323,7 +323,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled and self.vllm_config.model_config.use_mla
-        self.torchair_graph_use_cached_npu_graph = ascend_config.torchair_graph_config.use_cached_graph
+        self.use_cached_npu_graph = ascend_config.torchair_graph_config.use_cached_graph
         self.torchair_graph_batch_sizes = ascend_config.torchair_graph_config.graph_batch_sizes
 
         if ascend_config.torchair_graph_config.graph_batch_sizes_init:
