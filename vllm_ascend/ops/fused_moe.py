@@ -17,7 +17,6 @@
 
 from typing import Callable, Optional
 import os
-import json
 import torch
 import torch.distributed as dist
 import torch_npu
