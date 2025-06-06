@@ -140,7 +140,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
 
             experimental_config = torch_npu.profiler._ExperimentalConfig(
                 export_type=torch_npu.profiler.ExportType.Text,
-                profiler_level=torch_npu.profiler.ProfilerLevel.Level0,
+                profiler_level=torch_npu.profiler.ProfilerLevel.Level1,
                 msprof_tx=False,
                 aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
                 l2_cache=False,
@@ -155,9 +155,9 @@ class NPUWorker(LocalOrDistributedWorkerBase):
                     torch_npu.profiler.ProfilerActivity.CPU,
                     torch_npu.profiler.ProfilerActivity.NPU,
                 ],
-                with_stack=True,
-                profile_memory=True,
-                with_modules=True,
+                with_stack=False,
+                profile_memory=False,
+                with_modules=False,
                 experimental_config=experimental_config,
                 on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
                     torch_profiler_trace_dir))
