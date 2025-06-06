@@ -17,12 +17,10 @@
 # Adapted from vllm-project/vllm/blob/main/tests/conftest.py
 #
 
-import gc
 from typing import List, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 import pytest
-import torch
 from huggingface_hub import snapshot_download
 from PIL import Image
 from vllm import LLM, SamplingParams
