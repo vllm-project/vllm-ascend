@@ -91,6 +91,12 @@ def create_worker(
             if draft_model_config.hf_config.model_type == "eagle":
                 enable_lm_head_weight_load = True
 
+            # TODO(Yizhou): A quick fix, must be refactored ASAP
+            draft_worker_kwargs[
+                "vllm_config"].parallel_config.expert_parallel_size = 1
+            draft_worker_kwargs[
+                "vllm_config"].parallel_config.expert_tensor_parallel_size = 1
+
             proposer_worker = MultiStepWorker(**draft_worker_kwargs)
             if draft_model_config.hf_config.model_type == "deepseek_mtp":
                 num_spec_prefill_steps = draft_model_config.hf_config.n_predict
