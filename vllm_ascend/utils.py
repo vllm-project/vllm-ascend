@@ -58,6 +58,22 @@ def try_register_lib(lib_name: str, lib_info: str = ""):
         pass
 
 
+def enable_custom_op():
+    CUSTOM_OP_ENABLED = False
+    try:
+        # register custom ops into torch_library here
+        import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+
+    except ImportError:
+        logger.warning(
+            "Warning: Failed to register custom ops, all custom ops will be disabled"
+        )
+    else:
+        CUSTOM_OP_ENABLED = True
+
+    return CUSTOM_OP_ENABLED
+
+
 def find_hccl_library() -> str:
     """
     We either use the library file specified by the `HCCL_SO_PATH`
