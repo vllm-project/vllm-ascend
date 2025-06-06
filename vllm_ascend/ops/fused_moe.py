@@ -397,21 +397,18 @@ def fused_experts_with_all2all(
     return final_hidden_states
 
 
-def fused_experts_with_all2allv(token_dispatcher, logits, hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor):
+def fused_experts_with_all2allv(token_dispatcher, logits,
+                                hidden_states: torch.Tensor, w1: torch.Tensor,
+                                w2: torch.Tensor):
     # Enable moe alltoallv, it's a balanced policy for precision and efficiency.
     probs, routing_map = token_dispatcher.routing(logits)
-    (share_experts_output, dispatched_input, tokens_per_expert) = token_dispatcher.token_permutation(
-        hidden_states, probs, routing_map
-    )
+    (share_experts_output, dispatched_input,
+     tokens_per_expert) = token_dispatcher.token_permutation(
+         hidden_states, probs, routing_map)
     hidden_states_wrapper = [dispatched_input]
     del dispatched_input
 
-    expert_output = apply_mlp(hidden_states_wrapper,
-                              w1,
-                              w2,
-                              tokens_per_expert)
+    expert_output = apply_mlp(hidden_states_wrapper, w1, w2, tokens_per_expert)
     output, mlp_bias = token_dispatcher.token_unpermutation(expert_output)
     return output
 
@@ -744,33 +741,35 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                                              requires_grad=False)
 
     def apply(
-            self,
-            layer: torch.nn.Module,
-            x: torch.Tensor,
-            router_logits: torch.Tensor,
-            top_k: int,
-            renormalize: bool,
-            use_grouped_topk: bool = False,
-            global_num_experts: int = -1,
-            expert_map: Optional[torch.Tensor] = None,
-            topk_group: Optional[int] = None,
-            num_expert_group: Optional[int] = None,
-            custom_routing_function: Optional[Callable] = None,
-            scoring_func: str = "softmax",
-            e_score_correction_bias: Optional[torch.Tensor] = None,
-            is_prefill: bool = True,
-            enable_force_load_balance: bool = False,
-            **kwargs,
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool = False,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        is_prefill: bool = True,
+        enable_force_load_balance: bool = False,
+        **kwargs,
     ) -> torch.Tensor:
-        use_alltoallv = 'token_dispatcher' in kwargs and kwargs.get('token_dispatcher') is not None
+        use_alltoallv = 'token_dispatcher' in kwargs and kwargs.get(
+            'token_dispatcher') is not None
         if use_alltoallv and is_prefill:
             token_dispatcher = kwargs.get('token_dispatcher')
-            return fused_experts_with_all2allv(token_dispatcher=token_dispatcher,
-                                               logits=router_logits,
-                                               hidden_states=x,
-                                               w1=layer.w13_weight,
-                                               w2=layer.w2_weight,
-                                               )
+            return fused_experts_with_all2allv(
+                token_dispatcher=token_dispatcher,
+                logits=router_logits,
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+            )
 
         # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
         if global_num_experts == 256:
@@ -957,17 +956,17 @@ class AscendFusedMoE(FusedMoE):
         self.ep_group = get_ep_group()
         self.quant_method.create_weights(layer=self, **moe_quant_params)
         self.token_dispatcher = None
-        if ENABLE_MOE_ALLTOALLV and isinstance(self.quant_method, AscendUnquantizedFusedMoEMethod):
-            moe_dispatcher_config = (MoeDispatcherConfig()
-                                     .set_num_moe_experts(self.global_num_experts)
-                                     .set_num_local_experts(self.local_num_experts)
-                                     .set_moe_router_topk(top_k)
-                                     .set_group_topk(topk_group)
-                                     .set_num_groups(num_expert_group)
-                                     .set_expert_bias(e_score_correction_bias)
-                                     .set_scaling_factor(1.0)
-                                     .build())
-            self.token_dispatcher = MoEAlltoAllSeqOverLapDispatcher(moe_dispatcher_config)
+        if ENABLE_MOE_ALLTOALLV and isinstance(
+                self.quant_method, AscendUnquantizedFusedMoEMethod):
+            moe_dispatcher_config = (
+                MoeDispatcherConfig().set_num_moe_experts(
+                    self.global_num_experts).set_num_local_experts(
+                        self.local_num_experts).set_moe_router_topk(
+                            top_k).set_group_topk(topk_group).
+                set_num_groups(num_expert_group).set_expert_bias(
+                    e_score_correction_bias).set_scaling_factor(1.0).build())
+            self.token_dispatcher = MoEAlltoAllSeqOverLapDispatcher(
+                moe_dispatcher_config)
 
     def forward(self,
                 hidden_states: torch.Tensor,
