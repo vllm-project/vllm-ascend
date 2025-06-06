@@ -23,21 +23,20 @@ import torch
 import vllm.envs as envs
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
-from vllm.utils import supports_dynamo
 
+import vllm_ascend.envs as ascend_envs
+from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
 from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD, update_aclgraph_sizes
 
 CUSTOM_OP_ENABLED = False
 try:
     # register custom ops into torch_library here
     import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
-
-except ImportError:
-    logging.warning(
-        "Warning: Failed to register custom ops, all custom ops will be disabled"
-    )
-else:
     CUSTOM_OP_ENABLED = True
+except ImportError as e:
+    logging.warning(
+        "Failed to import 'vllm_ascend.vllm_ascend_C': %s. All custom ops will be disabled. ",
+        e)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -48,6 +47,7 @@ else:
     FlexibleArgumentParser = None
 
 os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
+os.environ["ACL_OP_INIT_MODE"] = ascend_envs.VLLM_ASCEND_ACL_OP_INIT_MODE
 
 
 class NPUPlatform(Platform):
@@ -78,7 +78,8 @@ class NPUPlatform(Platform):
         # and the user can enable quantization using "vllm serve --quantization ascend".
         if parser is not None:
             quant_action = parser._option_string_actions.get('--quantization')
-            if quant_action and hasattr(quant_action, 'choices'):
+            if quant_action and hasattr(quant_action,
+                                        'choices') and quant_action.choices:
                 if ASCEND_QUATIZATION_METHOD not in quant_action.choices:
                     quant_action.choices.append(ASCEND_QUATIZATION_METHOD)
 
@@ -119,26 +120,37 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        # initialize ascend config from vllm additional_config
+        ascend_config = init_ascend_config(vllm_config)
+
         from vllm.config import CompilationLevel  # noqa: E402
         compilation_config = vllm_config.compilation_config
+        model_config = vllm_config.model_config
+        parallel_config = vllm_config.parallel_config
+        cache_config = vllm_config.cache_config
 
-        if vllm_config.model_config is None:
+        if parallel_config:
+            # Default value for expert tensor parallel size
+            parallel_config.expert_tensor_parallel_size = parallel_config.tensor_parallel_size
+
+            # NOTE: When enable_expert_parallel is True, we follow vLLM convention:
+            # ep_size = world_size, which means expert_tensor_parallel_size must be 1
+            if ascend_config.expert_tensor_parallel_size > 0 and not parallel_config.enable_expert_parallel:
+                parallel_config.expert_tensor_parallel_size = ascend_config.expert_tensor_parallel_size
+
+            # Calculate expert parallel size based on world size
+            parallel_config.expert_parallel_size = (
+                parallel_config.world_size_across_dp //
+                parallel_config.expert_tensor_parallel_size)
+
+        if model_config is None:
             logger.warning("Model config is missing. This may indicate "
                            "that we are running a test case")
             enforce_eager = False
         else:
-            enforce_eager = getattr(vllm_config.model_config, "enforce_eager",
-                                    False)
+            enforce_eager = getattr(model_config, "enforce_eager", False)
 
-        # TODO(Yizhou): Override the value of enforce_eager to True before
-        # the CANN and torch_npu support NPU compilation.
-        enforce_eager = True
-        logger.warning(
-            "NPU compilation support pending. Will be available in future CANN and "
-            "torch_npu releases. NPU graph mode is currently experimental and disabled "
-            "by default. You can just adopt additional_config={'enable_graph_mode': True} "
-            "to serve deepseek models with NPU graph mode on vllm-ascend with V0 engine. "
-        )
+        check_ascend_config(vllm_config, enforce_eager)
 
         if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:
             logger.info("Compilation disabled, using eager mode by default")
@@ -147,6 +159,11 @@ class NPUPlatform(Platform):
             logger.warning(
                 "NPU does not support %s compilation level. Setting level to NO_COMPILATION",
                 compilation_config.level)
+            compilation_config.level = CompilationLevel.NO_COMPILATION
+        elif ascend_config.torchair_graph_config.enabled:
+            logger.info(
+                "Torchair compilation enabled on NPU. Setting level to NO_COMPILATION"
+            )
             compilation_config.level = CompilationLevel.NO_COMPILATION
         else:
             logger.info(
@@ -157,21 +174,6 @@ class NPUPlatform(Platform):
                 ["vllm.unified_ascend_attention_with_output"])
             update_aclgraph_sizes(vllm_config)
 
-        if vllm_config.additional_config is not None:
-            enable_graph_mode = vllm_config.additional_config.get(
-                "enable_graph_mode", False)
-            if enable_graph_mode and not supports_dynamo():
-                logger.warning(
-                    "enable_graph_mode is not supported because the version of torch is too low, forcing close enable_graph_mode"
-                )
-                vllm_config.additional_config["enable_graph_mode"] = False
-            if enable_graph_mode and envs.VLLM_USE_V1 and envs.VLLM_MLA_DISABLE:
-                logger.warning(
-                    "NPU graph mode is still experimental and not supported for V1 without mla currently, "
-                    "it has been disabled automatically.")
-                vllm_config.additional_config["enable_graph_mode"] = False
-
-        parallel_config = vllm_config.parallel_config
         if parallel_config and parallel_config.worker_cls == "auto":
             if envs.VLLM_USE_V1:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
@@ -183,7 +185,6 @@ class NPUPlatform(Platform):
             else:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
 
-        cache_config = vllm_config.cache_config
         if cache_config:
             if cache_config.block_size is None:
                 cache_config.block_size = 128
@@ -195,19 +196,16 @@ class NPUPlatform(Platform):
 
         if envs.VLLM_USE_V1:
             # Activate custom ops for v1.
-            vllm_config.compilation_config.custom_ops = ["all"]
-            # If ascend_scheduler_config exists in additional_config,
-            # extents original scheduler_config to use AscendScheduler.
+            compilation_config.custom_ops = ["all"]
 
-            additional_config = vllm_config.additional_config
-            if additional_config and additional_config.get(
-                    "ascend_scheduler_config", None) is not None:
-                additional_scheduler_config = additional_config.get(
-                    "ascend_scheduler_config")
+            # If ascend_scheduler_config is enabled,
+            # extents original scheduler_config to use AscendScheduler.
+            if ascend_config.ascend_scheduler_config.enabled:
                 from vllm_ascend.core.schedule_config import \
                     AscendSchedulerConfig
                 ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
-                    vllm_config.scheduler_config, additional_scheduler_config)
+                    vllm_config.scheduler_config,
+                    ascend_config.ascend_scheduler_config)
                 vllm_config.scheduler_config = ascend_scheduler_config
 
     @classmethod
@@ -246,3 +244,10 @@ class NPUPlatform(Platform):
         model configuration.
         """
         return True
+
+    @classmethod
+    def get_piecewise_backend_cls(cls) -> str:
+        """
+        Get piecewise backend class for piecewise graph.
+        """
+        return "vllm_ascend.compilation.piecewise_backend.NPUPiecewiseBackend"  # noqa

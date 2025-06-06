@@ -57,7 +57,6 @@ MAX_SPEC_TOKENS = 1
 
 # precision
 PRECISION = "bfloat16"
-os.environ["VLLM_USE_MODELSCOPE"] = "True"
 
 
 @pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "1",
@@ -219,7 +218,9 @@ def test_mtp_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
     "common_llm_kwargs",
     [{
         "additional_config": {
-            'enable_graph_mode': True,
+            'torchair_graph_config': {
+                "enabled": True,
+            },
         },
 
         # Print spec metrics.
@@ -263,7 +264,9 @@ def test_mtp_e2e_greedy_correctness_torchair_graph(
     "common_llm_kwargs",
     [{
         "additional_config": {
-            'enable_graph_mode': True,
+            'torchair_graph_config': {
+                "enabled": True,
+            },
         },
 
         # Print spec metrics.
@@ -450,8 +453,3 @@ def test_mtp_disable_queue(vllm_runner, common_llm_kwargs,
                                   per_test_common_llm_kwargs,
                                   baseline_llm_kwargs, test_llm_kwargs,
                                   batch_size, output_len, seed)
-
-
-if __name__ == "__main__":
-    import pytest
-    pytest.main([__file__])

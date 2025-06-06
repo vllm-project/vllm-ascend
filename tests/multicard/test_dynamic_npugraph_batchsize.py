@@ -18,9 +18,6 @@ import pytest
 import torch
 from vllm import LLM, SamplingParams
 
-# TODO: revert me when cuda hard code is fixed in 'VllmBackend'
-torch.cuda.CUDAGraph = torch.npu.NPUGraph
-
 MODELS = [
     "Qwen/Qwen2.5-0.5B-Instruct",
 ]

@@ -18,7 +18,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from https://github.com/vllm-project/vllm/tree/main/tools
 #
-export SHELLCHECK_OPTS="--exclude=SC2046,SC2006"
+export SHELLCHECK_OPTS="--exclude=SC2046,SC2006,SC2086"
 
 if command -v actionlint &> /dev/null; then
     actionlint .github/workflows/*.yml .github/workflows/*.yaml

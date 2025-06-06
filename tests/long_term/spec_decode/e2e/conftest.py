@@ -20,18 +20,15 @@
 import shutil
 from itertools import cycle
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import Optional, Sequence, Union
 
-import pytest
 import torch
-from vllm import LLM, SamplingParams
-from vllm.distributed import cleanup_dist_env_and_memory
-from vllm.model_executor.utils import set_random_seed
+from vllm import SamplingParams
 from vllm.sequence import PromptLogprobs, SampleLogprobs
 
-from ....model_utils import (TokensTextLogprobs,
-                             TokensTextLogprobsPromptLogprobs,
-                             check_logprobs_close, check_outputs_equal)
+from tests.model_utils import (TokensTextLogprobs,
+                               TokensTextLogprobsPromptLogprobs,
+                               check_logprobs_close, check_outputs_equal)
 
 PROMPTS = [
     "Hello, my name is",
@@ -43,65 +40,6 @@ PROMPTS = [
     "Curious George is a",
     "Python 3.11 brings improvements to its",
 ]
-
-
-@pytest.fixture
-def test_llm_generator(common_llm_kwargs, per_test_common_llm_kwargs,
-                       test_llm_kwargs, seed):
-
-    def generate():
-        kwargs = {
-            **common_llm_kwargs,
-            **per_test_common_llm_kwargs,
-            **test_llm_kwargs,
-        }
-
-        llm = LLM(**kwargs)
-
-        if seed is not None:
-            set_random_seed(seed)
-
-        yield llm
-
-        del llm
-        cleanup_dist_env_and_memory()
-
-    return generate
-
-
-def maybe_assert_ngram_worker(llm):
-    # Verify the proposer worker is ngram if ngram is specified.
-    if (llm.llm_engine.speculative_config is not None
-            and llm.llm_engine.speculative_config.method == "ngram"):
-        from vllm.spec_decode.ngram_worker import NGramWorker
-        assert isinstance(
-            llm.llm_engine.model_executor.driver_worker.proposer_worker,
-            NGramWorker)
-
-
-def get_output_from_llm_generator(
-        llm_generator, prompts,
-        sampling_params) -> Tuple[List[str], List[List[int]], float]:
-    tokens: List[str] = []
-    token_ids: List[List[int]] = []
-    acceptance_rate: float = -1.0
-    for llm in llm_generator():
-        maybe_assert_ngram_worker(llm)
-
-        outputs = llm.generate(prompts, sampling_params, use_tqdm=True)
-
-        token_ids = [output.outputs[0].token_ids for output in outputs]
-        tokens = [output.outputs[0].text for output in outputs]
-
-        # Fetch acceptance rate if logging is enabled.
-        if stat_loggers := getattr(llm.llm_engine, "stat_loggers", None):
-            stat_logger = stat_loggers["prometheus"]
-            acceptance_rate = (stat_logger.metrics.
-                               gauge_spec_decode_draft_acceptance_rate.labels(
-                                   **stat_logger.labels)._value.get())
-        del llm
-
-    return tokens, token_ids, acceptance_rate
 
 
 def check_logprobs_correctness(
@@ -229,17 +167,17 @@ def run_equality_correctness_test(
 
     # TODO current torchair graph mode needs clean torchair cache.
     # if do not clean, it will raise error
-    additional_config = common_llm_kwargs.get("additional_config")
-    enable_graph_mode = additional_config.get(
-        "enable_graph_mode") if additional_config else False
+    torchair_graph_enabled = common_llm_kwargs.get(
+        "additional_config", {}).get("torchair_graph_config",
+                                     {}).get("enabled", False)
 
     with vllm_runner(**org_args) as vllm_model:
-        if enable_graph_mode:
+        if torchair_graph_enabled:
             _clean_torchair_cache()
         org_outputs = vllm_model.generate_w_logprobs(prompts, sampling_params)
 
     with vllm_runner(**sd_args) as vllm_model:
-        if enable_graph_mode:
+        if torchair_graph_enabled:
             _clean_torchair_cache()
         if ensure_all_accepted or expected_acceptance_rate is not None:
             # Force log interval to be 0 to catch all metrics.

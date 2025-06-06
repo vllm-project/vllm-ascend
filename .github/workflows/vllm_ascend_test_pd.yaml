@@ -30,13 +30,19 @@ defaults:
   run:
     shell: bash -el {0}
 
+# only 1 job can runs on static-8-01-cards
+concurrency:
+  group: static-8-01-cards
+  cancel-in-progress: false
+
 jobs:
-  test:
-    if: ${{ github.event.label.name == 'module:pd' }}
+  prefilling-decoding-disaggregation:
+    # pd-test will be triggered when tag 'pd-test' & 'ready-for-test' or schedule job
+    if: ${{ contains(github.event.pull_request.labels.*.name, 'pd-test') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') || github.event_name == 'schedule' }}
     strategy:
       matrix:
-        vllm_verison: [v0.8.5.post1]
-    name: vLLM Ascend test
+        vllm_verison: [main, v0.9.0]
+    name: vLLM Ascend prefilling decoding disaggregation test
     runs-on: linux-arm64-npu-static-8
 
     container:
@@ -50,12 +56,6 @@ jobs:
       options: >-
         --device /dev/davinci0
         --device /dev/davinci1
-        --device /dev/davinci2
-        --device /dev/davinci3
-        --device /dev/davinci4
-        --device /dev/davinci5
-        --device /dev/davinci6
-        --device /dev/davinci7
         --device /dev/davinci_manager
         --device /dev/devmm_svm
         --device /dev/hisi_hdc
@@ -100,3 +100,7 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pip install -v -e .
+
+      - name: Run vllm-project/vllm-ascend PD Disaggregation test
+        run: |
+          pytest -sv tests/e2e/pd_disaggreate/test_pd_e2e.py

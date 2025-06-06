@@ -47,6 +47,7 @@ from vllm.worker.model_runner_base import ModelRunnerBase
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
+from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
@@ -74,6 +75,9 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         adapt_patch()
         # Register ops when worker init.
         from vllm_ascend import ops  # noqa: F401
+
+        # init ascend config
+        init_ascend_config(vllm_config)
 
         WorkerBase.__init__(self, vllm_config=vllm_config)
         # Try to import mindie_turbo to accelerate vLLM inference.
@@ -136,7 +140,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
 
             experimental_config = torch_npu.profiler._ExperimentalConfig(
                 export_type=torch_npu.profiler.ExportType.Text,
-                profiler_level=torch_npu.profiler.ProfilerLevel.Level0,
+                profiler_level=torch_npu.profiler.ProfilerLevel.Level1,
                 msprof_tx=False,
                 aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
                 l2_cache=False,
@@ -151,9 +155,9 @@ class NPUWorker(LocalOrDistributedWorkerBase):
                     torch_npu.profiler.ProfilerActivity.CPU,
                     torch_npu.profiler.ProfilerActivity.NPU,
                 ],
-                with_stack=True,
-                profile_memory=True,
-                with_modules=True,
+                with_stack=False,
+                profile_memory=False,
+                with_modules=False,
                 experimental_config=experimental_config,
                 on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(
                     torch_profiler_trace_dir))
@@ -534,7 +538,6 @@ class NPUWorker(LocalOrDistributedWorkerBase):
             backend: str = "hccl") -> None:
         """Initialize the distributed environment."""
         parallel_config = self.parallel_config
-        additional_config = self.vllm_config.additional_config
         set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
         init_distributed_environment(parallel_config.world_size, rank,
                                      distributed_init_method, local_rank,
@@ -542,13 +545,11 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size)
-        expert_tensor_parallel_size = 1
-        if additional_config:
-            expert_tensor_parallel_size = additional_config.get(
-                "expert_tensor_parallel_size", 1)
-        init_ascend_model_parallel(parallel_config.tensor_parallel_size,
-                                   parallel_config.pipeline_parallel_size,
-                                   expert_tensor_parallel_size)
+        init_ascend_model_parallel(
+            parallel_config.expert_parallel_size,
+            parallel_config.expert_tensor_parallel_size,
+            parallel_config.world_size_across_dp,
+        )
         ensure_kv_transfer_initialized(vllm_config)
 
 

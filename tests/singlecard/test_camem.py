@@ -18,12 +18,16 @@
 #
 import os
 
+import pytest
 import torch
 from vllm import LLM, SamplingParams
 from vllm.utils import GiB_bytes
 
 from tests.utils import fork_new_process_for_each_test
 from vllm_ascend.device_allocator.camem import CaMemAllocator
+
+if os.getenv("VLLM_USE_V1") == "1":
+    pytest.skip("Skip in vllm v1", allow_module_level=True)
 
 
 @fork_new_process_for_each_test
@@ -61,7 +65,6 @@ def test_basic_camem():
 
 @fork_new_process_for_each_test
 def test_end_to_end():
-    os.environ["VLLM_USE_V1"] = "0"
     free, total = torch.npu.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
     llm = LLM("Qwen/Qwen2.5-0.5B-Instruct", enable_sleep_mode=True)
