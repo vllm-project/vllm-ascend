@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
+import gc
 import logging
 import os
 from typing import TYPE_CHECKING, Optional, Tuple
@@ -24,6 +25,7 @@ import vllm.envs as envs
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
+import vllm_ascend.envs as ascend_envs
 from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
 from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD, update_aclgraph_sizes
 
@@ -46,6 +48,7 @@ else:
     FlexibleArgumentParser = None
 
 os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
+os.environ["ACL_OP_INIT_MODE"] = ascend_envs.VLLM_ASCEND_ACL_OP_INIT_MODE
 
 
 class NPUPlatform(Platform):
@@ -117,6 +120,12 @@ class NPUPlatform(Platform):
         return torch.npu.mem_get_info()
 
     @classmethod
+    def clear_npu_memory(cls):
+        gc.collect()
+        torch.npu.empty_cache()
+        torch.npu.reset_peak_memory_stats()
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         # initialize ascend config from vllm additional_config
         ascend_config = init_ascend_config(vllm_config)
@@ -133,7 +142,7 @@ class NPUPlatform(Platform):
 
             # NOTE: When enable_expert_parallel is True, we follow vLLM convention:
             # ep_size = world_size, which means expert_tensor_parallel_size must be 1
-            if ascend_config.expert_tensor_parallel_size > 1 and not parallel_config.enable_expert_parallel:
+            if ascend_config.expert_tensor_parallel_size > 0 and not parallel_config.enable_expert_parallel:
                 parallel_config.expert_tensor_parallel_size = ascend_config.expert_tensor_parallel_size
 
             # Calculate expert parallel size based on world size
