@@ -1027,8 +1027,9 @@ class AscendFusedMoE(FusedMoE):
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+        # NOTE: multistream only effective when `VLLM_ENABLE_MC2` is on
         self.enable_multistream_shared_expert = \
-            ascend_config.torchair_graph_config.enable_multistream_shared_expert
+            ascend_config.torchair_graph_config.enable_multistream_shared_expert and VLLM_ENABLE_MC2
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
