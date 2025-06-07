@@ -441,7 +441,6 @@ class MooncakeConnectorWorker:
             hostname: str,
             device_name: Optional[str],
     ) -> None:
-        pass
         """Initialize the mooncake instance."""
         ret_value = self.engine.initialize(
             hostname,
@@ -582,11 +581,10 @@ class MooncakeConnectorWorker:
         ready_event.wait()
 
     def _register(self, ptr, length):
-        pass
-        # ret_value = self.engine.register_memory(ptr, length)
-        # if ret_value != 0:
-        #     logger.error("Mooncake memory registration failed.")
-        #     raise RuntimeError("Mooncake memory registration failed.")
+        ret_value = self.engine.register_memory(ptr, length)
+        if ret_value != 0:
+            logger.error("Mooncake memory registration failed.")
+            raise RuntimeError("Mooncake memory registration failed.")
 
     def add_remote_agent(self, agent_meta: MooncakeAgentMetadata):
         engine_id = agent_meta.engine_id
@@ -796,7 +794,6 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
         if ctx is not None:
             ctx.destroy(linger=0)
 
-
 def get_local_ip_by_remote() -> str:
     # try ipv4
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -806,16 +803,23 @@ def get_local_ip_by_remote() -> str:
     except Exception:
         pass
 
+    try:
+        hostname = socket.gethostname()
+        ip = socket.gethostbyname(hostname)
+        if ip and ip != "127.0.0.1" and ip != "0.0.0.0":
+            return ip
+    except Exception:
+        pass
+
     # try ipv6
     try:
         s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
         # Google's public DNS server, see
         # https://developers.google.com/speed/public-dns/docs/using#addresses
-        s.connect(("8:8:8:8", 80))  # Doesn't need to be reachable
+        s.connect(("2001:4860:4860::8888", 80))  # Doesn't need to be reachable
         return s.getsockname()[0]
     except Exception:
         raise ValueError("Can not get local ip")
-
 
 def group_concurrent_contiguous(src: List[int], dst: List[int]
                                 ) -> Tuple[List[npt.NDArray[np.int64]], List[npt.NDArray[np.int64]]]:
