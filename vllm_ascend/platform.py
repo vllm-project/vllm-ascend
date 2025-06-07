@@ -142,7 +142,11 @@ class NPUPlatform(Platform):
 
             # NOTE: When enable_expert_parallel is True, we follow vLLM convention:
             # ep_size = world_size, which means expert_tensor_parallel_size must be 1
-            if ascend_config.expert_tensor_parallel_size > 0 and not parallel_config.enable_expert_parallel:
+            if parallel_config.enable_expert_parallel:
+                parallel_config.expert_tensor_parallel_size = 1
+            # NOTE: When enable_expert_parallel is False and param `asceend_config.expert_tensor_parallel_size`
+            # is configured, use ascend_config
+            elif ascend_config.expert_tensor_parallel_size > 0:
                 parallel_config.expert_tensor_parallel_size = ascend_config.expert_tensor_parallel_size
 
             # Calculate expert parallel size based on world size
