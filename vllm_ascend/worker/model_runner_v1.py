@@ -2054,6 +2054,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         acl_format = ACL_FORMAT_FRACTAL_NZ if is_310p(
         ) else ACL_FORMAT_FRACTAL_ND
         kv_caches: Dict[str, torch.Tensor] = {}
+        def align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
+            data_ptr = tensor.data_ptr()
+            aligned_addr = (data_ptr + alignment - 1) // alignment * alignment
+            offset = (aligned_addr - data_ptr) // tensor.element_size()
+            return tensor[int(offset):]
 
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
