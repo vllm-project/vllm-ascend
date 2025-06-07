@@ -54,8 +54,8 @@ class TorchairGraphConfig:
             "graph_batch_sizes", [])
         self.graph_batch_sizes_init = torchair_graph_config.get(
             "graph_batch_sizes_init", False)
-        self.enable_multistream_shared_expert = torchair_graph_config.get(
-            "enable_multistream_shared_expert", False)
+        self.enable_multistream_moe = torchair_graph_config.get(
+            "enable_multistream_moe", False)
         self.enable_view_optimize = torchair_graph_config.get(
             "enable_view_optimize", True)
 

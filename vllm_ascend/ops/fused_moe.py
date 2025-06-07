@@ -1054,8 +1054,8 @@ class AscendFusedMoE(FusedMoE):
 
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         # NOTE: multistream only effective when `VLLM_ENABLE_MC2` is on
-        self.enable_multistream_shared_expert = \
-            ascend_config.torchair_graph_config.enable_multistream_shared_expert and VLLM_ENABLE_MC2
+        self.enable_multistream_moe = \
+            ascend_config.torchair_graph_config.enable_multistream_moe and VLLM_ENABLE_MC2
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
@@ -1152,7 +1152,7 @@ class AscendFusedMoE(FusedMoE):
             global_redundant_expert_num=self.global_redundant_expert_num,
             **kwargs)
 
-        if self.enable_multistream_shared_expert and not is_prefill:
+        if self.enable_multistream_moe and not is_prefill:
             hidden_states, shared_output = hidden_states
 
         if self.dp_size > 1:
@@ -1177,7 +1177,7 @@ class AscendFusedMoE(FusedMoE):
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
-        if self.enable_multistream_shared_expert and not is_prefill:
+        if self.enable_multistream_moe and not is_prefill:
             return hidden_states, shared_output
         return hidden_states
 

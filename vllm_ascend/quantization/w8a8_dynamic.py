@@ -77,7 +77,7 @@ def apply_mlp(hidden_states: torch.Tensor,
     shared_experts = kwargs.get('shared_experts', None)
     if shared_experts:
         shared_gate_up = kwargs.get('shared_gate_up', None)
-        with tng.scope.npu_stream_switch('cv'):
+        with tng.scope.npu_stream_switch('moe_secondary'):
             tng.scope.npu_wait_tensor(shared_gate_up[0], hidden_states)
             shared_act = shared_experts.act_fn(shared_gate_up)
 
@@ -111,7 +111,7 @@ def apply_mlp(hidden_states: torch.Tensor,
         output_dtype=w2_scale.dtype)[0]
 
     if shared_experts:
-        with tng.scope.npu_stream_switch('cv'):
+        with tng.scope.npu_stream_switch('moe_secondary'):
             tng.scope.npu_wait_tensor(shared_act[0], hidden_states)
             shared_output, _ = shared_experts.down_proj(shared_act)
 
@@ -174,7 +174,7 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
     shared_experts = kwargs.get('shared_experts', None)
     if shared_experts:
         shared_hidden_states = kwargs.get('shared_hidden_states', None)
-        with tng.scope.npu_stream_switch('cv'):
+        with tng.scope.npu_stream_switch('moe_secondary'):
             tng.scope.npu_wait_tensor(shared_hidden_states, hidden_states)
             shared_gate_up, _ = shared_experts.gate_up_proj(
                 shared_hidden_states)
@@ -186,9 +186,6 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
     # comm_stream.wait_stream(torch.npu.current_stream())
     expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[
         0:5]
-
-    if quant_mode == 0:
-        dynamic_scale = None
 
     # `expand_x` will be disposed in the `apply_mlp` function
     down_out_list = apply_mlp(expand_x,

@@ -226,6 +226,8 @@ class CustomDeepseekV2MoE(nn.Module):
                 reduce_results=True,
                 prefix=f"{prefix}.shared_experts",
             )
+        else:
+            self.shared_experts = None  # type: ignore
         CustomDeepseekV2MoE.top_k = config.num_experts_per_tok
 
         self.dp_size = get_dp_group().world_size
@@ -239,8 +241,8 @@ class CustomDeepseekV2MoE(nn.Module):
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         # NOTE: multistream only effective when `VLLM_ENABLE_MC2` is on
-        self.enable_multistream_shared_expert = \
-            ascend_config.torchair_graph_config.enable_multistream_shared_expert and VLLM_ENABLE_MC2
+        self.enable_multistream_moe = \
+            ascend_config.torchair_graph_config.enable_multistream_moe and VLLM_ENABLE_MC2
 
     def forward(
             self,
@@ -260,12 +262,11 @@ class CustomDeepseekV2MoE(nn.Module):
             enable_force_load_balance = False
             if hasattr(attn_metadata, 'with_prefill_across_dp'):
                 is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
-
         num_tokens, hidden_size = hidden_states.shape
 
-        multistream = self.enable_multistream_shared_expert and not is_prefill
+        multistream = self.enable_multistream_moe and not is_prefill
 
-        old_hidden_states = hidden_states.clone()
+        old_hidden_states = hidden_states
 
         if self.tp_size > 1:
             if (VLLM_ENABLE_MC2
@@ -314,11 +315,9 @@ class CustomDeepseekV2MoE(nn.Module):
             else:
                 hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
-        if self.n_shared_experts is not None:
+        if self.shared_experts is not None:
             if not multistream:
                 shared_output = self.shared_experts(old_hidden_states)
-
-        if shared_output is not None:
             hidden_states = hidden_states + shared_output
 
         return hidden_states.view(num_tokens, hidden_size)
