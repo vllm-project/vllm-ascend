@@ -70,13 +70,13 @@ jobs:
         run: |
           sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
           apt-get update -y
-          apt install git curl -y
+          apt install -y gcc g++ libnuma-dev git curl
 
       - name: Config OS mirrors - openEuler
         if: ${{ endsWith(matrix.vllm_verison, '-openeuler') }}
         run: |
           yum update -y
-          yum install git curl -y
+          yum install -y gcc g++ numactl-devel git curl
 
       - name: Config pip mirrors
         run: |
@@ -88,15 +88,14 @@ jobs:
       - name: Run vllm-ascend/tests/e2e/run_doctests.sh
         run: |
           # PWD: /__w/vllm-ascend/vllm-ascend
-          # Address old branch like v0.7.3:
-          if [ ! -d /vllm-workspace/vllm-ascend/tests/e2e ]; then
-            echo "Warning: the doctest path doesn't exists, copy now"
-            cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
-          fi
+          echo "Replacing /vllm-workspace/vllm-ascend/tests/e2e ..."
+          rm -rf /vllm-workspace/vllm-ascend/tests/e2e
+          mkdir -p /vllm-workspace/vllm-ascend/tests
+          cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
 
           # Simulate container to enter directory
           cd /workspace
-
           # Run real test
           echo "Test:"
-          /vllm-workspace/vllm-ascend/tests/e2e/run_doctests.sh
+          /vllm-workspace/vllm-ascend/tests/e2e/run_doctests.sh "${{ matrix.vllm_verison }}"
+

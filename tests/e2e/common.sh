@@ -15,6 +15,7 @@ _err() { _red "Error: $*" && exit 1; }
 CURL_TIMEOUT=1
 CURL_COOLDOWN=5
 CURL_MAX_TRIES=120
+VENV_PATH=/tmp/vllm_venv
 
 function wait_url_ready() {
   local serve_name="$1"
@@ -45,7 +46,37 @@ function wait_for_exit() {
     _info "===> Wait for ${VLLM_PID} to exit."
     sleep 1
   done
-  _info "===> Wait for ${VLLM_PID} to exit."
+  _info "===> Process ${VLLM_PID} has exited."
+}
+
+function check_npus() {
+  # shellcheck disable=SC2155
+  read npu_count npu_type <<< $(python3 -c "import torch.npu; print(torch.npu.device_count(), torch.npu.get_device_name(0))")
+
+  if [[ -z "$npu_count" || "$npu_count" -eq 0 ]]; then
+    _warn "Need at least 1 NPU to run"
+    exit 1
+  else
+    _info "Found NPU conut: $npu_count"
+  fi
+  _info "NPU type is: $npu_type"
+}
+
+function clean_venv() {
+  if [[ -n "$VENV_PATH" && -d "$VENV_PATH" ]]; then
+    _info "Cleaning up default virtual env path: ${VENV_PATH}"
+    deactivate || true
+    rm -rf "$VENV_PATH"
+  fi
+}
+
+function create_vllm_venv() {
+  # make a clean env path
+  clean_venv
+  _info "Creating vllm virtual environment at ${VENV_PATH}"
+  python3 -m venv ${VENV_PATH}
+  source ${VENV_PATH}/bin/activate
 }
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+
