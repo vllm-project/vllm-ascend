@@ -908,7 +908,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
          sample_indices) = (self._process_reqs(scheduler_output,
                                                intermediate_tensors))
         logits = self.model.compute_logits(hidden_states[sample_indices], None)
-        self.eplb_loader.update_expert_map(reqs)
+        self.eplb_loader.update_expert_map_and_weight(reqs)
 
         # Apply structured output bitmasks if present
         if scheduler_output.grammar_bitmask is not None:

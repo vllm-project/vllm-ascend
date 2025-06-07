@@ -61,6 +61,9 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
         if self.state != 0:
             return -1
 
+        if not (expert_transfer_info or expert_pull_info):
+            return -1
+
         self.updated_expert_map = updated_expert_map
 
         self.layer_id = layer_id
@@ -90,7 +93,7 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
         self.state = 2
         return 0
 
-    def update_expert_map(self, reqs):
+    def update_expert_map_and_weight(self, reqs):
         if self.state != 2:
             return -1
         for req in reqs:
