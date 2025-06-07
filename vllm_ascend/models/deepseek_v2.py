@@ -398,6 +398,9 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             mscale = yarn_get_mscale(scaling_factor, float(mscale_all_dim))
             self.scaling = self.scaling * mscale * mscale
 
+        self.prefix = prefix
+        self.debug_layer_idx = int(self.prefix.split(".")[-2])
+
         # In the MLA backend, kv_cache includes both k_c and
         # pe (i.e. decoupled position embeddings). In particular,
         # the concat_and_cache_mla op requires
@@ -426,10 +429,8 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
             o_proj=self.o_proj,
+            debug_layer_idx=self.debug_layer_idx,
         )
-
-        self.prefix = prefix
-        self.debug_layer_idx = int(self.prefix.split(".")[-2])
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
