@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import torh.distinguish as dist
+import torch.distributed as dist
 
 from vllm_ascend.eplb.adaptor.abstract_adaptor import EplbAdaptor
 from vllm.logger import logger

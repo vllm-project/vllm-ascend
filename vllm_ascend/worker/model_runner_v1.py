@@ -25,7 +25,6 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 from multiprocessing import Manager
-import torh.distinguish as dist
 
 import numpy as np
 import numpy.typing as npt
@@ -336,8 +335,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         #     self.enable_eplb = additional_config.get("enable_eplb", False)
 
         if self.enable_eplb == True:
-            eplb_adaptor = VllmEplbAdaptor(self.model)
-            self.eplb_updator = EplbUpdator(eplb_adaptor)
+            self.eplb_adaptor = None
+            self.eplb_updator = EplbUpdator()
 
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
@@ -976,6 +975,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         )
 
         if self.enable_eplb:
+            if self.eplb_adaptor == None:
+                self.eplb_adaptor = VllmEplbAdaptor(self.model)
+                self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.do_eplb()
 
         return model_runner_output

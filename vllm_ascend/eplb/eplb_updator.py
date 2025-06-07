@@ -22,9 +22,11 @@ from vllm_ascend.eplb.core.worker.eplb_worker import EplbProcess
 
 class EplbUpdator:
 
-    def __init__(self, adaptor):
-        self.adaptor = adaptor
+    def __init__(self):
         self.init_eplb()
+    
+    def set_adaptor(self, adaptor):
+        self.adaptor = adaptor
     
     def init_eplb(self):
 
