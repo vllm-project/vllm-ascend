@@ -37,6 +37,7 @@ from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed.kv_transfer import has_kv_transfer_group
 from vllm.distributed.parallel_state import get_dp_group, get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
@@ -1484,8 +1485,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # maximum num_tokens.
         num_reqs = self.scheduler_config.max_num_seqs
         num_tokens = self.max_num_tokens
-        min_tokens_per_req = num_tokens // num_reqs
+        # TODO: Decoding doesn't need `max_num_tokens` for profiles; just set
+        # `max_num_seqs`.  However, for MTP, this might require adjustment.
+        if has_kv_transfer_group() and \
+            self.vllm_config.kv_transfer_config.is_kv_consumer:
+            num_tokens = num_reqs
 
+        min_tokens_per_req = num_tokens // num_reqs
         num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
         num_scheduled_tokens_list[-1] += num_tokens % num_reqs
         assert sum(num_scheduled_tokens_list) == num_tokens
@@ -1499,7 +1505,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # TODO: call maybe_profile_with_lora()
 
         # Trigger compilation for general shape.
-        hidden_states = self._dummy_run(self.max_num_tokens)
+        hidden_states = self._dummy_run(num_tokens)
 
         if get_pp_group().is_last_rank:
             hidden_states = hidden_states[logit_indices]
