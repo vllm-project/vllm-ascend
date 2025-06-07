@@ -1673,6 +1673,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         """
         import torch_npu
         kv_caches: Dict[str, torch.Tensor] = {}
+        def align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
+            data_ptr = tensor.data_ptr()
+            aligned_addr = (data_ptr + alignment - 1) // alignment * alignment
+            offset = (aligned_addr - data_ptr) // tensor.element_size()
+            return tensor[int(offset):]
 
         # Remove this after we drop 0.9.0 support
         if vllm_version_is("0.9.0"):
@@ -1745,10 +1750,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         rope_allocate_shape_alignment = rope_allocate_shape + alignment
                         nope_cache_shape = (num_blocks, block_size, num_kv_heads, nope_dim)
                         rope_cache_shape = (num_blocks, block_size, num_kv_heads, rope_dim)
-                        rope_cache = torch.zeros(nope_allocate_shape_alignment, dtype=dtype, device=self.device)
-                        nope_cache = torch.zeros(rope_allocate_shape_alignment, dtype=dtype, device=self.device)
-                        rope_cache = align_memory(nope_cache, alignment)[:nope_allocate_shape].view(nope_cache_shape)
-                        nope_cache = align_memory(rope_cache, alignment)[:rope_allocate_shape].view(rope_cache_shape)
+                        nope_cache = torch.zeros(nope_allocate_shape_alignment, dtype=dtype, device=self.device)
+                        rope_cache = torch.zeros(rope_allocate_shape_alignment, dtype=dtype, device=self.device)
+                        nope_cache = align_memory(nope_cache, alignment)[:nope_allocate_shape].view(nope_cache_shape)
+                        rope_cache = align_memory(rope_cache, alignment)[:rope_allocate_shape].view(rope_cache_shape)
                         kv_caches[layer_name] = (nope_cache, rope_cache)
                     else:
                         num_caches = kv_cache_shape[0]
