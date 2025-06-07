@@ -22,8 +22,9 @@ import vllm.distributed
 import vllm.envs as envs
 from torch.distributed import ProcessGroup
 from vllm.config import ParallelConfig, VllmConfig
+from vllm.distributed.utils import \
+    stateless_init_torch_distributed_process_group
 from vllm.v1.engine.core import DPEngineCoreProc
-from vllm.distributed.utils import stateless_init_torch_distributed_process_group
 
 
 def ascend_destroy_model_parallel():

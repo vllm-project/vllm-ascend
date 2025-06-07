@@ -22,9 +22,9 @@ from datetime import timedelta
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
+import vllm.envs as envs
 from torch.distributed import ProcessGroup
 from torch.distributed.distributed_c10d import PrefixStore
-import vllm.envs as envs
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
