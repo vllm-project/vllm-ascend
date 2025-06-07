@@ -16,5 +16,8 @@ requires = [
     "torch>=2.5.1",
     "torchvision<0.21.0",
     "wheel",
+    "msgpack",
+    "quart",
+    "numba",
 ]
 build-backend = "setuptools.build_meta"
