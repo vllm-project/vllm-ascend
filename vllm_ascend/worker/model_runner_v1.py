@@ -1392,7 +1392,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         def align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
             data_ptr = tensor.data_ptr()
             aligned_addr = (data_ptr + alignment - 1) // alignment * alignment
-            offset = (aligned_addr - data_ptr) // tensor.element_size
+            offset = (aligned_addr - data_ptr) // tensor.element_size()
             return tensor[int(offset):]
 
         # Remove this after we drop 0.9.0 support
