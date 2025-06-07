@@ -104,7 +104,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # that the correct package is installed.
     "VLLM_VERSION":
     lambda: os.getenv("VLLM_VERSION", None),
-<<<<<<< HEAD
     # Whether to enable the trace recompiles from pytorch.
     "VLLM_ASCEND_TRACE_RECOMPILES":
     lambda: bool(int(os.getenv("VLLM_ASCEND_TRACE_RECOMPILES", '0'))),
