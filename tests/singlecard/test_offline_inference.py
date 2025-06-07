@@ -83,7 +83,7 @@ def test_multimodal(model, prompt_template, vllm_runner):
                                    max_tokens=64)
 
 
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_TOPK_OPTIMZE": "1"})
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "1"})
 def test_models_topk() -> None:
     example_prompts = [
         "Hello, my name is",

@@ -57,8 +57,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_ENABLE_MC2", '0'))),
     # Whether to enable the topk optimization. It's disabled by default for experimental support
     # We'll make it enabled by default in the future.
-    "VLLM_ASCEND_ENABLE_TOPK_OPTIMZE":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_OPTIMZE", '0'))),
+    "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE", '0'))),
     # Whether to use LCCL communication. If not set, the default value is False.
     "USING_LCCL_COM":
     lambda: bool(int(os.getenv("USING_LCCL_COM", '0'))),
