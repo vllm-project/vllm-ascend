@@ -220,6 +220,8 @@ async def handle_completions(request: Request):
         # Extract the needed fields
         response_json = response.json()
         kv_transfer_params = response_json.get('kv_transfer_params', {})
+        logger.info("**** prefile end, kv_transfer_params: %s", kv_transfer_params)
+
         if kv_transfer_params:
             req_data["kv_transfer_params"] = kv_transfer_params
 

@@ -21,6 +21,8 @@ import hashlib
 import pickle
 import struct
 
+from concurrent.futures import Future
+
 from vllm_ascend import envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -46,9 +48,13 @@ GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
 
 
+global MOONCAKE_BASE_PORT
+#MOONCAKE_BASE_PORT = int(os.environ.get('MOONCAKE_BASE_PORT', 10000))
+BASE_PORT = int(os.getenv("VLLM_BASE_PORT", "8790"))
+
+
 class MooncakeAgentMetadata(msgspec.Struct, omit_defaults=True, dict=True):
     engine_id: str
-    tp_rank: int
     kv_caches_base_addr: list[int]
     num_blocks: int
 
@@ -93,6 +99,17 @@ class MooncakeConnectorV1_barebone(KVConnectorBase_V1):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
         assert vllm_config.kv_transfer_config is not None
         self.engine_id = vllm_config.kv_transfer_config.engine_id
+
+        # self.rank = get_tensor_model_parallel_rank()
+        # self.side_channel_host = get_local_ip_by_remote()  #变量名
+        # self.max_device_id = vllm_config.parallel_config.tensor_parallel_size * \
+        #                      vllm_config.parallel_config.data_parallel_size
+        # # 单边port用于TE上进行数据面的传输
+        # self.side_channel_port = (
+        #         MOONCAKE_BASE_PORT +
+        #         vllm_config.parallel_config.data_parallel_rank_local *
+        #         vllm_config.parallel_config.tensor_parallel_size + self.max_device_id + self.rank)
+
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: Optional[MooncakeConnectorScheduler] = \
@@ -178,6 +195,16 @@ class MooncakeConnectorScheduler:
         self.engine_id = engine_id
         self.local_ip = get_ip()
         logger.info("Initializing Mooncake Scheduler %s", engine_id)
+
+        self.side_channel_host = get_local_ip_by_remote()
+        self.max_device_id = vllm_config.parallel_config.tensor_parallel_size * \
+            vllm_config.parallel_config.data_parallel_size
+        
+        # 单边port用于TE上进行数据面的传输
+        self.side_channel_port = (
+                BASE_PORT +
+                vllm_config.parallel_config.data_parallel_rank_local *
+                vllm_config.parallel_config.tensor_parallel_size)
 
         # Requests that need to start recv.
         # New requests are added by update_state_after_alloc in
@@ -294,8 +321,8 @@ class MooncakeConnectorScheduler:
             do_remote_decode=False,
             remote_block_ids=computed_block_ids,
             remote_engine_id=self.engine_id,
-            remote_host=self.local_ip,
-            remote_port=envs.VLLM_LLMDD_CHANNEL_PORT,
+            remote_host=self.side_channel_host,
+            remote_port=self.side_channel_port,
         )
 
 
@@ -303,51 +330,66 @@ class MooncakeConnectorWorker:
     """Implementation of Worker side methods"""
 
     def __init__(self, vllm_config: VllmConfig, engine_id: str):
-        self._prefill_tp_size = 1
-        self._decode_tp_size = 1
+        self._get_prefill_decode_size(vllm_config)
         if self._prefill_tp_size < self._decode_tp_size:
             raise ValueError(
                 f"prefill_tp_size: {self._prefill_tp_size} must be "
-                f"greater than or equal to the decode_tp_size: {self._decode_tp_size}"
-            )
+                f"greater than or equal to the decode_tp_size: {self._decode_tp_size}")
 
         if TransferEngine is None:
             logger.error("mooncake is not available")
             raise RuntimeError("mooncake is not available")
         logger.info("Initializing Mooncake work %s", engine_id)
-
-        if vllm_config.kv_transfer_config.kv_role == "kv_producer":
-            self.port = ":15272"
-        elif vllm_config.kv_transfer_config.kv_role == "kv_consumer":
-            self.port = ":14012"
-
         self.engine = TransferEngine()
-        self.hostname = get_local_ip_by_remote()
+
+        # Metadata.
+        self.engine_id = engine_id
+        self.tp_rank = get_tensor_model_parallel_rank()
+        # self.world_size = get_tensor_model_parallel_world_size()
+        self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+        self.tp_group = get_tp_group()
+        self.dp_rank = vllm_config.parallel_config.data_parallel_rank_local
+        self.dp_size = vllm_config.parallel_config.data_parallel_size
+        self.kv_caches: dict[str, torch.Tensor] = {}
+        self.side_channel_host = get_local_ip_by_remote()
+        self.max_device_id = self.tp_size * self.dp_size
+        # 单边port用于TE上进行数据面的传输
+        # self.side_channel_port = (
+        #     BASE_PORT +
+        #     self.dp_rank * self.tp_size + self.tp_rank + self.max_device_id)
+        self.side_channel_port = (
+                BASE_PORT +
+                vllm_config.parallel_config.data_parallel_rank_local *
+                vllm_config.parallel_config.tensor_parallel_size)
+
+        # get tp device id
+        # self.device_id = (self.dp_rank * self.tp_size + self.tp_rank)
+        device_ids = os.getenv("ASCEND_RT_VISIBLE_DEVICES", "-1")
+        logger.info(f"os getenv ASCEND_RT_VISIBLE_DEVICES: {device_ids}")
+        device_ids = device_ids.split(',')
+        assert len(device_ids) > self.tp_rank
+        self.device_id = device_ids[self.tp_rank]
+        logger.info(f"dp_rank {self.dp_rank} "
+                    f"tp_rank {self.tp_rank} device_ids {self.device_id}")
+
         self.ib_device = None
         self._initialize(
-            hostname=self.hostname,
+            hostname=self.side_channel_host+':' +
+                     str(self.side_channel_port + self.tp_rank + self.max_device_id)+':'+'npu_'+self.device_id,
             device_name=self.ib_device,
         )
 
         # Map of engine_id -> agent_name.
-        self._remote_engine: dict[str, tuple] = {}
-
-        # Metadata.
-        self.engine_id = engine_id
-        self.rank = get_tensor_model_parallel_rank()
-        self.world_size = get_tensor_model_parallel_world_size()
-        self.tp_group = get_tp_group()
-
-        self.kv_caches: dict[str, torch.Tensor] = {}
+        self._remote_engine: List = []
 
         # Map of engine_id -> kv_caches_base_addr
         self.kv_caches_base_addr: dict[str, list[int]] = {}
 
         self.num_layers = 0
 
-        # Complete transfer tracker. Used by the rank 0 to track finished
-        # transactions on ranks 1 to N-1.
-        # [req_id -> count]
+        # # Complete transfer tracker. Used by the rank 0 to track finished
+        # # transactions on ranks 1 to N-1.
+        # # [req_id -> count]
         self._done_recving_count: defaultdict[str,
                                               int] = defaultdict(lambda: 0)
         self._done_sending_count: defaultdict[str,
@@ -358,7 +400,31 @@ class MooncakeConnectorWorker:
 
         self.vllm_config = vllm_config
         self.block_size = vllm_config.cache_config.block_size
+
+        # create async thread pool
+        self.futures: dict[str, list[Future]] = {}
+        self.req_record: dict[str, tuple[str, int]] = {}
         
+
+    def _get_prefill_decode_size(self, vllm_config: VllmConfig):
+        # get prefill tp size from extra config
+        prefill_parallel_config: dict[
+            str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("prefill", {})
+        
+        assert "tp_size" in prefill_parallel_config.keys()
+        self._prefill_tp_size = prefill_parallel_config["tp_size"]
+
+        assert "dp_size" in prefill_parallel_config.keys()
+        self._prefill_dp_size = prefill_parallel_config["dp_size"]
+
+        # get decode tp size from extra config
+        decode_parallel_config: dict[
+            str, Any] = vllm_config.kv_transfer_config.get_from_extra_config("decode", {})
+        assert "tp_size" in decode_parallel_config.keys()
+        self._decode_tp_size = decode_parallel_config["tp_size"]
+        assert "dp_size" in decode_parallel_config.keys()
+        self._decode_dp_size = decode_parallel_config["dp_size"]
+
 
     def _initialize(
         self,
@@ -372,19 +438,35 @@ class MooncakeConnectorWorker:
         with open(rank_table_path, "r", encoding="utf-8") as f:
             mooncake_config = json.load(f)
 
-        self.engine.initialize_ext(
-            hostname + self.port,
-            # "P2PHANDSHAKE",  ##TODO need to debug with new cpp code
-            mooncake_config["metadata_server"],   # like "http://xx.xx.xx.xx:8080/metadata"
-            mooncake_config["protocol"],          # like "ascend"
-            device_name if device_name is not None else "",
-            mooncake_config["metadata_backend"],  # like "http"
-            ##TODO local_rank need config, and cpp code need adpat
-            0,
+        # self.engine.initialize_ext(
+        #     hostname + self.port,   
+        #     #TODO观察
+        #     "P2PHANDSHAKE", 
+        #     mooncake_config["metadata_server"],   # like "http://xx.xx.xx.xx:8080/metadata"
+        #     mooncake_config["protocol"],          # like "ascend"
+        #     device_name if device_name is not None else "",
+        #     mooncake_config["metadata_backend"],  # like "http"
+        #     ##TODO local_rank need config, and cpp code need adpat
+        #     0,
+        # )
+        assert envs.ASCEND_RT_VISIBLE_DEVICES, "Please set path of rank_table to env variable ASCEND_RT_VISIBLE_DEVICES"
+        device_id = envs.ASCEND_RT_VISIBLE_DEVICES  #TODO 此处为单卡临时处理
+        device_name if device_name is not None else ""
+        logger.info("******self.engine.initialize now, para1: %s, para2: P2PHANDSHAKE, para3: %s, para4: %s", hostname, mooncake_config["protocol"], device_name)
+        ret_value = self.engine.initialize(
+            hostname, 
+            "P2PHANDSHAKE",
+            mooncake_config["protocol"],
+            device_name
         )
 
+        if ret_value != 0:
+            logger.error("Mooncake Transfer Engine initialization failed.")
+            raise RuntimeError("Mooncake Transfer Engine initialization failed.")
+        
+
     def _message_listener(self, metadata: MooncakeAgentMetadata,
-                          ready_event: threading.Event, rank: int):
+                          ready_event: threading.Event, tp_rank: int):
         """Background thread for getting new Mooncake handshakes."""
 
         encoder = msgspec.msgpack.Encoder()
@@ -397,9 +479,12 @@ class MooncakeConnectorWorker:
         # NOTE(rob): we need each rank to have a unique port. This
         # hack to keeps us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
-        port = int(envs.VLLM_LLMDD_CHANNEL_PORT) + rank
-        path = make_zmq_path("tcp", self.hostname, port)
-        logger.debug("Starting listening on path: %s", path)
+        #handshake_port = self.side_channel_port - self.max_device_id
+        handshake_port = self.side_channel_port + tp_rank
+        
+        path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
+
+        logger.info("Starting listening on path: %s", path)
         with zmq_ctx(zmq.ROUTER, path) as sock:
             ready_event.set()
             while True:
@@ -416,15 +501,15 @@ class MooncakeConnectorWorker:
                         "Connection listener got unexpected message %s", msg)
                 ready_event.set()
 
-    def _message_req(self, host: str, port: int, remote_tp_rank: int,
-                     msg: tuple[bytes, str]):
+    def _message_req(self, host: str, port: int, msg: tuple[bytes, str]):
         """send a normal message with a remote instance."""
 
         start_time = time.perf_counter()
         # NOTE(rob): we need each rank to have a unique port. This is
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
-        path = make_zmq_path("tcp", host, int(port) + int(remote_tp_rank))
+        remote_handshake_port = port - self.max_device_id
+        path = make_zmq_path("tcp", host, port)  #TODO 确认remote_tp_rank传值是否有问题
         logger.debug("Querying metadata on path: %s", path)
         with zmq_ctx(zmq.REQ, path) as sock:
             # Send msg to remote. It will recv a msg in shakehand case and other would not
@@ -482,7 +567,7 @@ class MooncakeConnectorWorker:
         logger.info("Per layer kv cache size: %s", first_kv_cache.shape)
         self.kv_caches = kv_caches
         kv_caches_base_addr = []
-
+        
         for cache_or_caches in kv_caches.values():
             # Normalize to always be a list of caches
             cache_list = [cache_or_caches] if use_mla else cache_or_caches
@@ -497,20 +582,20 @@ class MooncakeConnectorWorker:
         # After KV Caches registered, listen for new connections.
         metadata = MooncakeAgentMetadata(
             engine_id=self.engine_id,
-            tp_rank=self.rank,
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id],
             num_blocks=self.num_blocks,
         )
         ready_event = threading.Event()
         self._message_listener_t = threading.Thread(
             target=self._message_listener,
-            args=(metadata, ready_event, self.rank),
+            args=(metadata, ready_event, self.tp_rank),
             daemon=True,
             name="message_listener")
         self._message_listener_t.start()
         ready_event.wait()
 
     def _register(self, ptr, length):
+        logger.info("*--- _register: length: %s, self.num_blocks: %s, self.block_len: %s, ptr: %x", length, self.num_blocks, self.block_len, ptr)
         ret_value = self.engine.register_memory(ptr, length)
         if ret_value != 0:
             logger.error("Mooncake memory registration failed.")
@@ -522,21 +607,45 @@ class MooncakeConnectorWorker:
         if engine_id in self._remote_engine:
             return
 
-        self._remote_engine[engine_id] = (True, )
+        self._remote_engine.append(engine_id)
         self.kv_caches_base_addr[engine_id] = agent_meta.kv_caches_base_addr
 
     def get_finished(self) -> tuple[set[str], set[str]]:
+
+        # get the async transfer completed tasks (done recving)
+        for req in self.futures.keys():
+            success_count = 0
+            try:
+                # 获取每个任务的返回值
+                future = self.futures[req]
+                for trans_task in future:
+                    ret = trans_task.result()
+                    # 假设status为True时表示成功
+                    if ret >= 0:
+                        success_count += 1
+            except Exception as e:
+                # 处理任务中的异常情况
+                logger.error("Mooncake Transfer Engine Return Error.")
+                raise RuntimeError("Mooncake Transfer Engine Return Error.")
+
+            if success_count == len(self.futures[req]):
+                self._done_recving_count[req] += 1
+                msg = (DONE_RECVING_MSG, req)
+                remote_host = self.req_record[req][0]
+                remote_handshake_port = self.req_record[req][1]
+                self._message_req(remote_host, remote_handshake_port, msg)
+
         done_sending = set(self._done_sending_count.keys())
         done_recving = set(self._done_recving_count.keys())
 
-        if self.world_size == 1:
+        if self.tp_size == 1:
             return done_sending, done_recving
 
         # Rank 0: get finished from all other ranks.
-        if self.rank == 0:
+        if self.tp_rank == 0:
             # Keep track of how many other ranks have finished.
             other_ranks_finished_ids: list[str] = []
-            for i in range(1, self.world_size):
+            for i in range(1, self.tp_rank):
                 other_ranks_finished_ids.extend(
                     self.tp_group.recv_object(src=i))
             for req_id in other_ranks_finished_ids:
@@ -548,13 +657,13 @@ class MooncakeConnectorWorker:
             # Return ids that finished on all ranks to the scheduler.
             all_done_recving: set[str] = set()
             for req_id in list(self._done_recving_count.keys()):
-                if self._done_recving_count[req_id] == self.world_size:
+                if self._done_recving_count[req_id] == self.tp_rank:
                     del self._done_recving_count[req_id]
                     all_done_recving.add(req_id)
 
             all_done_sending: set[str] = set()
             for req_id in list(self._done_sending_count.keys()):
-                if (self._done_sending_count[req_id] == self.world_size
+                if (self._done_sending_count[req_id] == self.tp_rank
                         or self._done_sending_count[req_id]
                         == self._decode_tp_size):
                     del self._done_sending_count[req_id]
@@ -570,15 +679,6 @@ class MooncakeConnectorWorker:
             # Unused as only Rank 0 results are sent to scheduler.
             return done_sending, done_recving
 
-    def _get_new_notifs(self) -> set[str]:
-        """Get req_ids which got a remote xfer message."""
-
-        notified_req_ids: set[str] = set()
-        for req_ids in self.engine.get_new_notifs().values():
-            for req_id in req_ids:
-                assert req_id not in notified_req_ids
-                notified_req_ids.add(req_id.decode("utf-8"))
-        return notified_req_ids
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         """
@@ -612,11 +712,14 @@ class MooncakeConnectorWorker:
         request_id: str,
     ):
         # get target tp rank
-        remote_tp_rank = self._get_remote_tp_rank(request_id)
+        remote_handshake_port = remote_port + self._get_remote_tp_rank(request_id)
+        self.req_record[request_id] = (remote_host, remote_handshake_port)
+
         # NOTE(rob): this takes ~2s. We need to get this off the hotpath.
         if dst_engine_id not in self._remote_engine:
+            #remote_handshake_port = remote_port - self.max_device_id
             msg = (b"get_meta_msg", "")
-            self._message_req(remote_host, remote_port, remote_tp_rank, msg)
+            self._message_req(remote_host, remote_handshake_port, msg)
 
         # NOTE(rob): having the staging blocks be on the READER side is
         # not going to work well (since we will have to call rearrange tensors).
@@ -632,9 +735,14 @@ class MooncakeConnectorWorker:
         # just notify P worker that we have the blocks we need.
         num_local_blocks = len(local_block_ids)
         if num_local_blocks == 0:
+            # self._done_recving_count[request_id] += 1
+            # msg = (DONE_RECVING_MSG, request_id)
+            # self._message_req(remote_host, remote_port, remote_tp_rank, msg)
+            # return
             self._done_recving_count[request_id] += 1
+            remote_handshake_port = remote_port - self.max_device_id
             msg = (DONE_RECVING_MSG, request_id)
-            self._message_req(remote_host, remote_port, remote_tp_rank, msg)
+            self._message_req(remote_host, remote_handshake_port, msg)
             return
 
         # Partial prefix cache hit: just read uncomputed blocks.
@@ -642,47 +750,36 @@ class MooncakeConnectorWorker:
         assert num_local_blocks <= num_remote_blocks
         if num_local_blocks < num_remote_blocks:
             remote_block_ids = remote_block_ids[-num_local_blocks:]
-            local_block_ids = local_block_ids[:num_local_blocks]
 
         from concurrent.futures import ThreadPoolExecutor
-        grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
-            remote_block_ids, local_block_ids)
-        success_count = 0
-        futures = []
+        # grouped_remote_block_ids, grouped_local_block_ids = group_concurrent_contiguous(
+        #     remote_block_ids, local_block_ids)
+        # success_count = 0
+        # futures = []
+        grouped_remote_block_ids, grouped_local_block_ids = \
+            group_concurrent_contiguous(remote_block_ids, local_block_ids)
 
         with ThreadPoolExecutor() as executor:
 
-            mooncake_session_id = f"{remote_host}:{remote_port}"
+            # mooncake_session_id = f"{remote_host}:{remote_port}"  # our orinial
+            # TODO only support kv from P to D
+            remote_transfer_port = remote_handshake_port + self._prefill_dp_size * self._prefill_tp_size
+            mooncake_session_id = f"{remote_host}:{remote_transfer_port}"
+            
 
-            for src_layer_base_addr, dst_layer_base_addr in zip(
-                    self.kv_caches_base_addr[self.engine_id],
-                    self.kv_caches_base_addr[dst_engine_id]):
+            for src_layer_base_addr, dst_layer_base_addr in zip(self.kv_caches_base_addr[self.engine_id],
+                                                                self.kv_caches_base_addr[dst_engine_id]):
                 for i in range(len(grouped_remote_block_ids)):
-                    src = src_layer_base_addr + grouped_local_block_ids[i][
-                        0] * self.block_len
-                    dst = dst_layer_base_addr + grouped_remote_block_ids[i][
-                        0] * self.block_len
+                    src = src_layer_base_addr + \
+                        grouped_local_block_ids[i][0] * self.block_len
+                    dst = dst_layer_base_addr + \
+                        grouped_remote_block_ids[i][0] * self.block_len
                     length = len(grouped_local_block_ids[i]) * self.block_len
-                    future = executor.submit(self._transfer_sync,
-                                             mooncake_session_id, src, dst,
-                                             length)
-                    futures.append(future)
-
-            for future in futures:
-                try:
-                    ret = future.result()
-                    if ret >= 0:
-                        success_count += 1
-                except Exception as e:
-                    logger.error("Mooncake Transfer Engine Return Error.")
-                    raise RuntimeError(
-                        "Mooncake Transfer Engine Return Error.")
-
-        if success_count == len(futures):
-            self._done_recving_count[request_id] += 1
-            msg = (DONE_RECVING_MSG, request_id)
-            self._message_req(remote_host, remote_port, remote_tp_rank, msg)
-            return
+                    logger.info("****--- executor.submit, mooncake_session_id: %s, src:%s, dst: %s, length:%s", mooncake_session_id, src, dst, length)
+                    future = executor.submit(
+                        self._transfer_sync, mooncake_session_id, src, dst, length)
+                    print("****--- future: %s", future)
+                    self.futures[request_id].append(future)
 
     def _transfer_sync(self, session_id: str, buffer: int,
                        peer_buffer_address: int, length: int) -> int:
@@ -695,7 +792,7 @@ class MooncakeConnectorWorker:
         return ret
 
     def _get_remote_tp_rank(self, req_id: str) -> int:
-        return self._get_remote_tp_ranks_for_req(req_id)[self.rank]
+        return self._get_remote_tp_ranks_for_req(req_id)[self.tp_rank]
 
     def _get_remote_tp_ranks_for_req(self, req_id: str) -> list[int]:
         if self._prefill_tp_size == self._decode_tp_size:
@@ -703,8 +800,8 @@ class MooncakeConnectorWorker:
 
         seed = string_to_int64_hash(req_id)
         rand = random.Random(seed)
-        sampled_nums = rand.sample(range(self._prefill_tp_size),
-                                   self._decode_tp_size)
+        sampled_nums = rand.sample(
+            range(self._prefill_tp_size), self._decode_tp_size)
         return sampled_nums
 
 
@@ -735,14 +832,22 @@ def get_local_ip_by_remote() -> str:
         s.connect(("8.8.8.8", 80))  # Doesn't need to be reachable
         return s.getsockname()[0]
     except Exception:
-        pass
+        logger.error("get_local_ip_by_remote Error.")
+
+    try:
+        hostname = socket.gethostname()
+        ip = socket.gethostbyname(hostname)
+        if ip and ip != "127.0.0.1" and ip != "0.0.0.0":
+            return ip
+    except Exception:
+        logger.error("get_local_ip_by_remote Error 2.")
 
     # try ipv6
     try:
         s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
         # Google's public DNS server, see
         # https://developers.google.com/speed/public-dns/docs/using#addresses
-        s.connect(("8:8:8:8", 80))  # Doesn't need to be reachable
+        s.connect(("2001:4860:4860::8888", 80))  # Doesn't need to be reachable  # Doesn't need to be reachable
         return s.getsockname()[0]
     except Exception:
         raise ValueError("Can not get local ip")
@@ -758,8 +863,8 @@ def group_concurrent_contiguous(
     if src_indices.size == 0:
         return [], []
 
-    brk = np.where((np.diff(src_indices) != 1)
-                   | (np.diff(dst_indices) != 1))[0] + 1
+    brk = np.where((np.diff(src_indices) != 1) |
+                   (np.diff(dst_indices) != 1))[0] + 1
     src_groups = np.split(src_indices, brk)
     dst_groups = np.split(dst_indices, brk)
 
