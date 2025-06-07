@@ -56,7 +56,7 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
         self.pull_tensor_list = []
         self.mock_flag = True
 
-    def update_expert_weights_update_info(self, expert_transfer_info, expert_pull_info,
+    def generate_expert_d2d_transfer_task(self, expert_transfer_info, expert_pull_info,
         updated_expert_map, layer_id):
         if self.state != 0:
             return -1
@@ -97,7 +97,7 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
             req.wait()
         if self.comm_op_list is not None:
             self.comm_op_list = None
-        self.expert_map[self.layer_id] = self.updated_expert_map
+        self.expert_map[self.layer_id].copy_(self.updated_expert_map)
         for pull_info in self.pull_tensor_list:
             local_expert_id, buffer_tensor_id = pull_info
             self.copy_buffer_tensor(self.layer_id, local_expert_id, buffer_tensor_id)
@@ -132,14 +132,14 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
         if rank_id == 0:
             expert_transfer_info = [(1, 0)]
             expert_pull_info = [(1, 64)]
-            updated_expert_map_list = [-1] + [i for i in range(1, 64)] + [0] + [j for j in [-1] * 128]
+            updated_expert_map_list = [-1] + [i for i in range(1, 64)] + [0] + [j for j in [-1] * 191]
             updated_expert_map = torch.tensor(updated_expert_map_list)
             layer_id = 3
 
         if rank_id == 1:
             expert_transfer_info = [(0, 64)]
             expert_pull_info = [(0, 0)]
-            updated_expert_map_list = [0] + [k for k in [-1] * 63] + [i for i in range(1, 64)] + [j for j in [-1] * 128]
+            updated_expert_map_list = [0] + [k for k in [-1] * 63] + [i for i in range(1, 64)] + [j for j in [-1] * 129]
             updated_expert_map = torch.tensor(updated_expert_map_list)
             layer_id = 3
 

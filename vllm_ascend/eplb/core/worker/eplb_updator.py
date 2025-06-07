@@ -5,7 +5,7 @@
 
 # Input 热度表
 
-# output 
+# output
 # 加载到hbm的 tensor
 
 
@@ -45,10 +45,10 @@ class EplbWorker:
 
     def do_update(self):
         # put data in to queue
-        # in process self.policy.generate_policy() 
+        # in process self.policy.generate_policy()
         # get epxert table && tensor
 
-        # async stream 
+        # async stream
         # D2D
         # H2D
 
@@ -60,7 +60,7 @@ class EplbWorker:
         load_info = self.fetch_and_sum_load_info()
         if load_info is None:
             return
-        
+
         #根据负载信息，获取更新后的专家表
         changed, priority, new_expert_maps = self.calculate_rebalance_experts(load_info)
 
@@ -77,9 +77,40 @@ class EplbWorker:
         self.old_expert_maps = new_expert_maps
         print("EPLB Process complete")
     #
-    def alg(self,new_expert_maps):
-        #根据new_expert_maps，对D2D流程进行编排
-        pass
+    def compose_expert_update_info(self, updated_expert_maps, current_expert_maps):
+        num_layers = current_expert_maps.shape[0]
+        num_ranks = current_expert_maps.shape[1]
+        num_experts = current_expert_maps.shape[2]
+
+        for layer_id in range(num_layers):
+            updated_expert_maps_this_layer = updated_expert_maps[layer_id][:][:]
+            current_expert_maps_this_layer = current_expert_maps[layer_id][:][:]
+
+            expert_send_info_this_layer = dict()
+            expert_pull_info_this_layer = dict()
+
+            dst_rank_indices, experts_to_pull = torch.where((current_expert_maps_this_layer == -1) \
+                & (updated_expert_maps_this_layer != -1))
+
+            src_rank_indices, experts_to_send = torch.where((current_expert_maps_this_layer != -1) \
+                & (updated_expert_maps_this_layer == -1))
+
+            for idx in range(len(dst_rank_indices)):
+                dst_rank_id = dst_rank_indices[idx].item()
+                expert_id = experts_to_pull[idx].item()
+                if dst_rank_id not in expert_pull_info_this_layer:
+                    expert_pull_info_this_layer[dst_rank_id] = []
+
+                candidate_src_rank_indices = src_rank_indices[experts_to_send == expert_id]
+                #TODO: improve selection criterion of npu sending expert_id considering such as intra-node or inter-node...
+                src_rank_id = candidate_src_rank_indices[0].item()
+                if src_rank_id not in expert_send_info_this_layer:
+                    expert_send_info_this_layer[src_rank_id] = []
+
+                expert_send_info_this_layer[src_rank_id].append((dst_rank_id, expert_id))
+                expert_pull_info_this_layer[dst_rank_id].append((src_rank_id, expert_id))
+
+                yield (expert_send_info_this_layer, expert_pull_info_this_layer, updated_expert_maps_this_layer, layer_id)
 
 
     def load_impl(self, new_expert_table):
@@ -120,7 +151,7 @@ class EplbWorker:
 
     def fetch_and_sum_load_info(self):
         """
-        Each time the subprocess is awakened, read the latest moe_load 
+        Each time the subprocess is awakened, read the latest moe_load
         (shape: [num_moe_layers, num_experts_per_layer]) from shared_dict.
         """
         return self.shared_dict.get("moe_load", None)
@@ -133,7 +164,7 @@ class EplbWorker:
         self.shared_dict["expert_maps"] = expert_maps
 
 
-    
+
 class EplbProcess:
     def __init__(self, device_id: int, shared_dict, policy_type: int = 1, enable_d2d: bool = True):
         """
