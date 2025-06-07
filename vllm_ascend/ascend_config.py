@@ -55,6 +55,8 @@ class TorchairGraphConfig:
             "graph_batch_sizes_init", False)
         self.enable_multistream_shared_expert = torchair_graph_config.get(
             "enable_multistream_shared_expert", False)
+        self.enable_view_optimize = torchair_graph_config.get(
+            "enable_view_optimize", True)
 
         if not isinstance(self.graph_batch_sizes, list):
             raise TypeError("graph_batch_sizes must be list[int]")
