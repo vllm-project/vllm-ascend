@@ -32,7 +32,8 @@ from vllm_ascend.utils import dispose_tensor
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 
 
-def apply_mlp(hidden_states: torch.Tensor,
+def apply_mlp(
+              hidden_states: torch.Tensor,
               w1: torch.Tensor,
               w1_scale: torch.Tensor,
               w2: torch.Tensor,
@@ -720,7 +721,8 @@ class AscendW8A8DynamicFusedMoEMethod:
             # according to tp_size before they are feed into fused_moe module.
             # Therefore, all2all is needed no matter how dp/tp is set so as to
             # dispatch/combine tokens.
-            return fused_experts_with_all2all(hidden_states=x,
+            return fused_experts_with_all2all(
+                                              hidden_states=x,
                                               w1=layer.w13_weight,
                                               w1_scale=layer.w13_weight_scale,
                                               w2=layer.w2_weight,
