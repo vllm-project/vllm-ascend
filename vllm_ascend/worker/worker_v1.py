@@ -75,6 +75,9 @@ class NPUWorker(WorkerBase):
                          distributed_init_method=distributed_init_method,
                          is_driver_worker=is_driver_worker)
         # Try to import mindie_turbo to accelerate vLLM inference.
+        local_dp_rank = self.vllm_config.parallel_config.data_parallel_rank_local
+        world_size = self.vllm_config.parallel_config.world_size
+        self.local_rank_across_dp = local_dp_rank * world_size + self.local_rank
         try_register_lib(
             "mindie_turbo",
             "MindIE Turbo is installed. vLLM inference will be accelerated with MindIE Turbo."
@@ -112,7 +115,7 @@ class NPUWorker(WorkerBase):
 
     def init_device(self):
         if self.device_config.device.type == "npu":
-            self.device = torch.device(f"npu:{self.local_rank}")
+            self.device = torch.device(f"npu:{self.local_rank_across_dp}")
             NPUPlatform.set_device(self.device)
             NPUPlatform.empty_cache()
             self.init_npu_memory = NPUPlatform.mem_get_info()[0]
