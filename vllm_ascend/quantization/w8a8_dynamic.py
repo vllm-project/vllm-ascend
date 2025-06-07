@@ -32,8 +32,7 @@ from vllm_ascend.utils import dispose_tensor
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 
 
-def apply_mlp(
-              hidden_states: torch.Tensor,
+def apply_mlp(hidden_states: torch.Tensor,
               w1: torch.Tensor,
               w1_scale: torch.Tensor,
               w2: torch.Tensor,
@@ -465,13 +464,14 @@ def fused_experts(hidden_states: torch.Tensor,
         group_list_type = 0
 
     # `hidden_states` will be disposed in the `apply_mlp` function
-    hidden_states = apply_mlp(hidden_states,
-                              w1,
-                              w1_scale,
-                              w2,
-                              w2_scale,
-                              expert_tokens,
-                              group_list_type=group_list_type)
+    hidden_states = apply_mlp(
+        hidden_states,
+        w1,
+        w1_scale,
+        w2,
+        w2_scale,
+        expert_tokens,
+        group_list_type=group_list_type)
 
     if expert_map is not None:
         hidden_states.mul_(sorted_weights.unsqueeze(1))
@@ -722,19 +722,19 @@ class AscendW8A8DynamicFusedMoEMethod:
             # Therefore, all2all is needed no matter how dp/tp is set so as to
             # dispatch/combine tokens.
             return fused_experts_with_all2all(
-                                              hidden_states=x,
-                                              w1=layer.w13_weight,
-                                              w1_scale=layer.w13_weight_scale,
-                                              w2=layer.w2_weight,
-                                              w2_scale=layer.w2_weight_scale,
-                                              topk_weights=topk_weights,
-                                              topk_ids=topk_ids,
-                                              top_k=top_k,
-                                              expert_map=expert_map,
-                                              ep_group=self.ep_group,
-                                              log2phy=log2phy,
-                                              global_redundant_expert_num=global_redundant_expert_num,
-                                              )
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w1_scale=layer.w13_weight_scale,
+                w2=layer.w2_weight,
+                w2_scale=layer.w2_weight_scale,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                top_k=top_k,
+                expert_map=expert_map,
+                ep_group=self.ep_group,
+                log2phy=log2phy,
+                global_redundant_expert_num=global_redundant_expert_num,
+                )
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:

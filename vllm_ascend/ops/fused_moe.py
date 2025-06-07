@@ -959,6 +959,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 class AscendFusedMoE(FusedMoE):
 
     moe_counter = -1
+
     def __init__(
         self,
         num_experts: int,  # Global number of experts
@@ -1025,22 +1026,22 @@ class AscendFusedMoE(FusedMoE):
         self.log2phy = None
         self.global_redundant_expert_num = 0
 
-
         vllm_config = get_current_vllm_config()
         expert_map_path = None
         if vllm_config.additional_config:
             expert_map_path = vllm_config.additional_config.get(
-                                            "expert_map_path", None)
+                "expert_map_path", None)
         if expert_map_path and os.path.exists(expert_map_path):
             # moe expert load balance
             expert_load_balancer = ExpertLoadBalancer(expert_map_path,
                                                       self.global_num_experts)
             self.local_num_experts, self.expert_map = \
                                 expert_load_balancer.get_rank_placement_map(
-                                                self.moe_instance_id, 
+                                                self.moe_instance_id,
                                                 get_ep_group().rank_in_group)
             self.log2phy = expert_load_balancer.get_rank_log2phy_map(
-                self.moe_instance_id, get_ep_group().rank_in_group)
+                self.moe_instance_id,
+                get_ep_group().rank_in_group)
             self.global_redundant_expert_num = \
                         expert_load_balancer.get_global_redundant_expert_num()
         else:
