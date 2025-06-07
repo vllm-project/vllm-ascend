@@ -37,6 +37,8 @@ class CommonAttentionMetadata:
     and newly scheduled tokens"""
 
 
+
+
 class AscendMLABackend(AttentionBackend):
 
     accept_output_buffer: bool = True
