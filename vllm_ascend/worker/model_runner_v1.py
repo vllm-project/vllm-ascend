@@ -874,7 +874,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start_loc, seq_lens=seq_lens)
         with_prefill = attn_state != AscendAttentionState.DecodeOnly
-
+        self.with_prefill = with_prefill
         if self.dp_size > 1:
             max_num_tokens, with_prefill = self._get_forward_metadata_across_dp(
                 total_num_scheduled_tokens, with_prefill)
@@ -892,6 +892,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     batch_size)
             graph_pad_size = padded_batch_size - batch_size
             extra_builder_kwargs['graph_pad_size'] = graph_pad_size
+            self.graph_pad_size = graph_pad_size
 
         if self.vllm_config.model_config.use_mla:
             attn_metadata = self.attn_metadata_builder.build(  # type: ignore
@@ -1856,8 +1857,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_rejected_tokens,
             )
             target_token_ids = self.input_ids[token_indices]
-            target_positions = positions[token_indices]
-            target_hidden_states = hidden_states[token_indices]
+            target_positions = positions
+            target_hidden_states = hidden_states
             target_slot_mapping = attn_metadata.slot_mapping[token_indices]
 
         draft_token_ids = self.drafter.propose(

@@ -10,6 +10,10 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm_ascend.attention.mla_v1 import CommonAttentionMetadata
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
 
+import vllm.envs as envs_vllm
+
+import vllm_ascend.envs as envs_ascend
+
 
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.
 # We should refactor this to reuse the same sampling implementation.
@@ -151,21 +155,44 @@ class MtpProposer:
         #     input_batch=self.runner.input_batch,
         #     scheduler_output=self.runner.scheduler_output,
         # )
-
+        extra_builder_kwargs = {}
+        if (envs_ascend.VLLM_ENABLE_MC2
+                or self.torchair_graph_enabled) and not self.runner.with_prefill:
+            extra_builder_kwargs['graph_pad_size'] = self.runner.graph_pad_size
+            padding = torch.zeros(self.runner.input_batch.num_reqs,
+                                  dtype=input_ids.dtype,
+                                  device=input_ids.device
+                                  )
+            input_ids = torch.cat([input_ids, padding])
         attn_metadata = self.runner.attn_metadata_builder.build(
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
+            **extra_builder_kwargs
         )
 
         with set_forward_context(attn_metadata, self.vllm_config):
-            hidden_states = self.model(
+            model_kwargs = {}
+            if self.torchair_graph_enabled:
+                model_kwargs["kv_caches"] = self.runner.kv_caches
+                model_kwargs["attn_metadata"] = attn_metadata
+            if self.runner.torchair_graph_enabled and not self.runner.with_prefill:
+                hidden_states = self.compile_model(
+                    input_ids=input_ids,
+                    positions=target_positions,
+                    previous_hidden_states=target_hidden_states,
+                    inputs_embeds=None,
+                    **model_kwargs,
+                )
+            else:
+                assert self.model is not None
+                hidden_states = self.model(
                 input_ids=input_ids,
                 positions=target_positions,
                 previous_hidden_states=target_hidden_states,
-            )
+            )            
         sample_hidden_states = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
         draft_token_ids = logits.argmax(dim=-1)
@@ -199,6 +226,29 @@ class MtpProposer:
             loader.get_all_weights(
                 self.vllm_config.speculative_config.draft_model_config,
                 self.model))
+        if self.torchair_graph_enabled:
+            import torchair  # type: ignore
+            from torchair import patch_for_hcom  # type: ignore
+
+            patch_for_hcom()
+            config = torchair.CompilerConfig()
+            config.experimental_config.frozen_parameter = True
+            config.experimental_config.tiling_schedule_optimize = True
+            torch.npu.set_compile_mode(jit_compile=False)
+            if not self.use_cached_npu_graph:
+                npu_backend = torchair.get_npu_backend(compiler_config=config)
+                self.compile_model = torch.compile(
+                    self.model,
+                    dynamic=True,
+                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    backend=npu_backend)
+            else:
+                self.compile_model = torchair.inference.cache_compile(
+                    self.model.forward,
+                    dynamic=True,
+                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    config=config,
+                    ge_cache=False)
 
 
 # TODO Using torch instead of triton may result in poor performance
