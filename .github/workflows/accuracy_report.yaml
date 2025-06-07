@@ -19,110 +19,184 @@ name: Accuracy Report
 on:
   workflow_dispatch:
     inputs:
-      branch:
-        description: 'choose a dev branch to pr'
+      vllm-ascend-branch:
+        description: 'vllm-ascend branch:'
         required: true
-      vllm-ascend-version:
-        description: 'what vllm-ascend version to accuracy test?'
+        type: choice
+        options:
+          - main
+          - v0.7.3-dev
+      models:  
+        description: 'models:'
         required: true
-        type: string
+        type: choice
+        options:
+          - all
+          - Qwen/Qwen2.5-7B-Instruct
+          - Qwen/Qwen2.5-VL-7B-Instruct
+          - Qwen/Qwen3-8B-Base
+        default: 'all'
+
 jobs:
-  download:
+  download_reports:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        model: ${{ fromJSON(
+          (github.event.inputs.models == 'all' &&
+            '["Qwen/Qwen2.5-7B-Instruct","Qwen/Qwen2.5-VL-7B-Instruct","Qwen/Qwen3-8B-Base"]') ||
+          (github.event.inputs.models == 'Qwen/Qwen2.5-7B-Instruct' &&
+            '["Qwen/Qwen2.5-7B-Instruct"]') ||
+          (github.event.inputs.models == 'Qwen/Qwen2.5-VL-7B-Instruct' &&
+            '["Qwen/Qwen2.5-VL-7B-Instruct"]') ||
+          (github.event.inputs.models == 'Qwen/Qwen3-8B-Base' &&
+            '["Qwen/Qwen3-8B-Base"]')
+         ) }}
+        
+        version: [0, 1]
+        exclude:
+          - model: 'Qwen/Qwen2.5-VL-7B-Instruct'
+            version: 1
+      fail-fast: false     
+
+    name: Download ${{ matrix.model }} V${{ matrix.version }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.branch }}
+          ref: ${{ github.event.inputs.vllm-ascend-branch }}
 
-      - name: Debug List Artifacts
-        run: gh api /repos/${{ github.repository }}/actions/artifacts
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Query artifact run id for Qwen2.5-VL-7B-Instruct V0 latest artifact
-        id: get_Qwen2_5_VL_7B_Instruct_latest_run_id_V0
+      - name: Get base model name
+        id: get_basename
         run: |
-          ARTIFACT_JSON=$(gh api "repos/${{ github.repository }}/actions/artifacts")
-          RUN_ID=$(echo "$ARTIFACT_JSON" | \
-            jq -r '[.artifacts[] | select(.name=="${{ github.event.inputs.vllm-ascend-version }}-Qwen2.5-VL-7B-Instruct-V0-report")] | sort_by(.created_at) | last | .workflow_run.id')
-          echo "runid=$RUN_ID" >> "$GITHUB_OUTPUT"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          model_base_name=$(basename "${{ matrix.model }}")
+          echo "model_base_name=$model_base_name" >> $GITHUB_OUTPUT
+        shell: bash
 
-      - name: Query artifact run id for Qwen2.5-7B-Instruct V0 latest artifact
-        id: get_Qwen2_5_7B_Instruct_latest_run_id_V0
+      - name: Query artifact run id
+        id: get_run_id
         run: |
-          ARTIFACT_JSON=$(gh api "repos/${{ github.repository }}/actions/artifacts")
+          ARTIFACT_PATTERN="${{ github.event.inputs.vllm-ascend-branch }}-${{ steps.get_basename.outputs.model_base_name }}-V${{ matrix.version }}-report"
+          echo "Querying artifacts with pattern: $ARTIFACT_PATTERN"
+          
+          ARTIFACT_JSON=$(gh api --paginate /repos/${{ github.repository }}/actions/artifacts || echo "{}")
+          
           RUN_ID=$(echo "$ARTIFACT_JSON" | \
-            jq -r '[.artifacts[] | select(.name=="${{ github.event.inputs.vllm-ascend-version }}-Qwen2.5-7B-Instruct-V0-report")] | sort_by(.created_at) | last | .workflow_run.id')
-          echo "runid=$RUN_ID" >> "$GITHUB_OUTPUT"
+            jq -s -r --arg pattern "$ARTIFACT_PATTERN" \
+            '[.[].artifacts[]] | map(select(.name | test($pattern))) | sort_by(.created_at) | last | .workflow_run.id // empty')
+          
+          if [ -z "$RUN_ID" ]; then
+            echo "::warning::No artifact found matching pattern $ARTIFACT_PATTERN. Skipping download."
+            echo "runid=" >> $GITHUB_OUTPUT
+          else
+            echo "Found matching artifact with run ID: $RUN_ID"
+            echo "runid=$RUN_ID" >> $GITHUB_OUTPUT
+          fi
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN  }}
 
-      - name: Query artifact run id for Qwen3-8B-Base V0 latest artifact
-        id: get_Qwen3_8B_Base_latest_run_id_V0
-        run: |
-          ARTIFACT_JSON=$(gh api "repos/${{ github.repository }}/actions/artifacts")
-          RUN_ID=$(echo "$ARTIFACT_JSON" | \
-            jq -r '[.artifacts[] | select(.name=="${{ github.event.inputs.vllm-ascend-version }}-Qwen3-8B-Base-V0-report")] | sort_by(.created_at) | last | .workflow_run.id')
-          echo "runid=$RUN_ID" >> "$GITHUB_OUTPUT"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Download Qwen/Qwen2.5-VL-7B-Instruct V0 Artifact
+      - name: Download Artifact
+        if: ${{ steps.get_run_id.outputs.runid != '' }}
         uses: actions/download-artifact@v4
         with:
-          name: ${{ github.event.inputs.vllm-ascend-version }}-Qwen2.5-VL-7B-Instruct-V0-report
-          path: ./docs/source/developer_guide/evaluation/accuracy_report
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: vllm-project/vllm-ascend
-          run-id: ${{ steps.get_Qwen2_5_VL_7B_Instruct_latest_run_id_V0.outputs.runid }}
+          name: ${{ github.event.inputs.vllm-ascend-branch }}-${{ steps.get_basename.outputs.model_base_name }}-V${{ matrix.version }}-report
+          path: ./docs/source/developer_guide/evaluation/accuracy_report_bak
+          github-token: ${{ secrets.GITHUB_TOKEN  }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.get_run_id.outputs.runid }}
+          
+      - name: Upload reports artifact
+        if: ${{ steps.get_run_id.outputs.runid != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: report-${{ steps.get_basename.outputs.model_base_name }}-v${{ matrix.version }}
+          path: ./docs/source/developer_guide/evaluation/accuracy_report_bak/*.md
+          retention-days: 90
 
-      - name: Download Qwen/Qwen2.5-7B-Instruct Artifact
+  create_pr:
+    runs-on: ubuntu-latest
+    needs: download_reports
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.vllm-ascend-branch }}
+
+      - name: Setup workspace
+        run: mkdir -p ./accuracy/accuracy_report
+
+      - name: Download only current run reports
         uses: actions/download-artifact@v4
         with:
-          name: ${{ github.event.inputs.vllm-ascend-version }}-Qwen2.5-7B-Instruct-V0-report
           path: ./docs/source/developer_guide/evaluation/accuracy_report
+          pattern: report-*
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: vllm-project/vllm-ascend
-          run-id: ${{ steps.get_Qwen2_5_7B_Instruct_latest_run_id_V0.outputs.runid }}
+          run-id: ${{ github.run_id }}
 
-      - name: Download Qwen/Qwen3-8B-Base Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: ${{ github.event.inputs.vllm-ascend-version }}-Qwen3-8B-Base-V0-report
-          path: ./docs/source/developer_guide/evaluation/accuracy_report
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: vllm-project/vllm-ascend
-          run-id: ${{ steps.get_Qwen3_8B_Base_latest_run_id_V0.outputs.runid }}
-
-      - name: Display Files
-        working-directory: ./docs/source/developer_guide/evaluation/accuracy_report
+      - name: Delete old report
         run: |
-          cat ./Qwen2.5-VL-7B-Instruct.md
-          cat ./Qwen2.5-7B-Instruct.md
-          cat ./Qwen3-8B-Base.md
-      
-      - name: Create Pull Request for markdown update
+          find ./docs/source/developer_guide/evaluation/accuracy_report -maxdepth 1 -type f -name '*.md' ! -name 'index.md' -delete
+          find ./docs/source/developer_guide/evaluation/accuracy_report -mindepth 2 -type f -name '*.md' -exec mv -f {} ./docs/source/developer_guide/evaluation/accuracy_report \;
+          find ./docs/source/developer_guide/evaluation/accuracy_report -mindepth 1 -type d -empty -delete
+
+      - name: Generate step summary
+        if: ${{ always() }}
+        run: |
+          for report in ./docs/source/developer_guide/evaluation/accuracy_report/*.md; do
+            filename=$(basename "$report")
+            # skip index.md
+            if [ "$filename" = "index.md" ]; then
+              continue
+            fi
+
+            if [ -f "$report" ]; then
+              {
+                echo -e "\n\n---\n"
+                echo "## 📄 Report File: $(basename $report)"
+                cat "$report"
+              } >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
+      - name: Update accuracy_report/index.md
+        run: |
+          REPORT_DIR="./docs/source/developer_guide/evaluation/accuracy_report"
+          INDEX_MD="$REPORT_DIR/index.md"
+
+          {
+            echo "# Accuracy Report"
+            echo ""
+            echo "::: {toctree}"
+            echo ":caption: Accuracy Report"
+            echo ":maxdepth: 1"
+            
+            for report in "$REPORT_DIR"/*.md; do
+              filename="$(basename "$report" .md)"
+              if [ "$filename" != "index" ]; then
+                echo "$filename"
+              fi
+            done
+
+            echo ":::"
+          } > "$INDEX_MD"
+
+      - name: Create Pull Request
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.PR_TOKEN }}
-          base: ${{ github.event.inputs.branch }}
-          branch: auto-pr/accuracy-test
-          commit-message: "Update accuracy report for ${{ github.event.inputs.branch }}"
+          base: ${{ github.event.inputs.vllm-ascend-branch }}
+          branch: auto-pr/accuracy-report
+          commit-message: "Update accuracy reports for ${{ github.event.inputs.vllm-ascend-branch }}"
           add-paths: ./docs/source/developer_guide/evaluation/accuracy_report/*.md
-          title: "[Doc]Update accuracy report for ${{ github.event.inputs.branch }}"
+          title: "[Doc] Update accuracy reports for ${{ github.event.inputs.vllm-ascend-branch }}"
           body: |
-            The accuracy results running on Ascend NPU have changed, I'm updating the report.
-            Please review the changes.
-
+            The accuracy results running on NPU Altlas A2 have changed, updating reports for:
+            ${{ 
+              github.event.inputs.models == 'all' 
+                && 'All models (Qwen2.5-7B-Instruct, Qwen2.5-VL-7B-Instruct, Qwen3-8B-Base)' 
+                || github.event.inputs.models 
+            }}
+            
             - [Workflow run][1]
-            - [Qwen2.5-7B-Instruct accuracy report][2]
-            - [Qwen2.5-VL-7B-Instruct accuracy report][3]
-            - [Qwen3-8B-Base accuracy report][4]
-
+            
             [1]: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-            [2]: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.get_Qwen2_5_7B_Instruct_latest_run_id_V0.outputs.runid }}
-            [3]: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.get_Qwen2_5_VL_7B_Instruct_latest_run_id_V0.outputs.runid }}
-            [4]: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ steps.get_Qwen3_8B_Base_latest_run_id_V0.outputs.runid }}
