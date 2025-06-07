@@ -1,7 +1,10 @@
 from vllm import ModelRegistry
 
+import vllm_ascend.envs as envs
+
 
 def register_model():
+    from .deepseek_dbo import CustomDeepseekDBOForCausalLM  # noqa: F401
     from .deepseek_mtp import CustomDeepSeekMTP  # noqa: F401
     from .deepseek_v2 import CustomDeepseekV2ForCausalLM  # noqa: F401
     from .deepseek_v2 import CustomDeepseekV3ForCausalLM  # noqa: F401
@@ -22,9 +25,14 @@ def register_model():
         "vllm_ascend.models.qwen2_5_vl:AscendQwen2_5_VLForConditionalGeneration"
     )
 
-    ModelRegistry.register_model(
-        "DeepseekV2ForCausalLM",
-        "vllm_ascend.models.deepseek_v2:CustomDeepseekV2ForCausalLM")
+    if envs.VLLM_ASCEND_ENABLE_DBO:
+        ModelRegistry.register_model(
+            "DeepseekV2ForCausalLM",
+            "vllm_ascend.models.deepseek_dbo:CustomDeepseekDBOForCausalLM")
+    else:
+        ModelRegistry.register_model(
+            "DeepseekV2ForCausalLM",
+            "vllm_ascend.models.deepseek_v2:CustomDeepseekV2ForCausalLM")
 
     ModelRegistry.register_model(
         "DeepseekV3ForCausalLM",

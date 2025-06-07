@@ -60,8 +60,6 @@ def test_models(model: str, dtype: str, max_tokens: int) -> None:
 
 
 @pytest.mark.parametrize("model", MULTIMODALITY_MODELS)
-@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "1",
-                    reason="qwen2.5_vl is not supported on v1")
 def test_multimodal(model, prompt_template, vllm_runner):
     image = ImageAsset("cherry_blossom") \
         .pil_image.convert("RGB")

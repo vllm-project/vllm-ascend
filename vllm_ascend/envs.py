@@ -107,11 +107,18 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to enable the trace recompiles from pytorch.
     "VLLM_ASCEND_TRACE_RECOMPILES":
     lambda: bool(int(os.getenv("VLLM_ASCEND_TRACE_RECOMPILES", '0'))),
+    "VLLM_ASCEND_ENABLE_DBO":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_DBO", '0'))),
     # Whether to enable the model execute time observe profile. Disable it when
     # running vllm ascend in production environment.
     "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE", '0'))
                  ),
+    # MOE_ALL2ALL_BUFFER:
+    #   0: default, normal init.
+    #   1: enable moe_all2all_buffer.
+    "MOE_ALL2ALL_BUFFER":
+    lambda: bool(int(os.getenv("MOE_ALL2ALL_BUFFER", '0'))),
     # VLLM_ASCEND_ACL_OP_INIT_MODE:
     #   0: default, normal init.
     #   1: delay init until launch aclops.

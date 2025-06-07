@@ -13,6 +13,9 @@ from vllm.model_executor.layers.linear import (LinearBase,
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
+from vllm_ascend.multistream.context import get_multistream_comm_context
+from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
 
 if TYPE_CHECKING:
@@ -117,6 +120,7 @@ class AscendMLAMetadata:
 
     with_prefill_across_dp: bool = False
 
+    query_lens: Optional[list[int]] = None
     # The dimension of the attention heads
     head_dim: Optional[int] = None
     attn_mask: torch.Tensor = None
@@ -134,6 +138,17 @@ class AscendMLAMetadata:
         #     raise ValueError(
         #         f"Only {supported_head_sizes} are supported for head_dim,",
         #         f"received {self.head_dim}.")
+
+    def split_metadata_for_multistream(
+        self,
+        ms_split_config: MSAttentionMetadataSplitConfig,
+    ) -> list["AscendMLAMetadata"]:
+        """Split metadata for multi-stream with AscendMLAMetadata"""
+        return model_input_split_v1_mla_attn(
+            ms_split_config=ms_split_config,
+            attn_metadata=self,
+            _metadata_cls=AscendMLAMetadata,
+        )
 
 
 M = TypeVar("M", bound=AscendMLAMetadata)
@@ -386,6 +401,7 @@ class AscendMLAMetadataBuilder:
 
         return self.metadata_cls(  # type: ignore
             num_actual_tokens=num_actual_tokens,
+            query_lens=query_lens.tolist(),
             slot_mapping=slot_mapping,
             head_dim=self.runner.model_config.get_head_size(),
             num_decodes=self._num_decodes,
@@ -585,7 +601,15 @@ class AscendMLAImpl(MLAAttentionImpl):
             )
         attn_output = attn_output.reshape(
             [num_tokens, self.num_heads * self.v_head_dim])
-        return self.o_proj(attn_output)[0]
+
+        current_ms_metadata = get_multistream_comm_context()
+        if current_ms_metadata is None:
+            return self.o_proj(attn_output)[0]
+        else:
+            current_ms_metadata.before_comm_event.record()
+            with torch.npu.stream(current_ms_metadata.comm_stream):
+                current_ms_metadata.before_comm_event.wait()
+                return self.o_proj(attn_output)[0]
 
     def exec_kv(
         self,
@@ -685,7 +709,14 @@ class AscendMLAImpl(MLAAttentionImpl):
                 context_lens=attn_metadata.decode.seq_lens,  # type:ignore
                 mla_vheadsize=self.kv_lora_rank,
                 out=attn_output)
-        return self._v_up_proj_and_o_proj(attn_output)
+        current_ms_metadata = get_multistream_comm_context()
+        if current_ms_metadata is None:
+            return self._v_up_proj_and_o_proj(attn_output)
+        else:
+            current_ms_metadata.before_comm_event.record()
+            with torch.npu.stream(current_ms_metadata.comm_stream):
+                current_ms_metadata.before_comm_event.wait()
+                return self._v_up_proj_and_o_proj(attn_output)
 
     def forward(
         self,
@@ -811,16 +842,38 @@ class AscendMLAImpl(MLAAttentionImpl):
                 key_cache=kv_cache,
                 slot_indices=attn_metadata.slot_mapping.flatten())
         if has_prefill:
-            output[num_decode_tokens:] = self._forward_prefill(
-                prefill_q, prefill_k_c_normed, prefill_k_pe, kv_cache,
-                attn_metadata)
+            # FIX: aicore move should be also placed on the comm stream in dbo,
+            # otherwise it may affect the accuracy
+            # TODO: use an elegant way to overlap
+            output_prefill = self._forward_prefill(prefill_q,
+                                                   prefill_k_c_normed,
+                                                   prefill_k_pe, kv_cache,
+                                                   attn_metadata)
+            current_ms_metadata = get_multistream_comm_context()
+            if current_ms_metadata is not None:
+                with torch.npu.stream(current_ms_metadata.comm_stream):
+                    output[num_decode_tokens:] = output_prefill
+                    current_ms_metadata.after_comm_event.record()
+            else:
+                output[num_decode_tokens:] = output_prefill
+
         if has_decode:
             if self.running_in_graph:
                 return self._forward_decode(decode_ql_nope, decode_q_pe,
                                             decode_k_nope, decode_k_pe,
                                             kv_cache, attn_metadata)
             else:
-                output[:num_decode_tokens] = self._forward_decode(
-                    decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe,
-                    kv_cache, attn_metadata)
+                output_decode = self._forward_decode(decode_ql_nope,
+                                                     decode_q_pe,
+                                                     decode_k_nope,
+                                                     decode_k_pe, kv_cache,
+                                                     attn_metadata)
+            current_ms_metadata = get_multistream_comm_context()
+            if current_ms_metadata is not None:
+                with torch.npu.stream(current_ms_metadata.comm_stream):
+                    output[:num_decode_tokens] = output_decode
+                    current_ms_metadata.after_comm_event.record()
+            else:
+                output[:num_decode_tokens] = output_decode
+
         return output_padded

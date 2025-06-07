@@ -81,3 +81,17 @@ def test_models_distributed_topk() -> None:
             distributed_executor_backend="mp",
     ) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
+
+
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DBO": "1"})
+def test_models_distributed_DeepSeek_dbo():
+    example_prompts = ["The president of the United States is"] * 41
+    dtype = "half"
+    sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
+    with VllmRunner(
+            "deepseek-ai/DeepSeek-V2-Lite",
+            dtype=dtype,
+            tensor_parallel_size=4,
+            distributed_executor_backend="mp",
+    ) as vllm_model:
+        vllm_model.generate(example_prompts, sampling_params)
