@@ -47,7 +47,8 @@ class NPUPlatform(Platform):
     device_type: str = "npu"
     simple_compile_backend: str = "eager"  # Disable torch.compile()
     ray_device_key: str = "NPU"
-    device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
+    # device_control_env_var: str = "ASCEND_RT_VISIBLE_DEVICES"
+    device_control_env_var: str = "plcaceholder"
     dispatch_key: str = "PrivateUse1"
 
     supported_quantization: list[str] = [ASCEND_QUATIZATION_METHOD]

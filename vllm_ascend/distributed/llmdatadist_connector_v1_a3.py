@@ -167,6 +167,7 @@ class LLMDataDistConnectorScheduler():
      # Can not retrive the parallel config since it is not initialized.
      self.local_dp_rank = None
      self.tp_size = None
+     self.port = self.vllm_config.parallel_config.data_parallel_rank_local * self.vllm_config.parallel_config.tensor_parallel_size + envs.VLLM_LLMDD_CHANNEL_PORT
 
      self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
 
@@ -244,12 +245,6 @@ class LLMDataDistConnectorScheduler():
       request: "Request",
       block_ids: list[int],
   ) -> tuple[bool, Optional[dict[str, Any]]]:
-    if self.local_dp_rank is None:
-      vllm_config = get_current_vllm_config()
-      # Need this dp rank to locate the only dp rank the kv cache from
-      self.local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
-      # Need this tp size to offset the port in tp size
-      self.tp_size = vllm_config.parallel_config.tensor_parallel_size
 
     params = request.kv_transfer_params
     logger.debug(
@@ -267,13 +262,13 @@ class LLMDataDistConnectorScheduler():
     # If prompt < block_size, no xfer so free blocks immediately.
     delay_free_blocks = len(computed_block_ids) > 0
 
-    return delay_free_blocks, dict(
+    return False, dict(
         do_remote_prefill=True,
         do_remote_decode=False,
         remote_block_ids=computed_block_ids,
         remote_engine_id=self.engine_id,
         remote_host=self.local_ip,
-        remote_port=envs.VLLM_LLMDD_CHANNEL_PORT + self.local_dp_rank * self.tp_size,
+        remote_port=self.port,
     )
 
 class LLMDataDistConnectorWorker():
@@ -295,6 +290,7 @@ class LLMDataDistConnectorWorker():
       self.local_ip = get_ip()
       self.kv_transfer_config: Optional[KVTransferConfig] = vllm_config.kv_transfer_config
       self.local_agent_metadata: Optional[LLMDataDistAgentMetadata] = None
+      self.vllm_config = vllm_config
 
       self.llm_datadist_role = None
       self.llm_datadist_remote_role = None
@@ -360,9 +356,9 @@ class LLMDataDistConnectorWorker():
 
   def read_offline_rank_table(self):
     assert (
-        envs.DISAGGREGATED_RPEFILL_RANK_TABLE_PATH
-    ), "Please set path of rank_table to env variable DISAGGREGATED_RPEFILL_RANK_TABLE_PATH"
-    rank_table_path = envs.DISAGGREGATED_RPEFILL_RANK_TABLE_PATH
+        envs.DISAGGREGATED_PREFILL_RANK_TABLE_PATH
+    ), "Please set path of rank_table to env variable DISAGGREGATED_PREFILL_RANK_TABLE_PATH"
+    rank_table_path = envs.DISAGGREGATED_PREFILL_RANK_TABLE_PATH
     with open(rank_table_path, "r", encoding="utf-8") as f:
       global_rank_table = json.load(f)
     decode_device_list = global_rank_table["decode_device_list"]
@@ -498,11 +494,11 @@ class LLMDataDistConnectorWorker():
       )
       self.finished_reqs.add(req_id)
 
-  def add_remote_agent(self, metadata: LLMDataDistAgentMetadata) -> bool:
+  def add_remote_agent(self, metadata: LLMDataDistAgentMetadata) -> int:
     remote_cluster_id = metadata.cluster_id
     if remote_cluster_id in self.linked_cluster:
       logger.debug(f"LLMDataDistConnectorWorker: remote cluster_id: {metadata.cluster_id} already linked with this server, skip the connection")
-      return False
+      return remote_cluster_id
     remote_super_pod_id = metadata.super_pod_id
     remote_device_id = metadata.device_id
     remote_device_ip = metadata.device_ip
@@ -618,10 +614,10 @@ class LLMDataDistConnectorWorker():
         raise RuntimeError(f"LLMDataDistConnectorWorker: Linking failed, comm id: {comm_id}")
       time.sleep(1)
       logger.info("Checking query_register_mem_status again")
-    self.linked_cluster.update({remote_server_id: (remote_cluster_id, comm_id)})
+    self.linked_cluster.update({remote_cluster_id: comm_id})
     logger.info(f"cached linked cluster: {self.linked_cluster}")
     logger.info(f"Sucessfully build link with cluster id {remote_cluster_id} with cluster name {comm_name} !")
-    return True
+    return remote_cluster_id
 
 
   def remove_remote_agent(self, cluster_id: int):
@@ -641,7 +637,7 @@ class LLMDataDistConnectorWorker():
     host: str,
     port: int
   ):
-    url = f"tcp://{host}:{port + self.tp_rank}"
+    url = f"tcp://{host}:{port}"
     logger.debug(f"Querying metadata from url: {url}")
     msg_encoder = msgspec.msgpack.Encoder()
     msg_send = msg_encoder.encode(self.local_agent_metadata)
@@ -653,7 +649,8 @@ class LLMDataDistConnectorWorker():
       metadata = decoder.decode(metadata_bytes)
       metadata = LLMDataDistAgentMetadata(**metadata)
       logger.info(f"recving metadata: {metadata}")
-      self.add_remote_agent(metadata)
+      cluster_id = self.add_remote_agent(metadata)
+    return cluster_id
 
   def _read_blocks(
     self,
@@ -664,8 +661,8 @@ class LLMDataDistConnectorWorker():
     remote_engine_id: str,
     request_id: str,
   ):
-    if remote_ip not in self.linked_cluster:
-      self.connect_to_remote_agent(remote_ip, remote_port)
+    # if remote_ip not in self.linked_cluster:
+    remote_cluster_id = self.connect_to_remote_agent(remote_ip, remote_port + self.tp_rank)
     num_local_blocks = len(local_block_ids)
     if num_local_blocks == 0:
        return 
@@ -674,15 +671,14 @@ class LLMDataDistConnectorWorker():
     if num_local_blocks < num_remote_blocks:
       remote_block_ids = remote_block_ids[-num_local_blocks:]
 
-    remote_cluster_id = self.linked_cluster[remote_ip][0]
     logger.info(f"remote cluster id is: {remote_cluster_id}")
     if self.use_mla:
       remote_cache_key_k_normed = BlocksCacheKey(cluster_id=remote_cluster_id, model_id=0)
       remote_cache_key_k_pe = BlocksCacheKey(cluster_id=remote_cluster_id, model_id=1)
       logger.info("Try pull blocks from remote server")
       try:
-        self.cache_manager.pull_blocks(remote_cache_key_k_normed, self.cache[0], local_block_ids, remote_block_ids)
-        self.cache_manager.pull_blocks(remote_cache_key_k_pe, self.cache[1], local_block_ids, remote_block_ids)
+        self.cache_manager.pull_blocks(remote_cache_key_k_normed, self.cache[0], remote_block_ids, local_block_ids)
+        self.cache_manager.pull_blocks(remote_cache_key_k_pe, self.cache[1], remote_block_ids, local_block_ids)
       except (TypeError, ValueError) as e:
         raise RuntimeError(f"LLMDataDistConnectorWorker: Passing unexpected parameter to pull_blocks remote_cache_key: {remote_cache_key}, cache: {self.cache}, local_block_ids: {local_block_ids}, remote_block_ids: {remote_block_ids}")
       except LLMException:
@@ -691,7 +687,7 @@ class LLMDataDistConnectorWorker():
       remote_cache_key = BlocksCacheKey(cluster_id=remote_cluster_id)
       logger.info("Try pull blocks from remote server")
       try:
-        self.cache_manager.pull_blocks(remote_cache_key, self.cache, local_block_ids, remote_block_ids)
+        self.cache_manager.pull_blocks(remote_cache_key, self.cache, remote_block_ids, local_block_ids)
       except (TypeError, ValueError) as e:
         raise RuntimeError(f"LLMDataDistConnectorWorker: Passing unexpected parameter to pull_blocks remote_cache_key: {remote_cache_key}, cache: {self.cache}, local_block_ids: {local_block_ids}, remote_block_ids: {remote_block_ids}")
       except LLMException:
