@@ -65,7 +65,8 @@ from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 
 
-from vllm_ascend.eplb.core.worker.eplb_updator import EplbProcess
+from vllm_ascend.eplb.eplb_updator import EplbUpdator
+from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.loader.device_transfer_loader import D2DExpertWeightLoader
 
 if TYPE_CHECKING:
@@ -335,33 +336,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         #     self.enable_eplb = additional_config.get("enable_eplb", False)
 
         if self.enable_eplb == True:
-            self.init_eplb()
+            eplb_adaptor = VllmEplbAdaptor(self.model)
+            self.eplb_updator = EplbUpdator(eplb_adaptor)
 
-
-    def init_eplb(self):
-        self.num_moe_layers = 2
-        import multiprocessing
-        self.expert_map_initialized = False
-        self.update_in_flight = False
-
-        ctx = multiprocessing.get_context("spawn")
-        self.manager = ctx.Manager()
-        self.shared_dict = self.manager.dict({
-            "expert_map": None,  #当前rank_id的专家表[num_layers,num_experts]
-            "moe_load": None,    #热度负载信息 [num_layers,num_experts]
-            "expert_maps": None  #所有的专家表[num_layers, world_size, num_experts]
-        })
-        self.eplb = EplbProcess(
-            device_id=self.device,
-            shared_dict=self.shared_dict,
-            policy_type=1,
-            enable_d2d=True
-        )
-
-        self.planner_block_queue, self.block_update_queue, self.eplb_process = \
-            self.eplb._launch_process()
-
-        logger.info(f"[ModelRunner] Launched EPLB process (pid={self.eplb_process.pid})")
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -999,74 +976,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         )
 
         if self.enable_eplb:
-            self.do_eplb()
+            self.eplb_updator.do_eplb()
 
         return model_runner_output
-
-    def do_eplb(self):
-        if not self.update_in_flight:
-            try:
-                if not self.expert_map_initialized:
-                    self.get_expert_map()
-                    self.expert_map_initialized = True
-
-                moe_load = self.compute_and_set_moe_load()
-
-                self.planner_block_queue.put(1)
-                self.update_in_flight = True
-
-            except Exception as e:
-                logger.warning(f"[ModelRunner] Failed to wake EPLB process: {e}", exc_info=True)
-
-        if  self.update_in_flight:
-                if not self.block_update_queue.empty():
-                    self.block_update_queue.get()
-                    rank_id = dist.get_rank()
-                    new_expert_map = self.shared_dict["expert_maps"][:, rank_id, :]
-                    self.model.update_all_expert_map(new_expert_map, self.num_moe_layers)
-                    #加载权重
-                    self.update_in_flight = False
-
-    def compute_and_set_moe_load(self):
-        moe_load = self.model.get_all_moe_loads(self.num_moe_layers)
-
-        import torch.distributed as dist
-        if dist.is_initialized():
-            dist.all_reduce(moe_load, op=dist.ReduceOp.SUM)
-        self.shared_dict["moe_load"] = moe_load.to(torch.device("cpu"))
-
-        logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] = {moe_load}")
-
-        return moe_load
-
-
-    def get_expert_map(self):
-        expert_map = self.model.get_all_expert_map(self.num_moe_layers)
-        if dist.is_initialized():
-                    world_size = dist.get_world_size()
-        rank = dist.get_rank()
-
-        tensor_list = [
-            torch.zeros_like(expert_map) for _ in range(world_size)
-        ]
-
-        dist.all_gather(tensor_list, expert_map)
-        gathered = torch.stack(tensor_list, dim=0)
-        all_maps = gathered.permute(1, 0, 2).contiguous()
-
-        all_expert_maps = all_maps.to(torch.device("cpu"))
-        self.shared_dict["expert_maps"] = all_expert_maps
-        logger.debug(f"[ModelRunner] Updated shared_dict['expert_map'] = {expert_map}")
-        return all_expert_maps
-
-    def shutdown(self):
-        """
-        Clean up the EPLB process.
-        """
-        if self.eplb_process.is_alive():
-            self.eplb_process.terminate()
-            self.eplb_process.join()
-            logger.info("[ModelRunner] EPLB process terminated")
 
     def _profile_multimodal(self) -> None:
         # TODO: handle encoder-decoder models once we support them.
