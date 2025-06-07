@@ -116,6 +116,21 @@ def nd_to_nz_2d(in_tensor: torch.Tensor) -> torch.Tensor:
         2).contiguous()
 
 
+def nd_to_nz_spec(mask_tensor: torch.Tensor) -> torch.Tensor:
+    num_tokens = mask_tensor.shape[0]
+    max_seq_len = mask_tensor.shape[1]
+
+    tokens_pad = (num_tokens + 15) // 16 * 16
+    max_seq_len_pad = (max_seq_len + 15) // 16 * 16
+
+    mask_tensor_pad = \
+        torch.zeros((1, tokens_pad, max_seq_len_pad), dtype=mask_tensor.dtype, device=mask_tensor.device)
+    mask_tensor_pad[0][:num_tokens, :max_seq_len] = mask_tensor
+    mask = mask_tensor_pad.reshape(
+        (1, tokens_pad, max_seq_len_pad // 16, 16)).permute(0, 2, 1, 3)
+    return mask
+
+
 def aligned_16(tensor: torch.Tensor):
     """Aligned tensor for 310P"""
 

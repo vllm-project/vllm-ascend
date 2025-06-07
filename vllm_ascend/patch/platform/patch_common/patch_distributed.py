@@ -17,16 +17,17 @@
 # Adapted from vllm/model_executor/models/qwen2_vl.py
 # This file is a part of the vllm-ascend project.
 
+import torch
 import vllm
 import vllm.distributed
 import vllm.envs as envs
 from torch.distributed import ProcessGroup
 from vllm.config import ParallelConfig
+from vllm.distributed.utils import \
+    stateless_init_torch_distributed_process_group
 from vllm.logger import logger
 
 from vllm_ascend.utils import NullHandle, is_310p
-from vllm.distributed.utils import \
-    stateless_init_torch_distributed_process_group
 
 
 def ascend_destroy_model_parallel():

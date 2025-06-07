@@ -36,9 +36,8 @@ from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.cache import concat_and_cache_mla
-from vllm_ascend.utils import enable_custom_op
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
-                               nd_to_nz_2d)
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16,
+                               enable_custom_op, is_310p, nd_to_nz_2d)
 from vllm_ascend.worker.model_runner import (
     ModelInputForNPUBuilder, ModelInputForNPUWithSamplingMetadata)
 

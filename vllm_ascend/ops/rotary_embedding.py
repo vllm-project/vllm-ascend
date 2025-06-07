@@ -22,8 +22,7 @@ import torch
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 
-from vllm_ascend.utils import enable_custom_op
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import enable_custom_op, is_310p
 
 
 def custom_rotary_embedding_enabled(query, neox_style, head_size):
