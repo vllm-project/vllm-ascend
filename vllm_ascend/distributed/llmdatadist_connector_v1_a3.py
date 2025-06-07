@@ -356,9 +356,9 @@ class LLMDataDistConnectorWorker():
 
   def read_offline_rank_table(self):
     assert (
-        envs.DISAGGREGATED_RPEFILL_RANK_TABLE_PATH
-    ), "Please set path of rank_table to env variable DISAGGREGATED_RPEFILL_RANK_TABLE_PATH"
-    rank_table_path = envs.DISAGGREGATED_RPEFILL_RANK_TABLE_PATH
+        envs.DISAGGREGATED_PREFILL_RANK_TABLE_PATH
+    ), "Please set path of rank_table to env variable DISAGGREGATED_PREFILL_RANK_TABLE_PATH"
+    rank_table_path = envs.DISAGGREGATED_PREFILL_RANK_TABLE_PATH
     with open(rank_table_path, "r", encoding="utf-8") as f:
       global_rank_table = json.load(f)
     decode_device_list = global_rank_table["decode_device_list"]
@@ -662,7 +662,7 @@ class LLMDataDistConnectorWorker():
     request_id: str,
   ):
     # if remote_ip not in self.linked_cluster:
-    self.connect_to_remote_agent(remote_ip, remote_port + self.tp_rank)
+    remote_cluster_id = self.connect_to_remote_agent(remote_ip, remote_port + self.tp_rank)
     num_local_blocks = len(local_block_ids)
     if num_local_blocks == 0:
        return 
@@ -671,7 +671,6 @@ class LLMDataDistConnectorWorker():
     if num_local_blocks < num_remote_blocks:
       remote_block_ids = remote_block_ids[-num_local_blocks:]
 
-    remote_cluster_id = self.linked_cluster[remote_ip][0]
     logger.info(f"remote cluster id is: {remote_cluster_id}")
     if self.use_mla:
       remote_cache_key_k_normed = BlocksCacheKey(cluster_id=remote_cluster_id, model_id=0)
