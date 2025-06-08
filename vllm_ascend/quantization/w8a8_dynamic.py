@@ -39,8 +39,7 @@ def apply_mlp(hidden_states: torch.Tensor,
               w2_scale: torch.Tensor,
               group_list: torch.Tensor,
               dynamic_scale: torch.Tensor = None,
-              group_list_type: int = 1,
-              **kwargs) -> torch.Tensor:
+              group_list_type: int = 1) -> torch.Tensor:
     """
     apply MLP: gate_up_proj -> swiglu -> down_proj
 
@@ -74,13 +73,6 @@ def apply_mlp(hidden_states: torch.Tensor,
     else:
         pertoken_scale = dynamic_scale
 
-    shared_experts = kwargs.get('shared_experts', None)
-    if shared_experts:
-        shared_gate_up = kwargs.get('shared_gate_up', None)
-        with tng.scope.npu_stream_switch('moe_secondary'):
-            tng.scope.npu_wait_tensor(shared_gate_up[0], hidden_states)
-            shared_act = shared_experts.act_fn(shared_gate_up)
-
     # gmm1: gate_up_proj
     hidden_states = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
@@ -110,13 +102,6 @@ def apply_mlp(hidden_states: torch.Tensor,
         group_list=group_list,
         output_dtype=w2_scale.dtype)[0]
 
-    if shared_experts:
-        with tng.scope.npu_stream_switch('moe_secondary'):
-            tng.scope.npu_wait_tensor(shared_act[0], hidden_states)
-            shared_output, _ = shared_experts.down_proj(shared_act)
-
-    if shared_experts:
-        return hidden_states, shared_output
     return hidden_states
 
 
@@ -171,21 +156,20 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
     }
     kwargs_mc2.update(stage1_kwargs)
 
-    shared_experts = kwargs.get('shared_experts', None)
-    if shared_experts:
-        shared_hidden_states = kwargs.get('shared_hidden_states', None)
-        with tng.scope.npu_stream_switch('moe_secondary'):
-            tng.scope.npu_wait_tensor(shared_hidden_states, hidden_states)
-            shared_gate_up, _ = shared_experts.gate_up_proj(
-                shared_hidden_states)
-        kwargs.update({
-            "shared_gate_up": shared_gate_up,
-        })
-
     output = torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
     # comm_stream.wait_stream(torch.npu.current_stream())
     expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[
         0:5]
+
+    shared_experts = kwargs.get("shared_experts", None)
+    shared_experts_input = kwargs.get("shared_experts_input", None)
+    if shared_experts is not None:
+        with tng.scope.npu_stream_switch("moe_secondary"):
+            tng.scope.npu_wait_tensor(shared_experts_input, topk_weights)
+            shared_gate_up, _ = shared_experts.gate_up_proj(
+                shared_experts_input)
+            tng.scope.npu_wait_tensor(shared_gate_up[0], expand_x)
+            shared_act = shared_experts.act_fn(shared_gate_up)
 
     # `expand_x` will be disposed in the `apply_mlp` function
     down_out_list = apply_mlp(expand_x,
@@ -194,12 +178,7 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
                               w2,
                               w2_scale,
                               expert_token_nums,
-                              dynamic_scale=dynamic_scale,
-                              **kwargs)
-
-    multi_stream = isinstance(down_out_list, tuple)
-    if multi_stream:
-        down_out_list, shared_output = down_out_list
+                              dynamic_scale=dynamic_scale)
 
     # moeCombine
     kwargs_mc2 = {
@@ -230,9 +209,13 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
 
     hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
 
-    if multi_stream:
+    if shared_experts is None:
+        return hidden_states
+    else:
+        with tng.scope.npu_stream_switch("moe_secondary"):
+            tng.scope.npu_wait_tensor(shared_act[0], down_out_list)
+            shared_output, _ = shared_experts.down_proj(shared_act)
         return hidden_states, shared_output
-    return hidden_states
 
 
 # currently expert parallelism implemented with all2all

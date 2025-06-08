@@ -1053,9 +1053,6 @@ class AscendFusedMoE(FusedMoE):
         self.moe_parallel_config.ep_rank = get_ep_group().rank_in_group
 
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
-        # NOTE: multistream only effective when `VLLM_ENABLE_MC2` is on
-        self.enable_multistream_moe = \
-            ascend_config.torchair_graph_config.enable_multistream_moe and VLLM_ENABLE_MC2
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
@@ -1132,7 +1129,7 @@ class AscendFusedMoE(FusedMoE):
                         hidden_states, router_logits)
 
         # Matrix multiply.
-        hidden_states = self.quant_method.apply(
+        e_hidden_states = self.quant_method.apply(
             layer=self,
             x=hidden_states,
             router_logits=router_logits,
@@ -1152,34 +1149,38 @@ class AscendFusedMoE(FusedMoE):
             global_redundant_expert_num=self.global_redundant_expert_num,
             **kwargs)
 
-        if self.enable_multistream_moe and not is_prefill:
-            hidden_states, shared_output = hidden_states
+        shared_experts = kwargs.get("shared_experts", None)
+        shared_experts_input = kwargs.get("shared_experts_input", None)
+        if shared_experts is not None:
+            # Provide dummy implementation of "non-separated" shared experts.
+            if not isinstance(e_hidden_states, tuple):
+                return e_hidden_states, shared_experts(shared_experts_input)
+            else:
+                return e_hidden_states
 
         if self.dp_size > 1:
             if VLLM_ENABLE_MC2 and not is_prefill:
                 ...
             elif self.torchair_graph_enabled:
                 if USING_LCCL_COM:  # type: ignore
-                    hidden_states = dist._functional_collectives.reduce_scatter_tensor(
-                        hidden_states,
+                    e_hidden_states = dist._functional_collectives.reduce_scatter_tensor(
+                        e_hidden_states,
                         "sum",
                         scatter_dim=0,
                         group=get_dp_group().device_group)
                 elif self.torchair_graph_enabled and not is_prefill:
-                    hidden_states = dist._functional_collectives.reduce_scatter_tensor(
-                        hidden_states,
+                    e_hidden_states = dist._functional_collectives.reduce_scatter_tensor(
+                        e_hidden_states,
                         "sum",
                         scatter_dim=0,
                         group=get_dp_group().device_group)
                 else:
-                    hidden_states = get_ep_group().combine(hidden_states)
+                    e_hidden_states = get_ep_group().combine(e_hidden_states)
 
         if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
-            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+            e_hidden_states = tensor_model_parallel_all_reduce(e_hidden_states)
 
-        if self.enable_multistream_moe and not is_prefill:
-            return hidden_states, shared_output
-        return hidden_states
+        return e_hidden_states
 
     # ----------------------------------------- TBO-related --------------------------------------------
 

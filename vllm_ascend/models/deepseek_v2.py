@@ -263,10 +263,9 @@ class CustomDeepseekV2MoE(nn.Module):
             if hasattr(attn_metadata, 'with_prefill_across_dp'):
                 is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
         num_tokens, hidden_size = hidden_states.shape
-
-        multistream = self.enable_multistream_moe and not is_prefill
-
         old_hidden_states = hidden_states
+        use_separated_shared_experts = (self.shared_experts is not None
+                                        and not self.enable_multistream_moe)
 
         if self.tp_size > 1:
             if (VLLM_ENABLE_MC2
@@ -284,13 +283,13 @@ class CustomDeepseekV2MoE(nn.Module):
         router_logits, _ = self.gate(hidden_states)
 
         kwargs = {}
-        if multistream:
+        if not use_separated_shared_experts:
             kwargs.update({
                 "shared_experts": self.shared_experts,
-                "shared_hidden_states": old_hidden_states
+                "shared_experts_input": old_hidden_states
             })
 
-        hidden_states = self.experts(
+        experts_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
             is_prefill=is_prefill,
@@ -298,10 +297,12 @@ class CustomDeepseekV2MoE(nn.Module):
             enable_force_load_balance=enable_force_load_balance,
             **kwargs)
 
-        if multistream:
-            hidden_states, shared_output = hidden_states
-
-        hidden_states = hidden_states * self.routed_scaling_factor
+        if not isinstance(experts_hidden_states, tuple):
+            hidden_states = experts_hidden_states * self.routed_scaling_factor
+        else:
+            hidden_states = experts_hidden_states[
+                0] * self.routed_scaling_factor
+            shared_hidden_states = experts_hidden_states[1]
 
         if self.tp_size > 1:
             if (VLLM_ENABLE_MC2
@@ -315,10 +316,11 @@ class CustomDeepseekV2MoE(nn.Module):
             else:
                 hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
+        if use_separated_shared_experts:
+            shared_hidden_states = self.shared_experts(old_hidden_states)
+
         if self.shared_experts is not None:
-            if not multistream:
-                shared_output = self.shared_experts(old_hidden_states)
-            hidden_states = hidden_states + shared_output
+            hidden_states = hidden_states + shared_hidden_states
 
         return hidden_states.view(num_tokens, hidden_size)
 
