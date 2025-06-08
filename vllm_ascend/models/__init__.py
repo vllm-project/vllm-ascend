@@ -20,10 +20,16 @@ def register_model():
         "Qwen2VLForConditionalGeneration",
         "vllm_ascend.models.qwen2_vl:AscendQwen2VLForConditionalGeneration")
 
-    ModelRegistry.register_model(
-        "Qwen2_5_VLForConditionalGeneration",
-        "vllm_ascend.models.qwen2_5_vl:AscendQwen2_5_VLForConditionalGeneration"
-    )
+    if envs.USE_OPTIMIZED_MODEL:
+        ModelRegistry.register_model(
+            "Qwen2_5_VLForConditionalGeneration",
+            "vllm_ascend.models.qwen2_5_vl:AscendQwen2_5_VLForConditionalGeneration"
+        )
+    else:
+        ModelRegistry.register_model(
+            "Qwen2_5_VLForConditionalGeneration",
+            "vllm_ascend.models.qwen2_5_vl_without_padding:AscendQwen2_5_VLForConditionalGeneration_Without_Padding"
+        )
 
     if envs.VLLM_ASCEND_ENABLE_DBO:
         ModelRegistry.register_model(
