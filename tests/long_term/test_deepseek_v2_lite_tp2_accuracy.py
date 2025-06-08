@@ -34,8 +34,7 @@ FILTER = "exact_match,strict-match"
 # 3% relative tolerance for numerical accuracy.
 RTOL = 0.03
 # Baseline accuracy after VLLM optimization.
-# FIXME: fix the accuracy issue
-EXPECTED_VALUE = 0.000758150113722517
+EXPECTED_VALUE = 0.3843821076573162
 
 
 def run_test(model_name, queue, more_args=None):
