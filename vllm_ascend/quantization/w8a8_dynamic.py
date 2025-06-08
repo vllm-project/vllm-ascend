@@ -348,13 +348,14 @@ def fused_experts_with_all2all(
         group_list_type = 0
 
     # `hidden_states` will be disposed in the `apply_mlp` function
-    hidden_states = apply_mlp(hidden_states,
-                              w1,
-                              w1_scale,#17
-                              w2,
-                              w2_scale,
-                              expert_tokens,#16
-                              group_list_type=group_list_type)
+    hidden_states = apply_mlp(
+        hidden_states,
+        w1,
+        w1_scale,  #17
+        w2,
+        w2_scale,
+        expert_tokens,  #16
+        group_list_type=group_list_type)
 
     if expert_map is not None:
         resorted_idx = torch.argsort(sorted_idx)
@@ -464,14 +465,13 @@ def fused_experts(hidden_states: torch.Tensor,
         group_list_type = 0
 
     # `hidden_states` will be disposed in the `apply_mlp` function
-    hidden_states = apply_mlp(
-        hidden_states,
-        w1,
-        w1_scale,
-        w2,
-        w2_scale,
-        expert_tokens,
-        group_list_type=group_list_type)
+    hidden_states = apply_mlp(hidden_states,
+                              w1,
+                              w1_scale,
+                              w2,
+                              w2_scale,
+                              expert_tokens,
+                              group_list_type=group_list_type)
 
     if expert_map is not None:
         hidden_states.mul_(sorted_weights.unsqueeze(1))
@@ -734,7 +734,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 ep_group=self.ep_group,
                 log2phy=log2phy,
                 global_redundant_expert_num=global_redundant_expert_num,
-                )
+            )
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
