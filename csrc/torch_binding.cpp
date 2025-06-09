@@ -146,10 +146,10 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
     // Input validation
     TORCH_CHECK(input.dim() >= 1, "input must have at least 1 dimension");
     TORCH_CHECK(org_vocab_start_index >= 0, "org_vocab_start_index must be non-negative");
-    TORCH_CHECK(org_vocab_end_index > org_vocab_start_index, "org_vocab_end_index must be greater than org_vocab_start_index");
+    TORCH_CHECK(org_vocab_end_index >= org_vocab_start_index, "org_vocab_end_index must be greater than org_vocab_start_index");
     TORCH_CHECK(num_org_vocab_padding >= 0, "num_org_vocab_padding must be non-negative");
-    TORCH_CHECK(added_vocab_start_index > org_vocab_end_index, "added_vocab_start_index must be greater than org_vocab_end_index");
-    TORCH_CHECK(added_vocab_end_index > added_vocab_start_index, "added_vocab_end_index must be greater than added_vocab_start_index");
+    TORCH_CHECK(added_vocab_start_index >= org_vocab_end_index, "added_vocab_start_index must be greater than org_vocab_end_index");
+    TORCH_CHECK(added_vocab_end_index >= added_vocab_start_index, "added_vocab_end_index must be greater than added_vocab_start_index");
 
     // Get total number of elements
     int64_t size = input.numel();
