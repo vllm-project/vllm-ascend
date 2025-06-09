@@ -893,13 +893,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Return empty ModelRunnerOuptut if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
         # TO DO: read shared memory from asyn process
-        # self.eplb_loader.update_expert_weights_update_info
+        # self.eplb_loader.generate_expert_d2d_transfer_task
         # Run a demo for testing D2D transfering
         if self.eplb_loader.mock_flag:
             rank_id = torch.distributed.get_rank()
             (expert_transfer_info, expert_pull_info, updated_expert_map, layer_id) = \
                 self.eplb_loader.generate_mock_update_info(rank_id)
-            self.eplb_loader.update_expert_weights_update_info(expert_transfer_info,
+            self.eplb_loader.generate_expert_d2d_transfer_task(expert_transfer_info,
                 expert_pull_info, updated_expert_map, layer_id)
         reqs = []
         self.eplb_loader.asyn_expert_weight_transfer(reqs)
@@ -908,7 +908,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
          sample_indices) = (self._process_reqs(scheduler_output,
                                                intermediate_tensors))
         logits = self.model.compute_logits(hidden_states[sample_indices], None)
-        self.eplb_loader.update_expert_map(reqs)
+        self.eplb_loader.update_expert_map_and_weight(reqs)
 
         # Apply structured output bitmasks if present
         if scheduler_output.grammar_bitmask is not None:
@@ -1051,10 +1051,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         ]
 
         dist.all_gather(tensor_list, expert_map)
-        gathered = torch.stack(tensor_list, dim=0)           
-        all_maps = gathered.permute(1, 0, 2).contiguous()    
+        gathered = torch.stack(tensor_list, dim=0)
+        all_maps = gathered.permute(1, 0, 2).contiguous()
 
-        all_expert_maps = all_maps.to(torch.device("cpu")) 
+        all_expert_maps = all_maps.to(torch.device("cpu"))
         self.shared_dict["expert_maps"] = all_expert_maps
         logger.debug(f"[ModelRunner] Updated shared_dict['expert_map'] = {expert_map}")
         return all_expert_maps

@@ -5,8 +5,9 @@
 
 # Input: load table
 
-# output:
-# tensor loaded into HBM
+# output 
+# 加载到hbm的 tensor
+
 
 # step1. collect
 
@@ -42,11 +43,11 @@ class EplbWorker:
         self.enable_d2d = enable_d2d
 
     def do_update(self):
-        # Put data into queue
-        # In process: self.policy.generate_policy()
-        # Get expert table & tensor
+        # put data in to queue
+        # in process self.policy.generate_policy() 
+        # get epxert table && tensor
 
-        # Async stream 
+        # async stream 
         # D2D
         # H2D
 
@@ -59,9 +60,8 @@ class EplbWorker:
         if load_info is None:
             return
         
-        num_local_experts = load_info.max() + 1
-        load_info, old_placemet = self.global2local(load_info, self.old_expert_maps, num_local_experts)
-        changed, priority, new_placement = self.calculate_rebalance_experts(load_info, old_placemet)
+        #根据负载信息，获取更新后的专家表
+        changed, priority, new_expert_maps = self.calculate_rebalance_experts(load_info)
 
         new_expert_maps = self.local2global(new_placement)
         # If no update is needed, skip
@@ -71,12 +71,35 @@ class EplbWorker:
 
         update_info = self.compose_expert_update_info(new_expert_maps, self.old_expert_maps)
         self.old_expert_maps = new_expert_maps
+        print("EPLB Process complete")
+    #
+    def alg(self,new_expert_maps):
+        #根据new_expert_maps，对D2D流程进行编排
+        pass
 
-        return update_info
 
-    def calculate_rebalance_experts(self, load_info, old_placement):
+    def load_impl(self, new_expert_table):
+
+        if self.enable_d2d:
+            #通过D2D更新的专家权重，调用D2DExpertWeightLoader
+            pass
+            try:
+                pass
+                logger.debug(f"[EPLB Process on NPU:{self.device}] D2D update completed")
+            except Exception as ex:
+                logger.warning(f"[EPLB Process on NPU:{self.device}] D2D update failed: {ex}", exc_info=True)
+        else:
+            #通过SSD2D更新专家权重，调用SSD2DExpertWeightLoader
+            try:
+                pass
+                logger.debug(f"[EPLB Process on NPU:{self.device}] SSD2D update completed")
+            except Exception as ex:
+                logger.warning(f"[EPLB Process on NPU:{self.device}] SSD2D update failed: {ex}", exc_info=True)
+
+
+    def calculate_rebalance_experts(self,load_info):
         """
-        Use the policy instance's rebalance_experts method to compute new_map.
+        通过 policy 实例的 rebalance_experts 方法计算 new_map。
         """
         if self.old_expert_maps is None:
             return False, None, None
@@ -91,7 +114,10 @@ class EplbWorker:
         return self.shared_dict.get("expert_maps", None)
 
     def fetch_and_sum_load_info(self):
-
+        """
+        Each time the subprocess is awakened, read the latest moe_load 
+        (shape: [num_moe_layers, num_experts_per_layer]) from shared_dict.
+        """
         return self.shared_dict.get("moe_load", None)
 
     def update_expert_map(self, expert_maps):
