@@ -958,6 +958,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
 class AscendFusedMoE(FusedMoE):
 
+    # The moe_counter parameter is required during the initialization of EPLB
+    # to identify the current layer index within the MOE model.
     moe_counter = -1
 
     def __init__(
@@ -1026,11 +1028,8 @@ class AscendFusedMoE(FusedMoE):
         self.log2phy = None
         self.global_redundant_expert_num = 0
 
-        vllm_config = get_current_vllm_config()
-        expert_map_path = None
-        if vllm_config.additional_config:
-            expert_map_path = vllm_config.additional_config.get(
-                "expert_map_path", None)
+        ascend_config = get_ascend_config()
+        expert_map_path = ascend_config.expert_map_path
         if expert_map_path and os.path.exists(expert_map_path):
             # moe expert load balance
             expert_load_balancer = ExpertLoadBalancer(expert_map_path,
@@ -1053,7 +1052,6 @@ class AscendFusedMoE(FusedMoE):
         self.moe_parallel_config.tp_rank = get_etp_group().rank_in_group
         self.moe_parallel_config.ep_rank = get_ep_group().rank_in_group
 
-        ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         # NOTE: multistream only effective when `VLLM_ENABLE_MC2` is on
         self.enable_multistream_shared_expert = \

@@ -11,9 +11,9 @@ class ExpertLoadBalancer(object):
         self.expert_map_path = expert_map_path
         self.global_expert_num = global_expert_num
         self.expert_map_tensor, self.layers_num, self.ranks_num = (
-            self.expert_file_to_tensor())
+            self._expert_file_to_tensor())
 
-    def expert_file_to_tensor(self):
+    def _expert_file_to_tensor(self):
         with open(self.expert_map_path, "r") as f:
             data = json.load(f)
         layers_num = data["moe_layer_count"]
@@ -28,8 +28,7 @@ class ExpertLoadBalancer(object):
         expert_map_tensor = torch.tensor(tensor_data, dtype=torch.int32)
         return expert_map_tensor, layers_num, gpus_num
 
-    @staticmethod
-    def generate_index_dicts(tensor_2d):
+    def generate_index_dicts(self, tensor_2d):
         dict_list = []
         current_idx = 0
 
@@ -100,9 +99,3 @@ class ExpertLoadBalancer(object):
         return global_redundant_expert_num
 
 
-# if __name__ == "__main__":
-#     expert_load_balancer = ExpertLoadBalancer("expert_map.json", 256)
-#     rank_placement_map = expert_load_balancer.get_rank_placement_map(1, 0)
-#     print(rank_placement_map)
-#     rank_phy2log_map = expert_load_balancer.get_rank_log2phy_map(1, 0)
-#     print(rank_phy2log_map)
