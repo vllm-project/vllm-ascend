@@ -1,40 +1,38 @@
 # # TODO
-# load ssd or d2d transformer for expert weight
+# load SSD or D2D transformer for expert weight
 
 # matrixaccLib-EPLB:
 
-# Input 热度表
+# Input: load table
 
-# output
+# output 
 # 加载到hbm的 tensor
 
 
 # step1. collect
 
-# step2. eplb algo
-# step3. expert weight loading(ssd->host->hbm or d2d hbm) hbm buffer,  与后处理或者attention 计算掩盖
+# step2. EPLB algorithm
+# step3. expert weight loading (SSD->host->HBM or D2D HBM) HBM buffer, masking for post-processing or attention computation
 
-# step4. expert table apply & hbm buffer copy
+# step4. apply expert table & HBM buffer copy
 
 
 import time
 import numpy as np
+import torch
 import torch_npu
 import logging
-from multiprocessing import Process, Queue
-import multiprocessing
-from abc import ABC, abstractmethod
 import torch.distributed as dist
+from multiprocessing import Process, Queue, Manager
+from abc import ABC, abstractmethod
+from vllm.logger import logger
 
+from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory, DynamicConfig
 
-# from vllm_ascend.eplb.core.loader.device_transfer_loader import D2DExpertWeightLoader, SSD2DExpertWeightLoader
-from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory,DynamicConfig
-
-logger = logging.getLogger(__name__)
 
 class EplbWorker:
 
-    def __init__(self, device: int, shared_dict, policy_type, enable_d2d: bool = True, ):
+    def __init__(self, device: int, shared_dict, policy_type, enable_d2d: bool = True):
         self.policy_type = policy_type
         self.policy = PolicyFactory.generate_policy(policy_type, DynamicConfig())
         self.device = device
@@ -42,40 +40,39 @@ class EplbWorker:
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
 
-
     def do_update(self):
         # put data in to queue
-        # in process self.policy.generate_policy()
+        # in process self.policy.generate_policy() 
         # get epxert table && tensor
 
-        # async stream
+        # async stream 
         # D2D
         # H2D
 
-        #获取初始expert_map
-        if self.old_expert_maps == None:
+        # Get initial expert_map
+        if self.old_expert_maps is None:
             self.old_expert_maps = self.get_init_expert_maps()
 
-        #获取moe负载信息
+        # Get MOE load information
         load_info = self.fetch_and_sum_load_info()
         if load_info is None:
             return
-
+        
         #根据负载信息，获取更新后的专家表
-        changed, priority, new_expert_maps = self.calculate_rebalance_experts(load_info)
+        num_local_experts = load_info.max() + 1
+        load_info, old_placemet = self.global2local(load_info, self.old_expert_maps, num_local_experts)
+        changed, priority, new_placement = self.calculate_rebalance_experts(load_info, old_placemet)
 
-        #如果不需要更新，则跳过
+        new_expert_maps = self.local2global(new_placement)
+
         if changed == 0:
             return
         logger.debug(f"[EPLB Process on NPU:{self.device}] new_map differs, performing D2D")
 
-        # 更新权重
-        self.load_impl(new_expert_maps)
-
-        #更新expert_map
-        self.update_expert_map(new_expert_maps)
+        update_info = self.compose_expert_update_info(new_expert_maps, self.old_expert_maps)
         self.old_expert_maps = new_expert_maps
-        print("EPLB Process complete")
+        logger.info("EPLB Process complete")
+
     #
     def compose_expert_update_info(self, updated_expert_maps, current_expert_maps):
         num_layers = current_expert_maps.shape[0]
@@ -116,38 +113,18 @@ class EplbWorker:
                 expert_send_info_this_layer[src_rank_id].append((dst_rank_id, expert_id))
                 expert_recv_info_this_layer[dst_rank_id].append((src_rank_id, expert_id))
 
-            yield (expert_send_info_this_layer, expert_recv_info_this_layer, updated_expert_maps_this_layer, layer_id)
+            yield (expert_send_info_this_layer, expert_pull_info_this_layer, updated_expert_maps_this_layer, layer_id)
 
 
-    def load_impl(self, new_expert_table):
-
-        if self.enable_d2d:
-            #通过D2D更新的专家权重，调用D2DExpertWeightLoader
-            pass
-            try:
-                pass
-                logger.debug(f"[EPLB Process on NPU:{self.device}] D2D update completed")
-            except Exception as ex:
-                logger.warning(f"[EPLB Process on NPU:{self.device}] D2D update failed: {ex}", exc_info=True)
-        else:
-            #通过SSD2D更新专家权重，调用SSD2DExpertWeightLoader
-            try:
-                pass
-                logger.debug(f"[EPLB Process on NPU:{self.device}] SSD2D update completed")
-            except Exception as ex:
-                logger.warning(f"[EPLB Process on NPU:{self.device}] SSD2D update failed: {ex}", exc_info=True)
-
-
-    def calculate_rebalance_experts(self,load_info):
+    def calculate_rebalance_experts(self, load_info, old_placement):
         """
         通过 policy 实例的 rebalance_experts 方法计算 new_map。
         """
         if self.old_expert_maps is None:
             return False, None, None
 
-        changed, priority, new_map = self.policy.rebalance_experts(self.old_expert_maps, load_info)
+        changed, priority, new_map = self.policy.rebalance_experts(old_placement, load_info)
         return changed, priority, new_map
-
 
     def get_init_expert_maps(self):
         """
@@ -157,87 +134,134 @@ class EplbWorker:
 
     def fetch_and_sum_load_info(self):
         """
-        Each time the subprocess is awakened, read the latest moe_load
+        Each time the subprocess is awakened, read the latest moe_load 
         (shape: [num_moe_layers, num_experts_per_layer]) from shared_dict.
         """
         return self.shared_dict.get("moe_load", None)
 
-
     def update_expert_map(self, expert_maps):
-        """
-        子进程计算出 new_map 后，把它写回 shared_dict["expert_map"]。
-        """
+
         self.shared_dict["expert_maps"] = expert_maps
 
+    def global2local(self,
+        workload: torch.Tensor,       
+        placement: torch.Tensor,     
+        E_local: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+
+        L, G, _ = placement.shape
+        device = placement.device
+
+        wt_local = torch.full((L, G, E_local),
+                              fill_value=-1,
+                              dtype=workload.dtype,
+                              device=device)
+        pt_local = torch.full((L, G, E_local),
+                              fill_value=-1,
+                              dtype=torch.long,
+                              device=device)
+
+        valid = placement >= 0
+        l_idx, g_idx, k_idx = valid.nonzero(as_tuple=True)
+
+        slot_idx = placement[l_idx, g_idx, k_idx]
+        values = workload[l_idx, g_idx, k_idx]
+
+        wt_local[l_idx, g_idx, slot_idx] = values
+        pt_local[l_idx, g_idx, slot_idx] = k_idx
+
+        return wt_local, pt_local
+
+
+    def local2global(self,
+        placement_local: torch.Tensor  
+    ) -> torch.Tensor:
+
+        L, G, E_local = placement_local.shape
+        device = placement_local.device
+
+        max_id = torch.max(placement_local)
+        E_global = (max_id + 1).item() if max_id >= 0 else 0
+
+        if E_global == 0:
+            return torch.empty((L, G, 0), dtype=torch.long, device=device)
+
+        placement_global = torch.full((L, G, E_global),
+                                      fill_value=-1,
+                                      dtype=torch.long,
+                                      device=device)
+
+        valid = placement_local >= 0
+        l_idx, g_idx, slot_idx = valid.nonzero(as_tuple=True)
+        gid_idx = placement_local[l_idx, g_idx, slot_idx]
+
+        placement_global[l_idx, g_idx, gid_idx] = slot_idx
+
+        return placement_global
 
 
 class EplbProcess:
-    def __init__(self, device_id: int, shared_dict, policy_type: int = 1, enable_d2d: bool = True):
+    def __init__(self, device_id: int, shared_dict, planner_q, block_update_q,policy_type: int = 0, enable_d2d: bool = True):
         """
         Args:
-            device_id: NPU 设备号
-            shared_dict: Manager().dict() 返回的跨进程共享字典
-            policy_type: 整型，传给 PolicyFactory.generate_policy
-            enable_d2d: 是否启用 D2D 加载
+            device_id: NPU device ID
+            shared_dict: Cross-process shared dict returned by Manager().dict()
+            policy_type: Integer passed to PolicyFactory.generate_policy
+            enable_d2d: Whether to enable D2D loading
         """
         self.device_id = device_id
         self.shared_dict = shared_dict
         self.policy_type = policy_type
         self.enable_d2d = enable_d2d
+        self.planner_q = planner_q
+        self.block_update_q = block_update_q
 
-        # 创建 EplbWorker 实例
+        # Create EplbWorker instance
         self.worker = EplbWorker(self.device_id, self.shared_dict, self.policy_type, self.enable_d2d)
+        print(f"[EPLB rank={self.device_id}] my block_update_q id = {id(self.block_update_q)}")
 
-        # 后面 _launch_process 会覆盖这两个属性
-        self.planner_q = None
-        self.block_update_q = None
-
-    def worker_process(self):
+    def worker_process(self,planner_q,block_update_q):
         """
-        子进程入口：绑定到指定 NPU，循环等待 planner_q 唤醒，调用 do_update，再通知主进程已完成更新。
+        Subprocess entry: bind to specified NPU, loop waiting for planner_q to wake up, call do_update, then notify main process update is complete.
         """
         try:
             torch_npu.npu.set_device(self.device_id)
         except Exception as e:
-            logger.warning(
-                f"[EPLB 子进程 {self.device_id}] 无法绑定 NPU: {e}", exc_info=True
-            )
+            logger.warning(f"[EPLB subprocess {self.device_id}] Failed to bind NPU: {e}", exc_info=True)
             return
 
         while True:
             try:
-                # 阻塞等待主进程通知
-                self.planner_q.get()
 
-                # 执行一次更新
-                self.worker.do_update()
+                planner_q.get()
+                
+                update_info = self.worker.do_update()
+ 
+                print("update_info:", update_info)
 
-                # 通知主进程已完成更新
-                self.block_update_q.put(1)
+                for (a,b,c,d) in update_info:
+                    while True:
+                        if not block_update_q.empty():
+                            continue
+                        block_update_q.put((a,b,c,d))
+                        break
+
+                print("EPLB Process complete")
 
             except Exception as e:
-                logger.warning(
-                    f"[EPLB 子进程 {self.device_id}] 异常退出: {e}", exc_info=True
-                )
+                logger.warning(f"[EPLB subprocess {self.device_id}] Exiting due to error: {e}", exc_info=True)
                 break
 
     def _launch_process(self):
         """
-        使用 spawn 模式，启动子进程并返回 (planner_q, block_update_q, proc)。
+        Use spawn method to launch subprocess and return (planner_q, block_update_q, proc).
         """
-        ctx = multiprocessing.get_context("spawn")
-        planner_q = ctx.Queue()
-        block_update_q = ctx.Queue()
-
-        # 把队列赋给 worker_process 中使用
-        self.planner_q = planner_q
-        self.block_update_q = block_update_q
-
-        proc = ctx.Process(
+        proc = Process(
             target=self.worker_process,
-            args=(),
+            args=(self.planner_q,self.block_update_q),
             daemon=True
         )
+
         proc.start()
-        return planner_q, block_update_q, proc
+        return  proc
 
