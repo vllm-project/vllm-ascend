@@ -22,10 +22,9 @@ import numpy as np
 import torch
 import torch_npu
 import logging
-from multiprocessing import Process, Queue, Manager
-import multiprocessing
-from abc import ABC, abstractmethod
 import torch.distributed as dist
+from multiprocessing import Process, Queue, Manager
+from abc import ABC, abstractmethod
 from vllm.logger import logger
 
 from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory, DynamicConfig
@@ -72,7 +71,45 @@ class EplbWorker:
         update_info = self.compose_expert_update_info(new_expert_maps, self.old_expert_maps)
         self.old_expert_maps = new_expert_maps
         print("EPLB Process complete")
+
     #
+    def compose_expert_update_info(self, updated_expert_maps, current_expert_maps):
+        num_layers = current_expert_maps.shape[0]
+        num_ranks = current_expert_maps.shape[1]
+        num_experts = current_expert_maps.shape[2]
+
+        for layer_id in range(num_layers):
+            updated_expert_maps_this_layer = updated_expert_maps[layer_id][:][:]
+            current_expert_maps_this_layer = current_expert_maps[layer_id][:][:]
+
+            expert_send_info_this_layer = dict()
+            expert_pull_info_this_layer = dict()
+
+            if torch.equal(updated_expert_maps_this_layer, current_expert_maps_this_layer):
+                yield (expert_send_info_this_layer, expert_pull_info_this_layer, updated_expert_maps_this_layer, layer_id)
+
+            dst_rank_indices, experts_to_pull = torch.where((current_expert_maps_this_layer == -1) \
+                & (updated_expert_maps_this_layer != -1))
+
+            src_rank_indices, experts_to_send = torch.where((current_expert_maps_this_layer != -1) \
+                & (updated_expert_maps_this_layer == -1))
+
+            for idx in range(len(dst_rank_indices)):
+                dst_rank_id = dst_rank_indices[idx].item()
+                expert_id = experts_to_pull[idx].item()
+                if dst_rank_id not in expert_pull_info_this_layer:
+                    expert_pull_info_this_layer[dst_rank_id] = []
+
+                candidate_src_rank_indices = src_rank_indices[experts_to_send == expert_id]
+                #TODO: improve selection criterion of npu sending expert_id considering such as intra-node or inter-node...
+                src_rank_id = candidate_src_rank_indices[0].item()
+                if src_rank_id not in expert_send_info_this_layer:
+                    expert_send_info_this_layer[src_rank_id] = []
+
+                expert_send_info_this_layer[src_rank_id].append((dst_rank_id, expert_id))
+                expert_pull_info_this_layer[dst_rank_id].append((src_rank_id, expert_id))
+
+                yield (expert_send_info_this_layer, expert_pull_info_this_layer, updated_expert_maps_this_layer, layer_id)
 
 
     def calculate_rebalance_experts(self,load_info):
