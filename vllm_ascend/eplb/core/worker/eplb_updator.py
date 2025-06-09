@@ -5,7 +5,7 @@
 
 # Input: load table
 
-# output 
+# output
 # 加载到hbm的 tensor
 
 
@@ -42,10 +42,10 @@ class EplbWorker:
 
     def do_update(self):
         # put data in to queue
-        # in process self.policy.generate_policy() 
+        # in process self.policy.generate_policy()
         # get epxert table && tensor
 
-        # async stream 
+        # async stream
         # D2D
         # H2D
 
@@ -57,7 +57,7 @@ class EplbWorker:
         load_info = self.fetch_and_sum_load_info()
         if load_info is None:
             return
-        
+
         #根据负载信息，获取更新后的专家表
         num_local_experts = load_info.max() + 1
         load_info, old_placemet = self.global2local(load_info, self.old_expert_maps, num_local_experts)
@@ -73,7 +73,9 @@ class EplbWorker:
         self.old_expert_maps = new_expert_maps
         logger.info("EPLB Process complete")
 
-    #
+        return update_info
+
+    # TODO: Here only expert weight exchange is considered, need to be extended to cover other weight update cases
     def compose_expert_update_info(self, updated_expert_maps, current_expert_maps):
         num_layers = current_expert_maps.shape[0]
         num_ranks = current_expert_maps.shape[1]
@@ -91,7 +93,7 @@ class EplbWorker:
                 yield (expert_send_info_this_layer, expert_recv_info_this_layer, updated_expert_maps_this_layer, layer_id)
 
             # Parse expert_ids each rank needs to receive from other ranks
-            dst_rank_indices, experts_to_pull = torch.where((current_expert_maps_this_layer == -1) \
+            dst_rank_indices, experts_to_recv = torch.where((current_expert_maps_this_layer == -1) \
                 & (updated_expert_maps_this_layer != -1))
 
             # Parse expert_ids each rank needs to send to other ranks
@@ -100,7 +102,7 @@ class EplbWorker:
 
             for idx in range(len(dst_rank_indices)):
                 dst_rank_id = dst_rank_indices[idx].item()
-                expert_id = experts_to_pull[idx].item()
+                expert_id = experts_to_recv[idx].item()
                 if dst_rank_id not in expert_recv_info_this_layer:
                     expert_recv_info_this_layer[dst_rank_id] = []
 
@@ -113,7 +115,7 @@ class EplbWorker:
                 expert_send_info_this_layer[src_rank_id].append((dst_rank_id, expert_id))
                 expert_recv_info_this_layer[dst_rank_id].append((src_rank_id, expert_id))
 
-            yield (expert_send_info_this_layer, expert_pull_info_this_layer, updated_expert_maps_this_layer, layer_id)
+            yield (expert_send_info_this_layer, expert_recv_info_this_layer, updated_expert_maps_this_layer, layer_id)
 
 
     def calculate_rebalance_experts(self, load_info, old_placement):
@@ -134,7 +136,7 @@ class EplbWorker:
 
     def fetch_and_sum_load_info(self):
         """
-        Each time the subprocess is awakened, read the latest moe_load 
+        Each time the subprocess is awakened, read the latest moe_load
         (shape: [num_moe_layers, num_experts_per_layer]) from shared_dict.
         """
         return self.shared_dict.get("moe_load", None)
@@ -144,8 +146,8 @@ class EplbWorker:
         self.shared_dict["expert_maps"] = expert_maps
 
     def global2local(self,
-        workload: torch.Tensor,       
-        placement: torch.Tensor,     
+        workload: torch.Tensor,
+        placement: torch.Tensor,
         E_local: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
 
@@ -174,7 +176,7 @@ class EplbWorker:
 
 
     def local2global(self,
-        placement_local: torch.Tensor  
+        placement_local: torch.Tensor
     ) -> torch.Tensor:
 
         L, G, E_local = placement_local.shape
@@ -201,7 +203,7 @@ class EplbWorker:
 
 
 class EplbProcess:
-    def __init__(self, device_id: int, shared_dict, planner_q, block_update_q,policy_type: int = 0, enable_d2d: bool = True):
+    def __init__(self, device_id: int, shared_dict, planner_q, block_update_q, policy_type: int = 0, enable_d2d: bool = True):
         """
         Args:
             device_id: NPU device ID
@@ -234,9 +236,9 @@ class EplbProcess:
             try:
 
                 planner_q.get()
-                
+
                 update_info = self.worker.do_update()
- 
+
                 print("update_info:", update_info)
 
                 for (a,b,c,d) in update_info:

@@ -19,6 +19,7 @@ import torch.distributed as dist
 from enum import Enum
 
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.logger import logger
 from vllm_ascend.eplb.core.loader.abstract_loader import ExpertWeightLoader
 
 class ExpertWeightUpdateState(Enum):
@@ -51,16 +52,19 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
         self.layer_id = -1
 
         self.state = ExpertWeightUpdateState.WAITING
-        self.pull_tensor_list = []
+        self.recv_weight_list = []
         self.mock_flag = True
 
-    def generate_expert_d2d_send_task(self, expert_send_info, expert_recv_info,
+    def generate_expert_d2d_transfer_task(self, expert_send_info, expert_recv_info,
         updated_expert_map, layer_id):
+        # When current send/recv and weight.expert_map update tasks are not finished, cannot accept new d2d task
         if self.state != ExpertWeightUpdateState.WAITING:
-            return -1
+            logger.error("current d2d weight update tasks are on-going, cannot accept new weight update task")
+            return
 
+        # If neither send nor receive task is needed for this layer on this rank, return
         if not (expert_send_info or expert_recv_info):
-            return -1
+            return
 
         self.updated_expert_map = updated_expert_map
 
@@ -72,39 +76,47 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
                 self.comm_op_list.append(dist.P2POp(dist.isend, src_tensor, dst_rank))
 
         buffer_tensor_id = 0
-        for pull_info in expert_recv_info:
-            pull_rank, global_expert_id_to_pull = pull_info
+        for recv_info in expert_recv_info:
+            recv_rank, global_expert_id_to_recv = recv_info
             for buffer_tensor in self.get_buffer_tensor(buffer_tensor_id):
-                self.comm_op_list.append(dist.P2POp(dist.irecv, buffer_tensor, pull_rank))
-            self.pull_tensor_list.append((self.updated_expert_map[global_expert_id_to_pull].item(), buffer_tensor_id))
-        buffer_tensor_id += 1
+                self.comm_op_list.append(dist.P2POp(dist.irecv, buffer_tensor, recv_rank))
+            self.recv_weight_list.append((self.updated_expert_map[global_expert_id_to_recv].item(), buffer_tensor_id))
+            buffer_tensor_id += 1
 
         self.state = ExpertWeightUpdateState.READY
 
-        return 0
-
-    def asyn_expert_weight_send(self, reqs):
+    def asyn_expert_weight_transfer(self, reqs):
+        # Only when send/recv tasks are parsed into self.comm_op_list, d2d send/recv tasks can be luanched
         if self.state != ExpertWeightUpdateState.READY:
-            return -1
-        if self.comm_op_list is not None:
+            return
+
+        # set asynchronous stream for d2d expert weight transfer
+        if self.comm_op_list:
             reqs = dist.batch_isend_irecv(self.comm_op_list)
+
         self.state = ExpertWeightUpdateState.TRANSFERING
-        return 0
 
     def update_expert_map_and_weight(self, reqs):
+        # Only after send/recv tasks have been luanched, expert_map and weight can be updated
         if self.state != ExpertWeightUpdateState.TRANSFERING:
-            return -1
+            return
+
+        # Waiting for send/recv tasks finish
         for req in reqs:
             req.wait()
+
         if self.comm_op_list is not None:
             self.comm_op_list = None
+
+        # update expert_map
         self.expert_map[self.layer_id].copy_(self.updated_expert_map)
-        for pull_info in self.pull_tensor_list:
-            local_expert_id, buffer_tensor_id = pull_info
+
+        # update expert weight
+        for recv_info in self.recv_weight_list:
+            local_expert_id, buffer_tensor_id = recv_info
             self.copy_buffer_tensor(self.layer_id, local_expert_id, buffer_tensor_id)
-        self.pull_tensor_list = []
+        self.recv_weight_list = []
         self.state = ExpertWeightUpdateState.WAITING
-        return 0
 
     def init_buffer_tensor_dict(self, num_buffer_tensor, params_dtype):
         for name in self.expert_weight_names:
