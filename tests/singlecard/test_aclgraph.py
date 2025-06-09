@@ -23,7 +23,6 @@ Run `pytest tests/compile/test_aclgraph.py`.
 import os
 
 import pytest
-import torch
 from vllm import LLM, SamplingParams
 from vllm_ascend.platform import NPUPlatform
 
