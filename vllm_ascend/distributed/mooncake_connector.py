@@ -235,15 +235,6 @@ class MooncakeConnectorScheduler:
             if count > 0:
                 return count, True
 
-            # NOTE: if count is 0 here, we have less than block_size
-            # tokens to pull after subtracting the local prefix cache hit.
-            # The remote only sends fully computed blocks, so there is
-            # nothing to transfer but we still need to notify the
-            # prefill worker so that the remote blocks are freed.
-            if all(p in params for p in ("remote_engine_id", "remote_host",
-                                         "remote_port")):
-                self._reqs_need_recv[request.request_id] = (request, [])
-
         # No remote prefill for this request.
         return 0, False
 
@@ -282,15 +273,6 @@ class MooncakeConnectorScheduler:
         # Loop through scheduled reqs and convert to ReqMeta.
         for req_id, (req, block_ids) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
-            # For the case where there are no remote blocks to pull
-            # (block_ids is empty), we don't need to schedule
-            # an async read on the worker side.
-            if not block_ids:
-                logger.debug(
-                    "Skipping adding request %s to MooncakeConnectorMetadata, "
-                    "as there are no remote blocks to pull", req_id)
-                continue
-
             meta.add_new_req(
                 request_id=req_id,
                 local_block_ids=block_ids,
