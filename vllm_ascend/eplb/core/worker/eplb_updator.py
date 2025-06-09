@@ -84,22 +84,25 @@ class EplbWorker:
             current_expert_maps_this_layer = current_expert_maps[layer_id][:][:]
 
             expert_send_info_this_layer = dict()
-            expert_pull_info_this_layer = dict()
+            expert_recv_info_this_layer = dict()
 
+            # Guard Clause: if there is no expert weight update, avoid subsequent processing
             if torch.equal(updated_expert_maps_this_layer, current_expert_maps_this_layer):
-                yield (expert_send_info_this_layer, expert_pull_info_this_layer, updated_expert_maps_this_layer, layer_id)
+                yield (expert_send_info_this_layer, expert_recv_info_this_layer, updated_expert_maps_this_layer, layer_id)
 
+            # Parse expert_ids each rank needs to receive from other ranks
             dst_rank_indices, experts_to_pull = torch.where((current_expert_maps_this_layer == -1) \
                 & (updated_expert_maps_this_layer != -1))
 
+            # Parse expert_ids each rank needs to send to other ranks
             src_rank_indices, experts_to_send = torch.where((current_expert_maps_this_layer != -1) \
                 & (updated_expert_maps_this_layer == -1))
 
             for idx in range(len(dst_rank_indices)):
                 dst_rank_id = dst_rank_indices[idx].item()
                 expert_id = experts_to_pull[idx].item()
-                if dst_rank_id not in expert_pull_info_this_layer:
-                    expert_pull_info_this_layer[dst_rank_id] = []
+                if dst_rank_id not in expert_recv_info_this_layer:
+                    expert_recv_info_this_layer[dst_rank_id] = []
 
                 candidate_src_rank_indices = src_rank_indices[experts_to_send == expert_id]
                 #TODO: improve selection criterion of npu sending expert_id considering such as intra-node or inter-node...
@@ -108,7 +111,7 @@ class EplbWorker:
                     expert_send_info_this_layer[src_rank_id] = []
 
                 expert_send_info_this_layer[src_rank_id].append((dst_rank_id, expert_id))
-                expert_pull_info_this_layer[dst_rank_id].append((src_rank_id, expert_id))
+                expert_recv_info_this_layer[dst_rank_id].append((src_rank_id, expert_id))
 
                 yield (expert_send_info_this_layer, expert_pull_info_this_layer, updated_expert_maps_this_layer, layer_id)
 

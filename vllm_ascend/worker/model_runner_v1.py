@@ -340,26 +340,31 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def init_eplb(self):
         self.num_moe_layers = 2
-        import multiprocessing
         self.expert_map_initialized = False
         self.update_in_flight = False
+        self.weight_update_counter = 0
+        self.eplb_threshold = 10
+        self.forward_counter = 0
 
-        ctx = multiprocessing.get_context("spawn")
-        self.manager = ctx.Manager()
+        self.planner_block_queue = Queue(maxsize=1)
+        self.block_update_queue = Queue()
+
+        self.manager = Manager()
         self.shared_dict = self.manager.dict({
             "expert_map": None,  #当前rank_id的专家表[num_layers,num_experts]
             "moe_load": None,    #热度负载信息 [num_layers,num_experts]
             "expert_maps": None  #所有的专家表[num_layers, world_size, num_experts]
         })
+
         self.eplb = EplbProcess(
             device_id=self.device,
             shared_dict=self.shared_dict,
-            policy_type=1,
+            planner_q=self.planner_block_queue,
+            block_update_q=self.block_update_queue,
+            policy_type=0,
             enable_d2d=True
         )
-
-        self.planner_block_queue, self.block_update_queue, self.eplb_process = \
-            self.eplb._launch_process()
+        self.eplb_process = self.eplb._launch_process()
 
         logger.info(f"[ModelRunner] Launched EPLB process (pid={self.eplb_process.pid})")
 
@@ -892,17 +897,24 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if not scheduler_output.total_num_scheduled_tokens:
             # Return empty ModelRunnerOuptut if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
-        # TO DO: read shared memory from asyn process
-        # self.eplb_loader.generate_expert_d2d_transfer_task
-        # Run a demo for testing D2D transfering
-        if self.eplb_loader.mock_flag:
+
+        # Get weight update info from eplb process for D2D weight transfering
+        if self.update_in_flight and self.weight_update_counter < self.num_moe_layers:
+            (expert_send_info, expert_recv_info, updated_expert_map, layer_id) = self.block_update_queue.get()
             rank_id = torch.distributed.get_rank()
-            (expert_transfer_info, expert_pull_info, updated_expert_map, layer_id) = \
-                self.eplb_loader.generate_mock_update_info(rank_id)
-            self.eplb_loader.generate_expert_d2d_transfer_task(expert_transfer_info,
-                expert_pull_info, updated_expert_map, layer_id)
+            expert_send_info_this_rank = expert_send_info[rank_id] if rank_id in expert_send_info else []
+            expert_recv_info_this_rank = expert_recv_info[rank_id] if rank_id in expert_recv_info else []
+            # TODO: layer_id + 3 should be replaced by configuration
+            self.eplb_loader.generate_expert_d2d_transfer_task(expert_send_info_this_rank,
+                expert_recv_info_this_rank, updated_expert_map[rank_id], layer_id + 3)
+            self.weight_update_counter += 1
+            if self.weight_update_counter == self.num_moe_layers:
+                self.update_in_flight = False
+
+        # set asynchronous stream for d2d expert weight update
         reqs = []
         self.eplb_loader.asyn_expert_weight_transfer(reqs)
+
         (attn_metadata, hidden_states, spec_decode_metadata, positions,
          num_scheduled_tokens,
          sample_indices) = (self._process_reqs(scheduler_output,
@@ -998,8 +1010,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict={},
         )
 
-        if self.enable_eplb:
-            self.do_eplb()
+        self.forward_counter += 1
+        if self.enable_eplb and self.forward_counter >= self.eplb_threshold:
+            if not self.update_in_flight:
+                self.do_eplb()
+                self.update_in_flight = True
+                self.forward_counter = 0
+                self.weight_update_counter = 0
 
         return model_runner_output
 
@@ -1304,7 +1321,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
             pin_memory=True,
             vocab_size=self.model_config.get_vocab_size(),
-            block_size=self.cache_config.block_size,
+            block_sizes=[self.cache_config.block_size],
         )
 
         for kv_cache_group in kv_cache_config.kv_cache_groups:
