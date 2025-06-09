@@ -100,6 +100,7 @@ class AscendAttentionState(Enum):
     PrefillCacheHit = 1
     DecodeOnly = 2
     ChunkedPrefill = 3
+    SpecDecoding = 4
 
 
 @dataclass
