@@ -8,6 +8,9 @@ vllm_ascend.egg-info/
 # DS Store
 .DS_Store
 
+# fusion_result
+fusion_result*
+
 # Linting
 actionlint
 shellcheck*/

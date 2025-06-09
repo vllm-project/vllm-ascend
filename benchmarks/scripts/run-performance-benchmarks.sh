@@ -3,18 +3,15 @@
 
 check_npus() {
   # shellcheck disable=SC2155
-  declare -g npu_count=$(npu-smi info -l | grep "Total Count" | awk -F ':' '{print $2}' | tr -d ' ')
+  read npu_count npu_type <<< $(python3 -c "import torch.npu; print(torch.npu.device_count(), torch.npu.get_device_name(0))")
   
   if [[ -z "$npu_count" || "$npu_count" -eq 0 ]]; then
-    echo "Need at least 1 NPU to run benchmarking."
+    _warn "Need at least 1 NPU to run ."
     exit 1
   else
-    echo "found NPU conut: $npu_count"
+    _info "Found NPU conut: $npu_count"
   fi
-
-  npu_type=$(npu-smi info | grep -E "^\| [0-9]+" | awk -F '|' '{print $2}' | awk '{$1=$1;print}' | awk '{print $2}')
-
-  echo "NPU type is: $npu_type"
+  _info "NPU type is: $npu_type"
 }
 
 ensure_sharegpt_downloaded() {
