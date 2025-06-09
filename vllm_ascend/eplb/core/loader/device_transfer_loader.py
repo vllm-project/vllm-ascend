@@ -18,7 +18,6 @@ import torch
 import torch.distributed as dist
 from enum import Enum
 
-from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import logger
 from vllm_ascend.eplb.core.loader.abstract_loader import ExpertWeightLoader
 
@@ -29,30 +28,13 @@ class ExpertWeightUpdateState(Enum):
 
 class D2DExpertWeightLoader(ExpertWeightLoader):
 
-    def __init__(self, model):
+    def __init__(self, eplb_adaptor):
         self.comm_op_list = None
-        self.model = model
-        self.param_dict = dict(self.model.named_parameters())
-        # TODO: init self.expert_weight_names depending on different model types, only deepseek v3 w8a8 is supported here
-        config = self.model.config
-        self.expert_weight_names = ["w13_weight", "w2_weight", "w13_weight_scale", "w13_weight_offset",
-            "w2_weight_scale", "w2_weight_offset"]
-
-        self.buffer_tensor_dict = dict()
-        num_buffer_tensor = 1 # TO DO: provide number of buffer tensor by vllm configuration
-        params_dtype = torch.int8 # TO DO: provide number of buffer tensor by vllm configuration
-        self.init_buffer_tensor_dict(num_buffer_tensor, params_dtype)
-
-        self.expert_map = dict()
-        num_moe_layers = 2 # TO DO: provide number of num_moe_layers by vllm configuration
-        for layer_idx in range(num_moe_layers):
-            self.expert_map[3 + layer_idx] = self.model.get_expert_map(3 + layer_idx)
+        self.eplb_adaptor = eplb_adaptor
 
         self.updated_expert_map = None
-        self.layer_id = -1
-
+        self.layer_id = -1             # layer id to be updated
         self.state = ExpertWeightUpdateState.WAITING
-        self.recv_weight_list = []
         self.mock_flag = True
 
     def generate_expert_d2d_transfer_task(self, expert_send_info, expert_recv_info,
@@ -72,15 +54,15 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
         self.comm_op_list = []
         for send_info in expert_send_info:
             dst_rank, global_expert_id_to_send = send_info
-            for src_tensor in self.get_expert_tensor(layer_id, global_expert_id_to_send):
+            for src_tensor in self.eplb_adaptor.get_expert_tensor(layer_id, global_expert_id_to_send):
                 self.comm_op_list.append(dist.P2POp(dist.isend, src_tensor, dst_rank))
 
         buffer_tensor_id = 0
         for recv_info in expert_recv_info:
             recv_rank, global_expert_id_to_recv = recv_info
-            for buffer_tensor in self.get_buffer_tensor(buffer_tensor_id):
+            for buffer_tensor in self.eplb_adaptor.get_buffer_tensor(buffer_tensor_id):
                 self.comm_op_list.append(dist.P2POp(dist.irecv, buffer_tensor, recv_rank))
-            self.recv_weight_list.append((self.updated_expert_map[global_expert_id_to_recv].item(), buffer_tensor_id))
+            self.recv_weight_list.append((global_expert_id_to_recv, buffer_tensor_id))
             buffer_tensor_id += 1
 
         self.state = ExpertWeightUpdateState.READY
@@ -109,37 +91,18 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
             self.comm_op_list = None
 
         # update expert_map
-        self.expert_map[self.layer_id].copy_(self.updated_expert_map)
+        self.eplb_adaptor.do_update_expert_map(self.layer_id, self.updated_expert_map)
 
         # update expert weight
-        for recv_info in self.recv_weight_list:
-            local_expert_id, buffer_tensor_id = recv_info
-            self.copy_buffer_tensor(self.layer_id, local_expert_id, buffer_tensor_id)
-        self.recv_weight_list = []
+        buffer_tensor_id = 0
+        for recv_info in expert_recv_info:
+            recv_rank, global_expert_id_to_recv = recv_info
+            self.eplb_adaptor.do_update_expert_weight(self.layer_id, global_expert_id_to_recv, buffer_tensor_id)
+            buffer_tensor_id += 1
+
+        self.updated_expert_map = None
+        self.layer_id = -1
         self.state = ExpertWeightUpdateState.WAITING
-
-    def init_buffer_tensor_dict(self, num_buffer_tensor, params_dtype):
-        for name in self.expert_weight_names:
-            complete_name = "model.layers.3.mlp.experts." + name
-            expert_tensor = self.param_dict[complete_name].data[0:num_buffer_tensor]
-            self.buffer_tensor_dict[name] = torch.empty_like(expert_tensor)
-
-    def get_buffer_tensor(self, buffer_tensor_id):
-        for name in self.expert_weight_names:
-            yield self.buffer_tensor_dict[name][buffer_tensor_id]
-
-    def get_expert_tensor(self, layer_id, global_expert_id_to_send):
-        for name in self.expert_weight_names:
-            complete_name = "model.layers." + str(layer_id) + ".mlp.experts." + name
-            local_expert_id = self.expert_map[layer_id][global_expert_id_to_send].item()
-            yield self.param_dict[complete_name].data[local_expert_id]
-
-    def copy_buffer_tensor(self, layer_id, expert_id_before_replace, buffer_tensor_id):
-        for name in self.expert_weight_names:
-            complete_name = "model.layers." + str(layer_id) + ".mlp.experts." + name
-            local_expert_id = self.expert_map[layer_id][expert_id_before_replace].item()
-            expert_tensor = self.param_dict[complete_name].data[local_expert_id]
-            expert_tensor.copy_(self.buffer_tensor_dict[name][buffer_tensor_id])
 
     def generate_mock_update_info(self, rank_id):
         if rank_id == 0:
