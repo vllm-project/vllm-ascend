@@ -34,7 +34,7 @@ Following is the Release Compatibility Matrix for vLLM Ascend Plugin:
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
-| 2025.06.07 | Release candidates, v0.9.0rc1             |
+| 2025.06.09 | Release candidates, v0.9.0rc1             |
 | 2025.05.29 | v0.7.x post release, v0.7.3.post1         |
 | 2025.05.08 | v0.7.x Final release, v0.7.3              |
 | 2025.05.06 | Release candidates, v0.8.5rc1             |
