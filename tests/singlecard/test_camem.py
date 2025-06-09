@@ -16,7 +16,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-import os
 
 import torch
 from vllm import LLM, SamplingParams
@@ -61,7 +60,6 @@ def test_basic_camem():
 
 @fork_new_process_for_each_test
 def test_end_to_end():
-    os.environ["VLLM_USE_V1"] = "0"
     free, total = torch.npu.mem_get_info()
     used_bytes_baseline = total - free  # in case other process is running
     llm = LLM("Qwen/Qwen2.5-0.5B-Instruct", enable_sleep_mode=True)

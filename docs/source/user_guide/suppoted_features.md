@@ -8,7 +8,7 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 |-------------------------------|----------------|----------------|------------------------------------------------------------------------|
 | Chunked Prefill               | 🚧 WIP         | 🟢 Functional  | Functional, see detail note: [Chunked Prefill][cp]                     |
 | Automatic Prefix Caching      | 🚧 WIP         | 🟢 Functional  | Functional, see detail note: [vllm-ascend#732][apc]                    |
-| LoRA                          | 🟢 Functional  | 🚧 WIP         | [vllm-ascend#396][multilora], CI needed, working on V1 support         |
+| LoRA                          | 🟢 Functional  | 🟢 Functional  | [vllm-ascend#396][multilora], [vllm-ascend#893][v1 multilora]          |
 | Prompt adapter                | 🔴 No plan     | 🟡 Planned     | Plan in 2025.06.30                                                     |
 | Speculative decoding          | 🟢 Functional  | 🚧 WIP         | CI needed; working on V1 support                                       |
 | Pooling                       | 🟢 Functional  | 🟡 Planned     | CI needed and adapting more models; V1 support rely on vLLM support.   |
@@ -43,6 +43,7 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 [v1_scheduler]: https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/sched/scheduler.py
 [v1_rfc]: https://github.com/vllm-project/vllm/issues/8779
 [multilora]: https://github.com/vllm-project/vllm-ascend/issues/396
+[v1 multilora]: https://github.com/vllm-project/vllm-ascend/pull/893
 [graph_mode]: https://github.com/vllm-project/vllm-ascend/issues/767
 [apc]: https://github.com/vllm-project/vllm-ascend/issues/732
 [cp]: https://docs.vllm.ai/en/stable/performance/optimization.html#chunked-prefill

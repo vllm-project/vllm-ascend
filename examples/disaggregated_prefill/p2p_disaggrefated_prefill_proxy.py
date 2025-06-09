@@ -181,6 +181,13 @@ async def handle_request():
 
 
 if __name__ == "__main__":
-    t = start_service_discovery("0.0.0.0", 30001)
-    app.run(host="0.0.0.0", port=10001)
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="args of disaggregated-prefill proxy")
+    parser.add_argument("--http-port", type=int, default=10001)
+    parser.add_argument("--register-port", type=int, default=10002)
+    args = parser.parse_args()
+
+    t = start_service_discovery("0.0.0.0", args.register_port)
+    app.run(host="0.0.0.0", port=args.http_port)
     t.join()

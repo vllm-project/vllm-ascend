@@ -17,11 +17,15 @@
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 
+import atexit
 import math
-from typing import TYPE_CHECKING
+from contextlib import contextmanager
+from threading import Lock
+from typing import TYPE_CHECKING, List, Tuple
 
 import torch
 from packaging.version import InvalidVersion, Version
+from torch_npu.npu.streams import Event
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs
@@ -126,14 +130,16 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     original_sizes, compilation_config.cudagraph_capture_sizes = \
         compilation_config.cudagraph_capture_sizes, None
 
-    # Calculate parallel configuration factor (increases with DP or TP)
-    # TODO(Yizhou): This is a temporary solution, need to be improved
-    # in the future, taking into account the other parallel configurations.
+    # Calculate parallel configuration factor
     num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
     parallel_config = vllm_config.parallel_config
+
+    # TODO: Find out whether we need to take into account the pp_size
     parallel_factor = 1 + sum(size > 1 for size in [
-        parallel_config.data_parallel_size,
-        parallel_config.tensor_parallel_size
+        parallel_config.data_parallel_size_local,
+        parallel_config.tensor_parallel_size,
+        parallel_config.expert_parallel_size,
+        parallel_config.expert_tensor_parallel_size,
     ])
 
     # Calculate maximum supported batch sizes considering model architecture
@@ -169,3 +175,55 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             "No adjustment needed for ACL graph batch sizes: %s model (layers: %d) with %d sizes",
             vllm_config.model_config.architectures[0], num_hidden_layers,
             len(original_sizes))
+
+
+def dispose_tensor(x: torch.Tensor):
+    x.set_(torch.empty((0, ), device=x.device, dtype=x.dtype))
+
+
+class ProfileExecuteDuration:
+    _instance = None
+    _observations: List[Tuple[str, Event, Event]] = []
+    _lock = Lock()
+
+    def __new__(cls):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                atexit.register(cls._instance.destroy)
+            return cls._instance
+
+    def destroy(self):
+        with self._lock:
+            self._observations.clear()
+
+    @contextmanager
+    def capture_async(self, duration_tag: str):
+        if not envs.VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE:
+            yield
+            return
+
+        observe_start = Event(enable_timing=True)
+        observe_start.record()
+        try:
+            yield
+        finally:
+            observe_end = Event(enable_timing=True)
+            observe_end.record()
+            with self._lock:
+                self._observations.append(
+                    (duration_tag, observe_start, observe_end))
+
+    def pop_captured_sync(self) -> dict:
+        """Pop and synchronize all events in the observation list"""
+        durations: dict[str, float] = {}
+        if not envs.VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE:
+            return durations
+
+        while self._observations:
+            with self._lock:
+                tag, observe_start, observe_end = self._observations.pop()
+            observe_end.synchronize()
+            durations[tag] = observe_start.elapsed_time(observe_end)
+
+        return durations
