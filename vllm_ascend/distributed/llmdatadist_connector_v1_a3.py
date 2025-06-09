@@ -429,7 +429,7 @@ class LLMDataDistConnectorWorker():
         block_shape = first_kv_cache.shape[-block_rank:]
 
     self.block_len = math.prod(block_shape)
-    self.cache_addr = None
+    self.cache_addr = []
     alignment = 2 * 1024 * 1024
     if self.use_mla:
       cache_k_normed_addr_list = []
@@ -480,8 +480,6 @@ class LLMDataDistConnectorWorker():
     self.ready_event.wait()
 
   def start_load_kv(self, metadata: LLMDataDistConnectorMetadata):
-    logger.info("start to load kv")
-    logger.info(f"load kv metadata is: {metadata}")
     for req_id, meta in metadata.requests.items():
       logger.debug(f"Start to transmit {req_id}")
       self._read_blocks(
@@ -604,7 +602,6 @@ class LLMDataDistConnectorWorker():
     logger.info(f"comm name: {comm_name}")
     logger.info(f"cluster rank info: {cluster_rank_info}")
     comm_id = self.llm_datadist.link(comm_name, cluster_rank_info, json.dumps(rank_table))
-    logger.info("Fnished link process")
     while True:
       ret = self.llm_datadist.query_register_mem_status(comm_id=comm_id)
       if ret == llm_datadist.RegisterMemStatus.OK:
