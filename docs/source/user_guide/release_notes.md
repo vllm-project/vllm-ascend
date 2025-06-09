@@ -1,6 +1,6 @@
 # Release note
 
-## v0.9.0rc1 - 2025.06.07
+## v0.9.0rc1 - 2025.06.09
 
 This is the 1st release candidate of v0.9.0 for vllm-ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to start the journey. From this release, V1 Engine is recommended to use. The code of V0 Engine is frozen and will not be maintained any more. Please set environment `VLLM_USE_V1=1` to enable V1 Engine.
 
@@ -36,6 +36,7 @@ This is the 1st release candidate of v0.9.0 for vllm-ascend. Please follow the [
 ### Known Issue
 
 - In some case, vLLM process may be crashed with aclgraph enabled. We're working this issue and it'll be fixed in the next release.
+- Multi node data-parallel doesn't work with this release. This is a known issue in vllm and has been fixed on main branch. [#18981](https://github.com/vllm-project/vllm/pull/18981)
 
 ## v0.7.3.post1 - 2025.05.29
 
