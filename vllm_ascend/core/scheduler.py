@@ -505,7 +505,8 @@ class AscendScheduler(Scheduler):
             if num_tokens_scheduled == 0:
                 # The request was not scheduled in this step.
                 continue
-            self.scheduled_req_ids.remove(req_id)
+            if req_id in self.scheduled_req_ids:
+                self.scheduled_req_ids.remove(req_id)
 
         return super().update_from_output(scheduler_output,
                                           model_runner_output)
