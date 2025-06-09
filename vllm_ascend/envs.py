@@ -57,8 +57,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: bool(int(os.getenv("VLLM_ENABLE_MC2", '0'))),
     # Whether to enable the topk optimization. It's disabled by default for experimental support
     # We'll make it enabled by default in the future.
-    "VLLM_ASCEND_ENABLE_TOPK_OPTIMZE":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_OPTIMZE", '0'))),
+    "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE", '0'))),
     # Whether to use LCCL communication. If not set, the default value is False.
     "USING_LCCL_COM":
     lambda: bool(int(os.getenv("USING_LCCL_COM", '0'))),
@@ -107,6 +107,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to enable the trace recompiles from pytorch.
     "VLLM_ASCEND_TRACE_RECOMPILES":
     lambda: bool(int(os.getenv("VLLM_ASCEND_TRACE_RECOMPILES", '0'))),
+    "VLLM_ASCEND_ENABLE_DBO":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_DBO", '0'))),
     # Whether to enable the model execute time observe profile. Disable it when
     # running vllm ascend in production environment.
     "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
@@ -125,7 +127,12 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # We set this var default to `1` in vllm-ascend to avoid segment fault when
     # enable `pin_memory` while creating a tensor using `torch.tensor`.
     "VLLM_ASCEND_ACL_OP_INIT_MODE":
-    lambda: os.getenv("VLLM_ASCEND_ACL_OP_INIT_MODE", '1'),
+    lambda: os.getenv("VLLM_ASCEND_ACL_OP_INIT_MODE", '0'),
+    # Some models are optimized by vllm ascend. While in some case, e.g. rlhf
+    # training, the optimized model may not be suitable. In this case, set this
+    # value to False to disable the optimized model.
+    "USE_OPTIMIZED_MODEL":
+    lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
 }
 
 # end-env-vars-definition

@@ -1,3 +1,11 @@
+# Maintainers
+
+| Name | Github ID | Date |
+|:-----------:|:-----:|:-----:|
+| Xiyuan Wang| [@wangxiyuan](https://github.com/wangxiyuan) | 2025/01 |
+| Yikun Jiang| [@Yikun](https://github.com/Yikun) | 2025/02 |
+| Yi Gan| [@ganyi1996ppo](https://github.com/ganyi1996ppo) | 2025/02 |
+
 # Contributors
 
 vLLM Ascend every release would not have been possible without the following contributors:
