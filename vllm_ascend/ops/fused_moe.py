@@ -16,7 +16,7 @@
 # Adapted from vllm/tests/kernels/test_moe.py
 
 import os
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -36,6 +36,7 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
+from vllm_ascend.utils import npu_stream_switch, npu_wait_tensor
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 USING_LCCL_COM: bool = envs_ascend.USING_LCCL_COM
@@ -106,15 +107,17 @@ def process_topk_ids(topk_ids: torch.Tensor, expert_num: int, ep_size: int,
     return topk_ids_pad, unpad_indices
 
 
-def fused_experts_with_mc2(hidden_states: torch.Tensor,
-                           w1: torch.Tensor,
-                           w2: torch.Tensor,
-                           topk_weights: torch.Tensor,
-                           topk_ids: torch.Tensor,
-                           top_k: int,
-                           expert_map: torch.Tensor = None,
-                           moe_all_to_all_group_name: Optional[str] = None,
-                           **kwargs) -> torch.Tensor:
+def fused_experts_with_mc2(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    top_k: int,
+    expert_map: torch.Tensor = None,
+    moe_all_to_all_group_name: Optional[str] = None,
+    shared_experts: Optional[Any] = None
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     global_bs = 0
     moe_expert_num = len(expert_map)
     kwargs_mc2 = {
@@ -153,6 +156,13 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
     # comm_stream.wait_stream(torch.npu.current_stream())
     expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[
         0:5]
+
+    if shared_experts is not None:
+        with npu_stream_switch("moe_secondary", 0):
+            npu_wait_tensor(hidden_states, topk_weights)
+            shared_gate_up, _ = shared_experts.gate_up_proj(hidden_states)
+            npu_wait_tensor(shared_gate_up, expand_x)
+            shared_act = shared_experts.act_fn(shared_gate_up)
 
     w1 = w1.transpose(1, 2)
 
@@ -210,7 +220,13 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
 
     hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
 
-    return hidden_states
+    if shared_experts is None:
+        return hidden_states
+    else:
+        with npu_stream_switch("moe_secondary", 0):
+            npu_wait_tensor(shared_act, down_out_list)
+            shared_hidden_states, _ = shared_experts.down_proj(shared_act)
+        return hidden_states, shared_hidden_states
 
 
 def apply_mlp(hidden_states_wrapper: List[torch.Tensor],
@@ -875,6 +891,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = False,
         enable_force_load_balance: bool = False,
+        shared_experts: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
 
@@ -924,7 +941,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 top_k=top_k,
                 expert_map=expert_map,
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name,
-                **kwargs)
+                shared_experts=shared_experts)
         elif self.torchair_graph_enabled or get_ep_group().world_size == 1:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
