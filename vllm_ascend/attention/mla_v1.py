@@ -170,7 +170,7 @@ class AscendMLAMetadataBuilder:
             if metadata_cls is not None else AscendMLAMetadata  # type: ignore
         self.runner = runner
         scheduler_config = runner.scheduler_config
-        self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled    
+        self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
 
@@ -477,13 +477,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         # Adapt torch air graph mode with spec decoding.
         speculative_config = get_current_vllm_config().speculative_config
-        self.fia_sparse_mode = 0
-        self.use_spec_decode = False
-        # We need to set the sparse_mode of fused_infer_attention op to 3
-        # in spec decoding scenario in order to pass in attention mask.
         if speculative_config is not None:
-            self.fia_sparse_mode = 3
-            self.use_spec_decode = True
             self.spec_token_num = speculative_config.num_speculative_tokens
             assert self.spec_token_num > 0
 
@@ -575,7 +569,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         num_tokens = query.size(0)
         attn_output = None
         # Here is only 2 possibility of input, ChunkedPrefill or PrefillNoCache
-        if attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill:
+        if attn_metadata.attn_state in [
+                AscendAttentionState.ChunkedPrefill,
+                AscendAttentionState.SpecDecoding
+        ]:
             attn_output = torch.empty(num_tokens,
                                       self.num_heads * self.v_head_dim,
                                       dtype=query.dtype,
@@ -622,7 +619,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             attn_output = attn_output.view(-1, self.num_heads, self.v_head_dim)
         else:
             raise RuntimeError(
-                "Unexpected path reached, AscendMLAImpl should only have PrefillNoCache and ChunkedPrefill scenario in forward prefill, please file a bug to vllm-ascend !"
+                "Unexpected path reached, AscendMLAImpl should only have PrefillNoCache, ChunkedPrefill and SpecDecoding scenario in forward prefill, please file a bug to vllm-ascend !"
             )
         attn_output = attn_output.reshape(
             [num_tokens, self.num_heads * self.v_head_dim])
@@ -696,7 +693,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             device=q.device)
         if self.running_in_graph:
             # TorchAir's shape is [bs, num_heads_per_rank, q_seq_len, dim]
-            if self.use_spec_decode:
+            if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
                 assert num_tokens % self.spec_token_num == 0
                 q_nope = (q_nope.view(
                     num_tokens // (self.spec_token_num + 1),
@@ -710,9 +707,13 @@ class AscendMLAImpl(MLAAttentionImpl):
                     self.num_heads,
                     -1,
                 ).transpose(1, 2).contiguous())
+                sparse_mode = 3
+                spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
             else:
                 q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1)
                 q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
+                sparse_mode = 0
+                spec_attn_mask = None
             # shape of knope/k_pe for npu graph mode should be:
             # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
             block_size = kv_c_and_k_pe_cache[0].shape[1]
@@ -730,8 +731,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 num_heads=self.num_heads,
                 num_key_value_heads=self.num_kv_heads,
                 input_layout="BNSD",
-                atten_mask=attn_metadata.decode.attn_mask,  # type:ignore
-                sparse_mode=self.fia_sparse_mode,
+                atten_mask=spec_attn_mask,
+                sparse_mode=sparse_mode,
                 scale=self.scale,
                 antiquant_mode=0,
                 antiquant_scale=None,
@@ -773,7 +774,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output
-        self.running_in_graph = self.torchair_graph_enabled and attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+        self.running_in_graph = self.torchair_graph_enabled and attn_metadata.attn_state in [
+            AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
+        ]
         num_actual_toks = attn_metadata.num_actual_tokens
         if k_pe is None and not self.running_in_graph:
             kv_c, k_pe = self.kv_a_proj_with_mqa(
