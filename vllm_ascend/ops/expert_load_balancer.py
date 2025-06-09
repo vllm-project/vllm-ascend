@@ -97,5 +97,3 @@ class ExpertLoadBalancer(object):
             len(self.expert_map_tensor[0][0]) * self.ranks_num -
             self.global_expert_num)
         return global_redundant_expert_num
-
-
