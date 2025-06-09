@@ -18,13 +18,13 @@
 | Phi-4-mini | ✅ | |
 | MiniCPM | ✅ | |
 | MiniCPM3 | ✅ | |
+| LLama4 | ✅ | |
 | Mistral | | Need test |
 | DeepSeek v2.5 | |Need test |
 | Gemma-2 | | Need test |
 | Mllama |  |Need test|
 | Gemma-3 | ❌ | [#496](https://github.com/vllm-project/vllm-ascend/issues/496) |
 | ChatGLM | ❌ | [#554](https://github.com/vllm-project/vllm-ascend/issues/554) |
-| LLama4 | ❌ | [#471](https://github.com/vllm-project/vllm-ascend/issues/471) |
 
 ### Pooling Models
 | Model | Supported | Note |
