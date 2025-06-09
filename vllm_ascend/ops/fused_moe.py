@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/kernels/test_moe.py
 
+import os
 from typing import Callable, List, Optional
 
 import torch
@@ -34,6 +35,7 @@ from vllm.model_executor.layers.quantization.base_config import \
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
+from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 USING_LCCL_COM: bool = envs_ascend.USING_LCCL_COM
@@ -956,6 +958,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
 class AscendFusedMoE(FusedMoE):
 
+    # The moe_counter parameter is required during the initialization of EPLB
+    # to identify the current layer index within the MOE model.
+    moe_counter = -1
+
     def __init__(
         self,
         num_experts: int,  # Global number of experts
@@ -982,6 +988,9 @@ class AscendFusedMoE(FusedMoE):
         # TODO: This could not initialize FusedMoE baseclass,
         # fixme and make __init__() of AscendFusedMoE more clear
         super(FusedMoE, self).__init__()
+
+        AscendFusedMoE.moe_counter += 1
+        self.moe_instance_id = AscendFusedMoE.moe_counter
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -1016,16 +1025,33 @@ class AscendFusedMoE(FusedMoE):
         self.e_score_correction_bias = e_score_correction_bias
         self.expert_map = None
         self.activation = activation
+        self.log2phy = None
+        self.global_redundant_expert_num = 0
 
-        # Create a tensor of size num_experts filled with -1
-        self.local_num_experts, self.expert_map = determine_expert_map(
-            self.ep_size,
-            get_ep_group().rank_in_group, self.global_num_experts)
+        ascend_config = get_ascend_config()
+        expert_map_path = ascend_config.expert_map_path
+        if expert_map_path and os.path.exists(expert_map_path):
+            # moe expert load balance
+            expert_load_balancer = ExpertLoadBalancer(expert_map_path,
+                                                      self.global_num_experts)
+            self.local_num_experts, self.expert_map = \
+                                expert_load_balancer.get_rank_placement_map(
+                                                self.moe_instance_id,
+                                                get_ep_group().rank_in_group)
+            self.log2phy = expert_load_balancer.get_rank_log2phy_map(
+                self.moe_instance_id,
+                get_ep_group().rank_in_group)
+            self.global_redundant_expert_num = \
+                        expert_load_balancer.get_global_redundant_expert_num()
+        else:
+            # Create a tensor of size num_experts filled with -1
+            self.local_num_experts, self.expert_map = determine_expert_map(
+                self.ep_size,
+                get_ep_group().rank_in_group, self.global_num_experts)
 
         self.moe_parallel_config.tp_rank = get_etp_group().rank_in_group
         self.moe_parallel_config.ep_rank = get_ep_group().rank_in_group
 
-        ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         # NOTE: multistream only effective when `VLLM_ENABLE_MC2` is on
         self.enable_multistream_shared_expert = \
@@ -1122,6 +1148,8 @@ class AscendFusedMoE(FusedMoE):
             e_score_correction_bias=self.e_score_correction_bias,
             is_prefill=is_prefill,
             enable_force_load_balance=enable_force_load_balance,
+            log2phy=self.log2phy,
+            global_redundant_expert_num=self.global_redundant_expert_num,
             **kwargs)
 
         if self.enable_multistream_shared_expert and not is_prefill:

@@ -24,12 +24,13 @@ LLM(model="Qwen/Qwen3-8B", additional_config={"config_key":"config_value"})
 
 The following table lists the additional configuration options available in vLLM Ascend:
 
-| Name | Type | Default | Description |
-| ---- | ---- | ------- | ----------- |
-| `torchair_graph_config` | dict | `{}` | The config options for torchair graph mode |
-| `ascend_scheduler_config` | dict | `{}` | The config options for ascend scheduler  |
-| `expert_tensor_parallel_size` | str | `0` | Expert tensor parallel size the model to use. |
-| `refresh` | bool | `false` | Whether to refresh global ascend config content. This value is usually used by rlhf case. |
+| Name                          | Type | Default | Description                                                                                   |
+|-------------------------------| ---- |------|-----------------------------------------------------------------------------------------------|
+| `torchair_graph_config`       | dict | `{}` | The config options for torchair graph mode                                                    |
+| `ascend_scheduler_config`     | dict | `{}` | The config options for ascend scheduler                                                       |
+| `expert_tensor_parallel_size` | str | `0`  | Expert tensor parallel size the model to use.                                                 |
+| `refresh`                     | bool | `false` | Whether to refresh global ascend config content. This value is usually used by rlhf case.     |
+| `expert_map_path`             | str | None | When using expert load balancing for the MOE model, an expert map path needs to be passed in. |
 
 The details of each config option are as follows:
 
