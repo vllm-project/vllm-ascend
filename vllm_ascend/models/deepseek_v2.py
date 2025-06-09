@@ -25,7 +25,7 @@
 # # vllm-project/vllm/vllm/model_executor/models/deepseek_v2.py
 # """Inference-only DeepseekV2/DeepseekV3 model."""
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -69,10 +69,36 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
+from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import dispose_tensor
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
+
+
+class CustomDeepseekV2SiluAndMul(SiluAndMul):
+
+    def __init__(self,
+                 *,
+                 weight_scale: Optional[Callable[[], torch.Tensor]] = None):
+        super().__init__()
+        self.weight_scale = weight_scale
+
+    def forward_oot(self, x: Union[torch.Tensor, Tuple[torch.Tensor,
+                                                       torch.Tensor]]):
+        if isinstance(x, tuple):
+            assert self.weight_scale is not None
+            # For AscendW8A8DynamicLinearMethod:
+            # a dynamic scale is passed along with the quantized value.
+            quantized_x, dynamic_scale = x
+            return torch_npu.npu_dequant_swiglu_quant(
+                x=quantized_x,
+                weight_scale=self.weight_scale(),
+                activation_scale=dynamic_scale,
+                activate_left=True,
+                quant_mode=1)
+        else:
+            return super().forward_oot(x)
 
 
 class CustomDeepseekV2MLP(nn.Module):
@@ -101,44 +127,38 @@ class CustomDeepseekV2MLP(nn.Module):
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
-        self.act_fn = SiluAndMul()
 
-        # NOTE: `torch_npu.npu_dequant_swiglu_quant` can only be enabled in dynamic quant
-        self.is_dynamic_quant = not isinstance(
-            self.gate_up_proj.quant_method,
-            UnquantizedLinearMethod) and isinstance(
-                self.gate_up_proj.quant_method.quant_method,
-                AscendW8A8DynamicLinearMethod)
+        quant_method = self.gate_up_proj.quant_method
+        if isinstance(quant_method, UnquantizedLinearMethod):
+            self.act_fn = CustomDeepseekV2SiluAndMul()
+        elif (isinstance(quant_method, AscendLinearMethod) and isinstance(
+                quant_method.quant_method, AscendW8A8DynamicLinearMethod)):
+            # TODO(sdmyzlp): Currently preserved as before:
+            # 1. The only quantization supported for silu is W8A8Dynamic
+            # 2. Output dtype of gate_up/down is fixed to be int32/bfloat16
+            #
+            # Maybe one can implement a better and more general configuration
+            # scheme, e.g. by somehow passing around the tweaked `quant_config`
+            self.act_fn = CustomDeepseekV2SiluAndMul(
+                # Use lazy binding, for `weight_scale_fp32` is accessible
+                # only after `process_weights_after_loading`.
+                weight_scale=lambda: self.gate_up_proj.weight_scale_fp32)
+            # To be consumed by AscendW8A8DynamicLinearMethod.apply()
+            self.gate_up_proj._ascend_quant_config = {
+                "output_dtype": torch.int32,
+                "pertoken_scale": False,
+                "return_scale": True,
+            }
+            self.down_proj._ascend_quant_config = {
+                "output_dtype": torch.bfloat16,
+                "pertoken_scale": True,
+                "return_scale": False,
+            }
+        else:
+            raise NotImplementedError(
+                f"Quantization with [{type(quant_method)}] is NOT supported")
 
     def forward(self, x):
-        if self.is_dynamic_quant:
-            x, dynamic_scale = torch_npu.npu_dynamic_quant(x)
-            x = torch_npu.npu_quant_matmul(
-                x,
-                self.gate_up_proj.weight,
-                self.gate_up_proj.weight_scale,
-                output_dtype=torch.int32,
-            )
-            x, dynamic_scale = torch_npu.npu_dequant_swiglu_quant(
-                x=x,
-                weight_scale=self.gate_up_proj.weight_scale_fp32,
-                activation_scale=dynamic_scale,
-                bias=None,
-                quant_scale=None,
-                quant_offset=None,
-                group_index=None,
-                activate_left=True,
-                quant_mode=1)
-            x = torch_npu.npu_quant_matmul(
-                x,
-                self.down_proj.weight,
-                self.down_proj.weight_scale,
-                pertoken_scale=dynamic_scale,
-                output_dtype=torch.bfloat16,
-            )
-            if self.down_proj.reduce_results and self.down_proj.tp_size > 1:
-                x = tensor_model_parallel_all_reduce(x)
-            return x
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)

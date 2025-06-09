@@ -15,13 +15,13 @@
 # limitations under the License.
 #
 
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
 import torch_npu
 import torchair as tng  # type: ignore
-from vllm.distributed import GroupCoordinator, tensor_model_parallel_all_reduce
+from vllm.distributed import GroupCoordinator
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
@@ -77,19 +77,9 @@ def apply_mlp(hidden_states: torch.Tensor,
     shared_experts = kwargs.get('shared_experts', None)
     if shared_experts:
         shared_gate_up = kwargs.get('shared_gate_up', None)
-        shared_dynamic_scale = kwargs.get('shared_dynamic_scale', None)
         with tng.scope.npu_stream_switch('cv'):
-            tng.scope.npu_wait_tensor(shared_gate_up, hidden_states)
-            shared_x, shared_dynamic_scale = torch_npu.npu_dequant_swiglu_quant(
-                x=shared_gate_up,
-                weight_scale=shared_experts.gate_up_proj.weight_scale_fp32,
-                activation_scale=shared_dynamic_scale,
-                bias=None,
-                quant_scale=None,
-                quant_offset=None,
-                group_index=None,
-                activate_left=True,
-                quant_mode=1)
+            tng.scope.npu_wait_tensor(shared_gate_up[0], hidden_states)
+            shared_act = shared_experts.act_fn(shared_gate_up)
 
     # gmm1: gate_up_proj
     hidden_states = torch_npu.npu_grouped_matmul(
@@ -122,16 +112,9 @@ def apply_mlp(hidden_states: torch.Tensor,
 
     if shared_experts:
         with tng.scope.npu_stream_switch('cv'):
-            tng.scope.npu_wait_tensor(shared_x, hidden_states)
-            shared_output = torch_npu.npu_quant_matmul(
-                shared_x,
-                shared_experts.down_proj.weight,
-                shared_experts.down_proj.weight_scale,
-                pertoken_scale=shared_dynamic_scale,
-                output_dtype=torch.bfloat16,
-            )
-            if shared_experts.down_proj.reduce_results and shared_experts.down_proj.tp_size > 1:
-                shared_output = tensor_model_parallel_all_reduce(shared_output)
+            tng.scope.npu_wait_tensor(shared_act[0], hidden_states)
+            shared_output, _ = shared_experts.down_proj(shared_act)
+
     if shared_experts:
         return hidden_states, shared_output
     return hidden_states
@@ -193,17 +176,10 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
         shared_hidden_states = kwargs.get('shared_hidden_states', None)
         with tng.scope.npu_stream_switch('cv'):
             tng.scope.npu_wait_tensor(shared_hidden_states, hidden_states)
-            shared_x, shared_dynamic_scale = torch_npu.npu_dynamic_quant(
+            shared_gate_up, _ = shared_experts.gate_up_proj(
                 shared_hidden_states)
-            shared_gate_up = torch_npu.npu_quant_matmul(
-                shared_x,
-                shared_experts.gate_up_proj.weight,
-                shared_experts.gate_up_proj.weight_scale,
-                output_dtype=torch.int32,
-            )
         kwargs.update({
             "shared_gate_up": shared_gate_up,
-            "shared_dynamic_scale": shared_dynamic_scale,
         })
 
     output = torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
@@ -541,21 +517,33 @@ class AscendW8A8DynamicLinearMethod:
     @staticmethod
     def apply(
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
         bias: Optional[torch.Tensor] = None,
         tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:
-        original_dtype = x.dtype
-        # use ATB quantize
-        quant_out, dynamic_scale = torch_npu.npu_dynamic_quant(x)
-        return torch_npu.npu_quant_matmul(
-            quant_out,
+        config = getattr(layer, "_ascend_quant_config", {})
+        if not isinstance(x, tuple):
+            output_dtype = config.get("output_dtype", x.dtype)
+            quantized_x, dynamic_scale = torch_npu.npu_dynamic_quant(x)
+        else:
+            assert "output_dtype" in config.keys(), (
+                f"DynamicLinearMethod needs explicitly specified `output_dtype`"
+                f"for pre-quantized input, got config [{config}]")
+            output_dtype = config["output_dtype"]
+            quantized_x, dynamic_scale = x
+        pertoken_scale = (dynamic_scale
+                          if config.get("pertoken_scale", True) else None)
+
+        output = torch_npu.npu_quant_matmul(
+            quantized_x,
             layer.weight,
             layer.weight_scale,
-            pertoken_scale=dynamic_scale,
+            pertoken_scale=pertoken_scale,
             bias=bias,
-            output_dtype=original_dtype,
+            output_dtype=output_dtype,
         )
+        return ((output, dynamic_scale)
+                if config.get("return_scale", False) else output)
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
