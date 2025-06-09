@@ -123,12 +123,6 @@ class NPUPlatform(Platform):
         return torch.npu.mem_get_info()
 
     @classmethod
-    def clear_npu_memory(cls):
-        gc.collect()
-        torch.npu.empty_cache()
-        torch.npu.reset_peak_memory_stats()
-
-    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         # initialize ascend config from vllm additional_config
         ascend_config = init_ascend_config(vllm_config)
