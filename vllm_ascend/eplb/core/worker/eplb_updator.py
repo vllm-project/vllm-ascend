@@ -59,7 +59,9 @@ class EplbWorker:
             return
         
         #根据负载信息，获取更新后的专家表
-        changed, priority, new_expert_maps = self.calculate_rebalance_experts(load_info)
+        num_local_experts = load_info.max() + 1
+        load_info, old_placemet = self.global2local(load_info, self.old_expert_maps, num_local_experts)
+        changed, priority, new_placement = self.calculate_rebalance_experts(load_info, old_placemet)
 
         new_expert_maps = self.local2global(new_placement)
 
@@ -111,7 +113,7 @@ class EplbWorker:
                 yield (expert_send_info_this_layer, expert_pull_info_this_layer, updated_expert_maps_this_layer, layer_id)
 
 
-    def calculate_rebalance_experts(self,load_info):
+    def calculate_rebalance_experts(self, load_info, old_placement):
         """
         通过 policy 实例的 rebalance_experts 方法计算 new_map。
         """
