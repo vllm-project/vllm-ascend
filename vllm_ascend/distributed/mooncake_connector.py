@@ -21,7 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.utils import make_zmq_path, make_zmq_socket, round_down
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
@@ -45,8 +45,6 @@ BASE_PORT = int(os.getenv("VLLM_BASE_PORT", "8790"))
 
 GET_META_MSG = b"get_meta_msg"
 DONE_RECVING_MSG = b"done_recving_msg"
-
-logger = init_logger(__name__)
 
 try:
     from mooncake.engine import TransferEngine
@@ -378,18 +376,22 @@ class MooncakeConnectorWorker:
 
         # get tp device id
         # self.device_id = (self.dp_rank * self.tp_size + self.tp_rank)
-        device_ids = os.getenv("ASCEND_RT_VISIBLE_DEVICES", "-1")
+        # note: https://github.com/vllm-project/vllm-ascend/pull/940 introducing some changes
+        device_ids = os.getenv("ASCEND_RT_VISIBLE_DEVICES", None)
         logger.info(f"os getenv ASCEND_RT_VISIBLE_DEVICES: {device_ids}")
-        device_ids = device_ids.split(',')
+        if device_ids is None:
+            device_ids = list(range(self.dp_rank * self.tp_size, (self.dp_rank+1) * self.tp_size))
+        else:
+            device_ids = list(map(int, device_ids.split(',')))
         assert len(device_ids) > self.tp_rank
         self.device_id = device_ids[self.tp_rank]
         logger.info(f"dp_rank {self.dp_rank} "
-                    f"tp_rank {self.tp_rank} device_ids {self.device_id}")
+                    f"tp_rank {self.tp_rank} device_id {self.device_id}")
 
         self.ib_device = None
         self._initialize(
             hostname=self.side_channel_host+':' +
-                     str(self.side_channel_port + self.tp_rank + self.max_device_id)+':'+'npu_'+self.device_id,
+                     str(self.side_channel_port + self.tp_rank + self.max_device_id)+':'+'npu_'+ str(self.device_id),
             device_name=self.ib_device,
         )
 
@@ -748,7 +750,10 @@ class MooncakeConnectorWorker:
                     length = len(grouped_local_block_ids[i]) * self.block_len
                     future = executor.submit(
                         self._transfer_sync, mooncake_session_id, src, dst, length)
-                    self.futures[request_id].append(future)
+                    if request_id in self.futures:
+                        self.futures[request_id].append(future)
+                    else:
+                        self.futures[request_id] = [future]
 
     def _transfer_sync(
             self, session_id: str, buffer: int, peer_buffer_address: int, length: int
