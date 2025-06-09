@@ -3,7 +3,7 @@
 ## Version Specific FAQs
 
 - [[v0.7.3.post1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1007)
-- [[v0.8.5rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/754)
+- [[v0.9.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1115)
 
 ## General FAQs
 
