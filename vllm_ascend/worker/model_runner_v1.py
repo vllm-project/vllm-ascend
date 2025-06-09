@@ -31,6 +31,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 import torch.nn as nn
+import torch.distributed as dist
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
