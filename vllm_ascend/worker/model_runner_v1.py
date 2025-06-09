@@ -1346,8 +1346,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # For the case of no forward caused by receiving remote kv,
             # one round of dummy inference is necessary
             # to prevent hang over the collective calls.
-            if finished_recving is not None and len(finished_recving) > 0:
-                self._dummy_run(1)
         if not finsihed_sending and not finished_recving:
             return EMPTY_MODEL_RUNNER_OUTPUT
         
