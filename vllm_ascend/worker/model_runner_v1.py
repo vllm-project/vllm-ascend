@@ -24,7 +24,8 @@ import weakref
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
-from multiprocessing import Queue, Manager
+from multiprocessing import Manager
+import torh.distinguish as dist
 
 import numpy as np
 import numpy.typing as npt
@@ -65,7 +66,8 @@ from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 
 
-from vllm_ascend.eplb.core.worker.eplb_updator import EplbProcess
+from vllm_ascend.eplb.eplb_updator import EplbUpdator
+from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.core.loader.device_transfer_loader import D2DExpertWeightLoader
 
 if TYPE_CHECKING:
@@ -335,7 +337,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         #     self.enable_eplb = additional_config.get("enable_eplb", False)
 
         if self.enable_eplb == True:
-            self.init_eplb()
+            self.eplb_adaptor = None
+            self.eplb_updator = EplbUpdator()
 
 
     def init_eplb(self):
@@ -1017,6 +1020,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.update_in_flight = True
                 self.forward_counter = 0
                 self.weight_update_counter = 0
+        # if self.enable_eplb:
+        #     if self.eplb_adaptor == None:
+        #         self.eplb_adaptor = VllmEplbAdaptor(self.model)
+        #         self.eplb_updator.set_adaptor(self.eplb_adaptor)
+        #     self.eplb_updator.do_eplb()
 
         return model_runner_output
 
