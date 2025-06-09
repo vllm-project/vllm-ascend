@@ -18,7 +18,6 @@
 from typing import List, Optional
 
 import torch
-from vllm.model_executor.layers.linear import ColumnParallelLinear
 
 
 # Implementation of vanilla chunked prefill, should be removed after the kernel is ready for
