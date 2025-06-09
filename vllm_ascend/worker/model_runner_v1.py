@@ -24,7 +24,7 @@ import weakref
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
-from multiprocessing import Manager
+from multiprocessing import Queue, Manager
 import torh.distinguish as dist
 
 import numpy as np
@@ -1004,41 +1004,41 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return model_runner_output
 
     def do_eplb(self):
-        if not self.update_in_flight:
-            try:
-                if not self.expert_map_initialized:
-                    self.get_expert_map()
-                    self.expert_map_initialized = True
-
-                moe_load = self.compute_and_set_moe_load()
-
-                self.planner_block_queue.put(1)
-                self.update_in_flight = True
-
-            except Exception as e:
-                logger.warning(f"[ModelRunner] Failed to wake EPLB process: {e}", exc_info=True)
-
-        if  self.update_in_flight:
-                if not self.block_update_queue.empty():
-                    self.block_update_queue.get()
-                    rank_id = dist.get_rank()
-                    new_expert_map = self.shared_dict["expert_maps"][:, rank_id, :]
-                    self.model.update_all_expert_map(new_expert_map, self.num_moe_layers)
-                    #加载权重
-                    self.update_in_flight = False
+        try:
+            if not self.expert_map_initialized:
+                self.get_expert_map()
+                self.expert_map_initialized = True
+            moe_load = self.compute_and_set_moe_load()
+            self.planner_block_queue.put(1)
+            logger.info("[ModelRunner] Success to wake EPLB process")
+        except Exception as e:
+            logger.warning(f"[ModelRunner] Failed to wake EPLB process: {e}", exc_info=True)
 
     def compute_and_set_moe_load(self):
-        moe_load = self.model.get_all_moe_loads(self.num_moe_layers)
+        local_load = self.model.get_all_moe_loads(self.num_moe_layers) 
 
-        import torch.distributed as dist
+        self._gather_buffer = None
         if dist.is_initialized():
-            dist.all_reduce(moe_load, op=dist.ReduceOp.SUM)
-        self.shared_dict["moe_load"] = moe_load.to(torch.device("cpu"))
+            self.world_size = dist.get_world_size()
+        if dist.is_initialized():
+            device = local_load.device
+            if self._gather_buffer is None:
+                shape = (self.world_size, *local_load.shape) 
+                self._gather_buffer = torch.empty(shape, 
+                                                  dtype=local_load.dtype,
+                                                  device=device)
 
-        logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] = {moe_load}")
+            dist.all_gather_into_tensor(self._gather_buffer, local_load)
 
-        return moe_load
+            moe_load = self._gather_buffer.permute(1, 0, 2).contiguous()
+            self.shared_dict["moe_load"] = moe_load.cpu()
+            logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
+        else:
+            moe_load = local_load.unsqueeze(1) 
+            self.shared_dict["moe_load"] = moe_load.cpu()
+            logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
 
+        return moe_load  
 
     def get_expert_map(self):
         expert_map = self.model.get_all_expert_map(self.num_moe_layers)
