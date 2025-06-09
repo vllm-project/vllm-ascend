@@ -25,6 +25,7 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 from multiprocessing import Queue, Manager
+import torch.distributed as dist
 
 import numpy as np
 import numpy.typing as npt
