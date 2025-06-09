@@ -31,7 +31,7 @@ from vllm.logger import logger
 from vllm.utils import get_ip
 
 import vllm_ascend.envs as envs
-from vllm_ascend.distributed.kv_transfer.utils import NPU_DTYPE_TO_TORCH_DTYPE
+from vllm_ascend.distributed.kv_transfer.utils import NPU_DTYPE_TO_TORCH_DTYPE, get_machine_type
 
 
 class SimplePipe(KVPipeBase):
@@ -59,6 +59,7 @@ class SimplePipe(KVPipeBase):
             raise NotImplementedError(
                 "kv_role should be inside [kv_producer, kv_consumer]"
             )
+        self.machine_type = get_machine_type()
 
         self.llmdatadist_comm_port = kv_connector_extra_config.get(
             "llmdatadist_comm_port", 26000
@@ -159,7 +160,7 @@ class SimplePipe(KVPipeBase):
             self.decode_cluster_id: 1,
         }
         rank_table = {}
-        version = "1.2"
+        version = "1.2" if self.machine_type == "A3" else "1.0"
         server_count = (
             1
             if prefill_device_info["server_id"]
@@ -174,7 +175,7 @@ class SimplePipe(KVPipeBase):
                 {
                     "device_id": prefill_device_info["device_id"],
                     "device_ip": prefill_device_info["device_ip"],
-                    "super_device_id": prefill_device_info["super_device_id"],
+                    **({"super_device_id": prefill_device_info["super_device_id"]} if self.machine_type == "A3" else {}),
                     "rank_id": "0",
                 }
             ],
@@ -187,7 +188,7 @@ class SimplePipe(KVPipeBase):
                     {
                         "device_id": decode_device_info["device_id"],
                         "device_ip": decode_device_info["device_ip"],
-                        "super_device_id": decode_device_info["super_device_id"],
+                        **({"super_device_id": decode_device_info["super_device_id"]} if self.machine_type == "A3" else {}),
                         "rank_id": "1",
                     }
                 ],
@@ -198,7 +199,7 @@ class SimplePipe(KVPipeBase):
             decode_device_server_info = {
                 "device_id": decode_device_info["device_id"],
                 "device_ip": decode_device_info["device_ip"],
-                "super_device_id": decode_device_info["super_device_id"],
+                **({"super_device_id": decode_device_info["super_device_id"]} if self.machine_type == "A3" else {}),
                 "rank_id": "1",
             }
             rank_table["server_list"][0]["device"].append(

@@ -16,6 +16,7 @@
 #
 import llm_datadist  # type: ignore
 import torch
+import torch_npu
 
 TORCH_DTYPE_TO_NPU_DTYPE = {
     torch.half: llm_datadist.DataType.DT_FLOAT16,
@@ -38,3 +39,21 @@ NPU_DTYPE_TO_TORCH_DTYPE = {
     llm_datadist.DataType.DT_INT64: torch.int64,
     llm_datadist.DataType.DT_INT32: torch.int32,
 }
+
+A2_SOC_VERSION_LIST = {223, 224}
+
+A3_SOC_VERSION_LIST = {253, 255}
+
+_MACHINE_TYPE = None
+
+def get_machine_type():
+    if _MACHINE_TYPE is None:
+        torch_npu.npu._lazy_init()
+        soc_version = torch_npu._C._npu_get_soc_version()
+        if soc_version in A2_SOC_VERSION_LIST:
+            _MACHINE_TYPE = "A2"
+        elif soc_version in A3_SOC_VERSION_LIST:
+            _MACHINE_TYPE = "A3"
+        else:
+            raise RuntimeError(f"Unsupported soc version: {soc_version}. Supported soc versions are: "
+                               f"A2: {A2_SOC_VERSION_LIST}, A3: {A3_SOC_VERSION_LIST}")
