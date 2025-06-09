@@ -14,7 +14,7 @@ _err() { _red "Error: $*" && exit 1; }
 
 CURL_TIMEOUT=1
 CURL_COOLDOWN=5
-CURL_MAX_TRIES=120
+CURL_MAX_TRIES=180
 
 function wait_url_ready() {
   local serve_name="$1"
@@ -31,7 +31,7 @@ function wait_url_ready() {
       break
     fi
     if [ "$i" -gt "$CURL_MAX_TRIES" ]; then
-      _info "===> \$CURL_MAX_TRIES exceeded waiting for ${serve_name} to be ready"
+      _info "===> ${CURL_MAX_TRIES}s exceeded waiting for ${serve_name} to be ready"
       return 1
     fi
     sleep "$CURL_COOLDOWN"
