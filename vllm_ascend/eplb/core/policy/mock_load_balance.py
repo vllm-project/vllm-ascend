@@ -26,5 +26,4 @@ class MockLoadBalance(EplbPolicy):
                 new_table[i][indices[1]][-1],
                 new_table[i][indices[0]][-1]
             )
-        return 1, [-i for i in range(num_layers)], new_tableHuawei Technologies Co., Ltd. 2023-2024. All rights reserved.
-
+        return 1, [-i for i in range(num_layers)], new_table

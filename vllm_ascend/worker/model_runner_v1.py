@@ -25,7 +25,6 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 from multiprocessing import Queue, Manager
-import torh.distinguish as dist
 
 import numpy as np
 import numpy.typing as npt
@@ -346,8 +345,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.eplb_threshold = 10
         self.forward_counter = 0
 
-        self.planner_block_queue = Queue(maxsize=1)
-        self.block_update_queue = Queue()
+        self.planner_block_queue = Queue()
+        self.block_update_queue = Queue(maxsize=1)
 
         self.manager = Manager()
         self.shared_dict = self.manager.dict({
@@ -1032,7 +1031,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             logger.warning(f"[ModelRunner] Failed to wake EPLB process: {e}", exc_info=True)
 
     def compute_and_set_moe_load(self):
-        local_load = self.model.get_all_moe_loads(self.num_moe_layers) 
+        local_load = self.model.get_all_moe_loads(self.num_moe_layers)
 
         self._gather_buffer = None
         if dist.is_initialized():
@@ -1040,8 +1039,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if dist.is_initialized():
             device = local_load.device
             if self._gather_buffer is None:
-                shape = (self.world_size, *local_load.shape) 
-                self._gather_buffer = torch.empty(shape, 
+                shape = (self.world_size, *local_load.shape)
+                self._gather_buffer = torch.empty(shape,
                                                   dtype=local_load.dtype,
                                                   device=device)
 
@@ -1051,11 +1050,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.shared_dict["moe_load"] = moe_load.cpu()
             logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
         else:
-            moe_load = local_load.unsqueeze(1) 
+            moe_load = local_load.unsqueeze(1)
             self.shared_dict["moe_load"] = moe_load.cpu()
             logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
 
-        return moe_load  
+        return moe_load
 
     def get_expert_map(self):
         expert_map = self.model.get_all_expert_map(self.num_moe_layers)
