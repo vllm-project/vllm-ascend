@@ -29,7 +29,6 @@ from vllm.logger import logger
 
 from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory, DynamicConfig
 
-logger = logging.getLogger(__name__)
 
 class EplbWorker:
 
@@ -63,14 +62,14 @@ class EplbWorker:
         changed, priority, new_expert_maps = self.calculate_rebalance_experts(load_info)
 
         new_expert_maps = self.local2global(new_placement)
-        # If no update is needed, skip
+
         if changed == 0:
             return
         logger.debug(f"[EPLB Process on NPU:{self.device}] new_map differs, performing D2D")
 
         update_info = self.compose_expert_update_info(new_expert_maps, self.old_expert_maps)
         self.old_expert_maps = new_expert_maps
-        print("EPLB Process complete")
+        logger.info("EPLB Process complete")
 
     #
     def compose_expert_update_info(self, updated_expert_maps, current_expert_maps):
