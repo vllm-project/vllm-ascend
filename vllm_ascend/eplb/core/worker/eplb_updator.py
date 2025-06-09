@@ -73,28 +73,6 @@ class EplbWorker:
         self.old_expert_maps = new_expert_maps
         print("EPLB Process complete")
     #
-    def alg(self,new_expert_maps):
-        #根据new_expert_maps，对D2D流程进行编排
-        pass
-
-
-    def load_impl(self, new_expert_table):
-
-        if self.enable_d2d:
-            #通过D2D更新的专家权重，调用D2DExpertWeightLoader
-            pass
-            try:
-                pass
-                logger.debug(f"[EPLB Process on NPU:{self.device}] D2D update completed")
-            except Exception as ex:
-                logger.warning(f"[EPLB Process on NPU:{self.device}] D2D update failed: {ex}", exc_info=True)
-        else:
-            #通过SSD2D更新专家权重，调用SSD2DExpertWeightLoader
-            try:
-                pass
-                logger.debug(f"[EPLB Process on NPU:{self.device}] SSD2D update completed")
-            except Exception as ex:
-                logger.warning(f"[EPLB Process on NPU:{self.device}] SSD2D update failed: {ex}", exc_info=True)
 
 
     def calculate_rebalance_experts(self,load_info):
