@@ -121,7 +121,7 @@ class NPUWorker(WorkerBase):
         if self.device_config.device.type == "npu":
             self.device = torch.device(f"npu:{self.local_rank_across_dp}")
             NPUPlatform.set_device(self.device)
-            NPUPlatform.empty_cache()
+            NPUPlatform.clear_npu_memory()
             self.init_npu_memory = NPUPlatform.mem_get_info()[0]
         else:
             info = f"Not support device type: {self.device_config.device}"
@@ -160,7 +160,7 @@ class NPUWorker(WorkerBase):
         peak_memory = torch_npu.npu.memory_stats()["allocated_bytes.all.peak"]
         # TODO: don`t need impl this func after empty_cache in
         # Worker.determine_num_available_blocks() unified`
-        NPUPlatform.empty_cache()
+        NPUPlatform.clear_npu_memory()
         torch_allocated_bytes = torch_npu.npu.memory_stats(
         )["allocated_bytes.all.current"]
         total_allocated_bytes = torch_npu.npu.mem_get_info(
