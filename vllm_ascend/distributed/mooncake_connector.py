@@ -748,6 +748,7 @@ class MooncakeConnectorWorker:
         if ret < 0:
             logger.error("Mooncake Transfer Engine Return Error.")
             raise RuntimeError("Mooncake Transfer Engine Return Error.")
+        return ret
 
     def _get_remote_tp_rank(self, req_id: str) -> int:
         return self._get_remote_tp_ranks_for_req(req_id)[self.tp_rank]
