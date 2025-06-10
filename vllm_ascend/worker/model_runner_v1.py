@@ -25,7 +25,6 @@ from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
 from multiprocessing import Manager
-import torh.distinguish as dist
 
 import numpy as np
 import numpy.typing as npt
@@ -1187,7 +1186,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
-            self.eplb_loader = D2DExpertWeightLoader(model=self.model)
             if hasattr(self, "drafter"):
                 logger.info("Loading drafter model...")
                 self.drafter.load_model(self.model)
