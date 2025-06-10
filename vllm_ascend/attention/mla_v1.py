@@ -211,6 +211,7 @@ class AscendMLAMetadataBuilder:
             )
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
         # We now want to reorder the batch so that the "decode" requests are at
@@ -728,7 +729,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
         # Here is only 2 possibility of input, ChunkedPrefill or PrefillNoCache
-       if attn_metadata.attn_state in [
+        if attn_metadata.attn_state in [
                 AscendAttentionState.ChunkedPrefill,
                 AscendAttentionState.SpecDecoding
         ]:
