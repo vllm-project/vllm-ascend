@@ -890,4 +890,4 @@ class AscendFusedMoE(FusedMoE):
         ones = torch.ones_like(ids, dtype=torch.int64, device=ids.device)
         self.moe_load.scatter_add_(0, ids, ones)
 
-        self.moe_load
+        return self.moe_load
