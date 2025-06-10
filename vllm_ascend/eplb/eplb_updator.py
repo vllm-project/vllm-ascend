@@ -29,7 +29,7 @@ class EplbUpdator:
 
     def set_adaptor(self, adaptor):
         self.adaptor = adaptor
-        self.eplb_loader = D2DExpertWeightLoader(model=self.adaptor)
+        self.eplb_loader = D2DExpertWeightLoader(eplb_adaptor=self.adaptor)
 
     def init_eplb(self):
 
