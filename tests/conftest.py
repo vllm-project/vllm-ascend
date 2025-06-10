@@ -78,6 +78,7 @@ class VllmRunner:
         enable_chunked_prefill: bool = False,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = True,
+        quantization: Optional[str] = None,
         **kwargs,
     ) -> None:
         self.model = LLM(
@@ -94,6 +95,7 @@ class VllmRunner:
             max_model_len=max_model_len,
             block_size=block_size,
             enable_chunked_prefill=enable_chunked_prefill,
+            quantization=quantization,
             **kwargs,
         )
 
