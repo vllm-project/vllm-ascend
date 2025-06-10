@@ -27,6 +27,8 @@ class VllmEplbAdaptor(EplbAdaptor):
         super().__init__(**args)
         self.model = model
         self.param_dict = dict(self.model.named_parameters())
+        self.num_dense_layers = self.model.config.first_k_dense_replace
+        self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
 
         # TODO: init self.expert_weight_names depending on different model types, only deepseek v3 w8a8 is supported here
         self.expert_weight_names = ["w13_weight", "w2_weight", "w13_weight_scale", "w13_weight_offset",
@@ -34,17 +36,16 @@ class VllmEplbAdaptor(EplbAdaptor):
 
         self.buffer_tensor_dict = dict()
         num_buffer_tensor = 100 # TO DO: provide number of buffer tensor by vllm configuration
-        params_dtype = torch.int8 # TO DO: provide number of buffer tensor by vllm configuration
-        self.init_buffer_tensor_dict(num_buffer_tensor, params_dtype)
+        self.init_buffer_tensor_dict(num_buffer_tensor)
 
         self.expert_map_per_layer = dict()
-        num_moe_layers = 2 # TO DO: provide number of num_moe_layers by vllm configuration
-        for layer_idx in range(num_moe_layers):
-            self.expert_map_per_layer[3 + layer_idx] = self.model.get_expert_map(3 + layer_idx)
+        for layer_idx in range(self.num_moe_layers):
+            self.expert_map_per_layer[self.num_dense_layers + layer_idx] =\
+                self.model.get_expert_map(self.num_dense_layers + layer_idx)
 
-    def init_buffer_tensor_dict(self, num_buffer_tensor, params_dtype):
+    def init_buffer_tensor_dict(self, num_buffer_tensor):
         for name in self.expert_weight_names:
-            complete_name = "model.layers.3.mlp.experts." + name
+            complete_name = "model.layers." + str(self.num_dense_layers) + ".mlp.experts." + name
             expert_tensor = self.param_dict[complete_name].data[0:num_buffer_tensor]
             self.buffer_tensor_dict[name] = torch.empty_like(expert_tensor)
 
