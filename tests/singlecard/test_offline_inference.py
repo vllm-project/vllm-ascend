@@ -37,6 +37,10 @@ MODELS = [
     "Qwen/Qwen3-0.6B-Base",
 ]
 MULTIMODALITY_MODELS = ["Qwen/Qwen2.5-VL-3B-Instruct"]
+
+QUANTIZATION_MODELS = [
+    "vllm-ascend/Qwen2.5-0.5B-Instruct-W8A8-new",
+]
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 QUANTIZATION_MODELS = [
