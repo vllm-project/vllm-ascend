@@ -28,7 +28,7 @@ vllm serve deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B \
     "kv_parallel_size": 8,
     "kv_port":"21001",
     "kv_connector_extra_config":
-    {"prefill_device_ips": ["1.2.3.1", "1.2.3.2", "1.2.3.3", "1.2.3.4", "1.2.3.5", "1.2.3.6", "1.2.3.7", "1.2.3.8"],
+    {"prompt_device_ips": ["1.2.3.1", "1.2.3.2", "1.2.3.3", "1.2.3.4", "1.2.3.5", "1.2.3.6", "1.2.3.7", "1.2.3.8"],
     "decode_device_ips": ["1.2.3.9", "1.2.3.10", "1.2.3.11", "1.2.3.12", "1.2.3.13", "1.2.3.14", "1.2.3.15", "1.2.3.16"],
     "llmdatadist_comm_port": 26000,
     "proxy_ip":"3.0.0.0",
