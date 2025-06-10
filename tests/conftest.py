@@ -32,7 +32,6 @@ from vllm.utils import is_list_of
 
 from tests.model_utils import (PROMPT_TEMPLATES, TokensTextLogprobs,
                                TokensTextLogprobsPromptLogprobs)
-from vllm_ascend.platform import NPUPlatform
 # TODO: remove this part after the patch merged into vllm, if
 # we not explicitly patch here, some of them might be effectiveless
 # in pytest scenario
