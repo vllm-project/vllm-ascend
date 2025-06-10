@@ -943,11 +943,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_ids_cpu[:total_num_scheduled_tokens], non_blocking=True)
         input_ids = self.input_ids[:num_input_tokens]
 
-        if (envs_ascend.VLLM_ENABLE_MC2
-                or self.torchair_graph_enabled) and not with_prefill:
-            input_ids = self.input_ids[:padded_batch_size]
-            positions = self.positions[:padded_batch_size]
-
         # prepare the MRoPE for mllm if using multimodal
         num_input_tokens = total_num_scheduled_tokens
         # _prepare_inputs may reorder the batch, so we must gather multi
@@ -984,6 +979,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             positions = self.mrope_positions[:, :num_input_tokens]
         else:
             positions = self.positions[:num_input_tokens]
+
+        if (envs_ascend.VLLM_ENABLE_MC2
+                or self.torchair_graph_enabled) and not with_prefill:
+            input_ids = self.input_ids[:padded_batch_size]
+            positions = self.positions[:padded_batch_size]
 
         # Run forward pass
         with set_forward_context(attn_metadata,
