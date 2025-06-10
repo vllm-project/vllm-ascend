@@ -96,7 +96,7 @@ jobs:
         #   - vl-accuracy-test: Qwen/Qwen2.5-VL-7B-Instruct
         model_name: ${{ fromJSON(
           (github.event.inputs.models == 'all' &&
-            '["Qwen/Qwen2.5-7B-Instruct","Qwen/Qwen2.5-VL-7B-Instruct","model_name":"Qwen/Qwen3-8B-Base"]') ||
+            '["Qwen/Qwen2.5-7B-Instruct","Qwen/Qwen2.5-VL-7B-Instruct","Qwen/Qwen3-8B-Base"]') ||
           (github.event.inputs.models == 'Qwen/Qwen2.5-7B-Instruct' &&
             '["Qwen/Qwen2.5-7B-Instruct"]') ||
           (github.event.inputs.models == 'Qwen/Qwen2.5-VL-7B-Instruct' &&
@@ -201,6 +201,7 @@ jobs:
             pip show torch | grep "Version:" | awk '{print "GHA_TORCH_VERSION="$2}'
             pip show torch_npu | grep "Version:" | awk '{print "GHA_TORCH_NPU_VERSION="$2}'
             pip show vllm | grep "Version:" | awk '{print "GHA_VLLM_VERSION="$2}' | sed 's/+.*//'
+            echo "GHA_VLLM_ASCEND_VERSION=${{ github.event.inputs.vllm-ascend-version || github.ref }}"
           } >> "$GITHUB_ENV"
       
       - name: Print versions
@@ -209,7 +210,7 @@ jobs:
           echo "Torch NPU: ${{ env.GHA_TORCH_NPU_VERSION }}"
           echo "Torch: ${{ env.GHA_TORCH_VERSION }}"
           echo "vLLM: ${{ env.GHA_VLLM_VERSION }}"
-          echo "vLLM Ascend: ${{ env.GHA_VLLM_ASCEND_VERSION || github.ref }}"
+          echo "vLLM Ascend: ${{ env.GHA_VLLM_ASCEND_VERSION }}"
 
       - name: Run Accuracy Test for V${{ matrix.vllm_use_version }}
         id: report
@@ -238,10 +239,16 @@ jobs:
         run: |
           cat ./benchmarks/accuracy/${{ steps.report.outputs.markdown_name }}.md >> $GITHUB_STEP_SUMMARY
 
+      - name: Sanitize version string for artifact naming
+        run: |
+          SAFE_VLLM_ASCEND_VERSION="${GHA_VLLM_ASCEND_VERSION//\//-}"
+          echo "SAFE_VLLM_ASCEND_VERSION=$SAFE_VLLM_ASCEND_VERSION" >> "$GITHUB_ENV"
+
       - name: Upload Report for V${{ matrix.vllm_use_version }}
+        if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: actions/upload-artifact@v4
         with:
-          name: "${{ env.GHA_VLLM_ASCEND_VERSION }}-${{ steps.report.outputs.markdown_name }}-report"
+          name: "${{ env.SAFE_VLLM_ASCEND_VERSION }}-${{ steps.report.outputs.markdown_name }}-report"
           path: ./benchmarks/accuracy/${{ steps.report.outputs.markdown_name }}.md
           if-no-files-found: warn
           retention-days: 90
