@@ -14,6 +14,8 @@ from vllm.config import (CompilationConfig, CompilationLevel, VllmConfig,
                          set_current_vllm_config)
 from vllm.utils import direct_register_custom_op
 
+from vllm_ascend.utils import vllm_version_is
+
 global_counter = 0
 
 # create a library to hold the custom op
@@ -92,14 +94,28 @@ def test_simple_piecewise_compile():
 
     inputs = torch.randn(100).npu()
 
-    with compilation_counter.expect(
-            num_graphs_seen=1,  # one graph for the model
-            num_piecewise_graphs_seen=5,  # 2 * num_layers + 1
-            num_piecewise_capturable_graphs_seen=3,  # 1 + num_layers
-            num_backend_compilations=3,  # num_piecewise_capturable_graphs_seen
-            num_cudagraph_caputured=
-            6,  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
-    ):
+    if vllm_version_is("0.9.0"):
+        kwargs = {
+            "num_graphs_seen": 1,  # one graph for the model
+            "num_piecewise_graphs_seen": 5,  # 2 * num_layers + 1
+            "num_piecewise_capturable_graphs_seen": 3,  # 1 + num_layers
+            "num_backend_compilations":
+            3,  # num_piecewise_capturable_graphs_seen
+            "num_cudagraph_caputured":
+            6  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        }
+    else:
+        kwargs = {
+            "num_graphs_seen": 1,  # one graph for the model
+            "num_piecewise_graphs_seen": 5,  # 2 * num_layers + 1
+            "num_piecewise_capturable_graphs_seen": 3,  # 1 + num_layers
+            "num_backend_compilations":
+            3,  # num_piecewise_capturable_graphs_seen
+            "num_cudagraph_captured":
+            6  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+        }
+
+    with compilation_counter.expect(kwargs):
 
         model(inputs)
 

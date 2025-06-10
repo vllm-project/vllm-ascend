@@ -97,5 +97,5 @@ def topk_topp_forward_native(
 
 
 Sampler.apply_min_p = apply_min_p
-if envs.VLLM_ASCEND_ENABLE_TOPK_OPTIMZE:
+if envs.VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE:
     TopKTopPSampler.forward_native = topk_topp_forward_native
