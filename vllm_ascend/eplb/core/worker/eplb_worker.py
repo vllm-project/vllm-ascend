@@ -51,6 +51,7 @@ class EplbWorker:
         # Get initial expert_map
         if self.old_expert_maps is None:
             self.old_expert_maps = self.get_init_expert_maps()
+            self.num_local_experts = self.old_expert_maps.max() + 1
 
         # Get MOE load information
         load_info = self.fetch_and_sum_load_info()
@@ -58,8 +59,7 @@ class EplbWorker:
             return
 
         #根据负载信息，获取更新后的专家表
-        num_local_experts = load_info.max() + 1
-        load_info, old_placemet = self.global2local(load_info, self.old_expert_maps, num_local_experts)
+        load_info, old_placemet = self.global2local(load_info, self.old_expert_maps,  self.num_local_experts)
         changed, priority, new_placement = self.calculate_rebalance_experts(load_info, old_placemet)
 
         new_expert_maps = self.local2global(new_placement)
