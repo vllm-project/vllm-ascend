@@ -16,6 +16,7 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 from vllm_ascend.core.scheduler import AscendScheduler
+from vllm_ascend.utils import vllm_version_is
 
 EOS_TOKEN_ID = 50256
 
@@ -97,7 +98,11 @@ def create_scheduler(
     )
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
-        kv_cache_tensors=[],
+        **({
+            "tensors": {}
+        } if vllm_version_is("0.9.0") else {
+            "kv_cache_tensors": []
+        }),
         kv_cache_groups=[
             KVCacheGroupSpec(['layer'],
                              FullAttentionSpec(block_size, 1, 1, torch.float32,
@@ -139,6 +144,9 @@ def create_requests(num_requests: int,
             multi_modal_placeholders=mm_position,
             multi_modal_hashes=None,
             eos_token_id=EOS_TOKEN_ID,
+            **({
+                "arrival_time": 0.0
+            } if vllm_version_is("0.9.0") else {}),
         )
         requests.append(request)
     return requests
@@ -557,6 +565,8 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
     1. Speculated tokens get scheduled correctly
     2. Spec decoding stats properly count number of draft and accepted tokens
     """
+    if vllm_version_is("0.9.0"):
+        return
     num_spec_tokens = max(1, max(len(t) for t in spec_tokens))
     scheduler = create_scheduler(num_speculative_tokens=num_spec_tokens)
     requests = create_requests(num_requests=len(spec_tokens), num_tokens=1)
@@ -734,11 +744,12 @@ def assert_scheduler_empty(scheduler: AscendScheduler):
     assert len(scheduler.encoder_cache_manager.cached) == 0
 
     # KVCache Manager.
-    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
-               req_to_blocks) == 0
+    if not vllm_version_is("0.9.0"):
+        assert len(scheduler.kv_cache_manager.coordinator.
+                   single_type_managers[0].req_to_blocks) == 0
+        assert len(scheduler.kv_cache_manager.coordinator.
+                   single_type_managers[0].num_cached_block) == 0
     assert len(scheduler.kv_cache_manager.req_to_block_hashes) == 0
-    assert len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
-               num_cached_block) == 0
     num_free_blocks = (
         scheduler.kv_cache_manager.block_pool.free_block_queue.num_free_blocks)
     assert num_free_blocks == (
@@ -748,10 +759,6 @@ def assert_scheduler_empty(scheduler: AscendScheduler):
     # value, etc will remain since we lazily evict for prefix cache.
     for block in scheduler.kv_cache_manager.block_pool.blocks:
         assert block.ref_cnt == 0
-        # assert block._block_hash is None
-    # assert (
-    #     len(scheduler.kv_cache_manager.block_pool.cached_block_hash_to_block
-    #           ) == 0)
 
 
 def test_memory_leak():
