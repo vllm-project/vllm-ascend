@@ -1,6 +1,6 @@
 # Release note
 
-## v0.9.0rc1 - 2025.06.10
+## v0.9.0rc2 - 2025.06.10
 
 This release contains some quick fixes for v0.9.0rc1. Please use this release instead of v0.9.0rc1.
 
