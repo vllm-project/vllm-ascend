@@ -13,7 +13,9 @@ from vllm.model_executor.layers.linear import (LinearBase,
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-import vllm_ascend.envs as envs_ascend
+from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
+from vllm_ascend.multistream.context import get_multistream_comm_context
+from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
 
 if TYPE_CHECKING:
@@ -444,9 +446,14 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
 
-        self.enable_kv_nz = envs_ascend.VLLM_ENABLE_KV_NZ
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+        self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
+        # Adapt torch air graph mode with spec decoding.
+        speculative_config = get_current_vllm_config().speculative_config
+        if speculative_config is not None:
+            self.spec_token_num = speculative_config.num_speculative_tokens
+            assert self.spec_token_num > 0
 
     def _v_up_proj_and_o_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
@@ -679,24 +686,38 @@ class AscendMLAImpl(MLAAttentionImpl):
             dtype=q.dtype,
             device=q.device)
         if self.running_in_graph:
+            # TorchAir's shape is [bs, num_heads_per_rank, q_seq_len, dim]
+            if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
+                assert num_tokens % self.spec_token_num == 0
+                q_nope = q_nope.view(num_tokens // (self.spec_token_num + 1),
+                                     self.spec_token_num + 1, self.num_heads,
+                                     -1)
+                q_pe = q_pe.view(num_tokens // (self.spec_token_num + 1),
+                                 self.spec_token_num + 1, self.num_heads, -1)
+                if not self.enable_kv_nz:
+                    q_nope = q_nope.transpose(1, 2).contiguous()
+                    q_pe = q_pe.transpose(1, 2).contiguous()
+                sparse_mode = 3
+                spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
+            else:
+                if self.enable_kv_nz:
+                    q_nope = q_nope.view(num_tokens, 1, self.num_heads, -1)
+                    q_pe = q_pe.view(num_tokens, 1, self.num_heads, -1)
+                else:
+                    q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1)
+                    q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
+                sparse_mode = 0
+                spec_attn_mask = None
+            # shape of knope/k_pe for npu graph mode should be:
+            # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
             block_size = kv_c_and_k_pe_cache[0].shape[1]
             if self.enable_kv_nz:
-                # TorchAir's shape is [bs, num_heads_per_rank, seq_len, dim]
-                q_nope = q_nope.view(num_tokens, 1, self.num_heads, -1)
-                q_pe = q_pe.view(num_tokens, 1, self.num_heads, -1)
-                # shape of knope/k_pe for npu graph mode should be:
-                # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
                 k_nope = k_nope.view(-1, self.num_kv_heads,
                                      self.kv_lora_rank // 16, block_size, 16)
                 k_pe = k_pe.view(-1, self.num_kv_heads,
                                  self.qk_rope_head_dim // 16, block_size, 16)
                 input_layout = "BSND"
             else:
-                # TorchAir's shape is [bs, num_heads_per_rank, seq_len, dim]
-                q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1)
-                q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
-                # shape of knope/k_pe for npu graph mode should be:
-                # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
                 k_nope = k_nope.view(-1, self.num_kv_heads, block_size,
                                      self.kv_lora_rank)
                 k_pe = k_pe.view(-1, self.num_kv_heads, block_size,
@@ -712,7 +733,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 num_heads=self.num_heads,
                 num_key_value_heads=self.num_kv_heads,
                 input_layout=input_layout,
-                atten_mask=attn_metadata.attn_mask,
+                atten_mask=spec_attn_mask,
+                sparse_mode=sparse_mode,
                 scale=self.scale,
                 antiquant_mode=0,
                 antiquant_scale=None,
