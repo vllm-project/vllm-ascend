@@ -54,7 +54,7 @@ outputs = model.generate("Hello, how are you?")
 online example:
 
 ```shell
-vllm serve Qwen/Qwen2-7B-Instruct --additional-config='{"torchair_graph_config": {"enable": True}}'
+vllm serve Qwen/Qwen2-7B-Instruct --additional-config='{"torchair_graph_config": {"enable": true}}'
 ```
 
 You can find more detail about additional config [here](./additional_config.md)
