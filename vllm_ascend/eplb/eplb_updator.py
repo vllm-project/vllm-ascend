@@ -15,50 +15,57 @@
 # This file is a part of the vllm-ascend project.
 #
 import torch
-import multiprocessing
+import torch.distributed as dist
+from multiprocessing import Queue, Manager
 
 from vllm.logger import logger
 from vllm_ascend.eplb.core.worker.eplb_worker import EplbProcess
+from vllm_ascend.eplb.core.loader.device_transfer_loader import D2DExpertWeightLoader
 
 class EplbUpdator:
 
     def __init__(self):
         self.init_eplb()
-    
+
     def set_adaptor(self, adaptor):
         self.adaptor = adaptor
-    
+        self.eplb_loader = D2DExpertWeightLoader(model=self.adaptor.model)
+
     def init_eplb(self):
 
-        self.update_iterations: torch.int64 = 1
+        self.num_iterations: torch.int64 = 10
 
         self.num_moe_layers = 2
+        self.weight_update_counter = 0
         self.expert_map_initialized = False
         self.update_in_flight = False
 
+        self.reqs = []
+
         self.cur_iterations: torch.int64 = 0
 
-        ctx = multiprocessing.get_context("spawn")
-        self.manager = ctx.Manager()
+        self.planner_block_queue = Queue()
+        self.block_update_queue = Queue(maxsize=1)
 
+        self.manager = Manager()
         self.shared_dict = self.manager.dict({
             # 当前rank_id的专家表[num_layers,num_experts]
             "expert_map": None,
-            # 热度负载信息 [num_layers,num_experts]
+            # 热度负载信息 [num_layers, world_size, num_experts]
             "moe_load": None,
             # 所有的专家表[num_layers, world_size, num_experts]
             "expert_maps": None
         })
 
         self.eplb = EplbProcess(
-            device_id = self.device,
             shared_dict = self.shared_dict,
-            policy_type = 1,
+            planner_q = self.planner_block_queue,
+            block_update_q = self.block_update_queue,
+            policy_type = 0,
             enable_d2d = True
         )
 
-        self.planner_block_queue, self.block_update_queue, self.eplb_process = \
-            self.eplb._launch_process()
+        self.eplb_process = self.eplb._launch_process()
 
         logger.info(f"[ModelRunner] Launched EPLB process (pid={self.eplb_process.pid})")
 
@@ -67,53 +74,69 @@ class EplbUpdator:
         self.cur_iterations = self.cur_iterations + 1
         return self.cur_iterations % self.num_iterations == 0
 
-
     def get_init_expert_map(self):
         try:
             if not self.expert_map_initialized:
-                self.adaptor.get_init_expert_map()
+                self.shared_dict["expert_maps"] = self.adaptor.get_init_expert_map(self.num_moe_layers)
                 self.expert_map_initialized = True
         except Exception as e:
             logger.warning(f"[ModelRunner] Failed to wake EPLB process: {e}", exc_info=True)
 
-
     def wakeup_eplb_worker(self):
         self.planner_block_queue.put(1)
 
+    def forward_before(self):
+        if self.update_in_flight and self.weight_update_counter < self.num_moe_layers:
+            (expert_send_info, expert_recv_info, updated_expert_map, layer_id) = self.block_update_queue.get()
+            rank_id = torch.distributed.get_rank()
+            expert_send_info_this_rank = expert_send_info[rank_id] if rank_id in expert_send_info else []
+            expert_recv_info_this_rank = expert_recv_info[rank_id] if rank_id in expert_recv_info else []
+            # TODO: layer_id + 3 should be replaced by configuration
+            self.eplb_loader.generate_expert_d2d_transfer_task(expert_send_info_this_rank,
+                expert_recv_info_this_rank, updated_expert_map[rank_id], layer_id + 3)
+            self.weight_update_counter += 1
+            if self.weight_update_counter == self.num_moe_layers:
+                self.update_in_flight = False
 
-    def do_eplb(self):
+        # set asynchronous stream for d2d expert weight update
+        self.reqs = []
+        self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
+
+    def forward_end(self):
 
         self.get_init_expert_map()
 
-        # step 1. expert workload aggregation
         if not self.update_in_flight and self.get_update_iteration():
             moe_load = self.compute_and_set_moe_load()
             self.wakeup_eplb_worker()
             self.update_in_flight = True
 
-        # step 4. update expert map and expert weight tensor
-        if self.update_in_flight:
-            if not self.block_update_queue.empty():
-                self.block_update_queue.get()
-                rank_id = dist.get_rank()
-                new_expert_map = self.shared_dict["expert_maps"][:, rank_id, :]
-                self.model.update_all_expert_map(new_expert_map, self.num_moe_layers)
-                #加载权重
-                self.update_in_flight = False
-
+        self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
     def compute_and_set_moe_load(self):
-        moe_load = self.adaptor.get_rank_expert_workload(self.num_moe_layers)
+        local_load = self.adaptor.get_rank_expert_workload(self.num_moe_layers) 
 
-        import torch.distributed as dist
+        self._gather_buffer = None
         if dist.is_initialized():
-            dist.all_reduce(moe_load, op=dist.ReduceOp.SUM)
-        self.shared_dict["moe_load"] = moe_load.to(torch.device("cpu"))
+            self.world_size = dist.get_world_size()
+        if dist.is_initialized():
+            device = local_load.device
+            if self._gather_buffer is None:
+                shape = (self.world_size, *local_load.shape) 
+                self._gather_buffer = torch.empty(shape, 
+                                                  dtype=local_load.dtype,
+                                                  device=device)
 
-        logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] = {moe_load}")
+            dist.all_gather_into_tensor(self._gather_buffer, local_load)
 
-        return moe_load
-
+            moe_load = self._gather_buffer.permute(1, 0, 2).contiguous()
+            self.shared_dict["moe_load"] = moe_load.cpu()
+            logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
+        else:
+            moe_load = local_load.unsqueeze(1) 
+            self.shared_dict["moe_load"] = moe_load.cpu()
+            logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
+        return moe_load  
 
     def shutdown(self):
         """

@@ -32,10 +32,9 @@ from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory, DynamicCo
 
 class EplbWorker:
 
-    def __init__(self, device: int, shared_dict, policy_type, enable_d2d: bool = True):
+    def __init__(self, shared_dict, policy_type, enable_d2d: bool = True):
         self.policy_type = policy_type
         self.policy = PolicyFactory.generate_policy(policy_type, DynamicConfig())
-        self.device = device
         self.shared_dict = shared_dict
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
@@ -67,7 +66,7 @@ class EplbWorker:
 
         if changed == 0:
             return
-        logger.debug(f"[EPLB Process on NPU:{self.device}] new_map differs, performing D2D")
+        logger.debug(f"[EPLB Process  new_map differs, performing D2D")
 
         update_info = self.compose_expert_update_info(new_expert_maps, self.old_expert_maps)
         self.old_expert_maps = new_expert_maps
@@ -203,15 +202,13 @@ class EplbWorker:
 
 
 class EplbProcess:
-    def __init__(self, device_id: int, shared_dict, planner_q, block_update_q, policy_type: int = 0, enable_d2d: bool = True):
+    def __init__(self, shared_dict, planner_q, block_update_q, policy_type: int = 0, enable_d2d: bool = True):
         """
         Args:
-            device_id: NPU device ID
             shared_dict: Cross-process shared dict returned by Manager().dict()
             policy_type: Integer passed to PolicyFactory.generate_policy
             enable_d2d: Whether to enable D2D loading
         """
-        self.device_id = device_id
         self.shared_dict = shared_dict
         self.policy_type = policy_type
         self.enable_d2d = enable_d2d
@@ -219,19 +216,13 @@ class EplbProcess:
         self.block_update_q = block_update_q
 
         # Create EplbWorker instance
-        self.worker = EplbWorker(self.device_id, self.shared_dict, self.policy_type, self.enable_d2d)
-        print(f"[EPLB rank={self.device_id}] my block_update_q id = {id(self.block_update_q)}")
+        self.worker = EplbWorker(self.shared_dict, self.policy_type, self.enable_d2d)
+
 
     def worker_process(self,planner_q,block_update_q):
         """
         Subprocess entry: bind to specified NPU, loop waiting for planner_q to wake up, call do_update, then notify main process update is complete.
         """
-        try:
-            torch_npu.npu.set_device(self.device_id)
-        except Exception as e:
-            logger.warning(f"[EPLB subprocess {self.device_id}] Failed to bind NPU: {e}", exc_info=True)
-            return
-
         while True:
             try:
 
@@ -251,7 +242,7 @@ class EplbProcess:
                 print("EPLB Process complete")
 
             except Exception as e:
-                logger.warning(f"[EPLB subprocess {self.device_id}] Exiting due to error: {e}", exc_info=True)
+                logger.warning(f"[EPLB subprocess Exiting due to error: {e}", exc_info=True)
                 break
 
     def _launch_process(self):

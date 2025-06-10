@@ -901,29 +901,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Return empty ModelRunnerOuptut if there's no work to do.
             return EMPTY_MODEL_RUNNER_OUTPUT
 
-        # Get weight update info from eplb process for D2D weight transfering
-        if self.update_in_flight and self.weight_update_counter < self.num_moe_layers:
-            (expert_send_info, expert_recv_info, updated_expert_map, layer_id) = self.block_update_queue.get()
-            rank_id = torch.distributed.get_rank()
-            expert_send_info_this_rank = expert_send_info[rank_id] if rank_id in expert_send_info else []
-            expert_recv_info_this_rank = expert_recv_info[rank_id] if rank_id in expert_recv_info else []
-            # TODO: layer_id + 3 should be replaced by configuration
-            self.eplb_loader.generate_expert_d2d_transfer_task(expert_send_info_this_rank,
-                expert_recv_info_this_rank, updated_expert_map[rank_id], layer_id + 3)
-            self.weight_update_counter += 1
-            if self.weight_update_counter == self.num_moe_layers:
-                self.update_in_flight = False
-
-        # set asynchronous stream for d2d expert weight update
-        reqs = []
-        self.eplb_loader.asyn_expert_weight_transfer(reqs)
+        if self.enable_eplb:
+            if self.eplb_adaptor == None:
+                self.eplb_adaptor = VllmEplbAdaptor(self.model)
+                self.eplb_updator.set_adaptor(self.eplb_adaptor)
+            self.eplb_updator.forward_before()
 
         (attn_metadata, hidden_states, spec_decode_metadata, positions,
          num_scheduled_tokens,
          sample_indices) = (self._process_reqs(scheduler_output,
                                                intermediate_tensors))
         logits = self.model.compute_logits(hidden_states[sample_indices], None)
-        self.eplb_loader.update_expert_map_and_weight(reqs)
 
         # Apply structured output bitmasks if present
         if scheduler_output.grammar_bitmask is not None:
@@ -1013,85 +1001,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict={},
         )
 
-        self.forward_counter += 1
-        if self.enable_eplb and self.forward_counter >= self.eplb_threshold:
-            if not self.update_in_flight:
-                self.do_eplb()
-                self.update_in_flight = True
-                self.forward_counter = 0
-                self.weight_update_counter = 0
-        # if self.enable_eplb:
-        #     if self.eplb_adaptor == None:
-        #         self.eplb_adaptor = VllmEplbAdaptor(self.model)
-        #         self.eplb_updator.set_adaptor(self.eplb_adaptor)
-        #     self.eplb_updator.do_eplb()
+        if self.enable_eplb:
+            self.eplb_updator.forward_end()
 
         return model_runner_output
-
-    def do_eplb(self):
-        try:
-            if not self.expert_map_initialized:
-                self.get_expert_map()
-                self.expert_map_initialized = True
-            moe_load = self.compute_and_set_moe_load()
-            self.planner_block_queue.put(1)
-            logger.info("[ModelRunner] Success to wake EPLB process")
-        except Exception as e:
-            logger.warning(f"[ModelRunner] Failed to wake EPLB process: {e}", exc_info=True)
-
-    def compute_and_set_moe_load(self):
-        local_load = self.model.get_all_moe_loads(self.num_moe_layers)
-
-        self._gather_buffer = None
-        if dist.is_initialized():
-            self.world_size = dist.get_world_size()
-        if dist.is_initialized():
-            device = local_load.device
-            if self._gather_buffer is None:
-                shape = (self.world_size, *local_load.shape)
-                self._gather_buffer = torch.empty(shape,
-                                                  dtype=local_load.dtype,
-                                                  device=device)
-
-            dist.all_gather_into_tensor(self._gather_buffer, local_load)
-
-            moe_load = self._gather_buffer.permute(1, 0, 2).contiguous()
-            self.shared_dict["moe_load"] = moe_load.cpu()
-            logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
-        else:
-            moe_load = local_load.unsqueeze(1)
-            self.shared_dict["moe_load"] = moe_load.cpu()
-            logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
-
-        return moe_load
-
-    def get_expert_map(self):
-        expert_map = self.model.get_all_expert_map(self.num_moe_layers)
-        if dist.is_initialized():
-                    world_size = dist.get_world_size()
-        rank = dist.get_rank()
-
-        tensor_list = [
-            torch.zeros_like(expert_map) for _ in range(world_size)
-        ]
-
-        dist.all_gather(tensor_list, expert_map)
-        gathered = torch.stack(tensor_list, dim=0)
-        all_maps = gathered.permute(1, 0, 2).contiguous()
-
-        all_expert_maps = all_maps.to(torch.device("cpu"))
-        self.shared_dict["expert_maps"] = all_expert_maps
-        logger.debug(f"[ModelRunner] Updated shared_dict['expert_map'] = {expert_map}")
-        return all_expert_maps
-
-    def shutdown(self):
-        """
-        Clean up the EPLB process.
-        """
-        if self.eplb_process.is_alive():
-            self.eplb_process.terminate()
-            self.eplb_process.join()
-            logger.info("[ModelRunner] EPLB process terminated")
 
     def _profile_multimodal(self) -> None:
         # TODO: handle encoder-decoder models once we support them.
