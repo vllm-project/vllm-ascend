@@ -70,7 +70,7 @@ class EplbUpdator:
         logger.info(f"[ModelRunner] Launched EPLB process (pid={self.eplb_process.pid})")
 
 
-    def get_update_iteration(self): 
+    def get_update_iteration(self):
         self.cur_iterations = self.cur_iterations + 1
         return self.cur_iterations % self.num_iterations == 0
 
@@ -111,10 +111,10 @@ class EplbUpdator:
             self.wakeup_eplb_worker()
             self.update_in_flight = True
 
-        self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
+        self.eplb_loader.update_expert_map_and_weight(self.reqs)
 
     def compute_and_set_moe_load(self):
-        local_load = self.adaptor.get_rank_expert_workload(self.num_moe_layers) 
+        local_load = self.adaptor.get_rank_expert_workload(self.num_moe_layers)
 
         self._gather_buffer = None
         if dist.is_initialized():
@@ -122,8 +122,8 @@ class EplbUpdator:
         if dist.is_initialized():
             device = local_load.device
             if self._gather_buffer is None:
-                shape = (self.world_size, *local_load.shape) 
-                self._gather_buffer = torch.empty(shape, 
+                shape = (self.world_size, *local_load.shape)
+                self._gather_buffer = torch.empty(shape,
                                                   dtype=local_load.dtype,
                                                   device=device)
 
@@ -133,10 +133,10 @@ class EplbUpdator:
             self.shared_dict["moe_load"] = moe_load.cpu()
             logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
         else:
-            moe_load = local_load.unsqueeze(1) 
+            moe_load = local_load.unsqueeze(1)
             self.shared_dict["moe_load"] = moe_load.cpu()
             logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
-        return moe_load  
+        return moe_load
 
     def shutdown(self):
         """
