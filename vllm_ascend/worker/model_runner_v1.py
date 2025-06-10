@@ -339,37 +339,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.eplb_adaptor = None
             self.eplb_updator = EplbUpdator()
 
-
-    def init_eplb(self):
-        self.num_moe_layers = 2
-        self.expert_map_initialized = False
-        self.update_in_flight = False
-        self.weight_update_counter = 0
-        self.eplb_threshold = 10
-        self.forward_counter = 0
-
-        self.planner_block_queue = Queue()
-        self.block_update_queue = Queue(maxsize=1)
-
-        self.manager = Manager()
-        self.shared_dict = self.manager.dict({
-            "expert_map": None,  #当前rank_id的专家表[num_layers,num_experts]
-            "moe_load": None,    #热度负载信息 [num_layers,num_experts]
-            "expert_maps": None  #所有的专家表[num_layers, world_size, num_experts]
-        })
-
-        self.eplb = EplbProcess(
-            device_id=self.device,
-            shared_dict=self.shared_dict,
-            planner_q=self.planner_block_queue,
-            block_update_q=self.block_update_queue,
-            policy_type=0,
-            enable_d2d=True
-        )
-        self.eplb_process = self.eplb._launch_process()
-
-        logger.info(f"[ModelRunner] Launched EPLB process (pid={self.eplb_process.pid})")
-
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
         output.
