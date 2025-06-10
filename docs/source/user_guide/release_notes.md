@@ -1,5 +1,13 @@
 # Release note
 
+## v0.9.0rc2 - 2025.06.10
+
+This release contains some quick fixes for v0.9.0rc1. Please use this release instead of v0.9.0rc1.
+
+### Highlights
+
+- Fix the import error when vllm-ascend is installed without editable way. [#1152](https://github.com/vllm-project/vllm-ascend/pull/1152)
+
 ## v0.9.0rc1 - 2025.06.09
 
 This is the 1st release candidate of v0.9.0 for vllm-ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to start the journey. From this release, V1 Engine is recommended to use. The code of V0 Engine is frozen and will not be maintained any more. Please set environment `VLLM_USE_V1=1` to enable V1 Engine.

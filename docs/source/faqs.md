@@ -3,7 +3,7 @@
 ## Version Specific FAQs
 
 - [[v0.7.3.post1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1007)
-- [[v0.9.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1115)
+- [[v0.9.0rc2] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1115)
 
 ## General FAQs
 
@@ -69,14 +69,14 @@ If all above steps are not working, feel free to submit a GitHub issue.
 
 ### 7. How does vllm-ascend perform?
 
-Currently, only some models are improved. Such as `Qwen2 VL`, `Deepseek  V3`. Others are not good enough. In the future, we will support graph mode and custom ops to improve the performance of vllm-ascend. And when the official release of vllm-ascend is released, you can install `mindie-turbo` with `vllm-ascend` to speed up the inference as well.
+Currently, only some models are improved. Such as `Qwen2 VL`, `Deepseek  V3`. Others are not good enough. From 0.9.0rc2, Qwen and Deepseek works with graph mode to play a good performance. What's more, you can install `mindie-turbo` with `vllm-ascend v0.7.3` to speed up the inference as well.
 
 ### 8. How vllm-ascend work with vllm?
 vllm-ascend is a plugin for vllm. Basically, the version of vllm-ascend is the same as the version of vllm. For example, if you use vllm 0.7.3, you should use vllm-ascend 0.7.3 as well. For main branch, we will make sure `vllm-ascend` and `vllm` are compatible by each commit.
 
 ### 9. Does vllm-ascend support Prefill Disaggregation feature?
 
-Currently, only 1P1D is supported by vllm. For vllm-ascend, it'll be done by [this PR](https://github.com/vllm-project/vllm-ascend/pull/432). For NPND, vllm is not stable and fully supported yet. We will make it stable and supported by vllm-ascend in the future.
+Currently, only 1P1D is supported on V0 Engine. For V1 Engine or NPND support, We will make it stable and supported by vllm-ascend in the future.
 
 ### 10. Does vllm-ascend support quantization method?
 
@@ -84,9 +84,7 @@ Currently, w8a8 quantization is already supported by vllm-ascend originally on v
 
 ### 11. How to run w8a8 DeepSeek model?
 
-Currently, w8a8 DeepSeek is working in process: [support AscendW8A8 quantization](https://github.com/vllm-project/vllm-ascend/pull/511)
-
-Please run DeepSeek with BF16 now, following the [Multi-Node DeepSeek inferencing tutorail](https://vllm-ascend.readthedocs.io/en/main/tutorials/multi_node.html)
+Please following the [quantization inferencing tutorail](https://vllm-ascend.readthedocs.io/en/main/tutorials/multi_npu_quantization.html) and replace model to DeepSeek.
 
 ### 12. There is not output in log when loading models using vllm-ascend, How to solve it?
 
