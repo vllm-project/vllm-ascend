@@ -23,6 +23,7 @@ import time
 import types
 import weakref
 import copy
+import math
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
@@ -1758,8 +1759,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         kv_cache_list = []
                         for i in range(num_caches):
                             cache_shape = kv_cache_shape[1:]
-                            kv_cache_for_compute = torch.zeros(cache_shape, dtype=dtype, device=self.device)
-                            kv_cache_list.append(kv_cache_for_compute)
+                            cache_size = math.prod(cache_shape)
+                            cache_size_aligned = cache_size + alignment
+                            kv_cache = torch.zeros(cache_size_aligned, dtype=dtype, device=self.device)
+                            kv_cache = align_memory(kv_cache, alignment)[:cache_size].view(cache_shape)
+                            kv_cache_list.append(kv_cache)
                         kv_caches[layer_name] = kv_cache_list
                         # torch_npu.npu_format_cast(kv_caches[layer_name], 2)
                 else:
