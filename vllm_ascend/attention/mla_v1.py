@@ -376,7 +376,10 @@ class AscendMLAMetadataBuilder:
             seq_lens = seq_lens[:self._num_decode_tokens]
             input_positions = input_positions[:self._num_decode_tokens]
             block_table = block_table[:self._num_decode_tokens, ...]
-            if use_torchair_graph and self.runner.attn_state == AscendAttentionState.DecodeOnly:
+            if use_torchair_graph and self.runner.attn_state in [
+                    AscendAttentionState.DecodeOnly,
+                    AscendAttentionState.SpecDecoding
+            ]:
                 num_seqs = len(seq_lens)
                 if graph_pad_size != 0:
                     pad_value = 1
