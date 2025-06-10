@@ -17,8 +17,8 @@
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 
-import gc
 import atexit
+import gc
 import math
 from contextlib import contextmanager, nullcontext
 from threading import Lock
