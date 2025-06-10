@@ -59,7 +59,7 @@ class EplbWorker:
             return
 
         #根据负载信息，获取更新后的专家表
-        load_info, old_placemet = self.global2local(load_info, self.old_expert_maps,  self.num_local_experts)
+        load_info, old_placemet = self.global2local(load_info, self.old_expert_maps, self.num_local_experts)
         changed, priority, new_placement = self.calculate_rebalance_experts(load_info, old_placemet)
 
         new_expert_maps = self.local2global(new_placement)
@@ -81,8 +81,8 @@ class EplbWorker:
         num_experts = current_expert_maps.shape[2]
 
         for layer_id in range(num_layers):
-            updated_expert_maps_this_layer = updated_expert_maps[layer_id][:][:]
-            current_expert_maps_this_layer = current_expert_maps[layer_id][:][:]
+            updated_expert_maps_this_layer = updated_expert_maps[layer_id]
+            current_expert_maps_this_layer = current_expert_maps[layer_id]
 
             expert_send_info_this_layer = dict()
             expert_recv_info_this_layer = dict()
@@ -107,7 +107,7 @@ class EplbWorker:
 
                 if not torch.isin(src_rank_indices, torch.tensor(expert_id)).any():
                     # if expert_id are not sent out from any npu, it will be copied from one npu holding this expert
-                    candidate_src_rank_indices = torch.where(current_expert_maps_this_layer[:][expert_id] != -1)
+                    candidate_src_rank_indices = torch.where(current_expert_maps_this_layer[:, expert_id] != -1)
                 else:
                     candidate_src_rank_indices = src_rank_indices[experts_to_send == expert_id]
 

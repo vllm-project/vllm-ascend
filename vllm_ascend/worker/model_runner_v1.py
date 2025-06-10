@@ -871,7 +871,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         if self.enable_eplb:
             if self.eplb_adaptor == None:
-                self.eplb_adaptor = VllmEplbAdaptor(self.model)
+                self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
                 self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.forward_before()
 

@@ -15,13 +15,12 @@ class DynamicEP(EplbPolicy):
         num_card = len(current_expert_table[0])
 
         for i in range(num_layers):
-            # Ëæ»úÑ¡Á½¸ö¿¨
+            # ï¿½ï¿½ï¿½Ñ¡ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
             indices = random.sample(range(num_card), 2)
 
-            # ½»»»ÈßÓà×¨¼Ò
-            new_table[i][indices[0]][-1], new_table[i][indices[1]][-1] = (
-                new_table[i][indices[1]][-1],
-                new_table[i][indices[0]][-1]
-            )
+            # ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½×¨ï¿½ï¿½
+            expert_id_to_exchange = new_table[i][indices[0]][-1].clone()
+            new_table[i][indices[0]][-1] = new_table[i][indices[1]][-1]
+            new_table[i][indices[1]][-1] = expert_id_to_exchange
         return 1, [-i for i in range(num_layers)], new_table
 
