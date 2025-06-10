@@ -43,7 +43,7 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import try_register_lib
+from vllm_ascend.utils import try_register_lib, clear_npu_memory
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -121,7 +121,7 @@ class NPUWorker(WorkerBase):
         if self.device_config.device.type == "npu":
             self.device = torch.device(f"npu:{self.local_rank_across_dp}")
             NPUPlatform.set_device(self.device)
-            NPUPlatform.clear_npu_memory()
+            clear_npu_memory()
             self.init_npu_memory = NPUPlatform.mem_get_info()[0]
         else:
             info = f"Not support device type: {self.device_config.device}"
@@ -138,7 +138,7 @@ class NPUWorker(WorkerBase):
     def determine_available_memory(self) -> int:
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
-        NPUPlatform.clear_npu_memory()
+        clear_npu_memory()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -160,7 +160,7 @@ class NPUWorker(WorkerBase):
         peak_memory = torch_npu.npu.memory_stats()["allocated_bytes.all.peak"]
         # TODO: don`t need impl this func after empty_cache in
         # Worker.determine_num_available_blocks() unified`
-        NPUPlatform.clear_npu_memory()
+        clear_npu_memory()
         torch_allocated_bytes = torch_npu.npu.memory_stats(
         )["allocated_bytes.all.current"]
         total_allocated_bytes = torch_npu.npu.mem_get_info(
