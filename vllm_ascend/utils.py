@@ -19,16 +19,25 @@
 
 import atexit
 import math
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from threading import Lock
 from typing import TYPE_CHECKING, List, Tuple
 
 import torch
+import torchair  # type: ignore[import]  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs
+
+try:
+    # Recent release of torchair has moved these ops to `.scope`.
+    from torchair.scope import npu_stream_switch as _npu_stream_switch
+    from torchair.scope import npu_wait_tensor as _npu_wait_tensor
+except ImportError:
+    from torchair.ops import NpuStreamSwitch as _npu_stream_switch
+    from torchair.ops import npu_wait_tensor as _npu_wait_tensor
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -227,3 +236,14 @@ class ProfileExecuteDuration:
             durations[tag] = observe_start.elapsed_time(observe_end)
 
         return durations
+
+
+def npu_stream_switch(tag: str, priority: int, *, enabled: bool = True):
+    return _npu_stream_switch(tag, priority) if enabled else nullcontext()
+
+
+def npu_wait_tensor(self: torch.Tensor,
+                    dependency: torch.Tensor,
+                    *,
+                    enabled: bool = True):
+    return _npu_wait_tensor(self, dependency) if enabled else self
