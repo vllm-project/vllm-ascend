@@ -17,14 +17,27 @@
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 
+import atexit
 import math
-from typing import TYPE_CHECKING
+from contextlib import contextmanager, nullcontext
+from threading import Lock
+from typing import TYPE_CHECKING, List, Tuple
 
 import torch
+import torchair  # type: ignore[import]  # noqa: F401
 from packaging.version import InvalidVersion, Version
+from torch_npu.npu.streams import Event
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs
+
+try:
+    # Recent release of torchair has moved these ops to `.scope`.
+    from torchair.scope import npu_stream_switch as _npu_stream_switch
+    from torchair.scope import npu_wait_tensor as _npu_wait_tensor
+except ImportError:
+    from torchair.ops import NpuStreamSwitch as _npu_stream_switch
+    from torchair.ops import npu_wait_tensor as _npu_wait_tensor
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -175,3 +188,62 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
 
 def dispose_tensor(x: torch.Tensor):
     x.set_(torch.empty((0, ), device=x.device, dtype=x.dtype))
+
+
+class ProfileExecuteDuration:
+    _instance = None
+    _observations: List[Tuple[str, Event, Event]] = []
+    _lock = Lock()
+
+    def __new__(cls):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                atexit.register(cls._instance.destroy)
+            return cls._instance
+
+    def destroy(self):
+        with self._lock:
+            self._observations.clear()
+
+    @contextmanager
+    def capture_async(self, duration_tag: str):
+        if not envs.VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE:
+            yield
+            return
+
+        observe_start = Event(enable_timing=True)
+        observe_start.record()
+        try:
+            yield
+        finally:
+            observe_end = Event(enable_timing=True)
+            observe_end.record()
+            with self._lock:
+                self._observations.append(
+                    (duration_tag, observe_start, observe_end))
+
+    def pop_captured_sync(self) -> dict:
+        """Pop and synchronize all events in the observation list"""
+        durations: dict[str, float] = {}
+        if not envs.VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE:
+            return durations
+
+        while self._observations:
+            with self._lock:
+                tag, observe_start, observe_end = self._observations.pop()
+            observe_end.synchronize()
+            durations[tag] = observe_start.elapsed_time(observe_end)
+
+        return durations
+
+
+def npu_stream_switch(tag: str, priority: int, *, enabled: bool = True):
+    return _npu_stream_switch(tag, priority) if enabled else nullcontext()
+
+
+def npu_wait_tensor(self: torch.Tensor,
+                    dependency: torch.Tensor,
+                    *,
+                    enabled: bool = True):
+    return _npu_wait_tensor(self, dependency) if enabled else self
