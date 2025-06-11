@@ -24,9 +24,9 @@
 #           each worker's `__init__` function.
 #
 # Then in each kind of patch, there are three folders:
-# - patch_0_9_0: contains the patches applied when vllm version is 0.9.0.
+# - patch_0_9_1: contains the patches applied when vllm version is 0.9.1.
 # - patch_main: contains the patches applied when vllm version is main branch.
-# - patch_common: contains the patches applied in both 0.9.0 and main branch.
+# - patch_common: contains the patches applied in both 0.9.1 and main branch.
 #
 # Once a new patch is added in vllm-ascend, please add the patch description into this file as well.
 # ----------------------------------------------------------------------------------
@@ -35,17 +35,6 @@
 # --------------------------------
 # * Platform Patch:
 # =================
-# ** File: platform/patch_0_9_0/patch_distributed.py**
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.distributed.utils.stateless_init_torch_distributed_process_group()`
-#    Why:
-#       vllm distributed use gloo backend by default to initialize stateless process group, but we want to use hccl here
-#    How：
-#       Add hccl backend to the `stateless_init_torch_distributed_process_group`
-#    Related PR (if no, explain why):
-#       https://github.com/vllm-project/vllm/pull/18763
-#    Future Plan:
-#       Remove this patch once vllm is upgraded to 0.9.1
 # ** File: platform/patch_common/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.parallel_state.destroy_model_parallel()`

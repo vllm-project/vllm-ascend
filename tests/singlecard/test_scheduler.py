@@ -31,7 +31,6 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 from vllm_ascend.core.scheduler import AscendScheduler
-from vllm_ascend.utils import vllm_version_is
 
 EOS_TOKEN_ID = 50256
 
@@ -87,27 +86,15 @@ def create_scheduler(
     vllm_config = VllmConfig(scheduler_config=scheduler_config,
                              model_config=model_config,
                              cache_config=cache_config)
-
-    if vllm_version_is("0.9.0"):
-        kv_cache_config = KVCacheConfig(
-            num_blocks=10000,  # A large number of blocks to hold all requests
-            tensors={},
-            kv_cache_groups=[
-                KVCacheGroupSpec(['layer'],
-                                 FullAttentionSpec(16, 1, 1, torch.float32,
-                                                   False))
-            ],
-        )
-    else:
-        kv_cache_config = KVCacheConfig(
-            num_blocks=10000,  # A large number of blocks to hold all requests
-            kv_cache_tensors=[KVCacheTensor(size=1024, shared_by=[1])],
-            kv_cache_groups=[
-                KVCacheGroupSpec(['layer'],
-                                 FullAttentionSpec(16, 1, 1, torch.float32,
-                                                   False, None))
-            ],
-        )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=10000,  # A large number of blocks to hold all requests
+        kv_cache_tensors=[KVCacheTensor(size=1024, shared_by=[1])],
+        kv_cache_groups=[
+            KVCacheGroupSpec(['layer'],
+                             FullAttentionSpec(16, 1, 1, torch.float32, False,
+                                               None))
+        ],
+    )
     cache_config.num_gpu_blocks = 10000
     return AscendScheduler(
         vllm_config,
@@ -135,27 +122,15 @@ def create_requests(num_requests: int,
         else:
             mm_position = None
             mm_inputs = None
-        if vllm_version_is("0.9.0"):
-            request = Request(
-                request_id=f"{i}",
-                prompt_token_ids=[i] * num_tokens,
-                sampling_params=sampling_params,
-                multi_modal_inputs=mm_inputs,
-                multi_modal_placeholders=mm_position,
-                multi_modal_hashes=None,
-                arrival_time=0,
-                eos_token_id=EOS_TOKEN_ID,
-            )
-        else:
-            request = Request(
-                request_id=f"{i}",
-                prompt_token_ids=[i] * num_tokens,
-                sampling_params=sampling_params,
-                multi_modal_inputs=mm_inputs,
-                multi_modal_placeholders=mm_position,
-                multi_modal_hashes=None,
-                eos_token_id=EOS_TOKEN_ID,
-            )
+        request = Request(
+            request_id=f"{i}",
+            prompt_token_ids=[i] * num_tokens,
+            sampling_params=sampling_params,
+            multi_modal_inputs=mm_inputs,
+            multi_modal_placeholders=mm_position,
+            multi_modal_hashes=None,
+            eos_token_id=EOS_TOKEN_ID,
+        )
         requests.append(request)
     return requests
 
