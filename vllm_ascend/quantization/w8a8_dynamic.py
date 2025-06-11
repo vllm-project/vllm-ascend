@@ -410,7 +410,8 @@ def fused_experts_with_allgather(hidden_states: torch.Tensor,
         quant_mode=1,
     )
 
-    final_hidden_states = torch_npu.npu_grouped_matmul_finalize_routing(hidden_states, w2, scale=w2_scale.to(torch.float32), bias=None,
+    final_hidden_states = torch_npu.npu_grouped_matmul_finalize_routing(hidden_states, w2, 
+                                                            scale=w2_scale.to(torch.float32), bias=None,
                                                             pertoken_scale=pertoken_scale.view(-1),
                                                             group_list=expert_tokens, shared_input=share_input,
                                                             logit=sorted_topk_weight.to(torch.float32),
