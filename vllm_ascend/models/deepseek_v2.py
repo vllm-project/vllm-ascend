@@ -723,17 +723,11 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                                    inputs_embeds)
         return hidden_states
 
-    def update_expert_map(self,new_expert_map,layer_id):
-        self.model.layers[layer_id].mlp.experts.update_map(new_expert_map)
-
-    def update_all_expert_map(self, new_expert_map,num_moe_layers):
-        num_moe_layers = len(new_expert_map)
-        for layer_id in range(num_moe_layers):
-            layer_map = new_expert_map[layer_id].to("npu")
-            self.model.layers[3+layer_id].mlp.experts.update_map(layer_map)
-
     def get_expert_map(self,layer_id):
         return self.model.layers[layer_id].mlp.experts.get_map()
+
+    def get_log2phy_map(self,layer_id):
+        return self.model.layers[layer_id].mlp.experts.get_log2phy_map()
 
     def get_all_expert_map(self,num_moe_layers):
         all_loads = []
@@ -752,7 +746,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         """
         all_loads = []
         for layer_id in range(num_moe_layers):
-            load_tensor = self.get_moe_load(3+layer_id)  # (num_experts_per_layer,)
+            load_tensor = self.get_moe_load(3+layer_id)  
             all_loads.append(load_tensor)
 
         return torch.stack(all_loads, dim=0)
