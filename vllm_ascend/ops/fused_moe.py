@@ -1159,8 +1159,6 @@ class AscendFusedMoE(FusedMoE):
             global_redundant_expert_num=self.global_redundant_expert_num,
             **kwargs)
 
-        print("log2phy:", self.log2phy)
-        # print("expert_map:", self.expert_map)
         self.calculate_moe_load()
 
         if self.enable_multistream_shared_expert and not is_prefill:
