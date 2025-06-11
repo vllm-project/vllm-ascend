@@ -32,6 +32,7 @@ from vllm.config import get_current_vllm_config
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 
+
 def apply_mlp(hidden_states: torch.Tensor,
               w1: torch.Tensor,
               w1_scale: torch.Tensor,
@@ -88,9 +89,8 @@ def apply_mlp(hidden_states: torch.Tensor,
         split_item=2,
         group_list_type=group_list_type,
         group_type=0,
-        group_list=group_list,  
+        group_list=group_list,
         output_dtype=torch.bfloat16)[0]
-
 
     # act_fn: swiglu
     hidden_states = torch_npu.npu_swiglu(hidden_states)
@@ -107,24 +107,24 @@ def apply_mlp(hidden_states: torch.Tensor,
         split_item=2,
         group_list_type=group_list_type,
         group_type=0,
-        group_list=group_list,   
+        group_list=group_list,
         output_dtype=torch.bfloat16)[0]
     return hidden_states
 
 
 def fused_experts_with_mc2(
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        w1_scale: torch.Tensor,
-        w2_scale: torch.Tensor,
-        w1_scale_bias: torch.Tensor,
-        w2_scale_bias: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        top_k: int,
-        expert_map: torch.Tensor = None,
-        moe_all_to_all_group_name: str = "",
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w1_scale_bias: torch.Tensor,
+    w2_scale_bias: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    top_k: int,
+    expert_map: torch.Tensor = None,
+    moe_all_to_all_group_name: str = "",
 ) -> torch.Tensor:
     global_bs = 0
     moe_expert_num = len(expert_map)
@@ -164,7 +164,7 @@ def fused_experts_with_mc2(
     output = torch_npu.npu_moe_distribute_dispatch(**kwargs)
     # comm_stream.wait_stream(torch.npu.current_stream())
     expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[
-                                                                             0:5]
+        0:5]
 
     if quant_mode == 0:
         dynamic_scale = None
@@ -215,18 +215,18 @@ def fused_experts_with_mc2(
 # currently expert parallelism implemented with all2all
 # is under-optimized.
 def fused_experts_with_all2all(
-        hidden_states: torch.Tensor,
-        w1: torch.Tensor,
-        w1_scale: torch.Tensor,
-        w2: torch.Tensor,
-        w2_scale: torch.Tensor,
-        w1_scale_bias: torch.Tensor,
-        w2_scale_bias: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        top_k: int,
-        expert_map: torch.Tensor = None,
-        ep_group: GroupCoordinator = None,
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w1_scale_bias: torch.Tensor,
+    w2_scale_bias: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    top_k: int,
+    expert_map: torch.Tensor = None,
+    ep_group: GroupCoordinator = None,
 ):
     original_shape = hidden_states.shape
     if len(original_shape) == 3:
@@ -244,7 +244,7 @@ def fused_experts_with_all2all(
                                 row_idx_len,
                                 dtype=torch.int32,
                                 device=device).view(top_k, -1).permute(
-            1, 0).contiguous())
+                                    1, 0).contiguous())
         hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
             hidden_states,
             row_idx=row_idx,
@@ -284,7 +284,7 @@ def fused_experts_with_all2all(
                                row_idx_len,
                                dtype=torch.int32,
                                device=topk_weights.device).view(
-            top_k, -1).permute(1, 0).contiguous()
+                                   top_k, -1).permute(1, 0).contiguous()
         hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
             hidden_states,
             row_idx=row_idx,
@@ -365,7 +365,7 @@ def fused_experts(hidden_states: torch.Tensor,
         token_indices = (torch.arange(num_tokens,
                                       device=device,
                                       dtype=torch.int64).unsqueeze(1).expand(
-            -1, top_k).reshape(-1))
+                                          -1, top_k).reshape(-1))
 
         # Flatten token-to-expert mappings and map to local experts
         weights_flat = topk_weights.view(-1)
@@ -404,7 +404,7 @@ def fused_experts(hidden_states: torch.Tensor,
                                row_idx_len,
                                dtype=torch.int32,
                                device=topk_weights.device).view(
-            top_k, -1).permute(1, 0).contiguous()
+                                   top_k, -1).permute(1, 0).contiguous()
         hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
             hidden_states,
             row_idx=row_idx,
@@ -492,7 +492,7 @@ class AscendW4A8DynamicFusedMoEMethod:
         param_dict["w13_weight"] = torch.empty(num_experts,
                                                2 *
                                                intermediate_size_per_partition,
-                                               hidden_sizes ,
+                                               hidden_sizes,
                                                dtype=torch.int8)
         param_dict["w2_weight"] = torch.empty(num_experts,
                                               hidden_sizes,
@@ -511,14 +511,15 @@ class AscendW4A8DynamicFusedMoEMethod:
         world_size = torch.distributed.get_world_size()
         tp_size = world_size // all_to_all_group_size
         config = get_current_vllm_config()
-        group_size = config.quant_config.quant_description.get("group_size",256)
-        
+        group_size = config.quant_config.quant_description.get(
+            "group_size", 256)
+
         param_dict["w13_weight_scale"] = torch.empty(
             num_experts,
             2 * intermediate_size_per_partition,
             1,
             dtype=params_dtype)
-        
+
         param_dict["w13_weight_offset"] = torch.empty(
             num_experts,
             2 * intermediate_size_per_partition,
@@ -527,60 +528,58 @@ class AscendW4A8DynamicFusedMoEMethod:
         #[256,2048,28]
         param_dict["w13_weight_scale_second"] = torch.empty(
             num_experts,
-            2 * intermediate_size_per_partition ,
-            hidden_sizes // group_size ,
-            dtype=params_dtype)
-        
-        param_dict["w13_weight_offset_second"] = torch.empty(
-            num_experts,
-            2 * intermediate_size_per_partition ,
-            hidden_sizes // group_size ,
+            2 * intermediate_size_per_partition,
+            hidden_sizes // group_size,
             dtype=params_dtype)
 
-        param_dict["w2_weight_scale"] = torch.empty(
+        param_dict["w13_weight_offset_second"] = torch.empty(
             num_experts,
-            hidden_sizes,
-            1,
+            2 * intermediate_size_per_partition,
+            hidden_sizes // group_size,
             dtype=params_dtype)
-        param_dict["w2_weight_offset"] = torch.empty(
-            num_experts,
-            hidden_sizes,
-            1,
-            dtype=params_dtype)
+
+        param_dict["w2_weight_scale"] = torch.empty(num_experts,
+                                                    hidden_sizes,
+                                                    1,
+                                                    dtype=params_dtype)
+        param_dict["w2_weight_offset"] = torch.empty(num_experts,
+                                                     hidden_sizes,
+                                                     1,
+                                                     dtype=params_dtype)
         param_dict["w2_weight_scale_second"] = torch.empty(
             num_experts,
-            hidden_sizes ,
+            hidden_sizes,
             intermediate_size_per_partition // group_size,
             dtype=params_dtype)
         param_dict["w2_weight_offset_second"] = torch.empty(
             num_experts,
-            hidden_sizes ,
+            hidden_sizes,
             intermediate_size_per_partition // group_size,
             dtype=params_dtype)
 
         return param_dict
 
     def apply(
-            self,
-            layer: torch.nn.Module,
-            x: torch.Tensor,
-            router_logits: torch.Tensor,
-            top_k: int,
-            renormalize: bool,
-            use_grouped_topk: bool = False,
-            global_num_experts: int = -1,
-            expert_map: Optional[torch.Tensor] = None,
-            topk_group: Optional[int] = None,
-            num_expert_group: Optional[int] = None,
-            custom_routing_function: Optional[Callable] = None,
-            scoring_func: str = "softmax",
-            e_score_correction_bias: Optional[torch.Tensor] = None,
-            is_prefill: bool = True,
-            enable_force_load_balance: bool = True,
-            **kwargs,
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool = False,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        is_prefill: bool = True,
+        enable_force_load_balance: bool = True,
+        **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
-                   1] == global_num_experts, "Number of global experts mismatch"
+            1] == global_num_experts, "Number of global experts mismatch"
 
         # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
         if global_num_experts == 256:
@@ -650,18 +649,19 @@ class AscendW4A8DynamicFusedMoEMethod:
             # according to tp_size before they are feed into fused_moe module.
             # Therefore, all2all is needed no matter how dp/tp is set so as to
             # dispatch/combine tokens.
-            return fused_experts_with_all2all(hidden_states=x,
-                                              w1=layer.w13_weight,
-                                              w2=layer.w2_weight,
-                                              w1_scale=layer.w13_weight_scale_second,
-                                              w2_scale=layer.w2_weight_scale_second,
-                                              w1_scale_bias=layer.w13_scale_bias,
-                                              w2_scale_bias=layer.w2_scale_bias,
-                                              topk_weights=topk_weights,
-                                              topk_ids=topk_ids,
-                                              top_k=top_k,
-                                              expert_map=expert_map,
-                                              ep_group=self.ep_group)
+            return fused_experts_with_all2all(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                w1_scale=layer.w13_weight_scale_second,
+                w2_scale=layer.w2_weight_scale_second,
+                w1_scale_bias=layer.w13_scale_bias,
+                w2_scale_bias=layer.w2_scale_bias,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                top_k=top_k,
+                expert_map=expert_map,
+                ep_group=self.ep_group)
 
     def process_scale(self, weight: torch.Tensor, scale, per_group_scale):
         group_num, k, n = weight.shape
@@ -669,17 +669,21 @@ class AscendW4A8DynamicFusedMoEMethod:
         group_num, quantgroup_num, n = per_group_scale.shape
         weight_high = weight.to(torch.float32).reshape([group_num, quantgroup_num, -1, n]) * \
             per_group_scale.reshape([group_num, quantgroup_num, 1, n])
-        weight_high = weight_high.reshape([group_num, k, n]) 
+        weight_high = weight_high.reshape([group_num, k, n])
         bias = 8 * (weight_high.to(torch.float32) * scale).sum(axis=1)
-        scale_fp32 = (scale * per_group_scale).to(torch.float16).to(torch.float32)
+        scale_fp32 = (scale * per_group_scale).to(torch.float16).to(
+            torch.float32)
         scale_fp32_np = scale_fp32.cpu().numpy()
         scale_fp32_np.dtype = np.uint32
-        sscale_uint64 = np.zeros((group_num, quantgroup_num, n * 2), dtype=np.uint32) 
-        
+        sscale_uint64 = np.zeros((group_num, quantgroup_num, n * 2),
+                                 dtype=np.uint32)
+
         sscale_uint64[..., ::2] = scale_fp32_np
-        
-        sscale_uint64_buffer = np.frombuffer(sscale_uint64.tobytes(), dtype=np.int64).copy()
-        sscale_uint64_tensor = torch.from_numpy(sscale_uint64_buffer).reshape(group_num, quantgroup_num, n)
+
+        sscale_uint64_buffer = np.frombuffer(sscale_uint64.tobytes(),
+                                             dtype=np.int64).copy()
+        sscale_uint64_tensor = torch.from_numpy(sscale_uint64_buffer).reshape(
+            group_num, quantgroup_num, n)
         sscale_uint64_tensor = sscale_uint64_tensor.npu()
         return sscale_uint64_tensor, bias
 
@@ -690,28 +694,32 @@ class AscendW4A8DynamicFusedMoEMethod:
             layer.w2_weight.data = layer.w2_weight.data.transpose(
                 1, 2).contiguous()
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.transpose(
-                1, 2).contiguous()#[256,2048]
+            1, 2).contiguous()  #[256,2048]
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.transpose(
-                1, 2).contiguous()
+            1, 2).contiguous()
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(
             layer.w13_weight_offset.data.shape[0], -1)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(
             layer.w2_weight_offset.data.shape[0], -1)
         layer.w13_weight_scale_second.data = layer.w13_weight_scale_second.data.transpose(
-                1, 2).contiguous()
+            1, 2).contiguous()
         layer.w2_weight_scale_second.data = layer.w2_weight_scale_second.data.transpose(
-                1, 2).contiguous()
+            1, 2).contiguous()
 
-        layer.w13_weight_scale_second.data ,bias= self.process_scale(layer.w13_weight,
-                                                                layer.w13_weight_scale.data,
-                                                                layer.w13_weight_scale_second.data)
+        layer.w13_weight_scale_second.data, bias = self.process_scale(
+            layer.w13_weight, layer.w13_weight_scale.data,
+            layer.w13_weight_scale_second.data)
         param = torch.nn.Parameter(bias, requires_grad=False)
         layer.register_parameter("w13_scale_bias", param)
-        layer.w2_weight_scale_second.data ,bias1= self.process_scale(layer.w2_weight,
-                                                               layer.w2_weight_scale.data,
-                                                               layer.w2_weight_scale_second.data)
+        layer.w2_weight_scale_second.data, bias1 = self.process_scale(
+            layer.w2_weight, layer.w2_weight_scale.data,
+            layer.w2_weight_scale_second.data)
         param = torch.nn.Parameter(bias1, requires_grad=False)
         layer.register_parameter("w2_scale_bias", param)
 
-        layer.w13_weight.data = torch_npu.npu_quantize(layer.w13_weight.data.to(torch.float32), torch.tensor([1.]).npu(), None, torch.quint4x2, -1, False)
-        layer.w2_weight.data = torch_npu.npu_quantize(layer.w2_weight.data.to(torch.float32), torch.tensor([1.]).npu(), None, torch.quint4x2, -1, False)
+        layer.w13_weight.data = torch_npu.npu_quantize(
+            layer.w13_weight.data.to(torch.float32),
+            torch.tensor([1.]).npu(), None, torch.quint4x2, -1, False)
+        layer.w2_weight.data = torch_npu.npu_quantize(
+            layer.w2_weight.data.to(torch.float32),
+            torch.tensor([1.]).npu(), None, torch.quint4x2, -1, False)
