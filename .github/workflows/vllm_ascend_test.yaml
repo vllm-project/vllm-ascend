@@ -31,6 +31,9 @@ on:
       - '!benchmarks/**'
       - 'tools/mypy.sh'
       - 'mypy.ini'
+      - '.github/workflows/*.ya?ml'
+      - '.github/workflows/actionlint.*'
+      - '.github/workflows/matchers/actionlint.json'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -85,6 +88,13 @@ jobs:
           repository: vllm-project/vllm
           path: vllm-empty
 
+      - name: Actionlint Check
+        env:
+          SHELLCHECK_OPTS: --exclude=SC2046,SC2006,SC2086
+        run: |
+          echo "::add-matcher::.github/workflows/matchers/actionlint.json"
+          tools/actionlint.sh -color
+
       - name: Install vllm-project/vllm from source
         working-directory: vllm-empty
         run: |
@@ -103,7 +113,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-arm64-npu-1, linux-arm64-npu-4]
-        vllm_version: [v0.9.0, v0.9.1]
+        vllm_version: [main, v0.9.1]
     concurrency:
       group: >
         ${{
@@ -191,6 +201,7 @@ jobs:
           fi
 
       - name: Run vllm-project/vllm-ascend test on V0 engine
+        if: ${{ github.event_name == 'schedule' }}
         env:
           VLLM_USE_V1: 0
         run: |
