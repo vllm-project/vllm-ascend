@@ -67,12 +67,11 @@ from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_ep_group
+from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import dispose_tensor
-from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 
