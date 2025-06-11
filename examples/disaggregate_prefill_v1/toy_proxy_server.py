@@ -31,7 +31,8 @@ async def lifespan(app: FastAPI):
         prefiller_base_url = f'http://{host}:{port}/v1'
         app.state.prefill_clients.append({
             'client':
-            httpx.AsyncClient(timeout=None, base_url=prefiller_base_url),
+            httpx.AsyncClient(timeout=None, base_url=prefiller_base_url,
+                              limits=httpx.Limits(max_connections=100, max_keepalive_connections=20)),
             'host':
             host,
             'port':

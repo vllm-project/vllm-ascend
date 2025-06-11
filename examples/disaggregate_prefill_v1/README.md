@@ -196,7 +196,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
 * Run proxy server on the first node
 ```bash
 cd /vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1
-python toy_proxy_server.py --host 172.19.32.175 --port 1025 --prefiller-hosts 172.19.32.175 172.19.241.49  --prefiller-port 20002 20002 --decoder-hosts 172.19.123.51 172.19.190.36 --decoder-ports 20002 20002
+python toy_proxy_server.py --host 172.19.32.175 --port 1025 --prefiller-hosts 172.19.241.49 --prefiller-port 20002 --decoder-hosts 172.19.123.51 --decoder-ports 20002
 ```
 
 * Verification
