@@ -368,15 +368,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 
         #EPLB 
-        self.enable_eplb = True
-        # if additional_config:
-        #     self.enable_torchair_graph_mode = additional_config.get(
-        #         "enable_graph_mode",
-        #         False) and self.vllm_config.model_config.use_mla
-        #     self.use_cached_npu_graph = additional_config.get(
-        #         "use_cached_npu_graph", False)
-        #     self.enable_eplb = additional_config.get("enable_eplb", False)
-
+        self.enable_eplb = ascend_config.enable_eplb
         if self.enable_eplb == True:
             self.eplb_adaptor = None
             self.eplb_updator = EplbUpdator()
