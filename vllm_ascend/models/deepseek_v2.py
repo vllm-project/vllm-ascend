@@ -293,9 +293,7 @@ class CustomDeepseekV2MoE(nn.Module):
         self.etp_group = get_etp_group()
 
         self.params_dtype = torch.get_default_dtype()
-
-        ascend_config = get_ascend_config()
-        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+      
         self.fused_experts_allgather_ep_enabled = envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and \
             config.n_routed_experts == 256 and \
             self.ep_group.world_size > 1 and \
