@@ -1047,6 +1047,11 @@ class AscendFusedMoE(FusedMoE):
         self.log2phy = None
         self.global_redundant_expert_num = 0
 
+        # test log2phy
+        self.log2phy = torch.full((self.ep_size, self.global_num_experts),
+                                    -1,
+                                    dtype=torch.int32)
+
         ascend_config = get_ascend_config()
         expert_map_path = ascend_config.expert_map_path
         if expert_map_path and os.path.exists(expert_map_path):
@@ -1175,6 +1180,8 @@ class AscendFusedMoE(FusedMoE):
                 return e_hidden_states, shared_experts(hidden_states)
             else:
                 return e_hidden_states
+        print("log2phy:", self.log2phy)
+        # print("expert_map:", self.expert_map)
         self.calculate_moe_load()
 
         # if self.enable_multistream_shared_expert and not is_prefill:
@@ -1238,6 +1245,9 @@ class AscendFusedMoE(FusedMoE):
 
     def get_map(self):
         return self.expert_map
+
+    def get_log2phy_map(self):
+        return self.log2phy
 
     def get_moe_load(self):
         return self.moe_load
