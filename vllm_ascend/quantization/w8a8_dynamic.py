@@ -701,8 +701,8 @@ class AscendW8A8DynamicFusedMoEMethod:
         shared_experts: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
-        assert router_logits.shape[1] == global_num_experts, 
-                                        "Number of global experts mismatch"
+        assert router_logits.shape[
+            1] == global_num_experts, "Number of global experts mismatch"
 
         is_deepseek_v3_r1 = global_num_experts == 256
 
