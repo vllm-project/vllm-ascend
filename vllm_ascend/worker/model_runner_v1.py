@@ -74,7 +74,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import CommonAttentionMetadata
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
-from vllm_ascend.utils import ProfileExecuteDuration, vllm_version_is
+from vllm_ascend.utils import ProfileExecuteDuration
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 
 if TYPE_CHECKING:
@@ -1614,44 +1614,27 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         import torch_npu
         kv_caches: Dict[str, torch.Tensor] = {}
 
-        # Remove this after we drop 0.9.0 support
-        if vllm_version_is("0.9.0"):
-            self.input_batch = InputBatch(
-                max_num_reqs=self.max_num_reqs,
-                max_model_len=self.model_config.max_model_len,
-                max_num_batched_tokens=self.max_num_tokens,
-                device=self.device,
-                pin_memory=True,
-                vocab_size=self.model_config.get_vocab_size(),
-                block_size=self.cache_config.block_size,
-            )
-        else:
-            self.input_batch = InputBatch(
-                max_num_reqs=self.max_num_reqs,
-                max_model_len=self.model_config.max_model_len,
-                max_num_batched_tokens=self.max_num_tokens,
-                device=self.device,
-                pin_memory=True,
-                vocab_size=self.model_config.get_vocab_size(),
-                block_sizes=[self.cache_config.block_size],
-            )
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.model_config.max_model_len,
+            max_num_batched_tokens=self.max_num_tokens,
+            device=self.device,
+            pin_memory=True,
+            vocab_size=self.model_config.get_vocab_size(),
+            block_sizes=[self.cache_config.block_size],
+        )
 
-        if not vllm_version_is("0.9.0"):
-            kv_cache_sizes = {}
-            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                assert len(kv_cache_tensor.shared_by) == 1, (
-                    "KV cache tensor shared by multiple layers is not supported in "
-                    "NPU.")
-                kv_cache_sizes[
-                    kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
+        kv_cache_sizes = {}
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            assert len(kv_cache_tensor.shared_by) == 1, (
+                "KV cache tensor shared by multiple layers is not supported in "
+                "NPU.")
+            kv_cache_sizes[kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
 
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
             for layer_name in kv_cache_group.layer_names:
-                if vllm_version_is("0.9.0"):
-                    tensor_size = kv_cache_config.tensors[layer_name].size
-                else:
-                    tensor_size = kv_cache_sizes[layer_name]
+                tensor_size = kv_cache_sizes[layer_name]
                 assert tensor_size % kv_cache_spec.page_size_bytes == 0
                 num_blocks = tensor_size // kv_cache_spec.page_size_bytes
 
