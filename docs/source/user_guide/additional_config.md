@@ -44,6 +44,7 @@ The details of each config option are as follows:
 | `use_cached_graph` | bool | `False` | Whether to use cached graph |
 | `graph_batch_sizes` | list[int] | `[]` | The batch size for torchair graph cache |
 | `graph_batch_sizes_init` | bool | `False` | Init graph batch size dynamically if `graph_batch_sizes` is empty |
+| `enable_kv_nz`| bool | `False` | Whether to enable kvcache NZ layout |
 
 **ascend_scheduler_config**
 
@@ -64,7 +65,8 @@ A full example of additional configuration is as follows:
         "use_cached_graph": true,
         "graph_batch_sizes": [1, 2, 4, 8],
         "graph_batch_sizes_init": false,
-        "enable_multistream_moe": false
+        "enable_multistream_moe": false,
+        "enable_kv_nz": false
     },
     "ascend_scheduler_config": {
         "enabled": true,
