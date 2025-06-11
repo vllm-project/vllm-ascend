@@ -31,8 +31,6 @@ from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.utils import weak_ref_tensors
 
-from vllm_ascend.utils import vllm_version_is
-
 
 @dataclasses.dataclass
 class ConcreteSizeEntry:
@@ -206,11 +204,7 @@ class NPUPiecewiseBackend:
             # to save memory
             entry.output = weak_ref_tensors(output)
             entry.aclgraph = aclgraph
-
-            if vllm_version_is("0.9.0"):
-                compilation_counter.num_cudagraph_caputured += 1
-            else:
-                compilation_counter.num_cudagraph_captured += 1
+            compilation_counter.num_cudagraph_captured += 1
 
             # important: we need to return the output, rather than
             # the weak ref of the output, so that pytorch can correctly

@@ -29,8 +29,6 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
-from vllm_ascend.utils import vllm_version_is
-
 
 class AscendScheduler(Scheduler):
     """This Scheduler extends vllm's original v1 scheduler
@@ -129,12 +127,7 @@ class AscendScheduler(Scheduler):
                 continue
 
             assert num_new_tokens > 0
-
-            if vllm_version_is("0.9.0"):
-                blocks = computed_blocks.blocks
-            else:
-                blocks = computed_blocks.blocks[0]
-
+            blocks = computed_blocks.blocks[0]
             watermark = getattr(self.scheduler_config, "watermark", 0.01)
             if not self._check_watermark_for_prefill(request, num_new_tokens,
                                                      blocks, watermark):
@@ -330,14 +323,8 @@ class AscendScheduler(Scheduler):
                                len(computed_blocks) * self.block_size)
         num_required_blocks = cdiv(num_new_tokens + num_computed_tokens,
                                    self.block_size)
-
-        if vllm_version_is("0.9.0"):
-            req_blocks = self.kv_cache_manager.single_type_manager.req_to_blocks[
-                request.request_id]
-        else:
-            req_blocks = self.kv_cache_manager.coordinator.get_blocks(
-                request.request_id)
-
+        req_blocks = self.kv_cache_manager.coordinator.get_blocks(
+            request.request_id)
         num_new_blocks = (num_required_blocks - len(req_blocks) -
                           len(computed_blocks))
         num_evictable_computed_blocks = sum(1 for blk in computed_blocks
