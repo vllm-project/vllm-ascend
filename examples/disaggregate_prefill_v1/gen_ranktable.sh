@@ -2,8 +2,9 @@
 
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
-
+#Please modify the IPs and IFRAME according to your environment
 IPs=('1.0.0.0' '1.0.0.1')
+IFRAME=enp189s0f0
 LOCAL_HOST=`hostname -I|awk -F " " '{print$1}'`
 GPUS_PER_NODE=8
 MASTER_ADDR=${IPs[0]}
@@ -35,7 +36,7 @@ echo "NODE_RANK": $NODE_RANK
 echo "==============="
 
 if [[ -n "${GEN_RANKTABLE}" || ! -e ${PWD}/ranktable.json ]]; then
-    GLOO_SOCKET_IFNAME=enp189s0f0 torchrun \
+    GLOO_SOCKET_IFNAME=${IFRAME} torchrun \
         --nproc_per_node 1 \
         --nnodes ${NNODES} \
         --node_rank ${NODE_RANK} \
