@@ -1317,8 +1317,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 for tag, duration in durations.items()
             ]
             captured_name = "Decode" if self.attn_state == AscendAttentionState.DecodeOnly else "Prefill"
-            print(f"Profile execute duration [{captured_name}]:",
-                  " ".join(dr_str))
+            logger.info("Profile execute duration [%s]:%s", captured_name,
+                        " ".join(dr_str))
 
         return model_runner_output
 
