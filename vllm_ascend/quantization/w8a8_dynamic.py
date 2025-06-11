@@ -587,8 +587,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         self.ep_group = get_ep_group()
         self.etp_group = get_etp_group()
         
-        self.fused_experts_allgather_ep_enabled = 
-            envs_ascend.VLLM_ENABLE_FUSED_EP_ALLGATHER and \
+        self.fused_experts_allgather_ep_enabled = envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and \
             self.ep_group.world_size > 1 and \
             self.etp_group.world_size == 1
 
