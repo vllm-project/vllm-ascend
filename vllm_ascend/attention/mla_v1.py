@@ -13,6 +13,7 @@ from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.attention import _ALLOWED_NUM_QUERIES_PER_KV
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
@@ -376,7 +377,10 @@ class AscendMLAMetadataBuilder:
             seq_lens = seq_lens[:self._num_decode_tokens]
             input_positions = input_positions[:self._num_decode_tokens]
             block_table = block_table[:self._num_decode_tokens, ...]
-            if use_torchair_graph and self.runner.attn_state == AscendAttentionState.DecodeOnly:
+            if use_torchair_graph and self.runner.attn_state in [
+                    AscendAttentionState.DecodeOnly,
+                    AscendAttentionState.SpecDecoding
+            ]:
                 num_seqs = len(seq_lens)
                 if graph_pad_size != 0:
                     pad_value = 1
@@ -472,6 +476,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.o_proj = kwargs['o_proj']
         self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
@@ -481,6 +486,15 @@ class AscendMLAImpl(MLAAttentionImpl):
         if speculative_config is not None:
             self.spec_token_num = speculative_config.num_speculative_tokens
             assert self.spec_token_num > 0
+
+        # TODO: support numHeads / numKvHeads < 16 in MLA kernel
+        if self.torchair_graph_enabled:
+            assert self.num_queries_per_kv in _ALLOWED_NUM_QUERIES_PER_KV, \
+                ("The allowed number of queries per kv when enabling both MLA and Graph mode"
+                " only support {32, 64, 128}, Thus this is not supported for DeepSeek-V2-Lite,"
+                " as it only has 16 attention heads. And if you're using DeepSeek-V3 or DeepSeek-R1,"
+                " please make sure after the tensor parallel split, num_heads / num_kv_heads in "
+                "{32, 64, 128}.")
 
     def _v_up_proj_and_o_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
