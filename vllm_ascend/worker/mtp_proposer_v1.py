@@ -1,4 +1,6 @@
+import types
 import torch
+import torch.nn as nn
 from vllm.attention.layer import Attention
 from vllm.config import (VllmConfig, get_layers_from_vllm_config,
                          set_current_vllm_config)
@@ -8,8 +10,14 @@ from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading, set_default_torch_dtype)
 from vllm.v1.sample.metadata import SamplingMetadata
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import CommonAttentionMetadata
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
+from vllm_ascend.utils import ProfileExecuteDuration
+
+import vllm.envs as envs_vllm
+import vllm_ascend.envs as envs_ascend
 
 
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.
@@ -61,6 +69,8 @@ class MtpProposer:
             vllm_config.speculative_config.num_speculative_tokens)
         self.block_size = vllm_config.cache_config.block_size
         self.runner = runner
+        self.torchair_compiled_model = None
+        self.torchair_compiled_models = {}
 
     @staticmethod
     def prepare_inputs(
@@ -152,27 +162,102 @@ class MtpProposer:
         #     input_batch=self.runner.input_batch,
         #     scheduler_output=self.runner.scheduler_output,
         # )
-
+        if self.runner.torchair_graph_enabled:
+            self.runner.attn_state = AscendAttentionState.DecodeOnly
         attn_metadata = self.runner.attn_metadata_builder.build(
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
+            **self.runner.extra_builder_kwargs,
         )
 
         with set_forward_context(attn_metadata, self.vllm_config):
-            hidden_states = self.model(
-                input_ids=input_ids,
-                positions=target_positions,
-                previous_hidden_states=target_hidden_states,
-            )
+            with ProfileExecuteDuration().capture_async("forward"):
+                model_kwargs = {}
+                if self.runner.torchair_graph_enabled:
+                    model_kwargs["kv_caches"] = self.kv_caches
+                    model_kwargs["attn_metadata"] = attn_metadata
+                if self.runner.torchair_graph_enabled and not self.runner.with_prefill:
+                    compiled_model = self._get_torchair_lazy_compiled_model(
+                        self.runner.padded_batch_size)
+                    hidden_states = compiled_model(
+                        input_ids=input_ids,
+                        positions=target_positions,
+                        previous_hidden_states=target_hidden_states,
+                        **model_kwargs,
+                    )
+                else:
+                    assert self.model is not None
+                    hidden_states = self.model(
+                        input_ids=input_ids,
+                        positions=target_positions,
+                        previous_hidden_states=target_hidden_states,
+                    )
+            
         sample_hidden_states = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
         draft_token_ids = logits.argmax(dim=-1)
 
         # [batch_size, 1]
         return draft_token_ids.view(-1, 1)
+    
+    def _get_torchair_lazy_compiled_model(self, batch_size: int):
+        if batch_size < 0 or batch_size > self.runner.max_num_reqs:
+            raise ValueError(
+                f"Bad graph batch size:{batch_size}! max_num_reqs:{self.runner.max_num_reqs}"
+            )
+
+        compiled_model = self.torchair_compiled_models.get(
+            batch_size
+        ) if self.runner.use_cached_npu_graph else self.torchair_compiled_model
+
+        if compiled_model:
+            return compiled_model
+
+        import torchair  # type: ignore
+        from torchair import patch_for_hcom  # type: ignore
+
+        patch_for_hcom()
+        config = torchair.CompilerConfig()
+        config.experimental_config.frozen_parameter = True
+        config.experimental_config.tiling_schedule_optimize = True
+        config.experimental_config.enable_view_optimize = \
+        get_ascend_config().torchair_graph_config.enable_view_optimize
+        torch.npu.set_compile_mode(jit_compile=False)
+        if not self.use_cached_npu_graph:
+            npu_backend = torchair.get_npu_backend(compiler_config=config)
+            self.torchair_compiled_model = torch.compile(
+                self.model,
+                dynamic=True,
+                fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                backend=npu_backend)
+            return self.torchair_compiled_model
+        else:
+            # Generate a new forward proxy code object to prevent the invalidation of
+            # compilation cache caused by dynamo retracing
+            forward_proxy_name = f"{self.model.__class__.__name__}_forward_with_batch_size_{batch_size}"
+            forward_fn = self.model.forward
+            code = forward_fn.__code__
+            # Mark code object with a new proxy name
+            modified_code = code.replace(co_name=forward_proxy_name, )
+
+            modified_func = types.FunctionType(modified_code,
+                                               forward_fn.__globals__,
+                                               name=forward_proxy_name,
+                                               argdefs=forward_fn.__defaults__)
+
+            self.model.__dict__[forward_proxy_name] = modified_func.__get__(
+                self.model, nn.Module)
+            self.torchair_compiled_models[
+                batch_size] = torchair.inference.cache_compile(
+                    self.model.__dict__[forward_proxy_name],
+                    dynamic=True,
+                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    config=config,
+                    ge_cache=False)
+            return self.torchair_compiled_models[batch_size]
 
     def load_model(self) -> None:
         loader = get_model_loader(self.vllm_config.load_config)
