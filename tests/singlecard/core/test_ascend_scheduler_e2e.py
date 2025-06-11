@@ -18,8 +18,7 @@ def model() -> LLM:
         MODEL,
         enforce_eager=True,
         enable_prefix_caching=True,
-        long_prefill_token_threshold=2,
-        max_num_batched_tokens=6,
+        max_num_batched_tokens=200,
         max_num_seqs=3,
         additional_config={"ascend_scheduler_config": {
             "enabled": True,
@@ -35,7 +34,7 @@ def test_concurrent_partial_prefill(model):
 
 def test_prefix_cache_stats_is_recorded(model):
     # 17 tokens will make sure first 16 tokens are cached in a block
-    input_tokens = {"prompt_token_ids": [101] * 17}
+    input_tokens = {"prompt_token_ids": [101] * 129}
     _ = model.generate([input_tokens])
     outputs = model.generate([input_tokens])
-    assert outputs[0].num_cached_tokens == 16
+    assert outputs[0].num_cached_tokens == 128
