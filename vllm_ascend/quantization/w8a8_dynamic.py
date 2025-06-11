@@ -622,7 +622,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         
         self.fused_experts_allgather_ep_enabled = envs_ascend.VLLM_ENABLE_FUSED_EP_ALLGATHER and \
             self.ep_group.world_size > 1 and \
-            self.etp_group.world_size == 1:
+            self.etp_group.world_size == 1
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
