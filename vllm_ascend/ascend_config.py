@@ -39,7 +39,7 @@ class AscendConfig:
         self.expert_tensor_parallel_size = int(
             additional_config.get("expert_tensor_parallel_size", 0))
         self.expert_map_path = additional_config.get("expert_map_path", None)
-        self.enable_eplb = additional_config.get("enable_eplb", False)
+        self.dynamic_eplb = additional_config.get("dynamic_eplb", False)
 
 
 class TorchairGraphConfig:

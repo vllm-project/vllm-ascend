@@ -368,8 +368,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 
         #EPLB 
-        self.enable_eplb = ascend_config.enable_eplb
-        if self.enable_eplb == True:
+        self.dynamic_eplb = ascend_config.dynamic_eplb
+        if self.dynamic_eplb == True:
             self.eplb_adaptor = None
             self.eplb_updator = EplbUpdator()
 
@@ -1216,7 +1216,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
 
-        if self.enable_eplb:
+        if self.dynamic_eplb:
             if self.eplb_adaptor == None:
                 self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
                 self.eplb_updator.set_adaptor(self.eplb_adaptor)
@@ -1337,7 +1337,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             logger.info("Profile execute duration [%s]:%s", captured_name,
                         " ".join(dr_str))
 
-        if self.enable_eplb:
+        if self.dynamic_eplb:
             self.eplb_updator.forward_end()
 
         return model_runner_output
