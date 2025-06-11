@@ -119,7 +119,7 @@ class MultiStepWorker(NPUWorker):
             # execute_model_req
             assert execute_model_req.last_sampled_token_ids is not None
             model_input.last_sampled_token_ids = (
-                execute_model_req.last_sampled_token_ids.cuda())
+                execute_model_req.last_sampled_token_ids.npu())
             model_input.add_sampler_output(
                 SamplerOutput(outputs=[], sampled_token_ids=None),
                 model_input.last_sampled_token_ids)

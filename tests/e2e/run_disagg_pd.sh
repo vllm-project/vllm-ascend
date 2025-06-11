@@ -43,16 +43,16 @@ _info "Started pd disaggregated proxy server"
 
 PREFILL_PROC_NAME="Prefill-instance"
 PREFILL_PORT=8001
-run_prefill_instance $MODEL_NAME $TP_SIZE $PREFILL_PORT $REGISTER_PORT $PREFILL_DEVICE_IPS $DECODE_DEVICE_IPS
 _info "Starting prefill instance"
-
+run_prefill_instance $MODEL_NAME $TP_SIZE $PREFILL_PORT $REGISTER_PORT $PREFILL_DEVICE_IPS $DECODE_DEVICE_IPS &
+_info "Waiting for prefill instance ready"
 wait_url_ready $PREFILL_PROC_NAME "http://localhost:${PREFILL_PORT}/v1/completions"
 
 DECODE_PROC_NAME="Decode-instance"
 DECODE_PORT=8002
-run_decode_instance  $MODEL_NAME $TP_SIZE $DECODE_PORT $REGISTER_PORT $PREFILL_DEVICE_IPS $DECODE_DEVICE_IPS
 _info "Starting decode instance"
-
+run_decode_instance  $MODEL_NAME $TP_SIZE $DECODE_PORT $REGISTER_PORT $PREFILL_DEVICE_IPS $DECODE_DEVICE_IPS &
+_info "Waiting for decode instance ready"
 wait_url_ready $DECODE_PROC_NAME "http://localhost:${DECODE_PORT}/v1/completions"
 
 _info "pd disaggregated system is ready for handling request"

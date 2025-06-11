@@ -204,8 +204,7 @@ class NPUPiecewiseBackend:
             # to save memory
             entry.output = weak_ref_tensors(output)
             entry.aclgraph = aclgraph
-
-            compilation_counter.num_cudagraph_caputured += 1
+            compilation_counter.num_cudagraph_captured += 1
 
             # important: we need to return the output, rather than
             # the weak ref of the output, so that pytorch can correctly

@@ -6,11 +6,11 @@ You can check the [support status of vLLM V1 Engine][v1_user_guide]. Below is th
 
 | Feature                       | vLLM V0 Engine | vLLM V1 Engine | Next Step                                                              |
 |-------------------------------|----------------|----------------|------------------------------------------------------------------------|
-| Chunked Prefill               | 🚧 WIP         | 🟢 Functional  | Functional, see detail note: [Chunked Prefill][cp]                     |
-| Automatic Prefix Caching      | 🚧 WIP         | 🟢 Functional  | Functional, see detail note: [vllm-ascend#732][apc]                    |
+| Chunked Prefill               | 🟢 Functional  | 🟢 Functional  | Functional, see detail note: [Chunked Prefill][cp]                     |
+| Automatic Prefix Caching      | 🟢 Functional  | 🟢 Functional  | Functional, see detail note: [vllm-ascend#732][apc]                    |
 | LoRA                          | 🟢 Functional  | 🟢 Functional  | [vllm-ascend#396][multilora], [vllm-ascend#893][v1 multilora]          |
-| Prompt adapter                | 🔴 No plan     | 🟡 Planned     | Plan in 2025.06.30                                                     |
-| Speculative decoding          | 🟢 Functional  | 🚧 WIP         | CI needed; working on V1 support                                       |
+| Prompt adapter                | 🔴 No plan     | 🔴 No plan     | This feature has been deprecated by vllm.                              |
+| Speculative decoding          | 🟢 Functional  | 🟢 Functional  | Basic support                                                          |
 | Pooling                       | 🟢 Functional  | 🟡 Planned     | CI needed and adapting more models; V1 support rely on vLLM support.   |
 | Enc-dec                       | 🔴 NO plan     | 🟡 Planned     | Plan in 2025.06.30                                                     |
 | Multi Modality                | 🟢 Functional  | 🟢 Functional  | [Tutorial][multimodal], optimizing and adapting more models            |
