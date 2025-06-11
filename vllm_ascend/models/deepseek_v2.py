@@ -326,7 +326,7 @@ class CustomDeepseekV2MoE(nn.Module):
                                         and not self.enable_multistream_moe)
 
         if self.tp_size > 1:
-            if not(self.torchair_graph_enabled or self.ep_group.world_size == 1 
+            if not (self.torchair_graph_enabled or self.ep_group.world_size == 1 
                                     or self.fused_experts_allgather_ep_enabled):
                 if num_tokens < self.tp_size:
                     hidden_states = nn.functional.pad(
@@ -356,7 +356,7 @@ class CustomDeepseekV2MoE(nn.Module):
                 experts_hidden_states[1])
 
         if self.tp_size > 1:
-            if not(self.torchair_graph_enabled or self.ep_group.world_size == 1 
+            if not (self.torchair_graph_enabled or self.ep_group.world_size == 1 
                                     or self.fused_experts_allgather_ep_enabled):
                 dist.all_gather(list(chunk_hidden_states), hidden_states, 
                                     self.tp_group)
