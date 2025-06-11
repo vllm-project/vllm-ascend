@@ -123,7 +123,6 @@ class AscendScheduler(Scheduler):
                         self.connector.get_num_new_matched_tokens(
                             request, num_native_computed_tokens))
 
-
                 # Total computed tokens (local + external).
                 num_computed_tokens = (num_native_computed_tokens +
                                        num_external_computed_tokens)
