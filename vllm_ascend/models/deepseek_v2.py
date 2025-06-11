@@ -363,7 +363,7 @@ class CustomDeepseekV2MoE(nn.Module):
                 hidden_states = torch.cat(chunk_hidden_states, dim=0)
                 if num_tokens < self.tp_size:
                     hidden_states = hidden_states[:num_tokens]
-            else 
+            else:
                 hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
         if self.n_shared_experts is not None:
