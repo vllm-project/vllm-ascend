@@ -101,7 +101,7 @@ class EplbWorker:
                 if dst_rank_id not in expert_recv_info_this_layer:
                     expert_recv_info_this_layer[dst_rank_id] = []
 
-                if not torch.isin(src_rank_indices, torch.tensor(expert_id)).any():
+                if not torch.isin(torch.tensor(expert_id), experts_to_send).any():
                     # if expert_id are not sent out from any npu, it will be copied from one npu holding this expert
                     candidate_src_rank_indices = torch.where(current_expert_maps_this_layer[:, expert_id] != -1)
                 else:

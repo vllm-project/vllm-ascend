@@ -233,7 +233,7 @@ def fused_experts_with_all2all(
     log2phy: torch.Tensor = None,
     global_redundant_expert_num: int = 0,
 ):
-    if log2phy:
+    if log2phy is not None:
         topk_ids = log2phy[topk_ids]
     original_shape = hidden_states.shape
     if len(original_shape) == 3:
