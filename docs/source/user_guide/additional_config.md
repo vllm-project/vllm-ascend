@@ -39,11 +39,11 @@ The details of each config option are as follows:
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `enabled` | bool | `False` | Whether to enable torchair graph mode |
+| `enable_multistream_moe`| bool | `False` | Whether to enable multistream shared expert |
 | `enable_view_optimize` | bool | `True` | Whether to enable torchair view optimization |
 | `use_cached_graph` | bool | `False` | Whether to use cached graph |
 | `graph_batch_sizes` | list[int] | `[]` | The batch size for torchair graph cache |
 | `graph_batch_sizes_init` | bool | `False` | Init graph batch size dynamically if `graph_batch_sizes` is empty |
-| `enable_multistream_shared_expert`| bool | `False` | Whether to enable multistream shared expert |
 
 **ascend_scheduler_config**
 
@@ -64,7 +64,7 @@ A full example of additional configuration is as follows:
         "use_cached_graph": true,
         "graph_batch_sizes": [1, 2, 4, 8],
         "graph_batch_sizes_init": false,
-        "enable_multistream_shared_expert": false
+        "enable_multistream_moe": false
     },
     "ascend_scheduler_config": {
         "enabled": true,
