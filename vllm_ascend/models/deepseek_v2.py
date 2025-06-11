@@ -325,14 +325,15 @@ class CustomDeepseekV2MoE(nn.Module):
         use_separated_shared_experts = (self.shared_experts is not None
                                         and not self.enable_multistream_moe)
 
-        if not(self.torchair_graph_enabled or self.ep_group.world_size == 1 
-                                or self.fused_experts_allgather_ep_enabled):
-            if num_tokens < self.tp_size:
-                hidden_states = nn.functional.pad(
-                    hidden_states, (0, 0, 0, self.tp_size - num_tokens))
-            chunk_hidden_states = torch.tensor_split(
-                    hidden_states, self.tp_size, dim=0)
-            hidden_states = chunk_hidden_states[self.tp_rank]
+        if self.tp_size > 1:
+            if not(self.torchair_graph_enabled or self.ep_group.world_size == 1 
+                                    or self.fused_experts_allgather_ep_enabled):
+                if num_tokens < self.tp_size:
+                    hidden_states = nn.functional.pad(
+                        hidden_states, (0, 0, 0, self.tp_size - num_tokens))
+                chunk_hidden_states = torch.tensor_split(
+                        hidden_states, self.tp_size, dim=0)
+                hidden_states = chunk_hidden_states[self.tp_rank]
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
@@ -354,15 +355,16 @@ class CustomDeepseekV2MoE(nn.Module):
                 experts_hidden_states[0] * self.routed_scaling_factor +
                 experts_hidden_states[1])
 
-        if not(self.torchair_graph_enabled or self.ep_group.world_size == 1 
-                                or self.fused_experts_allgather_ep_enabled):
-            dist.all_gather(list(chunk_hidden_states), hidden_states, 
-                                self.tp_group)
+        if self.tp_size > 1:
+            if not(self.torchair_graph_enabled or self.ep_group.world_size == 1 
+                                    or self.fused_experts_allgather_ep_enabled):
+                dist.all_gather(list(chunk_hidden_states), hidden_states, 
+                                    self.tp_group)
                 hidden_states = torch.cat(chunk_hidden_states, dim=0)
                 if num_tokens < self.tp_size:
                     hidden_states = hidden_states[:num_tokens]
-        else 
-            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+            else 
+                hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(old_hidden_states)
