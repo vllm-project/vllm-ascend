@@ -47,14 +47,14 @@ from vllm import LLM
 
 os.environ["VLLM_USE_V1"] = 1
 
-model = LLM(model="deepseek-ai/DeepSeek-R1-0528", additional_config={"torchair_graph_config": {"enable": True}})
+model = LLM(model="deepseek-ai/DeepSeek-R1-0528", additional_config={"torchair_graph_config": {"enabled": True}})
 outputs = model.generate("Hello, how are you?")
 ```
 
 online example:
 
 ```shell
-vllm serve Qwen/Qwen2-7B-Instruct --additional-config='{"torchair_graph_config": {"enable": true}}'
+vllm serve Qwen/Qwen2-7B-Instruct --additional-config='{"torchair_graph_config": {"enabled": true}}'
 ```
 
 You can find more detail about additional config [here](./additional_config.md)
