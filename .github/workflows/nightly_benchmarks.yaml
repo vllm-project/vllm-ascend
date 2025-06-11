@@ -18,11 +18,7 @@
 name: 'Benchmarks / Performance'
 # This workflow runs nightly benchmarks for vllm-ascend.
 
-on:
-  schedule:
-    # Run at 02:00 everyday
-    - cron: '00 18 * * *'
-  
+on:  
   workflow_dispatch:
     # Allow manual triggering of the workflow
 
