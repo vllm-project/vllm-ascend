@@ -18,6 +18,7 @@
 #
 
 import atexit
+import gc
 import math
 from contextlib import contextmanager, nullcontext
 from threading import Lock
@@ -247,3 +248,9 @@ def npu_wait_tensor(self: torch.Tensor,
                     *,
                     enabled: bool = True):
     return _npu_wait_tensor(self, dependency) if enabled else self
+
+
+def clear_npu_memory():
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()

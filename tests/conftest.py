@@ -17,12 +17,10 @@
 # Adapted from vllm-project/vllm/blob/main/tests/conftest.py
 #
 
-import gc
 from typing import List, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 import pytest
-import torch
 from huggingface_hub import snapshot_download
 from PIL import Image
 from vllm import LLM, SamplingParams
@@ -37,7 +35,7 @@ from tests.model_utils import (PROMPT_TEMPLATES, TokensTextLogprobs,
 # TODO: remove this part after the patch merged into vllm, if
 # we not explicitly patch here, some of them might be effectiveless
 # in pytest scenario
-from vllm_ascend.utils import adapt_patch  # noqa E402
+from vllm_ascend.utils import adapt_patch, clear_npu_memory  # noqa E402
 
 adapt_patch(True)
 
@@ -56,8 +54,7 @@ PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 def cleanup_dist_env_and_memory():
     destroy_model_parallel()
     destroy_distributed_environment()
-    gc.collect()
-    torch.npu.empty_cache()
+    clear_npu_memory()
 
 
 class VllmRunner:
