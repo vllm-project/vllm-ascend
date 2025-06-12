@@ -866,7 +866,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         elif np.all(num_valid_tokens == 1):
             attn_state = AscendAttentionState.SpecDecoding
         # splitfuse
-        elif self.chunked_prefill_enabled:
+        elif not ascend_config.ascend_scheduler_config.enabled or self.chunked_prefill_enabled:
             attn_state = AscendAttentionState.ChunkedPrefill
         else:
             attn_state = AscendAttentionState.PrefillCacheHit
