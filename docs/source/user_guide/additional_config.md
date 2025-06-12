@@ -39,6 +39,7 @@ The details of each config option are as follows:
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `enabled` | bool | `False` | Whether to enable torchair graph mode |
+| `enable_multistream_mla`| bool | `False` | Whether to put vector ops of MLA to another stream |
 | `enable_multistream_moe`| bool | `False` | Whether to enable multistream shared expert |
 | `enable_view_optimize` | bool | `True` | Whether to enable torchair view optimization |
 | `use_cached_graph` | bool | `False` | Whether to use cached graph |
