@@ -4,7 +4,7 @@ from typing import List, TypedDict
 import pytest
 import torch
 
-from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
+from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer # type: ignore[import]  # isort: skip  # noqa
 
 
 class Device(TypedDict):
