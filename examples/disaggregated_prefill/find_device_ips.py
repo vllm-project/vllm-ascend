@@ -38,7 +38,7 @@ def get_device_ips():
     if npu_info.returncode != 0 or not os.path.exists(HCCN_TOOL_PATH):
         raise RuntimeError("No npu-smi/hccn_tool tools provided for NPU.")
 
-    # ‌Extract NPU IDs for all Ascend devices (excluding Mcu rows)
+    # ‌Extract NPU IDs for all Ascend devices (excluding Mcu rows)  
     device_ids = []
     for line in npu_info.stdout.strip().split('\n'):
         match = re.match(r'^\s*(\d+)\s+\d+\s+\d+\s+Ascend', line)
