@@ -13,10 +13,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 import vllm.envs as envs
 from vllm.logger import logger
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 class AscendConfig:
@@ -112,7 +115,7 @@ def get_ascend_config():
     return _ASCEND_CONFIG
 
 
-def check_ascend_config(vllm_config, enforce_eager):
+def check_ascend_config(vllm_config: "VllmConfig", enforce_eager):
     ascend_config = get_ascend_config()
 
     # for v0 engine
@@ -164,3 +167,11 @@ def check_ascend_config(vllm_config, enforce_eager):
                             "ACL Graph is currently experimental. Please "
                             "raise an issue on https://github.com/vllm-project/vllm-ascend/issues"
                             " if you encourage any Error")
+
+        # for expert parallelism
+        if vllm_config.parallel_config.enable_expert_parallel and \
+            ascend_config.expert_tensor_parallel_size > 0:
+            raise RuntimeError(
+                "Cannot set `--enable-expert-parallel` and "
+                "`expert_tensor_parallel_size` at the same time. "
+            )
