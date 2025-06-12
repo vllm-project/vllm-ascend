@@ -11,14 +11,17 @@ class Device(TypedDict):
     device_id: int
     device_expert: List[int]
 
+
 class Layer(TypedDict):
     layer_id: int
     device_count: int
     device_list: List[Device]
 
+
 class MockData(TypedDict):
     moe_layer_count: int
     layer_list: List[Layer]
+
 
 MOCK_DATA: MockData = {
     "moe_layer_count":
