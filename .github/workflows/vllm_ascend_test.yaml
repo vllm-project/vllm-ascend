@@ -185,8 +185,8 @@ jobs:
             # test_ascend_config.py should be ran separately because it will regenerate the global config many times.
             pytest -sv tests/singlecard/test_ascend_config.py
             pytest -sv tests/singlecard/test_camem.py
-            # pytest -sv tests/singlecard/core/test_ascend_scheduler.py
-            # pytest -sv tests/singlecard/core/test_ascend_scheduler_e2e.py
+            pytest -sv tests/singlecard/core/test_ascend_scheduler.py
+            pytest -sv tests/singlecard/core/test_ascend_scheduler_e2e.py
             pytest -sv tests/singlecard/ \
             --ignore=tests/singlecard/test_offline_inference.py \
             --ignore=tests/singlecard/test_guided_decoding.py \
@@ -217,7 +217,6 @@ jobs:
             # test_ascend_config.py should be ran separately because it will regenerate the global config many times.
             pytest -sv tests/singlecard/test_ascend_config.py
             pytest -sv tests/singlecard/test_prompt_embedding.py
-            pytest -sv tests/singlecard/core/test_ascend_scheduler.py
             pytest -sv tests/singlecard/ \
               --ignore=tests/singlecard/test_offline_inference.py \
               --ignore=tests/singlecard/test_guided_decoding.py \
