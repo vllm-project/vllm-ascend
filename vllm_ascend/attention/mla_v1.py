@@ -833,7 +833,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         if attn_metadata.attn_state in [
                 AscendAttentionState.ChunkedPrefill,
                 AscendAttentionState.SpecDecoding
-        ] and not ascend_config.new_chunked:
+        ] and not ascend_config.chunked_prefill_for_mla:
             attn_output = attn_output_torch
 
         current_ms_metadata = get_multistream_comm_context()
