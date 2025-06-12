@@ -170,10 +170,10 @@ jobs:
           while IFS= read -r line || [[ -n "$line" ]]; do
             commit_id=${line%% *}
             commit_title=${line#* }
-            commit_time=$(git show -s --format=%cd $commit_hash --date=iso-strict)
-            commit_time_no_tz=${commit_time::19}
 
             git checkout $commit_id
+            commit_time=$(git show -s --format=%cd $commit_hash --date=iso-strict)
+            commit_time_no_tz=${commit_time::19}
             pip install -e .
             
             echo "------------------------"
