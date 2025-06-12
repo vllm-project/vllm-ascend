@@ -1,10 +1,14 @@
+# fused moe ops test will hit the infer_schema error, we need add the patch
+# here to make the test pass.
+import vllm_ascend.patch.worker.patch_common.patch_utils  # type: ignore[import]  # isort: skip  # noqa
+
 import json
 from typing import List, TypedDict
 
 import pytest
 import torch
 
-from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer  # type: ignore[import]  # isort: skip  # noqa
+from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 
 
 class Device(TypedDict):
