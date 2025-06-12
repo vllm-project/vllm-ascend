@@ -487,6 +487,7 @@ class MooncakeConnectorWorker:
                 logger.debug("Sending query for metadata")
                 data_bytes = pickle.dumps(msg)
                 sock.send(data_bytes)
+                # TODO: 如果这里没有接收到metadata，后续应该添加超时重试或者abort请求操作
                 metadata_bytes = sock.recv()
                 decoder = msgspec.msgpack.Decoder(MooncakeAgentMetadata)
                 metadata = decoder.decode(metadata_bytes)
@@ -587,18 +588,17 @@ class MooncakeConnectorWorker:
             success_count = 0
             try:
                 # 获取每个任务的返回值
-                future = self.futures[req]
-                for trans_task in future:
-                    ret = trans_task.result()
-                    # 假设status为True时表示成功
-                    if ret >= 0:
+                future_list = self.futures[req]
+                for future in future_list:
+                    if future.done():
                         success_count += 1
             except Exception as e:
                 # 处理任务中的异常情况
-                logger.error("Mooncake Transfer Engine Return Error.")
-                raise RuntimeError("Mooncake Transfer Engine Return Error.")
+                logger.error("%s Transfer Task Return Error.", req, exc_info=True)
+                del self.futures[req]
 
             if success_count == len(self.futures[req]):
+                del self.futures[req]
                 self._done_recving_count[req] += 1
                 msg = (DONE_RECVING_MSG, req)
                 remote_host = self.req_record[req][0]
@@ -763,21 +763,33 @@ class MooncakeConnectorWorker:
             range(self._prefill_tp_size), self._decode_tp_size)
         return sampled_nums
 
-
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
-    """Context manager for a ZMQ socket"""
+def zmq_ctx(socket_type: Any, addr: str,
+            rcvtimeo_ms: int = 5000, sndtimeo_ms: int = 5000) -> Iterator[zmq.Socket]:
+    """
+    Context manager for a ZMQ socket with optional timeout settings.
+
+    :param socket_type: zmq.REQ or zmq.ROUTER
+    :param addr: address to connect/bind to (e.g., "tcp://*:5555")
+    :param rcvtimeo_ms: receive timeout in milliseconds (default: 5000)
+    :param sndtimeo_ms: send timeout in milliseconds (default: 5000)
+    """
 
     if socket_type not in (zmq.ROUTER, zmq.REQ):
         raise ValueError(f"Unexpected socket type: {socket_type}")
 
     ctx: Optional[zmq.Context] = None
     try:
-        ctx = zmq.Context()  # type: ignore[attr-defined]
-        yield make_zmq_socket(ctx=ctx,
-                              path=addr,
-                              socket_type=socket_type,
-                              bind=socket_type == zmq.ROUTER)
+        ctx = zmq.Context()
+        sock = make_zmq_socket(ctx=ctx, path=addr, socket_type=socket_type, bind=socket_type == zmq.ROUTER)
+
+        if rcvtimeo_ms >= 0:
+            sock.setsockopt(zmq.RCVTIMEO, rcvtimeo_ms)
+        if sndtimeo_ms >= 0:
+            sock.setsockopt(zmq.SNDTIMEO, sndtimeo_ms)
+
+        yield sock
+
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
