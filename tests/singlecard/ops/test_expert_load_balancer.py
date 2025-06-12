@@ -84,12 +84,12 @@ def test_get_rank_placement_map(mock_expert_load_balancer):
         layer_id, rank_id)
     assert rank_local_expert_num == 5
     assert rank_expert_map.equal(
-        torch.tensor([ 2, -1,  1,  3, -1,  4, -1,  0], dtype=torch.int32))
+        torch.tensor([2, -1, 1, 3, -1, 4, -1, 0], dtype=torch.int32))
     rank_id = 1
     rank_local_expert_num, rank_expert_map = mock_expert_load_balancer.get_rank_placement_map(
         layer_id, rank_id)
     assert rank_expert_map.equal(
-        torch.tensor([-1,  1,  4, -1,  2, -1,  0,  3], dtype=torch.int32))
+        torch.tensor([-1, 1, 4, -1, 2, -1, 0, 3], dtype=torch.int32))
 
 
 def test_get_rank_log2phy_map(mock_expert_load_balancer):
