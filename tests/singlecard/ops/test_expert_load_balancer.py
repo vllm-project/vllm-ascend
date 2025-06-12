@@ -1,5 +1,5 @@
 import json
-from typing import TypedDict, List
+from typing import List, TypedDict
 
 import pytest
 import torch
