@@ -23,6 +23,7 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
+import json
 import os
 
 # import sys
@@ -133,3 +134,7 @@ if READTHEDOCS_VERSION_TYPE == "tag":
 
 def setup(app):
     pass
+
+
+if __name__ == "__main__":
+    print(json.dumps(myst_substitutions))
