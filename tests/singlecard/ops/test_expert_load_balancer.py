@@ -6,6 +6,7 @@ import torch
 
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 
+
 class Device(TypedDict):
     device_id: int
     device_expert: List[int]
