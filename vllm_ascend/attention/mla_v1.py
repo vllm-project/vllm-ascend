@@ -405,8 +405,8 @@ class AscendMLAMetadataBuilder:
             if self.chunked_prefill_enabled and max_context_len_cpu > 0:
                 max_context_chunk = (self.chunked_prefill_workspace_size //
                                      num_prefills_with_context_cpu)
-                max_context_chunk = round_down(
-                    max_context_chunk, self.block_size)
+                max_context_chunk = round_down(max_context_chunk,
+									      self.block_size)
 
                 assert max_context_chunk > 0
                 num_chunks = cdiv(max_context_len_cpu, max_context_chunk)
