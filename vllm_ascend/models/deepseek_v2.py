@@ -35,9 +35,12 @@ from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.distributed import (get_pp_group,
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
-                              get_tp_group, tensor_model_parallel_all_reduce)
+                              get_tp_group, split_tensor_along_last_dim,
+                              tensor_model_parallel_all_gather,
+                              tensor_model_parallel_all_reduce,
+                              tensor_model_parallel_reduce_scatter)
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -134,6 +137,45 @@ class CustomDeepseekV2MergedReplicatedLinear(ReplicatedLinear):
             f"to a parameter shard of id {loaded_shard_id} size {shard.size()}"
         )
         shard.copy_(loaded_weight)
+
+
+class CustomDeepseekV2RowParallelLinear(RowParallelLinear):
+
+    def forward(
+        self,
+        input_,
+        is_prefill=True
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[nn.Parameter]]]:
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            tp_rank = get_tensor_model_parallel_rank()
+            splitted_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size)
+            input_parallel = splitted_input[tp_rank].contiguous()
+
+        # Matrix multiply.
+        assert self.quant_method is not None
+        # Only fuse bias add into GEMM for rank 0 (this ensures that
+        # bias will not get added more than once in TP>1 case)
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        output_parallel = self.quant_method.apply(self,
+                                                  input_parallel,
+                                                  bias=bias_)
+        if self.reduce_results and self.tp_size > 1:
+            if not is_prefill and output_parallel.shape[0] % self.tp_size == 0:
+                output = tensor_model_parallel_reduce_scatter(output_parallel,
+                                                              dim=0)
+            else:
+                output = tensor_model_parallel_all_reduce(output_parallel)
+        else:
+            output = output_parallel
+
+        output_bias = self.bias if self.skip_bias_add else None
+
+        if not self.return_bias:
+            return output
+        return output, output_bias
 
 
 class CustomDeepseekV2MLP(nn.Module):
@@ -293,10 +335,11 @@ class CustomDeepseekV2MoE(nn.Module):
 
         self.params_dtype = torch.get_default_dtype()
 
-    def forward(
-            self,
-            hidden_states: torch.Tensor,
-            attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
+    def forward(self,
+                hidden_states: torch.Tensor,
+                attn_metadata: Optional[AttentionMetadata] = None,
+                replace_allreduce: bool = False) -> torch.Tensor:
+
         if attn_metadata is None:
             attn_metadata = get_forward_context().attn_metadata
         # when profile runs, force experts to load balanced tokens
@@ -316,7 +359,7 @@ class CustomDeepseekV2MoE(nn.Module):
         use_separated_shared_experts = (self.shared_experts is not None
                                         and not self.enable_multistream_moe)
 
-        if self.tp_size > 1:
+        if self.tp_size > 1 and not replace_allreduce:
             if (VLLM_ENABLE_MC2
                     and not is_prefill) or not (self.torchair_graph_enabled or
                                                 self.ep_group.world_size == 1):
@@ -348,7 +391,7 @@ class CustomDeepseekV2MoE(nn.Module):
                 experts_hidden_states[0] * self.routed_scaling_factor +
                 experts_hidden_states[1])
 
-        if self.tp_size > 1:
+        if self.tp_size > 1 and not replace_allreduce:
             if (VLLM_ENABLE_MC2
                     and not is_prefill) or not (self.torchair_graph_enabled or
                                                 self.ep_group.world_size == 1):
@@ -441,11 +484,12 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj")
-        self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
-                                        self.hidden_size,
-                                        bias=False,
-                                        quant_config=quant_config,
-                                        prefix=f"{prefix}.o_proj")
+        self.o_proj = CustomDeepseekV2RowParallelLinear(
+            self.num_heads * self.v_head_dim,
+            self.hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj")
 
         if rope_scaling:
             rope_scaling["rope_type"] = 'deepseek_yarn'
@@ -555,6 +599,12 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         # with the layer's index.
         layer_idx = int(prefix.split(sep='.')[-1])
         self.layer_idx = layer_idx
+        self.layers = config.num_hidden_layers
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.tp_rank = get_tp_group().rank_in_group
+        ascend_config = get_ascend_config()
+        self.mla_moe_communication = ascend_config.torchair_graph_config.enabled \
+            and model_config.use_mla and envs.VLLM_USE_V1 and self.tp_size > 1
         # TODO: enable mla in vllm-ascend
         if model_config.use_mla:
             attn_cls = CustomDeepseekV2MLAAttention
@@ -607,10 +657,22 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         residual: Optional[torch.Tensor],
         kv_cache: Optional[torch.Tensor] = None,
         attn_metadata: Optional[AttentionMetadata] = None,
+        replace_allreduce: bool = False,
     ) -> torch.Tensor:
         # Self Attention
+        if attn_metadata is not None and attn_metadata.num_decodes > 0:
+            mla_moe_communication = self.mla_moe_communication and VLLM_ENABLE_MC2 \
+                and replace_allreduce
+        else:
+            mla_moe_communication = False
         if residual is None:
-            residual = hidden_states
+            if mla_moe_communication:
+                chunk_hidden_states = torch.tensor_split(hidden_states,
+                                                         self.tp_size,
+                                                         dim=0)
+                residual = chunk_hidden_states[self.tp_rank]
+            else:
+                residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             previous_hidden_states, previous_residual = hidden_states, residual
@@ -620,6 +682,9 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             # to save npu memory because they're no longer used.
             dispose_tensor(previous_hidden_states)
             dispose_tensor(previous_residual)
+        if mla_moe_communication and self.layer_idx > 0:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states,
+                                                             dim=0)
 
         hidden_states = self.self_attn(
             positions=positions,
@@ -643,7 +708,8 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             hidden_states, residual)
 
         if isinstance(self.mlp, CustomDeepseekV2MoE):
-            hidden_states = self.mlp(hidden_states, attn_metadata)
+            hidden_states = self.mlp(hidden_states, attn_metadata,
+                                     mla_moe_communication)
         else:
             hidden_states = self.mlp(hidden_states)
 
@@ -656,6 +722,10 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             # The scaling of DeepseekV2MOE output would be done in the forward
             # of DeepseekV2MOE
             hidden_states *= 1. / self.routed_scaling_factor
+        if mla_moe_communication and self.layer_idx == self.layers - 1:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states,
+                                                             dim=0)
+            residual = tensor_model_parallel_all_gather(residual, dim=0)
 
         return hidden_states, residual
 
@@ -674,6 +744,7 @@ class CustomDeepseekV2Model(nn.Module):
 
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
+        self.tp_size = get_tensor_model_parallel_world_size()
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -726,13 +797,15 @@ class CustomDeepseekV2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        replace_allreduce = hidden_states.shape[0] % self.tp_size == 0
+
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions, hidden_states, residual,
                 kv_caches[i -
                           self.start_layer] if kv_caches is not None else None,
-                attn_metadata)
+                attn_metadata, replace_allreduce)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
