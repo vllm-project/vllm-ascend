@@ -354,9 +354,6 @@ def fused_experts_with_allgather(hidden_states: torch.Tensor,
                   topk_ids: torch.Tensor,
                   top_k: int, 
                   expert_map: torch.Tensor = None):
-    '''
-    expert_map: [expert_start, expert_start+1, ..., expert_end]
-    '''
     original_shape = hidden_states.shape
     if len(original_shape) == 3:
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
@@ -801,8 +798,6 @@ class AscendW8A8DynamicFusedMoEMethod:
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
-            layer.w13_weight.data = layer.w13_weight.data.transpose(
-                1, 2).contiguous()
             layer.w2_weight.data = layer.w2_weight.data.transpose(
                 1, 2).contiguous()
         torch_npu.npu_format_cast_(layer.w13_weight, 29)
