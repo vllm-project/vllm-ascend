@@ -9,6 +9,7 @@ from typing import Optional, Tuple, Union
 import pytest
 import torch
 import torch.nn as nn
+import torch_npu
 
 from vllm_ascend.utils import enable_custom_op
 
@@ -188,6 +189,71 @@ def test_rotary_embedding_quant_with_leading_dim(
         rope.cos_sin_cache,
         rope.is_neox_style,
     )
+
+    # Compare the results.
+    torch.testing.assert_close(query.view(ref_query.size()),
+                               ref_query,
+                               atol=DEFAULT_ATOL,
+                               rtol=DEFAULT_RTOL)
+    torch.testing.assert_close(key.view(ref_key.size()),
+                               ref_key,
+                               atol=DEFAULT_ATOL,
+                               rtol=DEFAULT_RTOL)
+
+# test rope with npu_mrope interface with leading dimension and merge seqlen and batch_size as num_tokens
+@pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
+@pytest.mark.parametrize("batch_size", BATCH_SIZES)
+@pytest.mark.parametrize("seq_len", SEQ_LENS)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("rotary_dim", ROTARY_DIMS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_npu_mrope_quant_with_leading_dim(
+    is_neox_style: bool,
+    batch_size: int,
+    seq_len: int,
+    num_heads: int,
+    head_size: int,
+    rotary_dim: Optional[int],
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    max_position: int = 8192,
+    base: int = 10000,
+) -> None:
+    if rotary_dim is None:
+        rotary_dim = head_size
+
+    torch.set_default_device(device)
+    if rotary_dim is None:
+        rotary_dim = head_size
+    rope = RotaryEmbedding(head_size, rotary_dim, max_position, base,
+                           is_neox_style, dtype)
+    rope = rope.to(dtype=dtype)
+    num_tokens = batch_size * seq_len
+    positions = torch.randint(0, max_position, (batch_size * seq_len, ))
+    qkv_tensor = torch.randn(num_tokens,
+                             num_heads * head_size * 3,
+                             dtype=dtype)
+    query, key, _ = qkv_tensor.split(
+        [num_heads * head_size, num_heads * head_size, num_heads * head_size],
+        dim=-1,
+    )
+
+    ref_query, ref_key = rope.forward_native(positions, query, key)
+
+    query, key = torch_npu.npu_mrope(
+            positions,
+            query,
+            key,
+            rope.cos_sin_cache,
+            rope.head_size,
+            mrope_section=[0,0,0],
+            rotary_mode='half' if rope.is_neox_style else 'interleave'
+        )
 
     # Compare the results.
     torch.testing.assert_close(query.view(ref_query.size()),
