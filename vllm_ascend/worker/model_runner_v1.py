@@ -853,7 +853,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                block_offsets,
                out=self.slot_mapping_np[:total_num_scheduled_tokens])
 
-       ascend_config = get_ascend_config()
+        ascend_config = get_ascend_config()
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
         if np.array_equal(
