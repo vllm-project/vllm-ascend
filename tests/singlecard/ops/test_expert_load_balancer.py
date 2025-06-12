@@ -1,6 +1,8 @@
+import json
+
 import pytest
 import torch
-import json
+
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 
 
