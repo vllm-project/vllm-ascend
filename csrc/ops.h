@@ -31,6 +31,20 @@ namespace vllm_ascend {
     const int headSize, const int64_t numTokens, const uint32_t loopCnt,
     uint32_t aivNum);
 
+  extern void get_masked_input_and_mask_impl(
+    void* stream,
+    void* input,
+    void* masked_input,
+    void* mask_out,
+    const int64_t org_vocab_start_index,
+    const int64_t org_vocab_end_index,
+    const int64_t num_org_vocab_padding, 
+    const int64_t added_vocab_start_index,
+    const int64_t added_vocab_end_index,
+    const int64_t size,
+    const uint32_t loop_cnt,
+    const uint32_t aiv_num);
+    
   torch::Tensor weak_ref_tensor(torch::Tensor& tensor) {
     if (!tensor.is_privateuseone()) {
       throw std::runtime_error("Tensor must be on NPU device");
