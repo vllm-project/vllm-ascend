@@ -343,7 +343,7 @@ class MooncakeConnectorWorker:
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.tp_group = get_tp_group()
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank_local
-        self.dp_size = vllm_config.parallel_config.data_parallel_size
+        self.dp_size = vllm_config.parallel_config.data_parallel_size_local
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_local_ip_by_remote()
         self.max_device_id = self.tp_size * self.dp_size
