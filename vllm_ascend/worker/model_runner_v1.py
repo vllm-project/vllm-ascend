@@ -2067,6 +2067,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Add sampled_token_ids to token_ids_cpu.
             start_idx = self.input_batch.num_tokens_no_spec[i]
             end_idx = start_idx + num_sampled_ids
+            if end_idx >= self.max_model_len:
+                # Skip requests that have already reached the max model length.
+                draft_token_ids.append([])
+                continue
+
             self.input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
             assert self.drafter is not None
             drafter_output = self.drafter.propose(
