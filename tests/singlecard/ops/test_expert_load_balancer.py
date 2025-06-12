@@ -1,11 +1,25 @@
 import json
+from typing import TypedDict, List
 
 import pytest
 import torch
 
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 
-MOCK_DATA = {
+class Device(TypedDict):
+    device_id: int
+    device_expert: List[int]
+
+class Layer(TypedDict):
+    layer_id: int
+    device_count: int
+    device_list: List[Device]
+
+class MockData(TypedDict):
+    moe_layer_count: int
+    layer_list: List[Layer]
+
+MOCK_DATA: MockData = {
     "moe_layer_count":
     1,
     "layer_list": [{
