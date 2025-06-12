@@ -142,6 +142,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.device = device
 
         self.is_multimodal_model = self.model_config.is_multimodal_model
+        self.max_model_len = self.model_config.max_model_len
         self.block_size = vllm_config.cache_config.block_size
 
         self.max_num_blocks_per_req = cdiv(self.model_config.max_model_len,
