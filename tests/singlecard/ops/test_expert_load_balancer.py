@@ -5,7 +5,6 @@ import torch
 
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 
-
 MOCK_DATA = {
     "moe_layer_count": 1,
     "layer_list": [
