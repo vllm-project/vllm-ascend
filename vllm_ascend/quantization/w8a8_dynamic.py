@@ -798,9 +798,10 @@ class AscendW8A8DynamicFusedMoEMethod:
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
+            layer.w13_weight.data = layer.w13_weight.data.transpose(
+                1, 2).contiguous()
             layer.w2_weight.data = layer.w2_weight.data.transpose(
                 1, 2).contiguous()
-        torch_npu.npu_format_cast_(layer.w13_weight, 29)
         torch_npu.npu_format_cast_(layer.w2_weight, 29)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
             layer.w13_weight_scale.data.shape[0], -1)
