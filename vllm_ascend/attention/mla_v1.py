@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, Optional, Tuple, Type, TypeVar
 import numpy as np
 import torch
 import torch_npu
+from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
@@ -477,7 +478,15 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
-        self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
+        if envs.VLLM_USE_V1:
+            self.enable_chunked_prefill = True
+            if hasattr(
+                    ascend_config.ascend_scheduler_config,
+                    "enable_chunked_prefill"
+            ) and ascend_config.ascend_scheduler_config.enable_chunked_prefill:
+                self.enable_chunked_prefill = False
+
+        self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz and not self.enable_chunked_prefill
         # Adapt torch air graph mode with spec decoding.
         speculative_config = get_current_vllm_config().speculative_config
         if speculative_config is not None:
@@ -828,9 +837,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.running_in_graph = self.torchair_graph_enabled and attn_metadata.attn_state in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
+        self.torchair_without_chunk_prefill = self.torchair_graph_enabled and not self.enable_chunked_prefill
         num_actual_toks = attn_metadata.num_actual_tokens
         if k_pe is None and not self.running_in_graph:
-            if not self.torchair_graph_enabled:
+            if not self.torchair_without_chunk_prefill:
                 kv_c, k_pe = self.kv_a_proj_with_mqa(
                     hidden_states_or_kv_c_normed)[0].split(
                         [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
@@ -847,13 +857,13 @@ class AscendMLAImpl(MLAAttentionImpl):
             # Inputs and outputs may be padded for CUDA graphs
             output_padded = output
             output = output[:num_actual_toks, ...]
-            if not self.torchair_graph_enabled:
+            if not self.torchair_without_chunk_prefill:
                 kv_c_normed = kv_c_normed[:num_actual_toks, ...]
                 prefill_k_c_normed = kv_c_normed[num_decode_tokens:]
         if not self.running_in_graph:
             hidden_states_or_q_c = hidden_states_or_q_c[:num_actual_toks, ...]
             prefill_hs_or_q_c = hidden_states_or_q_c[num_decode_tokens:]
-            if not self.torchair_graph_enabled:
+            if not self.torchair_without_chunk_prefill:
                 decode_hs_or_q_c = hidden_states_or_q_c[:num_decode_tokens]
                 k_pe = k_pe[:num_actual_toks, ...]
                 k_pe = k_pe.unsqueeze(1)
@@ -893,7 +903,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 .view(-1, self.num_heads, self.qk_head_dim)
             prefill_q_pe = prefill_q[..., self.qk_nope_head_dim:]
             prefill_q_nope = prefill_q[..., :self.qk_nope_head_dim]
-            if self.torchair_graph_enabled:
+            if self.torchair_without_chunk_prefill:
                 num_tokens = prefill_hs_or_q_c.shape[0]
                 seq_len = self.rotary_emb.max_position_embeddings
                 cos = self.rotary_emb.cos_cached[:seq_len].to(
@@ -914,6 +924,25 @@ class AscendMLAImpl(MLAAttentionImpl):
                 prefill_k_c_normed = prefill_k_nope[num_decode_tokens:]
                 prefill_k_pe = prefill_k_pe.view(num_tokens, self.num_kv_heads,
                                                  -1)
+                prefill_q = torch.cat([prefill_q_nope, prefill_q_pe], dim=-1)
+            elif self.torchair_graph_enabled:
+                num_tokens = prefill_hs_or_q_c.shape[0]
+                prefill_q_pe = prefill_q_pe.view(num_tokens, self.num_kv_heads,
+                                                 -1)
+                if self.rotary_emb.__class__.__name__ == "RotaryEmbedding":
+                    # NOTE: when scaling not specified
+                    ori_q_pe_shape, ori_k_pe_shape = prefill_q_pe.shape, prefill_k_pe.shape
+                    prefill_q_pe = prefill_q_pe.reshape(num_tokens, -1)
+                    prefill_k_pe = prefill_k_pe.reshape(num_tokens, -1)
+                    prefill_q_pe, prefill_k_pe = self.rotary_emb(
+                        attn_metadata.prefill.input_positions, prefill_q_pe,
+                        prefill_k_pe)
+                    prefill_q_pe = prefill_q_pe.reshape(ori_q_pe_shape)
+                    prefill_k_pe = prefill_k_pe.reshape(ori_k_pe_shape)
+                else:
+                    prefill_q_pe, prefill_k_pe = self.rotary_emb(
+                        attn_metadata.prefill.input_positions, prefill_q_pe,
+                        prefill_k_pe)
                 prefill_q = torch.cat([prefill_q_nope, prefill_q_pe], dim=-1)
             else:
                 prefill_q_pe[...], prefill_k_pe[...] = self.rotary_emb(
