@@ -406,7 +406,7 @@ class AscendMLAMetadataBuilder:
                 max_context_chunk = (self.chunked_prefill_workspace_size //
                                      num_prefills_with_context_cpu)
                 max_context_chunk = round_down(
-                    max_context_chunk, self.block_size)  #待确认是否需要是block_size的倍数
+                    max_context_chunk, self.block_size)
 
                 assert max_context_chunk > 0
                 num_chunks = cdiv(max_context_len_cpu, max_context_chunk)
@@ -750,7 +750,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         if attn_metadata.attn_state in [
                 AscendAttentionState.ChunkedPrefill,
                 AscendAttentionState.SpecDecoding
-        ] and not ascend_config.new_chunked:
+        ] and not ascend_config.chunked_prefill_for_mla:
             attn_output_torch = torch.empty(num_tokens,
                                             self.num_heads * self.v_head_dim,
                                             dtype=query.dtype,
