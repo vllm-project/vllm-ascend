@@ -25,8 +25,12 @@ def concat_and_cache_mla(
     Tensor,  # [num_blocks, block_size, num_kv_head, nope + rope]
         slot_mapping,  # [num_tokens]
 ):
-    num_blocks = kv_cache.size()[0]
-    block_size = kv_cache.size()[1]
+    if isinstance(kv_cache, tuple):
+        num_blocks = kv_cache[0].size()[0]
+        block_size = kv_cache[0].size()[1]
+    else:
+        num_blocks = kv_cache.size()[0]
+        block_size = kv_cache.size()[1]
     num_kv_head = k_pe.size()[1]
 
     idx_for_copy = slot_mapping // block_size * block_size + slot_mapping % block_size

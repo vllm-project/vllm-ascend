@@ -4,7 +4,6 @@ from typing import TYPE_CHECKING, Any, Optional, Tuple, Type, TypeVar
 import numpy as np
 import torch
 import torch_npu
-from vllm import envs
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
@@ -478,13 +477,10 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
-        if envs.VLLM_USE_V1:
-            self.enable_chunked_prefill = True
-            if hasattr(
-                    ascend_config.ascend_scheduler_config,
-                    "enable_chunked_prefill"
-            ) and ascend_config.ascend_scheduler_config.enable_chunked_prefill:
-                self.enable_chunked_prefill = False
+        self.enable_chunked_prefill = True
+        if hasattr(ascend_config.ascend_scheduler_config,
+                   "enable_chunked_prefill"):
+            self.enable_chunked_prefill = ascend_config.ascend_scheduler_config.enable_chunked_prefill
 
         self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz and not self.enable_chunked_prefill
         # Adapt torch air graph mode with spec decoding.
@@ -927,18 +923,18 @@ class AscendMLAImpl(MLAAttentionImpl):
                 prefill_q = torch.cat([prefill_q_nope, prefill_q_pe], dim=-1)
             elif self.torchair_graph_enabled:
                 num_tokens = prefill_hs_or_q_c.shape[0]
-                prefill_q_pe = prefill_q_pe.view(num_tokens, self.num_kv_heads,
+                prefill_k_pe = prefill_k_pe.view(num_tokens, self.num_kv_heads,
                                                  -1)
                 if self.rotary_emb.__class__.__name__ == "RotaryEmbedding":
-                    # NOTE: when scaling not specified
+                    # NOTE: When scaling not specified
                     ori_q_pe_shape, ori_k_pe_shape = prefill_q_pe.shape, prefill_k_pe.shape
                     prefill_q_pe = prefill_q_pe.reshape(num_tokens, -1)
                     prefill_k_pe = prefill_k_pe.reshape(num_tokens, -1)
                     prefill_q_pe, prefill_k_pe = self.rotary_emb(
                         attn_metadata.prefill.input_positions, prefill_q_pe,
                         prefill_k_pe)
-                    prefill_q_pe = prefill_q_pe.reshape(ori_q_pe_shape)
-                    prefill_k_pe = prefill_k_pe.reshape(ori_k_pe_shape)
+                    prefill_q_pe = prefill_q_pe.view(ori_q_pe_shape)
+                    prefill_k_pe = prefill_k_pe.view(ori_k_pe_shape)
                 else:
                     prefill_q_pe, prefill_k_pe = self.rotary_emb(
                         attn_metadata.prefill.input_positions, prefill_q_pe,
