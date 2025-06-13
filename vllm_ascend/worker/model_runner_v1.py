@@ -206,7 +206,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.use_spec_decode = False
         self.spec_attn_mask = None
         if self.speculative_config:
-            self.use_spec_decode = True
             self.spec_attn_mask = torch.triu(torch.ones(2048,
                                                         2048,
                                                         dtype=torch.bool),
@@ -757,7 +756,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 mm_embeds.append(mm_embeds_item)
         return mm_embeds
 
-    def _process_reqs(
+    def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
@@ -1214,8 +1213,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 return EMPTY_MODEL_RUNNER_OUTPUT
             (attn_metadata, hidden_states, spec_decode_metadata, positions,
              num_scheduled_tokens,
-             sample_indices) = (self._process_reqs(scheduler_output,
-                                                   intermediate_tensors))
+             sample_indices) = (self._prepare_inputs(scheduler_output,
+                                                     intermediate_tensors))
 
         with ProfileExecuteDuration().capture_async("post process"):
             logits = self.model.compute_logits(hidden_states[sample_indices],
