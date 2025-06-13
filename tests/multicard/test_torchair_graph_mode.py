@@ -62,7 +62,14 @@ def test_e2e_deepseekv3_with_torchair(monkeypatch: pytest.MonkeyPatch):
         ) as vllm_model:
             vllm_output = vllm_model.generate_greedy(example_prompts,
                                                      max_tokens)
+        golden_results = [
+            'Hello, my name is feasibility伸 spazio debtor添',
+            'The president of the United States is begg"""\n杭州风和 bestimm',
+            'The capital of France is frequentlyশามalinkAllowed',
+            'The future of AI is deleting俯احت怎么样了حراف',
+        ]
 
-        for output in vllm_output:
-            generated_text = output[1]
-            print(f"Generated text: {generated_text!r}")
+        assert len(golden_results) == len(vllm_output)
+        for i in range(len(vllm_output)):
+            assert golden_results[i] == vllm_output[i][1]
+            print(f"Generated text: {vllm_output[i][1]!r}")
