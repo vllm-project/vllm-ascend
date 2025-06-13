@@ -7,6 +7,7 @@
 | Xiyuan Wang| [@wangxiyuan](https://github.com/wangxiyuan) | 2025/01 |
 | Yikun Jiang| [@Yikun](https://github.com/Yikun) | 2025/02 |
 | Yi Gan| [@ganyi1996ppo](https://github.com/ganyi1996ppo) | 2025/02 |
+| Shoujian Zheng| [@jianzs](https://github.com/jianzs) | 2025/06 |
 
 ## Contributors
 
