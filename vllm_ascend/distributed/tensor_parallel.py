@@ -14,7 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 import torch
-from vllm.distributed import get_tensor_model_parallel_group
+from vllm_ascend.distributed.parallel_state import get_etp_group
 
 
 def _gather_along_first_dim(input_, group, output_split_sizes=None):
@@ -206,7 +206,7 @@ def all_to_all_sp2hp(input_, group):
 
     """
     world_size = torch.distributed.get_world_size(group=group)
-    tp_group = get_tensor_model_parallel_group()
+    tp_group = get_etp_group().device_group
     input_ = input_.reshape(-1, input_.shape[-1])
     split_tensors = torch.split(input_,
                                 split_size_or_sections=input_.shape[-1] //

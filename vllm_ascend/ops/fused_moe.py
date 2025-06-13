@@ -431,7 +431,7 @@ def fused_experts_with_all2all_buffer(
         active_num=num_tokens)
 
     max_row_per_ep_rank = (-(-global_batch_size // ep_group.world_size) *
-                           max_model_len // ep_group.world_size +
+                           max_model_len * get_dp_group().world_size // ep_group.world_size +
                            1) * top_k * 2
     expert_idx_buffer_scatter, unpad_indices = process_topk_ids(
         expanded_expert_idx, global_num_experts, ep_group.world_size,
@@ -951,7 +951,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                                  topk_ids=topk_ids,
                                  top_k=top_k,
                                  expert_map=expert_map)
-        elif MOE_ALL2ALL_BUFFER:
+        elif VLLM_ASCEND_MOE_ALL2ALL_BUFFER:
             return fused_experts_with_all2all_buffer(
                 hidden_states=x,
                 w1=layer.w13_weight,
