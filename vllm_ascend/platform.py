@@ -164,6 +164,14 @@ class NPUPlatform(Platform):
         else:
             enforce_eager = getattr(model_config, "enforce_eager", False)
 
+        if ascend_config.torchair_graph_config.enabled and envs.VLLM_MLA_DISABLE:
+            # torchair_graph is not supported for V1 without mla currently.
+            logger.warning(
+                "Torchair graph mode is still experimental and not supported for V1 without mla currently, "
+                "Fallback to eager mode.")
+            ascend_config.torchair_graph_config.enabled = False
+            enforce_eager = True
+
         check_ascend_config(vllm_config, enforce_eager)
 
         if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:

@@ -24,6 +24,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, List, Tuple
 
 import torch
+import torch_npu  # noqa: F401
 import torchair  # type: ignore[import]  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
