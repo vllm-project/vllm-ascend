@@ -173,7 +173,7 @@ def vanilla_chunked_prefill_mla(
         latent_kv_dim = kv_cache.size(3) - rope_dim
         # select kv_c out as [batch_size, max_context_len, 1, latent_kv + rope_dim]
         cache_kv_c_pe = kv_cache[block_tables].view(
-            batch_size, max_num_blocks_per_seq * block_size,
+            batch_size, max_num_blocks_per_seq * block_size, 1,
             latent_kv_dim + rope_dim)[:, :max_context_len, :, :]
         # get kv_c and k_pe
         # cached_kv_c: [batch_size, max_context_len, 1, latent_kv]
