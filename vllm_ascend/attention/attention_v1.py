@@ -111,8 +111,8 @@ class AscendMetadata:
     block_tables: torch.Tensor
     # (batch_size,). The sequence length per sequence. Sequence length means
     # the computed tokens + new tokens None if it is a decoding.
-    query_start_loc: torch.Tensor
     query_lens: torch.Tensor
+    query_start_loc: torch.Tensor
     seq_lens: torch.Tensor
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int] = None
