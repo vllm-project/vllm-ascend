@@ -200,7 +200,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.use_eagle = False
         self.drafter = None
         if self.speculative_config:
-            self.use_spec_decode = True
             self.spec_attn_mask = torch.triu(torch.ones(2048,
                                                         2048,
                                                         dtype=torch.bool),
@@ -880,7 +879,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 mm_embeds.append(mm_embeds_item)
         return mm_embeds
 
-    def _process_reqs(
+    def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
