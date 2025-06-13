@@ -195,7 +195,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # Set up speculative decoding.
         self.use_aux_hidden_state_outputs = False
-        self.use_spec_decode = False
         self.spec_attn_mask = None
         self.use_eagle = False
         self.drafter = None
@@ -1016,9 +1015,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         seq_lens = self.seq_lens[:num_reqs]
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start_loc, seq_lens=seq_lens)
-        with_prefill = attn_state not in [
-            AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
-        ]
+        with_prefill = attn_state != AscendAttentionState.DecodeOnly
 
         if self.dp_size > 1:
             max_num_tokens, with_prefill = self._get_forward_metadata_across_dp(
@@ -1326,7 +1323,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         attn_metadata: SpecDecodeMetadata,
         aux_hidden_states: torch.Tensor = None,
     ) -> Optional[list[list[int]]]:
-        if not self.use_spec_decode:
+        if not self.speculative_config:
             # Speculative decoding is not enabled.
             spec_token_ids = None
         elif self.speculative_config.method == "ngram":
