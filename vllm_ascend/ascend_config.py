@@ -173,5 +173,4 @@ def check_ascend_config(vllm_config: "VllmConfig", enforce_eager):
             ascend_config.expert_tensor_parallel_size > 1:
             raise RuntimeError(
                 "Cannot set `--enable-expert-parallel` and "
-                "`expert_tensor_parallel_size` > 1 at the same time."
-            )
+                "`expert_tensor_parallel_size` > 1 at the same time.")
