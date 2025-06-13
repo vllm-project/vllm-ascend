@@ -203,7 +203,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
 
         # Set up speculative decoding.
-        self.use_spec_decode = False
         self.spec_attn_mask = None
         if self.speculative_config:
             self.spec_attn_mask = torch.triu(torch.ones(2048,
@@ -857,9 +856,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
             attn_state = AscendAttentionState.DecodeOnly
-        # Speculative decoding.
-        elif np.all(num_valid_tokens == 1):
-            attn_state = AscendAttentionState.SpecDecoding
         # splitfuse
         elif not ascend_config.ascend_scheduler_config.enabled or self.chunked_prefill_enabled:
             attn_state = AscendAttentionState.ChunkedPrefill
@@ -890,9 +886,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         seq_lens = self.seq_lens[:num_reqs]
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start_loc, seq_lens=seq_lens)
-        with_prefill = attn_state not in [
-            AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
-        ]
+        with_prefill = attn_state != AscendAttentionState.DecodeOnly
 
         if self.dp_size > 1:
             max_num_tokens, with_prefill = self._get_forward_metadata_across_dp(
@@ -1180,7 +1174,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         hidden_states: torch.Tensor,
         attn_metadata: SpecDecodeMetadata,
     ) -> Optional[list[list[int]]]:
-        if not self.use_spec_decode:
+        if not self.speculative_config:
             # Speculative decoding is not enabled.
             spec_token_ids = None
         elif self.speculative_config.method == "ngram":
