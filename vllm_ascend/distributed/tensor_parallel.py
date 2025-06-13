@@ -14,6 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 import torch
+
 from vllm_ascend.distributed.parallel_state import get_etp_group
 
 
