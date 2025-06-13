@@ -105,13 +105,16 @@ def test_get_rank_placement_map(mock_expert_load_balancer):
     rank_local_expert_num, rank_expert_map = mock_expert_load_balancer.get_rank_placement_map(
         layer_id, rank_id)
     assert rank_local_expert_num == 5
-    assert rank_expert_map.equal(
-        torch.tensor([2, -1, 1, 3, -1, 4, -1, 0], dtype=torch.int32))
+    expected_tensor = torch.tensor([2, -1, 1, 3, -1, 4, -1, 0], dtype=torch.int32).to(
+        rank_expert_map.device)
+    assert rank_expert_map.equal(expected_tensor)
+
     rank_id = 1
     rank_local_expert_num, rank_expert_map = mock_expert_load_balancer.get_rank_placement_map(
         layer_id, rank_id)
-    assert rank_expert_map.equal(
-        torch.tensor([-1, 1, 4, -1, 2, -1, 0, 3], dtype=torch.int32))
+    expected_tensor = torch.tensor([-1, 1, 4, -1, 2, -1, 0, 3], dtype=torch.int32).to(
+        rank_expert_map.device)
+    assert rank_expert_map.equal(expected_tensor)
 
 
 def test_get_rank_log2phy_map(mock_expert_load_balancer):
@@ -119,13 +122,16 @@ def test_get_rank_log2phy_map(mock_expert_load_balancer):
     rank_id = 0
     log2phy_map = mock_expert_load_balancer.get_rank_log2phy_map(
         layer_id, rank_id)
-    assert log2phy_map.equal(
-        torch.tensor([2, 6, 1, 3, 7, 4, 5, 0], dtype=torch.int32))
+    expected_tensor = torch.tensor([2, 6, 1, 3, 7, 4, 5, 0], dtype=torch.int32).to(
+        log2phy_map.device)
+    assert log2phy_map.equal(expected_tensor)
+
     rank_id = 1
     log2phy_map = mock_expert_load_balancer.get_rank_log2phy_map(
         layer_id, rank_id)
-    assert log2phy_map.equal(
-        torch.tensor([2, 6, 9, 3, 7, 4, 5, 8], dtype=torch.int32))
+    expected_tensor = torch.tensor([2, 6, 9, 3, 7, 4, 5, 8], dtype=torch.int32).to(
+        log2phy_map.device)
+    assert log2phy_map.equal(expected_tensor)
 
 
 def test_get_global_redundant_expert_num(mock_expert_load_balancer):
