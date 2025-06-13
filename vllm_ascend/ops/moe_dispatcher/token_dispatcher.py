@@ -33,7 +33,6 @@ from vllm_ascend.ops.comm_utils import async_all_to_all
 from vllm_ascend.ops.moe_dispatcher.moe_utils import (
     get_capacity, permute, sort_chunks_by_idxs, topk_softmax_with_capacity,
     unpermute)
-
 """ We use the following notation throughout this file:
      H: hidden size
      B: micro batch size
@@ -239,7 +238,8 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         if self.drop_and_pad:
             # Drop and pad the input to capacity.
             if self.config.moe_expert_capacity_factor is None:
-                raise ValueError("Capacity must be set before processing tokens")
+                raise ValueError(
+                    "Capacity must be set before processing tokens")
             num_tokens = routing_map.size(0) * self.config.moe_router_topk
             self.capacity = get_capacity(
                 num_tokens=num_tokens,
@@ -488,7 +488,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
             if hidden_states.shape[0] > 0 and self.num_local_experts > 1:
                 if self.num_global_tokens_per_local_expert_cpu is None:
                     raise ValueError("num_global_tokens_per_local_expert_cpu "
-                "should be set before used.")
+                                     "should be set before used.")
                 hidden_states = sort_chunks_by_idxs(
                     hidden_states,
                     self.num_global_tokens_per_local_expert_cpu.T.ravel(),

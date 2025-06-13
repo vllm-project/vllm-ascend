@@ -114,7 +114,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE", '0'))
                  ),
-    # MOE_ALL2ALL_BUFFER:
+    # VLLM_ASCEND_MOE_ALL2ALL_BUFFER:
     #   0: default, normal init.
     #   1: enable moe_all2all_buffer.
     "VLLM_ASCEND_MOE_ALL2ALL_BUFFER":
@@ -133,7 +133,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value to False to disable the optimized model.
     "USE_OPTIMIZED_MODEL":
     lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
-
+    # VLLM_ASCEND_ENABLE_MOE_ALL2ALLV:
+    #   0: default, normal init.
+    #   1: enable moe all2allv.
     "VLLM_ASCEND_ENABLE_MOE_ALL2ALLV":
     lambda: bool(int(os.getenv('VLLM_ASCEND_ENABLE_MOE_ALL2ALLV', '0'))),
 }

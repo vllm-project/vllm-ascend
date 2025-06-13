@@ -431,9 +431,9 @@ def fused_experts_with_all2all_buffer(
         expert_idx=topk_ids,
         active_num=num_tokens)
 
-    max_row_per_ep_rank = (-(-global_batch_size // ep_group.world_size) *
-                           max_model_len * get_dp_group().world_size // ep_group.world_size +
-                           1) * top_k * 2
+    max_row_per_ep_rank = (
+        -(-global_batch_size // ep_group.world_size) * max_model_len *
+        get_dp_group().world_size // ep_group.world_size + 1) * top_k * 2
     expert_idx_buffer_scatter, unpad_indices = process_topk_ids(
         expanded_expert_idx, global_num_experts, ep_group.world_size,
         max_row_per_ep_rank, num_tokens, top_k)
@@ -532,7 +532,7 @@ def fused_experts_with_all2allv(token_dispatcher, logits,
     probs, routing_map = token_dispatcher.routing(logits)
     (share_experts_output, dispatched_input,
      tokens_per_expert) = token_dispatcher.token_permutation(
-        hidden_states, probs, routing_map)
+         hidden_states, probs, routing_map)
     expert_output = apply_mlp(dispatched_input, w1, w2, tokens_per_expert)
     output, mlp_bias = token_dispatcher.token_unpermutation(expert_output)
     return output
@@ -1118,8 +1118,8 @@ class AscendFusedMoE(FusedMoE):
             moe_dispatcher_config = (
                 MoeDispatcherConfig().set_num_moe_experts(
                     self.global_num_experts).set_num_local_experts(
-                    self.local_num_experts).set_moe_router_topk(
-                    top_k).set_group_topk(topk_group).
+                        self.local_num_experts).set_moe_router_topk(
+                            top_k).set_group_topk(topk_group).
                 set_num_groups(num_expert_group).set_expert_bias(
                     e_score_correction_bias).set_scaling_factor(1.0).build())
             self.token_dispatcher = MoEAlltoAllSeqOverLapDispatcher(
