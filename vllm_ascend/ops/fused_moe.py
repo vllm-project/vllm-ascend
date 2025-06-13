@@ -15,7 +15,8 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/kernels/test_moe.py
 
-from typing import Callable, List, Optional
+import os
+from typing import Any, Callable, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
