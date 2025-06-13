@@ -345,15 +345,16 @@ def fused_experts_with_all2all(
         final_hidden_states = final_hidden_states.view(original_shape)
     return final_hidden_states
 
+
 def fused_experts_with_allgather(hidden_states: torch.Tensor,
-                  w1: torch.Tensor,
-                  w1_scale: torch.Tensor,
-                  w2: torch.Tensor,
-                  w2_scale: torch.Tensor,
-                  topk_weights: torch.Tensor,
-                  topk_ids: torch.Tensor,
-                  top_k: int, 
-                  expert_map: torch.Tensor = None):
+                                 w1: torch.Tensor,
+                                 w1_scale: torch.Tensor,
+                                 w2: torch.Tensor,
+                                 w2_scale: torch.Tensor,
+                                 topk_weights: torch.Tensor,
+                                 topk_ids: torch.Tensor,
+                                 top_k: int,
+                                 expert_map: torch.Tensor = None):
     original_shape = hidden_states.shape
     if len(original_shape) == 3:
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
@@ -368,22 +369,32 @@ def fused_experts_with_allgather(hidden_states: torch.Tensor,
     global_num_experts = len(expert_map)
     local_num_experts = global_num_experts // ep_size
 
-    hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
-        hidden_states)
+    hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
 
     hidden_states, expanded_x_idx, expert_tokens, pertoken_scale = torch_npu.npu_moe_init_routing_v2(
-            hidden_states, topk_ids, scale=pertoken_scale, offset=None,
-            active_num=num_tokens*top_k, expert_num=global_num_experts,
-            expert_tokens_num_type=1, expert_tokens_num_flag=True,
-            active_expert_range=[ep_rank * local_num_experts, (ep_rank+1) * local_num_experts],
-            quant_mode=-1, row_idx_type=1)
+        hidden_states,
+        topk_ids,
+        scale=pertoken_scale,
+        offset=None,
+        active_num=num_tokens * top_k,
+        expert_num=global_num_experts,
+        expert_tokens_num_type=1,
+        expert_tokens_num_flag=True,
+        active_expert_range=[
+            ep_rank * local_num_experts, (ep_rank + 1) * local_num_experts
+        ],
+        quant_mode=-1,
+        row_idx_type=1)
     group_list_type = 1
 
-    sorted_topk_weight = torch.index_select(topk_weights.view(-1), 0, expanded_x_idx)
+    sorted_topk_weight = torch.index_select(topk_weights.view(-1), 0,
+                                            expanded_x_idx)
     row_index = expanded_x_idx // topk_ids.shape[-1]
     row_index = row_index.to(torch.int64)
     # TODO pass share_input from outside
-    share_input = torch.zeros((batch_size, hidden_size), dtype=torch.bfloat16, device="npu")
+    share_input = torch.zeros((batch_size, hidden_size),
+                              dtype=torch.bfloat16,
+                              device="npu")
 
     hidden_states = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
@@ -407,18 +418,23 @@ def fused_experts_with_allgather(hidden_states: torch.Tensor,
         quant_mode=1,
     )
 
-    final_hidden_states = torch_npu.npu_grouped_matmul_finalize_routing(hidden_states, w2, 
-                                                            scale=w2_scale.to(torch.float32), bias=None,
-                                                            pertoken_scale=pertoken_scale.view(-1),
-                                                            group_list=expert_tokens, shared_input=share_input,
-                                                            logit=sorted_topk_weight.to(torch.float32),
-                                                            row_index=row_index,
-                                                            output_bs=batch_size).to(torch.bfloat16)
+    final_hidden_states = torch_npu.npu_grouped_matmul_finalize_routing(
+        hidden_states,
+        w2,
+        scale=w2_scale.to(torch.float32),
+        bias=None,
+        pertoken_scale=pertoken_scale.view(-1),
+        group_list=expert_tokens,
+        shared_input=share_input,
+        logit=sorted_topk_weight.to(torch.float32),
+        row_index=row_index,
+        output_bs=batch_size).to(torch.bfloat16)
 
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
 
     return final_hidden_states
+
 
 def fused_experts(hidden_states: torch.Tensor,
                   w1: torch.Tensor,
@@ -617,7 +633,7 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         self.ep_group = get_ep_group()
         self.etp_group = get_etp_group()
-        
+
         self.fused_experts_allgather_ep_enabled = envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and \
             self.ep_group.world_size > 1 and \
             self.etp_group.world_size == 1
@@ -767,15 +783,16 @@ class AscendW8A8DynamicFusedMoEMethod:
                                  top_k=top_k,
                                  expert_map=expert_map)
         elif self.fused_experts_allgather_ep_enabled and is_deepseek_v3_r1:
-            return fused_experts_with_allgather(hidden_states=x,
-                                              w1=layer.w13_weight,
-                                              w1_scale=layer.w13_weight_scale,
-                                              w2=layer.w2_weight,
-                                              w2_scale=layer.w2_weight_scale,
-                                              topk_weights=topk_weights,
-                                              topk_ids=topk_ids,
-                                              top_k=top_k,
-                                              expert_map=expert_map)
+            return fused_experts_with_allgather(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w1_scale=layer.w13_weight_scale,
+                w2=layer.w2_weight,
+                w2_scale=layer.w2_weight_scale,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                top_k=top_k,
+                expert_map=expert_map)
         else:
             # The current implementation of deepseek moe splits hidden_states
             # according to tp_size before they are feed into fused_moe module.
