@@ -43,6 +43,7 @@ def forward_oot(
     activation: str = "silu",
 ) -> torch.Tensor:
     topk_weights, topk_ids = select_experts(
+        global_num_experts=global_num_experts,
         hidden_states=x,
         router_logits=router_logits,
         top_k=top_k,
