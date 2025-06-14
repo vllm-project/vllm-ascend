@@ -50,18 +50,10 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value is None, which means the system default C compiler will be used.
     "C_COMPILER":
     lambda: os.getenv("C_COMPILER", None),
-    # Whether to enable MC2 for DeepSeek. If not set, the default value is False.
-    # MC2 is a fusion operator provided by Ascend to speed up computing and communication.
-    # Find more detail here: https://www.hiascend.com/document/detail/zh/canncommercial/81RC1/developmentguide/opdevg/ascendcbestP/atlas_ascendc_best_practices_10_0043.html
-    "VLLM_ENABLE_MC2":
-    lambda: bool(int(os.getenv("VLLM_ENABLE_MC2", '0'))),
     # Whether to enable the topk optimization. It's disabled by default for experimental support
     # We'll make it enabled by default in the future.
     "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE", '0'))),
-    # Whether to use LCCL communication. If not set, the default value is False.
-    "USING_LCCL_COM":
-    lambda: bool(int(os.getenv("USING_LCCL_COM", '0'))),
     # The version of the Ascend chip. If not set, the default value is
     # ASCEND910B1. It's used for package building. Please make sure that the
     # version is correct.
