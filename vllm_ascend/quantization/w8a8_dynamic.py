@@ -757,7 +757,18 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         topk_weights = topk_weights.to(x.dtype)
 
-        if VLLM_ENABLE_MC2 and not is_prefill:
+        if self.fused_experts_allgather_ep_enabled and is_deepseek_v3_r1:
+            return fused_experts_with_allgather(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w1_scale=layer.w13_weight_scale,
+                w2=layer.w2_weight,
+                w2_scale=layer.w2_weight_scale,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                top_k=top_k,
+                expert_map=expert_map)
+        elif VLLM_ENABLE_MC2 and not is_prefill:
             return fused_experts_with_mc2(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -782,17 +793,6 @@ class AscendW8A8DynamicFusedMoEMethod:
                                  topk_ids=topk_ids,
                                  top_k=top_k,
                                  expert_map=expert_map)
-        elif self.fused_experts_allgather_ep_enabled and is_deepseek_v3_r1:
-            return fused_experts_with_allgather(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w1_scale=layer.w13_weight_scale,
-                w2=layer.w2_weight,
-                w2_scale=layer.w2_weight_scale,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                top_k=top_k,
-                expert_map=expert_map)
         else:
             # The current implementation of deepseek moe splits hidden_states
             # according to tp_size before they are feed into fused_moe module.
