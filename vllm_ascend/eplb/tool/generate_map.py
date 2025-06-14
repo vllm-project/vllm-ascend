@@ -18,30 +18,26 @@ def split_and_insert(n, k, m):
 
     for j in range(m // k):
         for i in range(k):
-            groups[i] = np.append(groups[i], B[i + j * k])
+            redundant_expert = groups[i][-1] + 1
+            if redundant_expert > 255:
+                redundant_expert = 0
+            groups[i] = np.append(groups[i], redundant_expert)
     return np.concatenate(groups)
 
-def random_generation(n_layer=58, n_expert=256, start_layer_idx=0, device_count=320, n_redundant=32, output_name=""):
+
+def random_generation(n_layer=58, n_expert=256, start_layer_idx=0, device_count=128, n_redundant=128, output_name=""):
     expert_data = {}
     expert_data["moe_layer_count"] = n_layer
     layer_list = []
     for i in range(n_layer):
         layer = {"layer_id": start_layer_idx + i, "device_count": device_count}
         random_placement = split_and_insert(n_expert, device_count, n_redundant)
-        print(f"random_placement={random_placement}")
         device_list = []
-        step = (n_expert + n_redundant) // device_count
-        print(f"step={step}")
+        step = random_placement.shape[0] // device_count
         for j in range(device_count):
             device = {}
             device["device_id"] = j
-            routed_expert = random_placement[j].tolist()
-            while True:
-                redundant_expert = np.random.choice(n_expert, size=1, replace=False)
-                if redundant_expert[0].item() in routed_expert:
-                    continue
-                break
-            device["device_expert"] = random_placement[j].tolist() + [redundant_expert[0].item()]
+            device["device_expert"] = random_placement[j * step: (j + 1) * step].tolist()
             device_list.append(device)
         layer["device_list"] = device_list
         layer_list.append(layer)
