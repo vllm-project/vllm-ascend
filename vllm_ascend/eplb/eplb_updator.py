@@ -86,6 +86,8 @@ class EplbUpdator:
         self.planner_block_queue.put(1)
 
     def forward_before(self):
+        self.get_init_expert_map()
+
         if self.update_in_flight and self.weight_update_counter < self.num_moe_layers:
             (expert_send_info, expert_recv_info, updated_expert_map, layer_id) = self.block_update_queue.get()
             rank_id = torch.distributed.get_rank()
@@ -105,9 +107,6 @@ class EplbUpdator:
         self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
     def forward_end(self):
-
-        self.get_init_expert_map()
-
         if not self.update_in_flight and self.get_update_iteration():
             moe_load = self.compute_and_set_moe_load()
             self.wakeup_eplb_worker()
