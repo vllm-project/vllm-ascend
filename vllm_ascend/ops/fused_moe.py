@@ -1180,8 +1180,7 @@ class AscendFusedMoE(FusedMoE):
                 return e_hidden_states, shared_experts(hidden_states)
             else:
                 return e_hidden_states
-        print("log2phy:", self.log2phy)
-        # print("expert_map:", self.expert_map)
+
         self.calculate_moe_load()
 
         # if self.enable_multistream_shared_expert and not is_prefill:
