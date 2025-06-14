@@ -1212,8 +1212,11 @@ class AscendFusedMoE(FusedMoE):
 
         assert self.quant_method is not None
 
-        local_num_experts = torch.sum(self.expert_map != -1) \
-            if self.expert_map is not None else num_experts
+        if self.log2phy is not None:
+            local_num_experts = self.local_num_experts
+        else:
+            local_num_experts = torch.sum(self.expert_map != -1) \
+                if self.expert_map is not None else num_experts
 
         moe_quant_params = {
             "num_experts": local_num_experts,

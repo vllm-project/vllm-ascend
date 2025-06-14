@@ -85,7 +85,10 @@ class ExpertLoadBalancer(object):
         layer_expert_map = expert_placement_map[layer_id]
         rank_expert_map = layer_expert_map[rank_id].to(
             torch.npu.current_device())
-        rank_local_expert_num = torch.sum(torch.ne(rank_expert_map, -1)).item()
+
+        # valid num in expert_map may not equal to
+        # rank_local_expert_num when num_redundant_experts > 0
+        rank_local_expert_num = len(self.expert_map_tensor[layer_id, rank_id])
         return rank_local_expert_num, rank_expert_map
 
     def get_rank_log2phy_map(self, layer_id, rank_id):
