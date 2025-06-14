@@ -1030,11 +1030,11 @@ class AscendFusedMoE(FusedMoE):
         self.log2phy = None
         self.global_redundant_expert_num = 0
 
-        # test log2phy
-        self.log2phy = torch.full((self.ep_size, self.global_num_experts),
-                                    -1,
-                                    dtype=torch.int32) 
-                                    
+        # TODO: if this is not need for dynamic eplb with redundant expert, remove this
+        # self.log2phy = torch.full((self.ep_size, self.global_num_experts),
+        #                             -1,
+        #                             dtype=torch.int32)
+
         ascend_config = get_ascend_config()
         expert_map_path = ascend_config.expert_map_path
         if expert_map_path and os.path.exists(expert_map_path):
@@ -1218,7 +1218,7 @@ class AscendFusedMoE(FusedMoE):
             enable_force_load_balance=enable_force_load_balance)
 
         return hidden_states
-        
+
     def update_map(self,new_expert_map):
         self.expert_map = new_expert_map
 
