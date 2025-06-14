@@ -118,8 +118,7 @@ jobs:
     needs: [lint]
     if: ${{ needs.lint.result == 'success' }}
     strategy:
-      # TODO(yikun): 1 ---> 2
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         os: [linux-arm64-npu-1]
         vllm_version: [main, v0.9.1]
@@ -176,6 +175,9 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         run: |
           pytest -sv tests/singlecard/test_offline_inference.py
+          # TODO: switch hf to modelscope
+          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
+            pytest -sv tests/singlecard/test_ilama_lora.py
           # TODO(sss): guided decoding doesn't work, fix it later
           # pytest -sv tests/singlecard/test_guided_decoding.py
           # test_ascend_config.py should be ran separately because it will regenerate the global config many times.
@@ -183,6 +185,7 @@ jobs:
           pytest -sv tests/singlecard/test_camem.py
           pytest -sv tests/singlecard/ \
           --ignore=tests/singlecard/test_offline_inference.py \
+          --ignore=tests/singlecard/test_ilama_lora.py \
           --ignore=tests/singlecard/test_guided_decoding.py \
           --ignore=tests/singlecard/test_ascend_config.py \
           --ignore=tests/singlecard/test_camem.py
@@ -193,8 +196,10 @@ jobs:
           VLLM_USE_V1: 0
           VLLM_USE_MODELSCOPE: True
         run: |
-          pytest -sv tests/singlecard/test_ilama_lora.py
           pytest -sv tests/singlecard/test_offline_inference.py
+          # TODO: switch hf to modelscope
+          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
+            pytest -sv tests/singlecard/test_ilama_lora.py
           # guided decoding doesn't work, fix it later
           # pytest -sv tests/singlecard/test_guided_decoding.py
           pytest -sv tests/singlecard/test_camem.py
@@ -203,6 +208,7 @@ jobs:
           pytest -sv tests/singlecard/test_prompt_embedding.py
           pytest -sv tests/singlecard/ \
             --ignore=tests/singlecard/test_offline_inference.py \
+            --ignore=tests/singlecard/test_ilama_lora.py \
             --ignore=tests/singlecard/test_guided_decoding.py \
             --ignore=tests/singlecard/test_camem.py \
             --ignore=tests/singlecard/test_ascend_config.py \
@@ -271,7 +277,9 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
         run: |
-          pytest -sv tests/multicard/test_ilama_lora_tp2.py
+          # TODO: switch hf to modelscope
+          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
+            pytest -sv tests/multicard/test_ilama_lora_tp2.py
           # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py will raise error.
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
@@ -286,7 +294,9 @@ jobs:
           VLLM_USE_V1: 0
           VLLM_USE_MODELSCOPE: True
         run: |
-          pytest -sv tests/multicard/test_ilama_lora_tp2.py
+          # TODO: switch hf to modelscope
+          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
+            pytest -sv tests/multicard/test_ilama_lora_tp2.py
           # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py will raise error.
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
