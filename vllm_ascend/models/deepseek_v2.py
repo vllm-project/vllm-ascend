@@ -67,6 +67,7 @@ from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
@@ -500,12 +501,13 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         self.enable_multistream_mla = \
             ascend_config.torchair_graph_config.enable_multistream_mla
 
-    def forward(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor,
-            kv_cache: Optional[torch.Tensor] = None,
-            attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
+    def forward(self,
+                positions: torch.Tensor,
+                hidden_states: torch.Tensor,
+                kv_cache: Optional[torch.Tensor] = None,
+                attn_metadata: Optional[AttentionMetadata] = None,
+                rotary_cos: Optional[torch.Tensor] = None,
+                rotary_sin: Optional[torch.Tensor] = None) -> torch.Tensor:
         if self.q_lora_rank is not None:
             ckq = self.q_a_proj(hidden_states)[0]
             use_multistream_mla = (self.enable_multistream_mla
@@ -526,6 +528,8 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                                      dtype=hidden_states_or_q_c.dtype,
                                      device=hidden_states_or_q_c.device)
                 forward_kwargs['output'] = output
+                forward_kwargs['rotary_cos'] = rotary_cos
+                forward_kwargs['rotary_sin'] = rotary_sin
 
             output = self.mla_attn.impl.forward(self.mla_attn,
                                                 hidden_states_or_q_c,
@@ -617,6 +621,8 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         residual: Optional[torch.Tensor],
         kv_cache: Optional[torch.Tensor] = None,
         attn_metadata: Optional[AttentionMetadata] = None,
+        rotary_cos: Optional[torch.Tensor] = None,
+        rotary_sin: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
@@ -636,6 +642,8 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
+            rotary_cos=rotary_cos,
+            rotary_sin=rotary_sin,
         )
 
         if hidden_states.dtype == torch.float16:
@@ -713,8 +721,46 @@ class CustomDeepseekV2Model(nn.Module):
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
 
+        ascend_config = get_ascend_config()
+        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+
+        rope_theta = getattr(config, "rope_theta", 10000)
+        rope_scaling = getattr(config, "rope_scaling", None)
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
+        if rope_scaling:
+            rope_scaling["rope_type"] = 'deepseek_yarn'
+        self.rotary_emb = get_rope(config.qk_rope_head_dim,
+                                   rotary_dim=config.qk_rope_head_dim,
+                                   max_position=max_position_embeddings,
+                                   base=rope_theta,
+                                   rope_scaling=rope_scaling,
+                                   is_neox_style=False)
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
+
+    def prepare_decoder_rotary_cos_sin(
+        self,
+        attn_metadata: Optional[AttentionMetadata] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if (envs.VLLM_USE_V1 and attn_metadata is not None
+                and attn_metadata.num_decodes is not None
+                and attn_metadata.atten_state is not None):
+            has_decode = attn_metadata.num_decodes > 0
+            running_in_graph = self.torchair_graph_enabled and attn_metadata.attn_state in [
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding
+            ]
+            if has_decode and running_in_graph:
+                cos = self.rotary_emb.cos_cached
+                sin = self.rotary_emb.sin_cached
+                cos = cos[attn_metadata.decode.input_positions]
+                sin = sin[attn_metadata.decode.input_positions]
+                cos = cos[:, None, None, :]
+                sin = sin[:, None, None, :]
+                return cos, sin
+        return None, None
 
     def forward(
         self,
@@ -736,13 +782,18 @@ class CustomDeepseekV2Model(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        # In graph mode and v1 engine,
+        # precomputing cos and sin can eliminate repeated calculations in each decode layer.
+        rotary_cos, rotary_sin = self.prepare_decoder_rotary_cos_sin(
+            attn_metadata)
+
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions, hidden_states, residual,
                 kv_caches[i -
                           self.start_layer] if kv_caches is not None else None,
-                attn_metadata)
+                attn_metadata, rotary_cos, rotary_sin)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({

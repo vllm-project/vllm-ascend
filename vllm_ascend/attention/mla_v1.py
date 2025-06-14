@@ -829,6 +829,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         k_pe: torch.Tensor,  # value in unified attn
         kv_cache: torch.Tensor,
         attn_metadata: M,
+        rotary_cos: Optional[torch.Tensor] = None,
+        rotary_sin: Optional[torch.Tensor] = None,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
@@ -875,24 +877,28 @@ class AscendMLAImpl(MLAAttentionImpl):
             decode_k_nope = None
             assert attn_metadata.decode is not None
             if self.running_in_graph:
-                seq_len = self.rotary_emb.max_position_embeddings
-                cos = self.rotary_emb.cos_cached[:seq_len].to(
-                    dtype=decode_hs_or_q_c.dtype)
-                sin = self.rotary_emb.sin_cached[:seq_len].to(
-                    dtype=decode_hs_or_q_c.dtype)
-                cos = cos[attn_metadata.decode.input_positions]
-                sin = sin[attn_metadata.decode.input_positions]
-                cos = cos[:, None, None, :]
-                sin = sin[:, None, None, :]
-                # Without explicitly controlling the order, IndexByTensor operations
-                # would be placed after `matmul W_KV_T` hindering the overlapping of
-                # KvRmsNormRopeCache and SingleRope.
-                npu_wait_tensor(decode_hs_or_q_c,
-                                cos,
-                                enabled=self.enable_multistream_mla)
-                npu_wait_tensor(decode_hs_or_q_c,
-                                sin,
-                                enabled=self.enable_multistream_mla)
+                if rotary_cos is not None and rotary_sin is not None:
+                    cos = rotary_cos.to(dtype=decode_hs_or_q_c.dtype)
+                    sin = rotary_sin.to(dtype=decode_hs_or_q_c.dtype)
+                else:
+                    seq_len = self.rotary_emb.max_position_embeddings
+                    cos = self.rotary_emb.cos_cached[:seq_len].to(
+                        dtype=decode_hs_or_q_c.dtype)
+                    sin = self.rotary_emb.sin_cached[:seq_len].to(
+                        dtype=decode_hs_or_q_c.dtype)
+                    cos = cos[attn_metadata.decode.input_positions]
+                    sin = sin[attn_metadata.decode.input_positions]
+                    cos = cos[:, None, None, :]
+                    sin = sin[:, None, None, :]
+                    # Without explicitly controlling the order, IndexByTensor operations
+                    # would be placed after `matmul W_KV_T` hindering the overlapping of
+                    # KvRmsNormRopeCache and SingleRope.
+                    npu_wait_tensor(decode_hs_or_q_c,
+                                    cos,
+                                    enabled=self.enable_multistream_mla)
+                    npu_wait_tensor(decode_hs_or_q_c,
+                                    sin,
+                                    enabled=self.enable_multistream_mla)
             decode_ql_nope, decode_q_pe = \
                 self._q_proj_and_k_up_proj(decode_hs_or_q_c)
             if self.running_in_graph:
