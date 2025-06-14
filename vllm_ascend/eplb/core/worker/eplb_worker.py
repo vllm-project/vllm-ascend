@@ -90,7 +90,7 @@ class EplbWorker:
 
                 # check if there is any experts movement inside one NPU
                 expert_not_move = torch.isin(new_placement_check, old_placement_check)
-                if not torch.equal(new_placement[expert_not_move], old_placement[expert_not_move]):
+                if not torch.equal(new_placement_check[expert_not_move], old_placement_check[expert_not_move]):
                     logger.error(f"There exists expert movement inside NPU, expert placement on layer {layer_id}, rank {rank_id} is invalid")
                     new_placement[layer_id] = old_placement[layer_id]
                     break
