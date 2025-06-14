@@ -67,7 +67,7 @@ from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_ep_group
+from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
@@ -291,8 +291,16 @@ class CustomDeepseekV2MoE(nn.Module):
         self.tp_group = get_tp_group().device_group
         self.tp_rank = get_tp_group().rank_in_group
         self.ep_group = get_ep_group()
+        self.etp_group = get_etp_group()
 
         self.params_dtype = torch.get_default_dtype()
+
+        # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
+        # only supports deepseek v3/r1
+        self.fused_experts_allgather_ep_enabled = envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and \
+            config.n_routed_experts == 256 and \
+            self.ep_group.world_size > 1 and \
+            self.etp_group.world_size == 1
 
     def forward(
             self,
@@ -317,10 +325,13 @@ class CustomDeepseekV2MoE(nn.Module):
         use_separated_shared_experts = (self.shared_experts is not None
                                         and not self.enable_multistream_moe)
 
+        enable_alltoall_ep = self.ep_group.world_size > 1 and not self.fused_experts_allgather_ep_enabled
+        if not is_prefill:
+            enable_alltoall_ep = enable_alltoall_ep and (
+                VLLM_ENABLE_MC2 or not self.torchair_graph_enabled)
+
         if self.tp_size > 1:
-            if (VLLM_ENABLE_MC2
-                    and not is_prefill) or not (self.torchair_graph_enabled or
-                                                self.ep_group.world_size == 1):
+            if enable_alltoall_ep:
                 if num_tokens < self.tp_size:
                     hidden_states = nn.functional.pad(
                         hidden_states, (0, 0, 0, self.tp_size - num_tokens))
@@ -350,9 +361,7 @@ class CustomDeepseekV2MoE(nn.Module):
                 experts_hidden_states[1])
 
         if self.tp_size > 1:
-            if (VLLM_ENABLE_MC2
-                    and not is_prefill) or not (self.torchair_graph_enabled or
-                                                self.ep_group.world_size == 1):
+            if enable_alltoall_ep:
                 dist.all_gather(list(chunk_hidden_states), hidden_states,
                                 self.tp_group)
                 hidden_states = torch.cat(chunk_hidden_states, dim=0)
