@@ -1047,10 +1047,10 @@ class AscendFusedMoE(FusedMoE):
         self.log2phy = None
         self.global_redundant_expert_num = 0
 
-        # test log2phy
-        self.log2phy = torch.full((self.ep_size, self.global_num_experts),
-                                    -1,
-                                    dtype=torch.int32)
+        # TODO: if this is not need for dynamic eplb with redundant expert, remove this
+        # self.log2phy = torch.full((self.ep_size, self.global_num_experts),
+        #                             -1,
+        #                             dtype=torch.int32)
 
         ascend_config = get_ascend_config()
         expert_map_path = ascend_config.expert_map_path

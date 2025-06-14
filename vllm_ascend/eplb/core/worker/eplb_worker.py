@@ -60,6 +60,9 @@ class EplbWorker:
         load_info, old_placemet = self.global2local(load_info, self.old_expert_maps, self.num_local_experts)
         changed, priority, new_placement = self.calculate_rebalance_experts(load_info, old_placemet)
 
+        if not torch.is_tensor(new_placement):
+            new_placement = torch.tensor(new_placement)
+        self.check_expert_placement(old_placemet, new_placement)
         new_expert_maps = self.local2global(new_placement)
 
         logger.debug(f"[EPLB Process  new_map differs, performing D2D")
@@ -69,6 +72,28 @@ class EplbWorker:
         logger.info("EPLB Process complete")
 
         return update_info
+
+    def check_expert_placement(self, old_placemet, new_placement):
+        num_layers = old_placemet.shape[0]
+        num_ranks = old_placemet.shape[1]
+
+        for layer_id in range(num_layers):
+            for rank_id in range(num_ranks):
+                new_placement_check = new_placement[layer_id][rank_id]
+                old_placement_check = old_placement[layer_id][rank_id]
+
+                # check if same logical experts are placed on the same NPU
+                if new_placement_check.numel() != torch.unique(new_placement_check).numel():
+                    logger.error(f"Replicated experts are placed on the same NPU, expert placement on layer {layer_id}, rank {rank_id} is invalid")
+                    new_placement[layer_id] = old_placement[layer_id]
+                    break
+
+                # check if there is any experts movement inside one NPU
+                expert_not_move = torch.isin(new_placement_check, old_placement_check)
+                if not torch.equal(new_placement[expert_not_move], old_placemet[expert_not_move]):
+                    logger.error(f"There exists expert movement inside NPU, expert placement on layer {layer_id}, rank {rank_id} is invalid")
+                    new_placement[layer_id] = old_placement[layer_id]
+                    break
 
     # TODO: Here only expert weight exchange is considered, need to be extended to cover other weight update cases
     def compose_expert_update_info(self, updated_expert_maps, current_expert_maps):
@@ -231,7 +256,7 @@ class EplbProcess:
 
                 update_info = self.worker.do_update()
 
-                print("update_info:", update_info)
+                logger.info("update_info:", update_info)
 
                 for (a,b,c,d) in update_info:
                     while True:
@@ -239,8 +264,6 @@ class EplbProcess:
                             continue
                         block_update_q.put((a,b,c,d))
                         break
-
-                print("EPLB Process complete")
 
             except Exception as e:
                 logger.warning(f"[EPLB subprocess Exiting due to error: {e}", exc_info=True)
