@@ -57,12 +57,12 @@ class EplbWorker:
             return
 
         #根据负载信息，获取更新后的专家表
-        load_info, old_placemet = self.global2local(load_info, self.old_expert_maps, self.num_local_experts)
-        changed, priority, new_placement = self.calculate_rebalance_experts(load_info, old_placemet)
+        load_info, old_placement = self.global2local(load_info, self.old_expert_maps, self.num_local_experts)
+        changed, priority, new_placement = self.calculate_rebalance_experts(load_info, old_placement)
 
         if not torch.is_tensor(new_placement):
             new_placement = torch.tensor(new_placement)
-        self.check_expert_placement(old_placemet, new_placement)
+        self.check_expert_placement(old_placement, new_placement)
         new_expert_maps = self.local2global(new_placement)
 
         logger.debug(f"[EPLB Process  new_map differs, performing D2D")
@@ -73,9 +73,9 @@ class EplbWorker:
 
         return update_info
 
-    def check_expert_placement(self, old_placemet, new_placement):
-        num_layers = old_placemet.shape[0]
-        num_ranks = old_placemet.shape[1]
+    def check_expert_placement(self, old_placement, new_placement):
+        num_layers = old_placement.shape[0]
+        num_ranks = old_placement.shape[1]
 
         for layer_id in range(num_layers):
             for rank_id in range(num_ranks):
@@ -90,7 +90,7 @@ class EplbWorker:
 
                 # check if there is any experts movement inside one NPU
                 expert_not_move = torch.isin(new_placement_check, old_placement_check)
-                if not torch.equal(new_placement[expert_not_move], old_placemet[expert_not_move]):
+                if not torch.equal(new_placement[expert_not_move], old_placement[expert_not_move]):
                     logger.error(f"There exists expert movement inside NPU, expert placement on layer {layer_id}, rank {rank_id} is invalid")
                     new_placement[layer_id] = old_placement[layer_id]
                     break
