@@ -60,8 +60,13 @@ def test_e2e_deepseekv3_with_torchair(monkeypatch: pytest.MonkeyPatch):
                 },
                 enforce_eager=False,
         ) as vllm_model:
+            # use greedy sampler to make sure the generated results are fix
             vllm_output = vllm_model.generate_greedy(example_prompts,
                                                      max_tokens)
+        # NOTE: vllm-ascend/DeepSeek-V3-Pruning is a random weight of
+        # DeepSeek-V3 with 2 hidden layers, thus the golden results seems
+        # inaccurate. This will only change if accuracy improves with the
+        # official weights of DeepSeek-V3.
         golden_results = [
             'Hello, my name is feasibility伸 spazio debtor添',
             'The president of the United States is begg"""\n杭州风和 bestimm',
