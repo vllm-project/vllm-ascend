@@ -133,6 +133,10 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value to False to disable the optimized model.
     "USE_OPTIMIZED_MODEL":
     lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
+    "DISAGGREGATED_PREFILL_RANK_TABLE_PATH":
+    lambda: os.getenv("DISAGGREGATED_PREFILL_RANK_TABLE_PATH", None),
+    "VLLM_LLMDD_CHANNEL_PORT":
+    lambda: os.getenv("VLLM_LLMDD_CHANNEL_PORT", 5557)
 }
 
 # end-env-vars-definition
