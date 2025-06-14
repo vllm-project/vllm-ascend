@@ -53,7 +53,7 @@ The details of each config option are as follows:
 | ---- | ---- | ------- | ----------- |
 | `enabled` | bool | `False` | Whether to enable ascend scheduler for V1 engine|
 
-ascend_scheduler_config also support the options from [vllm scheduler config](https://docs.vllm.ai/en/stable/api/vllm/config.html#vllm.config.SchedulerConfig). For example, you  can add `chunked_prefill_enabled: true` to ascend_scheduler_config as well.
+ascend_scheduler_config also support the options from [vllm scheduler config](https://docs.vllm.ai/en/stable/api/vllm/config.html#vllm.config.SchedulerConfig). For example, you can add `enable_chunked_prefill: True` to ascend_scheduler_config as well.
 
 ### Example
 
@@ -62,18 +62,18 @@ A full example of additional configuration is as follows:
 ```
 {
     "torchair_graph_config": {
-        "enabled": true,
-        "use_cached_graph": true,
+        "enabled": True,
+        "use_cached_graph": True,
         "graph_batch_sizes": [1, 2, 4, 8],
-        "graph_batch_sizes_init": false,
-        "enable_multistream_moe": false,
-        "enable_kv_nz": false
+        "graph_batch_sizes_init": False,
+        "enable_multistream_moe": False,
+        "enable_kv_nz": False
     },
     "ascend_scheduler_config": {
-        "enabled": true,
-        "chunked_prefill_enabled": true,
+        "enabled": True,
+        "enable_chunked_prefill": True,
     },
     "expert_tensor_parallel_size": 1,
-    "refresh": false,
+    "refresh": False,
 }
 ```
