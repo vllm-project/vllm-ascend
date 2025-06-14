@@ -325,7 +325,7 @@ class CustomDeepseekV2MoE(nn.Module):
         use_separated_shared_experts = (self.shared_experts is not None
                                         and not self.enable_multistream_moe)
 
-        # torch_npu.npu_format_cast_(layer.w2_weight, 29) is not supported by 
+        # torch_npu.npu_format_cast_(layer.w2_weight, 29) is not supported by
         # torch_npu.npu_grouped_matmul in current release version of torch_npu
         if self.fused_experts_allgather_ep_enabled:
             enable_alltoall_ep = False
@@ -333,7 +333,7 @@ class CustomDeepseekV2MoE(nn.Module):
             enable_alltoall_ep = self.ep_group.world_size > 1
             if not is_prefill:
                 enable_alltoall_ep = enable_alltoall_ep and (
-                    VLLM_ENABLE_MC2 or not self.torchair_graph_enabled) 
+                    VLLM_ENABLE_MC2 or not self.torchair_graph_enabled)
 
         if self.tp_size > 1:
             if enable_alltoall_ep:
