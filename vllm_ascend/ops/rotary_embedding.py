@@ -64,13 +64,14 @@ def rope_forward_oot(
         # TODO: Remove the contiguous in the future.
         query = query.contiguous().view(query.shape[0], -1)
         key = key.contiguous().view(key.shape[0], -1)
-        torch_npu._npu_rotary_embedding(
+        query, key = torch_npu.npu_mrope(
             positions,
             query,
             key,
-            self.head_size,
             self.cos_sin_cache,
-            neox_style,
+            self.head_size,
+            mrope_section=[0,0,0],
+            rotary_mode='half' if neox_style else 'interleave'
         )
     return query.view(query_shape), key.view(key_shape)
 
