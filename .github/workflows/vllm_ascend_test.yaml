@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: 'test'
+name: 'e2e test / basic'
 
 on:
   schedule:
@@ -118,7 +118,8 @@ jobs:
     needs: [lint]
     if: ${{ needs.lint.result == 'success' }}
     strategy:
-      max-parallel: 2
+      # TODO(yikun): 1 ---> 2
+      max-parallel: 1
       matrix:
         os: [linux-arm64-npu-1]
         vllm_version: [main, v0.9.1]
@@ -175,20 +176,16 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         run: |
           pytest -sv tests/singlecard/test_offline_inference.py
-          # guided decoding doesn't work, fix it later
-          # pytest -sv tests/singlecard/test_guided_decoding.py.py
+          # TODO(sss): guided decoding doesn't work, fix it later
+          # pytest -sv tests/singlecard/test_guided_decoding.py
           # test_ascend_config.py should be ran separately because it will regenerate the global config many times.
           pytest -sv tests/singlecard/test_ascend_config.py
           pytest -sv tests/singlecard/test_camem.py
-          pytest -sv tests/singlecard/core/test_ascend_scheduler.py
-          pytest -sv tests/singlecard/core/test_ascend_scheduler_e2e.py
           pytest -sv tests/singlecard/ \
           --ignore=tests/singlecard/test_offline_inference.py \
           --ignore=tests/singlecard/test_guided_decoding.py \
           --ignore=tests/singlecard/test_ascend_config.py \
-          --ignore=tests/singlecard/test_camem.py \
-          --ignore=tests/singlecard/core/test_ascend_scheduler.py \
-          --ignore=tests/singlecard/core/test_ascend_scheduler_e2e.py
+          --ignore=tests/singlecard/test_camem.py
 
       - name: Run vllm-project/vllm-ascend test on V0 engine
         if: ${{ github.event_name == 'schedule' }}
@@ -196,9 +193,10 @@ jobs:
           VLLM_USE_V1: 0
           VLLM_USE_MODELSCOPE: True
         run: |
+          pytest -sv tests/singlecard/test_ilama_lora.py
           pytest -sv tests/singlecard/test_offline_inference.py
           # guided decoding doesn't work, fix it later
-          # pytest -sv tests/singlecard/test_guided_decoding.py.py
+          # pytest -sv tests/singlecard/test_guided_decoding.py
           pytest -sv tests/singlecard/test_camem.py
           # test_ascend_config.py should be ran separately because it will regenerate the global config many times.
           pytest -sv tests/singlecard/test_ascend_config.py
@@ -274,6 +272,7 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         run: |
           pytest -sv tests/multicard/test_ilama_lora_tp2.py
+          # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py will raise error.
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
           pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
