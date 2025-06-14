@@ -18,7 +18,10 @@ def split_and_insert(n, k, m):
 
     for j in range(m // k):
         for i in range(k):
-            groups[i] = np.append(groups[i], B[i + j * k])
+            redundant_expert = groups[i][-1] + 1
+            if redundant_expert > 255:
+                redundant_expert = 0
+            groups[i] = np.append(groups[i], redundant_expert)
     return np.concatenate(groups)
 
 
