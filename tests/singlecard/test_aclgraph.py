@@ -20,7 +20,9 @@ Compare the outputs of vLLM with and without aclgraph.
 Run `pytest tests/compile/test_aclgraph.py`.
 """
 
+import multiprocessing
 import os
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -30,32 +32,64 @@ from tests.conftest import VllmRunner
 from tests.model_utils import check_outputs_equal
 
 MODELS = ["Qwen/Qwen2.5-0.5B-Instruct"]
+PROMPTS = [
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+]
+
+original_replay = torch.npu.NPUGraph.replay
+replay_counter = multiprocessing.Value("i", 0)
+
+
+def replay_wrapper(self):
+    with replay_counter.get_lock():
+        replay_counter.value += 1
+    return original_replay(self)
 
 
 @pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
                     reason="aclgraph only support on v1")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("prompts", [PROMPTS, PROMPTS[:3]])
 def test_models(
     model: str,
     max_tokens: int,
+    prompts: list[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with monkeypatch.context() as m:
-        prompts = [
-            "Hello, my name is", "The president of the United States is",
-            "The capital of France is", "The future of AI is"
-        ]
-
         # aclgraph only support on v1
         m.setenv("VLLM_USE_V1", "1")
 
         sampling_params = SamplingParams(max_tokens=max_tokens,
                                          temperature=0.0)
+
         # TODO: change to use vllmrunner when the registry of custom op is solved
         # while running pytest
-        vllm_model = LLM(model)
-        vllm_aclgraph_outputs = vllm_model.generate(prompts, sampling_params)
+        with patch.object(torch.npu.NPUGraph, "replay", replay_wrapper):
+            vllm_model = LLM(model)
+            vllm_aclgraph_outputs = vllm_model.generate(
+                prompts, sampling_params)
+
+        num_hidden_layers = vllm_model.llm_engine.model_config.hf_config.num_hidden_layers
+
+        # Calculate expected replay call count
+        # Number of ACL graphs = hidden layers + 1 (only for piecewise scenario)
+        num_acl_graphs = num_hidden_layers + 1
+        # Number of inference steps (first step only includes one prompt, hence +1)
+        num_inference_steps = max_tokens + 1
+        expected_replay_calls = num_acl_graphs * num_inference_steps
+
+        # Verify replay call count
+        actual_replay_calls = replay_counter.value
+        assert actual_replay_calls == expected_replay_calls, (
+            f"NPUGraph.replay call count mismatch. "
+            f"Expected: {expected_replay_calls}, Actual: {actual_replay_calls}"
+        )
+
         del vllm_model
         torch.npu.empty_cache()
 
