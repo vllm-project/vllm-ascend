@@ -31,6 +31,7 @@ The following table lists the additional configuration options available in vLLM
 | `expert_tensor_parallel_size` | str | `0`  | Expert tensor parallel size the model to use.                                                 |
 | `refresh`                     | bool | `false` | Whether to refresh global ascend config content. This value is usually used by rlhf case.     |
 | `expert_map_path`             | str | None | When using expert load balancing for the MOE model, an expert map path needs to be passed in. |
+| `chunked_prefill_for_mla` | bool | `False` | Whether to enable the fused operator-like chunked_prefill. |
 
 The details of each config option are as follows:
 
