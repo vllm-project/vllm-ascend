@@ -70,9 +70,8 @@ def rope_forward_oot(
             key,
             self.cos_sin_cache,
             self.head_size,
-            mrope_section=[0,0,0],
-            rotary_mode='half' if neox_style else 'interleave'
-        )
+            mrope_section=[0, 0, 0],
+            rotary_mode='half' if neox_style else 'interleave')
     return query.view(query_shape), key.view(key_shape)
 
 

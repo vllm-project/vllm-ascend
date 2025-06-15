@@ -198,6 +198,7 @@ def test_rotary_embedding_quant_with_leading_dim(
                                atol=DEFAULT_ATOL,
                                rtol=DEFAULT_RTOL)
 
+
 # test rope with npu_mrope interface with leading dimension and merge seqlen and batch_size as num_tokens
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
@@ -244,14 +245,13 @@ def test_npu_mrope_quant_with_leading_dim(
     ref_query, ref_key = rope.forward_native(positions, query, key)
 
     query, key = torch_npu.npu_mrope(
-            positions,
-            query,
-            key,
-            rope.cos_sin_cache,
-            rope.head_size,
-            mrope_section=[0,0,0],
-            rotary_mode='half' if rope.is_neox_style else 'interleave'
-        )
+        positions,
+        query,
+        key,
+        rope.cos_sin_cache,
+        rope.head_size,
+        mrope_section=[0, 0, 0],
+        rotary_mode='half' if rope.is_neox_style else 'interleave')
 
     # Compare the results.
     torch.testing.assert_close(query.view(ref_query.size()),
