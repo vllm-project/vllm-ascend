@@ -17,6 +17,8 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py
 #
 
+import time
+from pathlib import Path
 from typing import Optional
 
 import torch
@@ -39,9 +41,12 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import init_ascend_config
+from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.device_allocator.camem import CaMemAllocator
-from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.distributed.parallel_state import (get_ep_group,
+                                                    get_etp_group,
+                                                    init_ascend_model_parallel)
+from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import try_register_lib
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
@@ -234,6 +239,33 @@ class NPUWorker(WorkerBase):
         else:
             self.profiler.stop()
 
+    def expert_distribution_record(self, is_start: bool = True):
+        assert envs.VLLM_EXPERT_DISTRIBUTION_RECORDER_DIR is not None, \
+            "VLLM_EXPERT_DISTRIBUTION_RECORDER_DIR is not set. " \
+            "Please set it to enable expert distribution recording."
+
+        if is_start:
+            logger.info("Starting expert distribution record.")
+            self.expert_load_balancer.start_expert_distribution_record()
+        else:
+            logger.info("Stopping expert distribution record.")
+            self.expert_load_balancer.stop_expert_distribution_record()
+
+    def dump_expert_distribution_record(self):
+        assert envs.VLLM_EXPERT_DISTRIBUTION_RECORDER_DIR is not None, \
+            "VLLM_EXPERT_DISTRIBUTION_RECORDER_DIR is not set. " \
+            "Please set it to enable expert distribution recording."
+
+        logger.info("Dumping expert distribution record.")
+        local_expert_distribution = \
+            self.expert_load_balancer.export_local_expert_distribution_record()
+
+        ep_rank = get_ep_group().rank_in_group
+        etp_rank = get_etp_group().rank_in_group
+        _dump_to_file(
+            f"expert_distribution_recorder_{time.time()}_{ep_rank}_{etp_rank}.pt",
+            local_expert_distribution)
+
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
 
@@ -278,6 +310,15 @@ class NPUWorker(WorkerBase):
         )
         ensure_kv_transfer_initialized(self.vllm_config)
 
+        # Initialize the expert load balancer.
+        if self.vllm_config.model_config.is_deepseek_mla:
+            expert_map_path = get_ascend_config().expert_map_path
+            num_logical_experts = \
+                self.vllm_config.model_config.hf_config.n_routed_experts
+            self.expert_load_balancer = ExpertLoadBalancer.init_instance(
+                expert_map_path=expert_map_path,
+                global_expert_num=num_logical_experts)
+
     def _init_profiler(self):
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
@@ -311,3 +352,12 @@ class NPUWorker(WorkerBase):
                     torch_profiler_trace_dir))
         else:
             return None
+
+
+def _dump_to_file(name, data):
+    save_dir = Path(envs.VLLM_EXPERT_DISTRIBUTION_RECORDER_DIR)
+    path_output = save_dir / name
+    logger.info(f"Write expert distribution to {path_output}")
+    if not save_dir.exists():
+        save_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(data, str(path_output))
