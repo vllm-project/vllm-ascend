@@ -648,8 +648,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.W_UV = W_UV.transpose(0, 1).contiguous()
         # Convert from (L, N, P) to (N, P, L)
         self.W_UK_T = W_UK.permute(1, 2, 0).contiguous()
-        self.W_UV.data = torch_npu.npu_format_cast(self.W_UV.data, 29)
-        self.W_UK_T.data = torch_npu.npu_format_cast(self.W_UK_T.data, 29)
+
+        # Waiting for BMM NZ support
+        # self.W_UV.data = torch_npu.npu_format_cast(self.W_UV.data, 29)
+        # self.W_UK_T.data = torch_npu.npu_format_cast(self.W_UK_T.data, 29)
 
     def _compute_prefill_context(
         self,
