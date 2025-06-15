@@ -133,7 +133,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value to False to disable the optimized model.
     "USE_OPTIMIZED_MODEL":
     lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
-
     "GLOBAL_RANKTABLE":
     lambda: os.getenv("GLOBAL_RANKTABLE", None)
 }
