@@ -1045,21 +1045,25 @@ class AscendFusedMoE(FusedMoE):
         self.log2phy = None
         self.global_redundant_expert_num = 0
 
+        self.expert_load_balancer = ExpertLoadBalancer.get_instance()
         ascend_config = get_ascend_config()
         expert_map_path = ascend_config.expert_map_path
         if expert_map_path and os.path.exists(expert_map_path):
+            # only support in MC2 and graph mode
+            if not (VLLM_ENABLE_MC2
+                    and ascend_config.torchair_graph_config.enabled):
+                raise NotImplementedError(
+                    "EPLB is only supported in MC2 and graph mode")
             # moe expert load balance
-            expert_load_balancer = ExpertLoadBalancer(expert_map_path,
-                                                      self.global_num_experts)
             self.local_num_experts, self.expert_map = \
-                                expert_load_balancer.get_rank_placement_map(
+                                self.expert_load_balancer.get_rank_placement_map(
                                                 self.moe_instance_id,
                                                 get_ep_group().rank_in_group)
-            self.log2phy = expert_load_balancer.get_rank_log2phy_map(
+            self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
                 self.moe_instance_id,
                 get_ep_group().rank_in_group)
             self.global_redundant_expert_num = \
-                        expert_load_balancer.get_global_redundant_expert_num()
+                        self.expert_load_balancer.get_global_redundant_expert_num()
         else:
             # Create a tensor of size num_experts filled with -1
             self.local_num_experts, self.expert_map = determine_expert_map(
@@ -1146,7 +1150,7 @@ class AscendFusedMoE(FusedMoE):
                         hidden_states, router_logits)
 
         # Matrix multiply.
-        e_hidden_states = self.quant_method.apply(
+        e_hidden_states, topk_ids = self.quant_method.apply(
             layer=self,
             x=hidden_states,
             router_logits=router_logits,
@@ -1173,6 +1177,9 @@ class AscendFusedMoE(FusedMoE):
                 return e_hidden_states, shared_experts(hidden_states)
             else:
                 return e_hidden_states
+
+        self.expert_load_balancer.accumulate_expert_distribution_record(
+            self.moe_instance_id, topk_ids)
 
         if self.dp_size > 1:
             if VLLM_ENABLE_MC2 and not is_prefill:
