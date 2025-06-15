@@ -329,7 +329,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # leading to performance degradation.
         # Therefore, an environment variable is added here to dynamically set
         # the size of the pre-constructed mask matrix based on requirements.
-        mask_len = os.getenv("PAGED_ATTENTION_MASK_LEN", 10000)
+        mask_len = os.getenv("PAGED_ATTENTION_MASK_LEN", 128)
         self.attn_mask_len = min(self.model_config.max_model_len,
                                  int(mask_len))
         self.attn_mask_builder = AttentionMaskBuilder.initialize_from_len(
@@ -589,9 +589,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 seq_lens, query_lens, position, self.dtype, self.device)
         # Prefill without cache situation.
         elif attn_state == AscendAttentionState.PrefillNoCache:
-            max_seq_len = max(seq_lens, default=0)
+            # Note: `torch_npu._npu_flash_attention` only requires a 128x128 mask, so we hardcode it here.
+            # Once a new attention operator for prefill-only state is added,
+            # the mask generation logic here must be updated according to the new operator used.
             return self.attn_mask_builder.get_attn_mask(
-                max_seq_len, self.dtype, self.device)
+                128, self.dtype, self.device)
         # Prefill with cache hit.
         elif attn_state == AscendAttentionState.PrefillCacheHit:
             return self.attn_mask_builder.get_attn_mask(
