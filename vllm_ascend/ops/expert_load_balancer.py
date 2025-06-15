@@ -55,7 +55,7 @@ class ExpertLoadBalancer:
                         dtype=torch.int64,
                         device=torch.npu.current_device())
         # Always enable expert load recording if torchair graph is enabled.
-        self._recording = self._torchair_graph_enabled or False
+        self._recording = self._torchair_graph_enabled
 
     @staticmethod
     def get_instance():
@@ -172,7 +172,8 @@ class ExpertLoadBalancer:
 
     def stop_expert_distribution_record(self):
         """Stop recording the expert distribution."""
-        self._recording = self._torchair_graph_enabled or False
+        # If torchair graph is not enabled, we do not turn off the recording.
+        self._recording = self._torchair_graph_enabled
 
     def export_local_expert_distribution_record(self):
         """Export the local expert distribution record and reset it."""
