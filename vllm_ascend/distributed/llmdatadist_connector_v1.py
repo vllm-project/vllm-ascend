@@ -801,7 +801,8 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
                                 prefill_info_input)
 
         if self.tp_rank == 0:
-            logger.info("[rank%d][P]: KV send DONE.", torch.distributed.get_rank())
+            logger.info("[rank%d][P]: KV send DONE.",
+                        torch.distributed.get_rank())
 
     def _inject_kv_into_layer(
         self,
