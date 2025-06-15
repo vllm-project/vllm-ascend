@@ -42,6 +42,7 @@ class ExpertLoadBalancer:
             self.expert_map_tensor, self.layers_num, self.ranks_num = (
                 self._expert_file_to_tensor(expert_map_path))
         else:
+            self.expert_map_tensor = None
             # TODO: change the num layer source
             self.layers_num = 58
             self.ranks_num = None
