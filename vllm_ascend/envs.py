@@ -133,6 +133,12 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value to False to disable the optimized model.
     "USE_OPTIMIZED_MODEL":
     lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
+    # VLLM_ASCEND_ENABLE_NPU_MROPE:
+    #   0: using npu_rotary_embedding.
+    #   1: using npu_mrope.
+    # Just a temporary plan，will be removed after npu_mrope supports aclgraph mode.
+    "VLLM_ASCEND_ENABLE_NPU_MROPE":
+    lambda: bool(int(os.getenv('VLLM_ASCEND_ENABLE_NPU_MROPE', '0'))),
 }
 
 # end-env-vars-definition

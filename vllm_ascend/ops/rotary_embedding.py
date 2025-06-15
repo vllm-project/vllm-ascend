@@ -22,6 +22,7 @@ import torch
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 
+import vllm_ascend.envs as ascend_envs
 from vllm_ascend.platform import CUSTOM_OP_ENABLED
 
 
@@ -75,6 +76,52 @@ def rope_forward_oot(
     return query.view(query_shape), key.view(key_shape)
 
 
+def rope_forward_oot_npu_mrope(
+    self,
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    offsets: Optional[torch.Tensor] = None,
+    is_neox_style_override: Optional[bool] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    import torch_npu
+    query_shape, key_shape = query.shape, key.shape
+    if self.cos_sin_cache.device != query.device:
+        self.cos_sin_cache = self.cos_sin_cache.to(query.device)
+    if self.cos_sin_cache.dtype != query.dtype:
+        self.cos_sin_cache = self.cos_sin_cache.to(query.dtype)
+    neox_style = self.is_neox_style
+    if is_neox_style_override is not None:
+        neox_style = is_neox_style_override
+    # adopt custom kernel path for rotary_embedding
+    if custom_rotary_embedding_enabled(query, neox_style, self.head_size):
+        query, key = torch.ops._C.rotary_embedding(
+            positions,
+            query,
+            key,
+            self.head_size,
+            self.cos_sin_cache,
+            neox_style,
+        )
+        return query.view(query_shape), key.view(key_shape)
+    if offsets is not None:
+        raise NotImplementedError(
+            "Batched rotary embedding is currently not supported on NPU.")
+    else:
+        # TODO: Remove the contiguous in the future.
+        query = query.contiguous().view(query.shape[0], -1)
+        key = key.contiguous().view(key.shape[0], -1)
+        query, key = torch_npu.npu_mrope(
+            positions,
+            query,
+            key,
+            self.cos_sin_cache,
+            self.head_size,
+            mrope_section=[0, 0, 0],
+            rotary_mode="half" if neox_style else "interleave")
+    return query.view(query_shape), key.view(key_shape)
+
+
 def native_rope_deepseek_forward(self,
                                  positions: torch.Tensor,
                                  query: torch.Tensor,
@@ -95,8 +142,8 @@ def native_rope_deepseek_forward(self,
                                                         2).reshape(b, h_q, d)
         b, h_k, d = key.shape
         key = key.view(b, h_k, d // 2, 2).transpose(3, 2).reshape(b, h_k, d)
-    q_pe, k_pe = rope_forward_oot(self, positions, query, key, offsets,
-                                  neox_style)
+    q_pe, k_pe = RotaryEmbedding.forward_oot(self, positions, query, key,
+                                             offsets, neox_style)
     return q_pe, k_pe
 
 
@@ -270,7 +317,10 @@ def deepseek_rope_init_func(
                        device="npu")
 
 
-RotaryEmbedding.forward_oot = rope_forward_oot
+if not ascend_envs.VLLM_ASCEND_ENABLE_NPU_MROPE:
+    RotaryEmbedding.forward_oot = rope_forward_oot
+else:
+    RotaryEmbedding.forward_oot = rope_forward_oot_npu_mrope
 
 # Note: we adopt the native huggingface deepseek rope initialization code from
 # https://huggingface.co/deepseek-ai/DeepSeek-V3-0324/blob/main/modeling_deepseek.py for
