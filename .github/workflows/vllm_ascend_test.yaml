@@ -131,9 +131,8 @@ jobs:
       # TODO(yikun): Remove m.daocloud.io prefix when infra proxy ready
       image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
       env:
-        HF_ENDPOINT: https://hf-mirror.com
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
         VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
     steps:
       - name: Check npu and CANN info
         run: |
@@ -179,7 +178,7 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/singlecard/test_offline_inference.py
+            pytest -sv tests/singlecard/test_offline_inference.py
             # guided decoding doesn't work, fix it later
             # pytest -sv tests/singlecard/test_guided_decoding.py.py
             # test_ascend_config.py should be ran separately because it will regenerate the global config many times.
@@ -197,11 +196,11 @@ jobs:
           else
             pytest -sv tests/multicard/test_ilama_lora_tp2.py
             # To avoid oom, we need to run the test in a single process.
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_topk
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/ --ignore=tests/multicard/test_ilama_lora_tp2.py --ignore=tests/multicard/test_offline_inference_distributed.py
+            pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
+            pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
+            pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_topk
+            pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
+            pytest -sv tests/multicard/ --ignore=tests/multicard/test_ilama_lora_tp2.py --ignore=tests/multicard/test_offline_inference_distributed.py
           fi
 
       - name: Run vllm-project/vllm-ascend test on V0 engine
@@ -210,7 +209,7 @@ jobs:
           VLLM_USE_V1: 0
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
-            VLLM_USE_MODELSCOPE=True  pytest -sv tests/singlecard/test_offline_inference.py
+            pytest -sv tests/singlecard/test_offline_inference.py
             # guided decoding doesn't work, fix it later
             # pytest -sv tests/singlecard/test_guided_decoding.py.py
             pytest -sv tests/singlecard/test_camem.py
@@ -227,11 +226,11 @@ jobs:
               --ignore=tests/singlecard/core/test_ascend_scheduler_e2e.py
           else
             pytest -sv tests/multicard/test_ilama_lora_tp2.py
-            # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py will raise error.
+            # Fixme: run pytest -sv tests/multicard/test_offline_inference_distributed.py will raise error.
             # To avoid oom, we need to run the test in a single process.
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_topk
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/ --ignore=tests/multicard/test_ilama_lora_tp2.py --ignore=tests/multicard/test_offline_inference_distributed.py
+            pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
+            pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
+            pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_topk
+            pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
+            pytest -sv tests/multicard/ --ignore=tests/multicard/test_ilama_lora_tp2.py --ignore=tests/multicard/test_offline_inference_distributed.py
           fi

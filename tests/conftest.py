@@ -17,14 +17,13 @@
 # Adapted from vllm-project/vllm/blob/main/tests/conftest.py
 #
 
-import contextlib
 import gc
 from typing import List, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 import pytest
 import torch
-from huggingface_hub import snapshot_download
+from modelscope import snapshot_download  # type: ignore[import-untyped]
 from PIL import Image
 from vllm import LLM, SamplingParams
 from vllm.config import TaskOption
@@ -54,17 +53,11 @@ PromptAudioInput = _PromptMultiModalInput[Tuple[np.ndarray, int]]
 PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 
 
-def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
+def cleanup_dist_env_and_memory():
     destroy_model_parallel()
     destroy_distributed_environment()
-    with contextlib.suppress(AssertionError):
-        torch.distributed.destroy_process_group()
-    if shutdown_ray:
-        import ray  # Lazy import Ray
-        ray.shutdown()
     gc.collect()
     torch.npu.empty_cache()
-    torch.npu.reset_peak_memory_stats()
 
 
 class VllmRunner:
@@ -363,4 +356,4 @@ def prompt_template(request):
 
 @pytest.fixture(scope="session")
 def ilama_lora_files():
-    return snapshot_download(repo_id="jeeejeee/ilama-text2sql-spider")
+    return snapshot_download(repo_id="vllm-ascend/ilama-text2sql-spider")
