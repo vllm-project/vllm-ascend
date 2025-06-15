@@ -2,6 +2,7 @@
 
 import json
 import os
+import uuid
 
 import aiohttp
 from quart import Quart, make_response, request  # type: ignore
@@ -32,7 +33,9 @@ async def forward_request(url, data, headers: dict):
 async def handle_request():
     try:
         original_request_data = await request.get_json()
-        print(f"{request.headers.get('X-Request-ID')=}")
+        if isinstance(original_request_data["prompt"], str):
+            original_request_data["prompt"] = [original_request_data["prompt"]]
+        request_id = request.headers.get('X-Request-ID', uuid.uuid4().hex)
 
         prefill_request = original_request_data.copy()
         # Change max_tokens = 1 to let it only do prefill
@@ -42,9 +45,7 @@ async def handle_request():
         async for prefill_result in forward_request(
             f"http://{PREFILL_ENDPOINT}/v1/completions",
             prefill_request,
-            headers={
-                "X-Request-ID": request.headers.get("X-Request-ID"),
-            },
+            headers={"X-Request-ID": request_id},
         ):
             # Print the prefill result
             print("===== Prefill result =====")
@@ -62,9 +63,7 @@ async def handle_request():
         generator = forward_request(
             f"http://{DECODE_ENDPOINT}/v1/completions",
             decode_request,
-            headers={
-                "X-Request-ID": request.headers.get("X-Request-ID"),
-            },
+            headers={"X-Request-ID": request_id},
         )
         response = await make_response(generator)
         response.timeout = None

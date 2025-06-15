@@ -1,6 +1,7 @@
 import enum
 import hashlib
 import json
+import os
 import random
 import struct
 import time
@@ -16,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -115,6 +117,9 @@ def get_servers_from_ranktable(ranktable_path: str, prefill_tp: int,
                            role=role,
                            devices=device_infos))
         return server_infos
+
+    if ranktable_path is None or not os.path.exists(ranktable_path):
+        raise FileNotFoundError(f"Rank table file not found: {ranktable_path}")
 
     with open(ranktable_path, "r") as file:
         rank_table = json.load(file)
@@ -433,8 +438,6 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
         self.tp_rank = get_tensor_model_parallel_rank()
         self.num_layers = self._vllm_config.model_config.get_num_layers(
             self._vllm_config.parallel_config)
-        if self.tp_size == 1:
-            local_rank = self.dp_rank
         local_rank = get_world_group().local_rank
         self.llm_datadist_engine = KVTransferEngine(self.kv_role, local_rank,
                                                     self.dp_rank, self.tp_rank,
@@ -796,7 +799,9 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
                 or self.cluster_info.prefill_dp_size != 1):
             report_prefill_info(self.cluster_info.router_endpoint,
                                 prefill_info_input)
-        logger.info("[rank%d][P]: KV send DONE.", torch.distributed.get_rank())
+
+        if self.tp_rank == 0:
+            logger.info("[rank%d][P]: KV send DONE.", torch.distributed.get_rank())
 
     def _inject_kv_into_layer(
         self,
@@ -901,6 +906,7 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
         return len(request.prompt_token_ids) - 1, False
 
     def update_state_after_alloc(self, request: "Request",
+                                 blocks: "KVCacheBlocks",
                                  num_external_tokens: int):
         """
         Update KVConnector state after block allocation.
