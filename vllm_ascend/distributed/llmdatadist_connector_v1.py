@@ -25,9 +25,9 @@ if TYPE_CHECKING:
     from vllm.v1.request import Request
 
 import llm_datadist  # type: ignore
-from llm_datadist import LLMException, LLMStatusCode
+from llm_datadist import LLMConfig, LLMException, LLMStatusCode
 
-import vllm_ascend.envs as envs
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
 
 TORCH_DTYPE_TO_NPU_DTYPE = {
@@ -41,7 +41,7 @@ TORCH_DTYPE_TO_NPU_DTYPE = {
     torch.int32: llm_datadist.DataType.DT_INT32,
 }
 
-GLOBAL_RANKTABLE = envs.GLOBAL_RANKTABLE
+GLOBAL_RANKTABLE = envs_ascend.LLMDATADIST_GLOBAL_RANKTABLE
 
 
 class ServerRole(enum.Enum):
@@ -289,16 +289,19 @@ class KVTransferEngine:
             self.role, self.cluster_id)
 
     def prepare_data_dist(self):
-        # TODO: The maximum size of the mbuf for the llm datadist. We need to
-        # find an appropriate value to minimize memory waste.
-        options = {
-            "llm.SyncKvCacheWaitTime": envs.LLMDATADIST_SYNC_CACHE_WAIT_TIME,
-            "ge.flowGraphMemMaxSize": f"{int(2.25*1024*1024*1024):d}",
+        buff_size = envs_ascend.LLMDATADIST_BUFFSIZE_MB * 1024 * 1024
+        llm_config = LLMConfig()
+        llm_config.ge_options = {
+            "llm.SyncKvCacheWaitTime":
+            envs_ascend.LLMDATADIST_SYNC_CACHE_WAIT_TIME,
+            "ge.flowGraphMemMaxSize": f"{buff_size:d}",
             "ge.exec.deviceId": str(self.local_rank),
         }
+        llm_config.buf_pool_cfg = '{"buf_cfg": [{"total_size":2097152,"blk_size":256,"max_buf_size":256}]}'
         if self.role == llm_datadist.LLMRole.PROMPT:
-            options["llm.listenIpInfo"] = f"{self.local_device_ip}:26000"
-        self.datadist_engine.init(options)
+            llm_config.listen_ip_info = f"{self.local_device_ip}:26000"
+        engine_options = llm_config.generate_options()
+        self.datadist_engine.init(engine_options)
         logger.info("llm_datadist init done")
         self.kv_transfer = self.datadist_engine.kv_cache_manager
 
@@ -869,7 +872,7 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
         self,
         request: "Request",
         num_computed_tokens: int,
-    ) -> int:
+    ) -> tuple[int, bool]:
         """
         Get number of new tokens that can be loaded from the external KV cache
         beyond the num_computed_tokens.
@@ -887,15 +890,15 @@ class LLMDataDistConnectorV1(KVConnectorBase_V1):
         # the block granularity. And it expects the returned blocks and
         # num_computed_tokens to also be aligned with the block granularity.
 
-        # NOTE: only request in waiting queue will come here. we use datadist
+        # NOTE: only requests in waiting queue will come here. we use datadist
         # pull cache to do transfer, so we don't align to block_size in prefill,
         # we won't have extra new matched tokens; in decode, new request kv
         # cache will be transferred from prefill, so num_computed_tokens = 0,
         # and extra new matched tokens should be len(request.prompt_token_ids) -
         # 1
         if self.kv_role == llm_datadist.LLMRole.PROMPT:
-            return 0
-        return len(request.prompt_token_ids) - 1
+            return 0, False
+        return len(request.prompt_token_ids) - 1, False
 
     def update_state_after_alloc(self, request: "Request",
                                  num_external_tokens: int):

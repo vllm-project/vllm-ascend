@@ -96,6 +96,15 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # 5000ms.
     "LLMDATADIST_SYNC_CACHE_WAIT_TIME":
     lambda: os.getenv("LLMDATADIST_SYNC_CACHE_WAIT_TIME", "5000"),
+    # The path to the llmdatadist global rank table. If not set, the default
+    # value is None. This results in an error if the global rank table is
+    # required but not specified.
+    "LLMDATADIST_GLOBAL_RANKTABLE":
+    lambda: os.getenv("LLMDATADIST_GLOBAL_RANKTABLE", None),
+    # The buffer size in MB for llmdatadist communication. If not set, the
+    # default value is 2560 MB.
+    "LLMDATADIST_BUFFSIZE_MB":
+    lambda: int(os.getenv("LLMDATADIST_BUFFSIZE_MB", 2560)),
     # The version of vllm is installed. This value is used for developers who
     # installed vllm from source locally. In this case, the version of vllm is
     # usually changed. For example, if the version of vllm is "0.9.0", but when
@@ -133,8 +142,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value to False to disable the optimized model.
     "USE_OPTIMIZED_MODEL":
     lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
-    "GLOBAL_RANKTABLE":
-    lambda: os.getenv("GLOBAL_RANKTABLE", None)
 }
 
 # end-env-vars-definition
