@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-name: 'test'
+name: 'e2e test / basic'
 
 on:
   schedule:
@@ -43,6 +43,12 @@ on:
 defaults:
   run:
     shell: bash -el {0}
+
+# only cancel in-progress runs of the same workflow
+# and ignore the lint / 1 card / 4 cards test type
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   lint:
@@ -114,25 +120,14 @@ jobs:
     strategy:
       max-parallel: 2
       matrix:
-        os: [linux-arm64-npu-1, linux-arm64-npu-4]
+        os: [linux-arm64-npu-1]
         vllm_version: [main, v0.9.1]
-    concurrency:
-      group: >
-        ${{
-        matrix.os == 'linux-arm64-npu-4'
-          && github.event.pull_request.number
-          && format('pr-{0}-limit-npu-4', github.event.pull_request.number)
-        || format('job-{0}-{1}-{2}', matrix.os, matrix.vllm_version, github.event.pull_request.number)
-        }}
-      cancel-in-progress: false
     name: vLLM Ascend test
     runs-on: ${{ matrix.os }}
     container:
       # TODO(yikun): Remove m.daocloud.io prefix when infra proxy ready
       image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
       env:
-        HF_ENDPOINT: https://hf-mirror.com
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
         VLLM_LOGGING_LEVEL: ERROR
     steps:
       - name: Check npu and CANN info
@@ -177,61 +172,135 @@ jobs:
         env:
           VLLM_USE_V1: 1
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+          VLLM_USE_MODELSCOPE: True
         run: |
-          if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/singlecard/test_offline_inference.py
-            # guided decoding doesn't work, fix it later
-            # pytest -sv tests/singlecard/test_guided_decoding.py.py
-            # test_ascend_config.py should be ran separately because it will regenerate the global config many times.
-            pytest -sv tests/singlecard/test_ascend_config.py
-            pytest -sv tests/singlecard/test_camem.py
-            pytest -sv tests/singlecard/core/test_ascend_scheduler.py
-            pytest -sv tests/singlecard/core/test_ascend_scheduler_e2e.py
-            pytest -sv tests/singlecard/ \
-            --ignore=tests/singlecard/test_offline_inference.py \
-            --ignore=tests/singlecard/test_guided_decoding.py \
-            --ignore=tests/singlecard/test_ascend_config.py \
-            --ignore=tests/singlecard/test_camem.py \
-            --ignore=tests/singlecard/core/test_ascend_scheduler.py \
-            --ignore=tests/singlecard/core/test_ascend_scheduler_e2e.py
-          else
-            pytest -sv tests/multicard/test_ilama_lora_tp2.py
-            # To avoid oom, we need to run the test in a single process.
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_topk
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/ --ignore=tests/multicard/test_ilama_lora_tp2.py --ignore=tests/multicard/test_offline_inference_distributed.py
-          fi
+          pytest -sv tests/singlecard/test_offline_inference.py
+          # TODO: switch hf to modelscope
+          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
+            pytest -sv tests/singlecard/test_ilama_lora.py
+          # TODO(sss): guided decoding doesn't work, fix it later
+          # pytest -sv tests/singlecard/test_guided_decoding.py
+          # test_ascend_config.py should be ran separately because it will regenerate the global config many times.
+          pytest -sv tests/singlecard/test_ascend_config.py
+          pytest -sv tests/singlecard/test_camem.py
+          pytest -sv tests/singlecard/ \
+          --ignore=tests/singlecard/test_offline_inference.py \
+          --ignore=tests/singlecard/test_ilama_lora.py \
+          --ignore=tests/singlecard/test_guided_decoding.py \
+          --ignore=tests/singlecard/test_ascend_config.py \
+          --ignore=tests/singlecard/test_camem.py
 
       - name: Run vllm-project/vllm-ascend test on V0 engine
         if: ${{ github.event_name == 'schedule' }}
         env:
           VLLM_USE_V1: 0
+          VLLM_USE_MODELSCOPE: True
         run: |
-          if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
-            VLLM_USE_MODELSCOPE=True  pytest -sv tests/singlecard/test_offline_inference.py
-            # guided decoding doesn't work, fix it later
-            # pytest -sv tests/singlecard/test_guided_decoding.py.py
-            pytest -sv tests/singlecard/test_camem.py
-            # test_ascend_config.py should be ran separately because it will regenerate the global config many times.
-            pytest -sv tests/singlecard/test_ascend_config.py
-            pytest -sv tests/singlecard/test_prompt_embedding.py
-            pytest -sv tests/singlecard/ \
-              --ignore=tests/singlecard/test_offline_inference.py \
-              --ignore=tests/singlecard/test_guided_decoding.py \
-              --ignore=tests/singlecard/test_camem.py \
-              --ignore=tests/singlecard/test_ascend_config.py \
-              --ignore=tests/singlecard/test_prompt_embedding.py \
-              --ignore=tests/singlecard/core/test_ascend_scheduler.py \
-              --ignore=tests/singlecard/core/test_ascend_scheduler_e2e.py
-          else
+          pytest -sv tests/singlecard/test_offline_inference.py
+          # TODO: switch hf to modelscope
+          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
+            pytest -sv tests/singlecard/test_ilama_lora.py
+          # guided decoding doesn't work, fix it later
+          # pytest -sv tests/singlecard/test_guided_decoding.py
+          pytest -sv tests/singlecard/test_camem.py
+          # test_ascend_config.py should be ran separately because it will regenerate the global config many times.
+          pytest -sv tests/singlecard/test_ascend_config.py
+          pytest -sv tests/singlecard/test_prompt_embedding.py
+          pytest -sv tests/singlecard/ \
+            --ignore=tests/singlecard/test_offline_inference.py \
+            --ignore=tests/singlecard/test_ilama_lora.py \
+            --ignore=tests/singlecard/test_guided_decoding.py \
+            --ignore=tests/singlecard/test_camem.py \
+            --ignore=tests/singlecard/test_ascend_config.py \
+            --ignore=tests/singlecard/test_prompt_embedding.py \
+            --ignore=tests/singlecard/core/test_ascend_scheduler.py \
+            --ignore=tests/singlecard/core/test_ascend_scheduler_e2e.py
+
+  e2e-4-cards:
+    needs: [e2e]
+    if: ${{ needs.e2e.result == 'success' }}
+    strategy:
+      max-parallel: 1
+      matrix:
+        os: [linux-arm64-npu-4]
+        vllm_version: [main, v0.9.1]
+    name: vLLM Ascend test
+    runs-on: ${{ matrix.os }}
+    container:
+      # TODO(yikun): Remove m.daocloud.io prefix when infra proxy ready
+      image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+          apt-get update -y
+          apt install git -y
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ matrix.vllm_version }}
+          path: ./vllm-empty
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Install vllm-project/vllm-ascend
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e .
+
+      - name: Run vllm-project/vllm-ascend test for V1 Engine
+        env:
+          VLLM_USE_V1: 1
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+          VLLM_USE_MODELSCOPE: True
+        run: |
+          # TODO: switch hf to modelscope
+          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
             pytest -sv tests/multicard/test_ilama_lora_tp2.py
-            # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py will raise error.
-            # To avoid oom, we need to run the test in a single process.
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_topk
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/ --ignore=tests/multicard/test_ilama_lora_tp2.py --ignore=tests/multicard/test_offline_inference_distributed.py
-          fi
+          # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py will raise error.
+          # To avoid oom, we need to run the test in a single process.
+          pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
+          pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
+          pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_topk
+          pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
+          pytest -sv tests/multicard/ --ignore=tests/multicard/test_ilama_lora_tp2.py --ignore=tests/multicard/test_offline_inference_distributed.py
+
+      - name: Run vllm-project/vllm-ascend test on V0 engine
+        if: ${{ github.event_name == 'schedule' }}
+        env:
+          VLLM_USE_V1: 0
+          VLLM_USE_MODELSCOPE: True
+        run: |
+          # TODO: switch hf to modelscope
+          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
+            pytest -sv tests/multicard/test_ilama_lora_tp2.py
+          # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py will raise error.
+          # To avoid oom, we need to run the test in a single process.
+          pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
+          pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
+          pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_topk
+          pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
+          pytest -sv tests/multicard/ --ignore=tests/multicard/test_ilama_lora_tp2.py --ignore=tests/multicard/test_offline_inference_distributed.py
