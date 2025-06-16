@@ -129,6 +129,7 @@ jobs:
       image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
       env:
         VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
     steps:
       - name: Check npu and CANN info
         run: |
@@ -175,9 +176,7 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         run: |
           pytest -sv tests/singlecard/test_offline_inference.py
-          # TODO: switch hf to modelscope
-          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
-            pytest -sv tests/singlecard/test_ilama_lora.py
+          pytest -sv tests/singlecard/test_ilama_lora.py
           # TODO(sss): guided decoding doesn't work, fix it later
           # pytest -sv tests/singlecard/test_guided_decoding.py
           # test_ascend_config.py should be ran separately because it will regenerate the global config many times.
@@ -197,9 +196,7 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         run: |
           pytest -sv tests/singlecard/test_offline_inference.py
-          # TODO: switch hf to modelscope
-          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
-            pytest -sv tests/singlecard/test_ilama_lora.py
+          pytest -sv tests/singlecard/test_ilama_lora.py
           # guided decoding doesn't work, fix it later
           # pytest -sv tests/singlecard/test_guided_decoding.py
           pytest -sv tests/singlecard/test_camem.py
@@ -277,9 +274,7 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
         run: |
-          # TODO: switch hf to modelscope
-          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
-            pytest -sv tests/multicard/test_ilama_lora_tp2.py
+          pytest -sv tests/multicard/test_ilama_lora_tp2.py
           # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py will raise error.
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
@@ -294,9 +289,7 @@ jobs:
           VLLM_USE_V1: 0
           VLLM_USE_MODELSCOPE: True
         run: |
-          # TODO: switch hf to modelscope
-          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
-            pytest -sv tests/multicard/test_ilama_lora_tp2.py
+          pytest -sv tests/multicard/test_ilama_lora_tp2.py
           # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py will raise error.
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
