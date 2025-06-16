@@ -256,8 +256,6 @@ class EplbProcess:
 
                 update_info = self.worker.do_update()
 
-                logger.info("update_info:", update_info)
-
                 for (a,b,c,d) in update_info:
                     while True:
                         if not block_update_q.empty():
