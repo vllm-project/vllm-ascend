@@ -2,9 +2,34 @@
 
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 export LD_LIBRARY_PATH=/usr/local/Ascend/ascend-toolkit/latest/opp/vendors/customize/op_api/lib/:${LD_LIBRARY_PATH}
-#Please modify the IPs and IFRAME according to your environment
-IPs=('1.0.0.0' '1.0.0.1')
-IFRAME=enp189s0f0
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --ips)
+            shift
+            # 收集所有后续参数直到遇到下一个选项或结束
+            while [[ $# -gt 0 && ! "$1" == --* ]]; do
+                IPs+=("$1")
+                shift
+            done
+            ;;
+        --network-card-name)
+            shift
+            NETWORK_CARD_NAME="$1"
+            shift
+            ;;
+        --prefill-device-cnt)
+            shift
+            PREFILL_DEVICE_CNT="$1"
+            shift
+            ;;
+        --decode-device-cnt)
+            shift
+            DECODE_DEVICE_CNT="$1"
+            shift
+            ;;
+    esac
+done
 LOCAL_HOST=`hostname -I|awk -F " " '{print$1}'`
 GPUS_PER_NODE=8
 MASTER_ADDR=${IPs[0]}
@@ -36,11 +61,11 @@ echo "NODE_RANK": $NODE_RANK
 echo "==============="
 
 if [[ -n "${GEN_RANKTABLE}" || ! -e ${PWD}/ranktable.json ]]; then
-    GLOO_SOCKET_IFNAME=${IFRAME} torchrun \
+    GLOO_SOCKET_IFNAME=$NETWORK_CARD_NAME torchrun \
         --nproc_per_node 1 \
         --nnodes ${NNODES} \
         --node_rank ${NODE_RANK} \
         --master_addr ${MASTER_ADDR} \
         --master_port ${MASTER_PORT} \
-        gen_ranktable.py --prefill-device-cnt $1 --decode-device-cnt $2
+        gen_ranktable.py --prefill-device-cnt $PREFILL_DEVICE_CNT --decode-device-cnt $DECODE_DEVICE_CNT
 fi
