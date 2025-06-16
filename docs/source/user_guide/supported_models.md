@@ -32,7 +32,6 @@
 | XLM-RoBERTa-based | ✅ |  |
 | Molmo | ✅ |  |
 
-
 ## Multimodal Language Models
 
 ### Generative Models

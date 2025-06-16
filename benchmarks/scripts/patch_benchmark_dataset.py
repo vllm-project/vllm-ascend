@@ -6,9 +6,8 @@ import libcst.matchers as m
 # Patch the benchmark_dataset.py file to set streaming=False in load_dataset calls
 
 
-# TDOO(Potabk): Remove this patch when the issue is fixed in the upstream
+# TODO(Potabk): Remove this patch when the issue is fixed in the upstream
 class StreamingFalseTransformer(cst.CSTTransformer):
-
     def __init__(self):
         self.in_target_class = False
         self.in_target_func = False
@@ -56,13 +55,12 @@ def patch_file(path):
     print(f"Patched: {path}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     parser = ArgumentParser(
-        description=
-        "Patch benchmark_dataset.py to set streaming=False in load_dataset calls"
+        description="Patch benchmark_dataset.py to set streaming=False in load_dataset calls"
     )
-    parser.add_argument("--path",
-                        type=str,
-                        help="Path to the benchmark_dataset.py file")
+    parser.add_argument(
+        "--path", type=str, help="Path to the benchmark_dataset.py file"
+    )
     args = parser.parse_args()
     patch_file(args.path)

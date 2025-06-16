@@ -10,7 +10,7 @@ This document describes how to install vllm-ascend manually.
 - Software:
 
     | Software  | Supported version | Note                                   |
-    |-----------|-------------------|----------------------------------------| 
+    |-----------|-------------------|----------------------------------------|
     | CANN      | >= 8.1.RC1        | Required for vllm-ascend and torch-npu |
     | torch-npu | >= 2.5.1          | Required for vllm-ascend               |
     | torch     | >= 2.5.1          | Required for torch-npu and vllm        |
@@ -184,6 +184,7 @@ git clone https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 docker build -t vllm-ascend-dev-image:latest -f ./Dockerfile .
 ```
+
 :::
 
 ```{code-block} bash

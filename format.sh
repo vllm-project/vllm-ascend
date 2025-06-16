@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
@@ -36,6 +36,12 @@
 # Cause the script to exit if a single command fails
 set -eo pipefail
 
+echo "vLLM-Ascend linting system has been moved from format.sh to pre-commit hooks."
+echo "Please run 'pip install -r requirements-pre-commit.txt', followed by"
+echo "'pre-commit install' to install the pre-commit hooks."
+echo "Then linters will run automatically before each commit."
+
+# Will remove this after the pre-commit hooks are fully functional.
 # this stops git rev-parse from failing if we run this from the .git directory
 builtin cd "$(dirname "${BASH_SOURCE:-$0}")"
 ROOT="$(git rev-parse --show-toplevel)"
@@ -273,7 +279,7 @@ echo 'vllm-ascend isort: Done'
 # Clang-format section
 # Exclude some files for formatting because they are vendored
 CLANG_FORMAT_EXCLUDES=(
-    'csrc/kernels/pos_encoding_kernels.cpp' 'csrc/kernels/advance_step.cpp' 'csrc/kernels/get_masked_input_and_mask_kernel.cpp' 'csrc/torch_binding.cpp' 'csrc/ops.h'
+    'csrc/kernels/pos_encoding_kernels.cpp' 'csrc/kernels/advance_step.cpp' 'csrc/torch_binding.cpp' 'csrc/ops.h'
 )
 
 # Format specified files with clang-format
