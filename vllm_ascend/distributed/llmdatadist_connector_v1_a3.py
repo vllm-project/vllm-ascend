@@ -376,7 +376,7 @@ class LLMDataDistConnectorWorker():
     return global_rank_table
 
 
-  def read_agent_metadata(self, global_rank_table, server_id, device_id, agent_role):
+  def read_agent_metadata(self, global_rank_table, server_id, device_rank, agent_role):
     devices_type_list = []
     agent_metadata = None
     if self.llm_datadist_role == LLMRole.PROMPT:
@@ -388,27 +388,25 @@ class LLMDataDistConnectorWorker():
       devices_type_list.append("decode_device_list")
     for device_type in devices_type_list:
       device_list = global_rank_table[device_type]
-      for device_info in device_list:
-        if device_info["server_id"] != str(server_id):
-          continue
-        if device_info["device_id"] != str(device_id):
-          continue
-        super_pod_id_ = device_info.get("super_pod_id", None)
-        server_id_ = device_info["server_id"]
-        device_id_ = device_info["device_id"]
-        device_ip_ = device_info["device_ip"]
-        super_device_id_ = device_info.get("super_device_id", None)
-        cluster_id_ = int(device_info["cluster_id"])
-        agent_metadata = LLMDataDistAgentMetadata(
-          super_pod_id=super_pod_id_,
-          server_id=server_id_,
-          device_id=device_id_,
-          device_ip=device_ip_,
-          super_device_id=super_device_id_,
-          cluster_id=cluster_id_,
-        )
-        break
-    assert agent_metadata is not None, f"Can't read the target server_id {server_id} and device_id {device_id} from rank table"
+      device_list = [d for d in device_list if d.get("server_id") == server_id]
+      if len(device_list) <= device_rank:
+        continue
+      device_info = device_list[device_rank]
+      super_pod_id_ = device_info.get("super_pod_id", None)
+      server_id_ = device_info["server_id"]
+      device_id_ = device_info["device_id"]
+      device_ip_ = device_info["device_ip"]
+      super_device_id_ = device_info.get("super_device_id", None)
+      cluster_id_ = int(device_info["cluster_id"])
+      agent_metadata = LLMDataDistAgentMetadata(
+        super_pod_id=super_pod_id_,
+        server_id=server_id_,
+        device_id=device_id_,
+        device_ip=device_ip_,
+        super_device_id=super_device_id_,
+        cluster_id=cluster_id_,
+      )
+    assert agent_metadata is not None, f"Can't read the target server_id {server_id} and device_rank {device_rank} from rank table"
     return agent_metadata
 
 
