@@ -330,11 +330,11 @@ class CustomDeepseekV2MoE(nn.Module):
         if self.fused_experts_allgather_ep_enabled:
             enable_alltoall_ep = False
         else:
-            enable_alltoall_ep = self.ep_group.world_size > 1
-            if not is_prefill:
-                enable_alltoall_ep = enable_alltoall_ep and (
-                    VLLM_ENABLE_MC2 or not self.torchair_graph_enabled)
-
+            enable_alltoall_ep = (
+                (VLLM_ENABLE_MC2 and not is_prefill) or
+                not (self.torchair_graph_enabled or self.ep_group.world_size == 1)
+            )
+    
         if self.tp_size > 1:
             if enable_alltoall_ep:
                 if num_tokens < self.tp_size:

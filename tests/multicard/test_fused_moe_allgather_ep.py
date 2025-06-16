@@ -16,16 +16,18 @@
 #
 """
 Execute the inference of fused_moe_allgather_ep and fused_moe_alltoall_ep.
+
 Run 'pytest tests/multicard/test_fused_moe_allgather_ep.py'.
 """
 
-import datetime
 import os
-import pytest
 from unittest.mock import patch
+
+from modelscope import snapshot_download  # type: ignore
 from vllm import SamplingParams
+
 from tests.conftest import VllmRunner
-from tests.model_utils import check_outputs_equal
+
 
 @patch.dict(os.environ, {
     "VLLM_USE_V1": "1",
@@ -52,7 +54,8 @@ def test_generate_with_allgather():
             "expert_tensor_parallel_size": 1
         }
     ) as vllm_model:
-        vllm_allgather_outputs = vllm_model.generate(example_prompts, sampling_params)
+        vllm_model.generate(example_prompts, sampling_params)
+
 
 @patch.dict(os.environ, {
     "VLLM_USE_V1": "1",
@@ -78,4 +81,4 @@ def test_generate_with_alltoall():
             "expert_tensor_parallel_size": 1
         }
     ) as vllm_model:
-        vllm_alltoall_outputs = vllm_model.generate(example_prompts, sampling_params)
+        vllm_model.generate(example_prompts, sampling_params)
