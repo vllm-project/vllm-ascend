@@ -94,7 +94,7 @@ class EplbUpdator:
             self.eplb_loader.generate_log2phy_map(updated_expert_map)
             expert_send_info_this_rank = expert_send_info[rank_id] if rank_id in expert_send_info else []
             expert_recv_info_this_rank = expert_recv_info[rank_id] if rank_id in expert_recv_info else []
-            logger.info(f"check update info, layer = {layer_id}, send = {expert_send_info_this_rank}, recv = {expert_recv_info_this_rank}")
+            #logger.info(f"check update info, layer = {layer_id}, send = {expert_send_info_this_rank}, recv = {expert_recv_info_this_rank}")
             self.eplb_loader.generate_expert_d2d_transfer_task(expert_send_info_this_rank,
                 expert_recv_info_this_rank, updated_expert_map[rank_id], layer_id + 3)
             self.weight_update_counter += 1

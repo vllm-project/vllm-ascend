@@ -106,6 +106,8 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
         for recv_expert_info in self.recv_expert_list:
             global_expert_id_to_recv, buffer_tensor_id = recv_expert_info
             self.eplb_adaptor.do_update_expert_weight(self.layer_id, global_expert_id_to_recv, buffer_tensor_id)
+        
+        logger.info(f"[EPLB] finished update expert weight for layer: {self.layer_id}")
 
         self.recv_expert_list = []
         self.updated_expert_map = None
