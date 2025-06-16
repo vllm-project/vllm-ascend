@@ -33,15 +33,6 @@ from vllm_ascend.ops.comm_utils import async_all_to_all
 from vllm_ascend.ops.moe_dispatcher.moe_utils import (
     get_capacity, permute, sort_chunks_by_idxs, topk_softmax_with_capacity,
     unpermute)
-""" We use the following notation throughout this file:
-     H: hidden size
-     B: micro batch size
-     S: sequence length
-     TP: tensor model parallel size
-     EP: expert model parallel size
-     num_local_tokens: S/TP*B
-     num_global_tokens: num_local_tokens*TP*EP
-"""
 
 
 class MoeDispatcherConfig:
