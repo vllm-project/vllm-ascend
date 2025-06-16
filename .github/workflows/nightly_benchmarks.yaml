@@ -116,7 +116,7 @@ jobs:
 
       - name: Install vllm-project/vllm-ascend
         run: |
-          pip install -e .
+          pip install -e . --no-build-isolation
           pip install -r benchmarks/requirements-bench.txt
 
       - name: Run current commit benchmarks

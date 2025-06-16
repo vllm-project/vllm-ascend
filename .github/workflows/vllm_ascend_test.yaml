@@ -216,7 +216,7 @@ jobs:
       - name: Install vllm-project/vllm-ascend
         run: |
           pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install -v -e . --no-build-isolation
 
       - name: Run e2e test for V1 Engine
         env:
@@ -313,7 +313,7 @@ jobs:
       - name: Install vllm-project/vllm-ascend
         run: |
           pip install -r requirements-dev.txt
-          pip install -v -e .
+          pip install -v -e . --no-build-isolation
 
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         env:

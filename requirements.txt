@@ -10,7 +10,8 @@ pyyaml
 scipy
 setuptools>=64
 setuptools-scm>=8
-torch-npu==2.5.1
+--extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+torch-npu==2.5.1.post1.dev20250528
 torch>=2.5.1
 torchvision<0.21.0
 wheel
