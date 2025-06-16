@@ -903,6 +903,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 total_num_scheduled_tokens, with_prefill)
             extra_builder_kwargs['with_prefill_across_dp'] = with_prefill
 
+        self.with_prefill = with_prefill
         # Add graph_pad_size here
         if envs_ascend.VLLM_ENABLE_MC2 or (self.torchair_graph_enabled
                                            and not with_prefill):
@@ -915,6 +916,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             graph_pad_size = padded_batch_size - total_num_scheduled_tokens
 
             extra_builder_kwargs['graph_pad_size'] = graph_pad_size
+            self.padded_batch_size = padded_batch_size
+        self.extra_builder_kwargs = extra_builder_kwargs
 
         if self.vllm_config.model_config.use_mla:
             attn_metadata = self.attn_metadata_builder.build(  # type: ignore
@@ -1001,6 +1004,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if self.torchair_graph_enabled and not with_prefill:
                     compiled_model = self._get_torchair_lazy_compiled_model(
                         padded_batch_size)
+                    # FIXME(xyx): adapt dummyrun for mtp to avoid recompile  
+                    torch._dynamo.mark_static(input_ids)
+                    torch._dynamo.mark_static(positions)
+                    torch._dynamo.mark_static(
+                        attn_metadata.decode.block_table)
+                    torch._dynamo.mark_static(
+                        attn_metadata.decode.input_positions)
+                    torch._dynamo.mark_static(attn_metadata.slot_mapping)
+                    for kv in self.kv_caches:
+                        assert isinstance(
+                            kv, tuple), "kv_cache must be a tuple"
+                        torch._dynamo.mark_static(kv[0])
+                        torch._dynamo.mark_static(kv[1])
                     hidden_states = compiled_model(
                         input_ids=input_ids,
                         positions=positions,
@@ -1499,7 +1515,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         positions=positions,
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=inputs_embeds)
-                return hidden_states
+            if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
+                assert isinstance(self.drafter, MtpProposer)
+                self.drafter.dummy_run(num_tokens)
+            return hidden_states
 
     def profile_run(self) -> None:
         # FIXME Profile with multimodal encoder & encoder cache.
