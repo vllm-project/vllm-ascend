@@ -102,4 +102,3 @@ class VllmEplbAdaptor(EplbAdaptor):
         rank_id = torch.distributed.get_rank()
         if self.log2phy_map_per_layer[layer_id] is not None:
             self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map[rank_id])
-
