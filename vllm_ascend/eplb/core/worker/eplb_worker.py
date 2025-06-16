@@ -128,7 +128,7 @@ class EplbWorker:
 
                 if not torch.isin(torch.tensor(expert_id), experts_to_send).any():
                     # if expert_id are not sent out from any npu, it will be copied from one npu holding this expert
-                    candidate_src_rank_indices = torch.where(current_expert_maps_this_layer[:, expert_id] != -1)
+                    candidate_src_rank_indices = torch.where(current_expert_maps_this_layer[:, expert_id] != -1)[0]
                 else:
                     candidate_src_rank_indices = src_rank_indices[experts_to_send == expert_id]
 
@@ -245,7 +245,7 @@ class EplbProcess:
         self.worker = EplbWorker(self.shared_dict, self.policy_type, self.enable_d2d)
 
 
-    def worker_process(self,planner_q,block_update_q):
+    def worker_process(self, planner_q, block_update_q):
         """
         Subprocess entry: bind to specified NPU, loop waiting for planner_q to wake up, call do_update, then notify main process update is complete.
         """
@@ -254,14 +254,17 @@ class EplbProcess:
 
                 planner_q.get()
 
-                update_info = self.worker.do_update()
+                update_info_generator = self.worker.do_update()
+                update_info_list = []
 
-                for (a,b,c,d) in update_info:
-                    while True:
-                        if not block_update_q.empty():
-                            continue
-                        block_update_q.put((a,b,c,d))
-                        break
+                for (send_info , recv_info , new_expert_map, layer_id) in update_info_generator:
+                    update_info_list.append((send_info , recv_info , new_expert_map, layer_id))
+
+                while True:
+                    if not block_update_q.empty():
+                        continue
+                    block_update_q.put(update_info_list)
+                    break
 
             except Exception as e:
                 logger.warning(f"[EPLB subprocess Exiting due to error: {e}", exc_info=True)

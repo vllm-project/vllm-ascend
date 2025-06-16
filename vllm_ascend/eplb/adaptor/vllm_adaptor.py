@@ -32,7 +32,7 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.param_dict = dict(self.model.named_parameters())
         self.num_dense_layers = self.model.config.first_k_dense_replace
         self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
-        self.global_expert_num = 256
+        self.global_expert_num = self.model.config.n_routed_experts
 
         # TODO: init self.expert_weight_names depending on different model types, only deepseek v3 w8a8 is supported here
         self.expert_weight_names = ["w13_weight", "w2_weight", "w13_weight_scale", "w13_weight_offset",
@@ -98,7 +98,7 @@ class VllmEplbAdaptor(EplbAdaptor):
             expert_tensor = self.param_dict[complete_name].data[local_expert_id]
             expert_tensor.copy_(self.buffer_tensor_dict[name][buffer_tensor_id])
 
-    def generate_index_dicts(self,tensor_2d):
+    def generate_index_dicts(self, tensor_2d):
         dict_list = []
         current_idx = 0
 
@@ -143,7 +143,7 @@ class VllmEplbAdaptor(EplbAdaptor):
         rank_id = torch.distributed.get_rank()
         if self.log2phy_map_per_layer[layer_id] is not None:
             self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map[rank_id])
-    
+
     def global2local(self,
         placement: torch.Tensor,
         E_local: int
