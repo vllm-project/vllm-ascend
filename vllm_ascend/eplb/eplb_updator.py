@@ -30,12 +30,12 @@ class EplbUpdator:
     def set_adaptor(self, adaptor):
         self.adaptor = adaptor
         self.eplb_loader = D2DExpertWeightLoader(eplb_adaptor=self.adaptor)
+        self.num_moe_layers = self.adaptor.num_moe_layers
 
     def init_eplb(self):
 
         self.num_iterations: torch.int64 = 10
 
-        self.num_moe_layers = 2
         self.weight_update_counter = 0
         self.expert_map_initialized = False
         self.update_in_flight = False
@@ -86,18 +86,20 @@ class EplbUpdator:
         self.planner_block_queue.put(1)
 
     def forward_before(self):
+        self.get_init_expert_map()
+
         if self.update_in_flight and self.weight_update_counter < self.num_moe_layers:
             (expert_send_info, expert_recv_info, updated_expert_map, layer_id) = self.block_update_queue.get()
             rank_id = torch.distributed.get_rank()
             self.eplb_loader.generate_log2phy_map(updated_expert_map)
             expert_send_info_this_rank = expert_send_info[rank_id] if rank_id in expert_send_info else []
             expert_recv_info_this_rank = expert_recv_info[rank_id] if rank_id in expert_recv_info else []
-            # TODO: layer_id + 3 should be replaced by configuration
             logger.info(f"check update info, layer = {layer_id}, send = {expert_send_info_this_rank}, recv = {expert_recv_info_this_rank}")
             self.eplb_loader.generate_expert_d2d_transfer_task(expert_send_info_this_rank,
                 expert_recv_info_this_rank, updated_expert_map[rank_id], layer_id + 3)
             self.weight_update_counter += 1
             if self.weight_update_counter == self.num_moe_layers:
+                self.weight_update_counter = 0
                 self.update_in_flight = False
 
         # set asynchronous stream for d2d expert weight update
@@ -105,9 +107,6 @@ class EplbUpdator:
         self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
     def forward_end(self):
-
-        self.get_init_expert_map()
-
         if not self.update_in_flight and self.get_update_iteration():
             moe_load = self.compute_and_set_moe_load()
             self.wakeup_eplb_worker()

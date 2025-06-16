@@ -13,11 +13,13 @@ from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.attention import _ALLOWED_NUM_QUERIES_PER_KV
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
+from vllm_ascend.utils import npu_stream_switch, npu_wait_tensor
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -376,7 +378,10 @@ class AscendMLAMetadataBuilder:
             seq_lens = seq_lens[:self._num_decode_tokens]
             input_positions = input_positions[:self._num_decode_tokens]
             block_table = block_table[:self._num_decode_tokens, ...]
-            if use_torchair_graph and self.runner.attn_state == AscendAttentionState.DecodeOnly:
+            if use_torchair_graph and self.runner.attn_state in [
+                    AscendAttentionState.DecodeOnly,
+                    AscendAttentionState.SpecDecoding
+            ]:
                 num_seqs = len(seq_lens)
                 if graph_pad_size != 0:
                     pad_value = 1
@@ -472,14 +477,28 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.o_proj = kwargs['o_proj']
         self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+        self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
+        self.enable_multistream_mla = \
+            ascend_config.torchair_graph_config.enable_multistream_mla
+
         # Adapt torch air graph mode with spec decoding.
         speculative_config = get_current_vllm_config().speculative_config
         if speculative_config is not None:
             self.spec_token_num = speculative_config.num_speculative_tokens
             assert self.spec_token_num > 0
+
+        # TODO: support numHeads / numKvHeads < 16 in MLA kernel
+        if self.torchair_graph_enabled:
+            assert self.num_queries_per_kv in _ALLOWED_NUM_QUERIES_PER_KV, \
+                ("The allowed number of queries per kv when enabling both MLA and Graph mode"
+                " only support {32, 64, 128}, Thus this is not supported for DeepSeek-V2-Lite,"
+                " as it only has 16 attention heads. And if you're using DeepSeek-V3 or DeepSeek-R1,"
+                " please make sure after the tensor parallel split, num_heads / num_kv_heads in "
+                "{32, 64, 128}.")
 
     def _v_up_proj_and_o_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
@@ -648,7 +667,40 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv = self.kv_a_proj_with_mqa(hidden_states)[0]
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv = kv.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
-        k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
+        cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
+        with npu_stream_switch("mla_secondary",
+                               0,
+                               enabled=self.enable_multistream_mla):
+            k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
+                kv,
+                self.kv_a_layernorm.weight,
+                cos,
+                sin,
+                slots.to(torch.int64),
+                kv_cache[1],
+                kv_cache[0],
+                epsilon=self.kv_a_layernorm.variance_epsilon,
+                cache_mode=cache_mode,
+            )
+        return k_pe, k_nope
+
+    def exec_kv_prefill(
+        self,
+        hidden_states: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        kv_cache: Tuple,
+        slots: torch.Tensor,
+    ):
+
+        B = hidden_states.shape[0]
+        N = self.num_kv_heads
+        S = 1
+        kv = self.kv_a_proj_with_mqa(hidden_states)[0]
+        # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
+        kv = kv.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
+        cache_mode = "PA_BLK_NZ" if self.enable_kv_nz else "PA"
+        _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv,
             self.kv_a_layernorm.weight,
             cos,
@@ -657,7 +709,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_cache[1],
             kv_cache[0],
             epsilon=self.kv_a_layernorm.variance_epsilon,
-            cache_mode="PA",
+            cache_mode=cache_mode,
+            is_output_kv=True,
         )
         return k_pe, k_nope
 
@@ -695,34 +748,42 @@ class AscendMLAImpl(MLAAttentionImpl):
             # TorchAir's shape is [bs, num_heads_per_rank, q_seq_len, dim]
             if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
                 assert num_tokens % self.spec_token_num == 0
-                q_nope = (q_nope.view(
-                    num_tokens // (self.spec_token_num + 1),
-                    self.spec_token_num + 1,
-                    self.num_heads,
-                    -1,
-                ).transpose(1, 2).contiguous())
-                q_pe = (q_pe.view(
-                    num_tokens // (self.spec_token_num + 1),
-                    self.spec_token_num + 1,
-                    self.num_heads,
-                    -1,
-                ).transpose(1, 2).contiguous())
+                q_nope = q_nope.view(num_tokens // (self.spec_token_num + 1),
+                                     self.spec_token_num + 1, self.num_heads,
+                                     -1)
+                q_pe = q_pe.view(num_tokens // (self.spec_token_num + 1),
+                                 self.spec_token_num + 1, self.num_heads, -1)
+                if not self.enable_kv_nz:
+                    q_nope = q_nope.transpose(1, 2).contiguous()
+                    q_pe = q_pe.transpose(1, 2).contiguous()
                 sparse_mode = 3
                 spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
             else:
-                q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1)
-                q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
+                if self.enable_kv_nz:
+                    q_nope = q_nope.view(num_tokens, 1, self.num_heads, -1)
+                    q_pe = q_pe.view(num_tokens, 1, self.num_heads, -1)
+                else:
+                    q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1)
+                    q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
                 sparse_mode = 0
                 spec_attn_mask = None
             # shape of knope/k_pe for npu graph mode should be:
             # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
             block_size = kv_c_and_k_pe_cache[0].shape[1]
-            k_nope = k_nope.view(-1, self.num_kv_heads, block_size,
-                                 self.kv_lora_rank)
-            k_pe = k_pe.view(-1, self.num_kv_heads, block_size,
-                             self.qk_rope_head_dim)
+            if self.enable_kv_nz:
+                k_nope = k_nope.view(-1, self.num_kv_heads,
+                                     self.kv_lora_rank // 16, block_size, 16)
+                k_pe = k_pe.view(-1, self.num_kv_heads,
+                                 self.qk_rope_head_dim // 16, block_size, 16)
+                input_layout = "BSND"
+            else:
+                k_nope = k_nope.view(-1, self.num_kv_heads, block_size,
+                                     self.kv_lora_rank)
+                k_pe = k_pe.view(-1, self.num_kv_heads, block_size,
+                                 self.qk_rope_head_dim)
+                input_layout = "BNSD"
 
-            attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
+            attn_output, _ = torch_npu.npu_fused_infer_attention_score(
                 q_nope,
                 k_nope,
                 k_nope,
@@ -730,7 +791,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 key_rope=k_pe,
                 num_heads=self.num_heads,
                 num_key_value_heads=self.num_kv_heads,
-                input_layout="BNSD",
+                input_layout=input_layout,
                 atten_mask=spec_attn_mask,
                 sparse_mode=sparse_mode,
                 scale=self.scale,
@@ -779,10 +840,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         ]
         num_actual_toks = attn_metadata.num_actual_tokens
         if k_pe is None and not self.running_in_graph:
-            kv_c, k_pe = self.kv_a_proj_with_mqa(
-                hidden_states_or_kv_c_normed)[0].split(
-                    [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-            kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+            if not self.torchair_graph_enabled:
+                kv_c, k_pe = self.kv_a_proj_with_mqa(
+                    hidden_states_or_kv_c_normed)[0].split(
+                        [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+                kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
         else:
             kv_c_normed = hidden_states_or_kv_c_normed
         assert attn_metadata.num_decodes is not None and \
@@ -795,38 +857,55 @@ class AscendMLAImpl(MLAAttentionImpl):
             # Inputs and outputs may be padded for CUDA graphs
             output_padded = output
             output = output[:num_actual_toks, ...]
-            kv_c_normed = kv_c_normed[:num_actual_toks, ...]
-            prefill_k_c_normed = kv_c_normed[num_decode_tokens:]
+            if not self.torchair_graph_enabled:
+                kv_c_normed = kv_c_normed[:num_actual_toks, ...]
+                prefill_k_c_normed = kv_c_normed[num_decode_tokens:]
         if not self.running_in_graph:
             hidden_states_or_q_c = hidden_states_or_q_c[:num_actual_toks, ...]
-            decode_hs_or_q_c = hidden_states_or_q_c[:num_decode_tokens]
             prefill_hs_or_q_c = hidden_states_or_q_c[num_decode_tokens:]
-            k_pe = k_pe[:num_actual_toks, ...]
-            k_pe = k_pe.unsqueeze(1)
-            decode_k_pe = k_pe[:num_decode_tokens]
-            prefill_k_pe = k_pe[num_decode_tokens:]
+            if not self.torchair_graph_enabled:
+                decode_hs_or_q_c = hidden_states_or_q_c[:num_decode_tokens]
+                k_pe = k_pe[:num_actual_toks, ...]
+                k_pe = k_pe.unsqueeze(1)
+                decode_k_pe = k_pe[:num_decode_tokens]
+                prefill_k_pe = k_pe[num_decode_tokens:]
         else:
             decode_hs_or_q_c = hidden_states_or_q_c
         if has_decode:
             decode_k_nope = None
             assert attn_metadata.decode is not None
-            decode_ql_nope, decode_q_pe = \
-                self._q_proj_and_k_up_proj(decode_hs_or_q_c)
             if self.running_in_graph:
                 seq_len = self.rotary_emb.max_position_embeddings
                 cos = self.rotary_emb.cos_cached[:seq_len].to(
-                    dtype=decode_q_pe.dtype)
+                    dtype=decode_hs_or_q_c.dtype)
                 sin = self.rotary_emb.sin_cached[:seq_len].to(
-                    dtype=decode_q_pe.dtype)
+                    dtype=decode_hs_or_q_c.dtype)
                 cos = cos[attn_metadata.decode.input_positions]
                 sin = sin[attn_metadata.decode.input_positions]
                 cos = cos[:, None, None, :]
                 sin = sin[:, None, None, :]
-
-                decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
+                # Without explicitly controlling the order, IndexByTensor operations
+                # would be placed after `matmul W_KV_T` hindering the overlapping of
+                # KvRmsNormRopeCache and SingleRope.
+                npu_wait_tensor(decode_hs_or_q_c,
+                                cos,
+                                enabled=self.enable_multistream_mla)
+                npu_wait_tensor(decode_hs_or_q_c,
+                                sin,
+                                enabled=self.enable_multistream_mla)
+            decode_ql_nope, decode_q_pe = \
+                self._q_proj_and_k_up_proj(decode_hs_or_q_c)
+            if self.running_in_graph:
                 decode_k_pe, decode_k_nope = self.exec_kv(
                     hidden_states_or_kv_c_normed, cos, sin, kv_cache,
                     attn_metadata.slot_mapping)
+                with npu_stream_switch("mla_secondary",
+                                       0,
+                                       enabled=self.enable_multistream_mla):
+                    npu_wait_tensor(decode_q_pe,
+                                    decode_k_pe,
+                                    enabled=self.enable_multistream_mla)
+                    decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
             else:
                 decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
                     attn_metadata.decode.input_positions,
@@ -841,22 +920,25 @@ class AscendMLAImpl(MLAAttentionImpl):
             prefill_q_nope = prefill_q[..., :self.qk_nope_head_dim]
             if self.torchair_graph_enabled:
                 num_tokens = prefill_hs_or_q_c.shape[0]
+                seq_len = self.rotary_emb.max_position_embeddings
+                cos = self.rotary_emb.cos_cached[:seq_len].to(
+                    dtype=prefill_q_pe.dtype)
+                sin = self.rotary_emb.sin_cached[:seq_len].to(
+                    dtype=prefill_q_pe.dtype)
+                cos = cos[attn_metadata.prefill.input_positions]
+                sin = sin[attn_metadata.prefill.input_positions]
+                cos = cos[:, None, None, :]
+                sin = sin[:, None, None, :]
+
+                prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
+                prefill_k_pe, prefill_k_nope = self.exec_kv_prefill(
+                    hidden_states_or_kv_c_normed, cos, sin, kv_cache,
+                    attn_metadata.slot_mapping)
+
+                kv_c_normed = prefill_k_nope[:num_actual_toks, ...]
+                prefill_k_c_normed = prefill_k_nope[num_decode_tokens:]
                 prefill_k_pe = prefill_k_pe.view(num_tokens, self.num_kv_heads,
                                                  -1)
-                if self.rotary_emb.__class__.__name__ == 'RotaryEmbedding':
-                    # NOTE: When scaling not specified
-                    ori_q_pe_shape, ori_k_pe_shape = prefill_q_pe.shape, prefill_k_pe.shape
-                    prefill_q_pe = prefill_q_pe.reshape(num_tokens, -1)
-                    prefill_k_pe = prefill_k_pe.reshape(num_tokens, -1)
-                    prefill_q_pe, prefill_k_pe = self.rotary_emb(
-                        attn_metadata.prefill.input_positions, prefill_q_pe,
-                        prefill_k_pe)
-                    prefill_q_pe = prefill_q_pe.view(ori_q_pe_shape)
-                    prefill_k_pe = prefill_k_pe.view(ori_k_pe_shape)
-                else:
-                    prefill_q_pe, prefill_k_pe = self.rotary_emb(
-                        attn_metadata.prefill.input_positions, prefill_q_pe,
-                        prefill_k_pe)
                 prefill_q = torch.cat([prefill_q_nope, prefill_q_pe], dim=-1)
             else:
                 prefill_q_pe[...], prefill_k_pe[...] = self.rotary_emb(

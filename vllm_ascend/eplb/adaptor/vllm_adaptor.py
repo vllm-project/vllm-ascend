@@ -34,14 +34,15 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.expert_weight_names = ["w13_weight", "w2_weight", "w13_weight_scale", "w13_weight_offset",
             "w2_weight_scale", "w2_weight_offset"]
 
-        self.buffer_tensor_dict = dict()
-        num_buffer_tensor = 100 # TO DO: provide number of buffer tensor by vllm configuration
-        self.init_buffer_tensor_dict(num_buffer_tensor)
-
         self.expert_map_per_layer = dict()
         for layer_idx in range(self.num_moe_layers):
             self.expert_map_per_layer[self.num_dense_layers + layer_idx] =\
                 self.model.get_expert_map(self.num_dense_layers + layer_idx)
+
+        self.buffer_tensor_dict = dict()
+        # TODO: here we set number of buffer tensor equal to number of expert in each laryer, which can be improved
+        num_buffer_tensor = torch.where(self.expert_map_per_layer[self.num_dense_layers] != -1)[0].numel()
+        self.init_buffer_tensor_dict(num_buffer_tensor)
 
         self.log2phy_map_per_layer = dict()
         for layer_idx in range(self.num_moe_layers):
@@ -123,7 +124,7 @@ class VllmEplbAdaptor(EplbAdaptor):
 
         log2phy_map = torch.full((ranks_num, global_expert_num),
                                     -1,
-                                    dtype=torch.int32) 
+                                    dtype=torch.int32)
         for rank in range(ranks_num):
             for key in result_dict:
                 indices_in_concat = result_dict[key]
@@ -135,6 +136,7 @@ class VllmEplbAdaptor(EplbAdaptor):
         return log2phy_map
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
-        
+
         if self.log2phy_map_per_layer[layer_id] is not None:
-            self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map)
+            rank_id = torch.distributed.get_rank()
+            self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map[rank_id])
