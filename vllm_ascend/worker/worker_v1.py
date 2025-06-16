@@ -117,6 +117,11 @@ class NPUWorker(WorkerBase):
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
+    def initialize_cache(self, num_gpu_blocks: int,
+                         num_cpu_blocks: int) -> None:
+        self.cache_config.num_gpu_blocks = num_gpu_blocks
+        self.cache_config.num_cpu_blocks = num_cpu_blocks
+
     def init_device(self):
         if self.device_config.device.type == "npu":
             self.device = torch.device(f"npu:{self.local_rank_across_dp}")

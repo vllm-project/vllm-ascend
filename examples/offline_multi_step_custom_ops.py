@@ -19,9 +19,6 @@
 
 from vllm import LLM, SamplingParams
 
-import vllm_ascend.platform as pf
-
-pf.CUSTOM_OP_ENABLED = True  # set True for custom Ops of Multi-Step.
 prompts = [
     "Hello, my name is",
     "The president of the United States is",
