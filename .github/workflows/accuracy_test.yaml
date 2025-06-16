@@ -175,7 +175,7 @@ jobs:
         working-directory: ./vllm-ascend
         run: |
           pip install -r requirements-dev.txt
-          pip install -e . --no-build-isolation
+          pip install -e .
 
       - name: Install lm-eval, ray, and datasets
         run: |

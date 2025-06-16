@@ -90,7 +90,7 @@ jobs:
       - name: Install vllm-project/vllm-ascend
         run: |
           pip install -r requirements-dev.txt
-          pip install -v -e . --no-build-isolation
+          pip install -v -e .
 
       - name: Run vllm-project/vllm-ascend long term test
         run: |
