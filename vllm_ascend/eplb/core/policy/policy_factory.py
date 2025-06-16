@@ -10,6 +10,6 @@ class PolicyFactory:
     def generate_policy(policy_type: int, config: DynamicConfig) -> EplbPolicy:
         policy = {
             0:MockLoadBalance ,  # MockLoadBalance
-            1:DynamicEP,  # When real eplb algorithm is ready, recover this
+            1:DynamicEP,
         }
         return policy.get(policy_type, MockLoadBalance)(config)
