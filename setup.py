@@ -31,8 +31,6 @@ from setuptools.command.develop import develop
 from setuptools.command.install import install
 from setuptools_scm import get_version
 
-os.environ['PIP_EXTRA_INDEX_URL'] = 'https://mirrors.huaweicloud.com/ascend/repos/pypi'  # yapf: disable
-
 def load_module_from_path(module_name, path):
     spec = importlib.util.spec_from_file_location(module_name, path)
     module = importlib.util.module_from_spec(spec)
