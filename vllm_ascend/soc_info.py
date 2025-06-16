@@ -8,5 +8,5 @@ class NPUSocInfo:
     def __post_init__(self):
         torch_npu.npu._lazy_init()
         self.soc_version = torch_npu._C._npu_get_soc_version()
-        if self.soc_version in (253, 254, 255):
+        if self.soc_version in (250, 251, 252, 253, 254, 255):
             self.is_a3 = True
