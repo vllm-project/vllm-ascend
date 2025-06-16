@@ -47,16 +47,7 @@
 #    Related PR (if no, explain why):
 #    Future Plan:
 #       Remove those patch when vllm merged them
-#   2. `vllm.v1.engine.core.DPEngineCoreProc._init_data_parallel`
-#    Why:
-#       There is some bug for ASCEND_RT_VISIBLE_DEVICES usage.
-#    How：
-#       The ASCEND_RT_VISIBLE_DEVICES related code is dropped.
-#    Related PR (if no, explain why):
-#       No, this is a bug for vllm ascend
-#    Future Plan:
-#       Remove this patch once ASCEND_RT_VISIBLE_DEVICES bug is fixed.
-#   3. `vllm.config.ParallelConfig.get_next_dp_init_port`
+#   2. `vllm.config.ParallelConfig.get_next_dp_init_port`
 #    Why:
 #       vllm doesn't support get port from environment.
 #    How：
@@ -65,7 +56,7 @@
 #       Need a PR to vllm to support get port from environment.
 #    Future Plan:
 #       Remove those patch when vllm merged them
-#   4. `vllm.config.ParallelConfig.ParallelConfig.stateless_init_dp_group`
+#   3. `vllm.config.ParallelConfig.ParallelConfig.stateless_init_dp_group`
 #    Why:
 #       vLLM use gloo backend by default to initialize stateless dp process gourp, but we want to use hccl here to
 #       get better performance

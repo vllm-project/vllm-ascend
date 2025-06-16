@@ -152,7 +152,7 @@ class cmake_build_ext(build_ext):
             # if pybind11 is installed via pip
             pybind11_cmake_path = (subprocess.check_output(
                 [python_executable, "-m", "pybind11",
-                 "--cmake"]).decode().strip())
+                 "--cmakedir"]).decode().strip())
         except subprocess.CalledProcessError as e:
             # else specify pybind11 path installed from source code on CI container
             raise RuntimeError(f"CMake configuration failed: {e}")
