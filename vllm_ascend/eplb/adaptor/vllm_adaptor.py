@@ -17,9 +17,12 @@
 
 import torch
 import torch.distributed as dist
+import numpy as np
 
 from vllm_ascend.eplb.adaptor.abstract_adaptor import EplbAdaptor
 from vllm.logger import logger
+import random
+
 
 class VllmEplbAdaptor(EplbAdaptor):
 
@@ -29,6 +32,7 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.param_dict = dict(self.model.named_parameters())
         self.num_dense_layers = self.model.config.first_k_dense_replace
         self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
+        self.global_expert_num = 256
 
         # TODO: init self.expert_weight_names depending on different model types, only deepseek v3 w8a8 is supported here
         self.expert_weight_names = ["w13_weight", "w2_weight", "w13_weight_scale", "w13_weight_offset",
@@ -72,18 +76,16 @@ class VllmEplbAdaptor(EplbAdaptor):
         expert_map = self.model.get_all_expert_map(num_moe_layers)
         if dist.is_initialized():
             world_size = dist.get_world_size()
+            rank = dist.get_rank()
 
-        rank = dist.get_rank()
+        gathered = torch.empty((world_size, *expert_map.shape),  # [W, L, E]
+            dtype=expert_map.dtype,
+            device=expert_map.device)
 
-        tensor_list = [
-            torch.zeros_like(expert_map) for _ in range(world_size)
-        ]
+        dist.all_gather_into_tensor(gathered, expert_map)
+        all_maps = gathered.permute(1, 0, 2)
+        all_expert_maps = all_maps.cpu()
 
-        dist.all_gather(tensor_list, expert_map)
-        gathered = torch.stack(tensor_list, dim=0)
-        all_maps = gathered.permute(1, 0, 2).contiguous()
-
-        all_expert_maps = all_maps.to(torch.device("cpu"))
         return all_expert_maps
 
     def do_update_expert_map(self, layer_id, updated_expert_map):
@@ -111,6 +113,8 @@ class VllmEplbAdaptor(EplbAdaptor):
         return dict_list
 
     def generate_log2phy_map(self, expert_map):
+        num_local_experts = expert_map.max() + 1
+        expert_map = self.global2local(expert_map,num_local_experts)
         ranks_num, global_expert_num = expert_map.shape
         concatenated = torch.flatten(expert_map)
         rank_expert_to_global = self.generate_index_dicts(
@@ -122,7 +126,7 @@ class VllmEplbAdaptor(EplbAdaptor):
                 result_dict[key] = []
             result_dict[key].append(idx)
 
-        log2phy_map = torch.full((ranks_num, global_expert_num),
+        log2phy_map = torch.full((ranks_num, self.global_expert_num),
                                     -1,
                                     dtype=torch.int32)
         for rank in range(ranks_num):
@@ -136,7 +140,27 @@ class VllmEplbAdaptor(EplbAdaptor):
         return log2phy_map
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
-
+        rank_id = torch.distributed.get_rank()
         if self.log2phy_map_per_layer[layer_id] is not None:
-            rank_id = torch.distributed.get_rank()
             self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map[rank_id])
+    
+    def global2local(self,
+        placement: torch.Tensor,
+        E_local: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+
+        G, _ = placement.shape
+        device = placement.device
+
+        pt_local = torch.full(( G, E_local),
+                              fill_value=-1,
+                              dtype=torch.long,
+                              device=device)
+
+        valid = placement >= 0
+        g_idx, k_idx = valid.nonzero(as_tuple=True)
+        slot_idx = placement[g_idx, k_idx]
+
+        pt_local[g_idx, slot_idx] = k_idx
+
+        return pt_local
