@@ -19,7 +19,8 @@ class MockLoadBalance(EplbPolicy):
 
         for i in range(num_layers):
             # 随机选两个卡
-            indices = random.sample(range(num_card), 2)
+            # indices = random.sample(range(num_card), 2)
+            indices = [3,1]
 
             # 交换冗余专家
             expert_id_to_exchange = new_table[i][indices[0]][-1].clone()
