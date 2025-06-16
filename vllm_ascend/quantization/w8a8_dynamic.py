@@ -391,7 +391,6 @@ def fused_experts_with_allgather(hidden_states: torch.Tensor,
                                             expanded_x_idx)
     row_index = expanded_x_idx // topk_ids.shape[-1]
     row_index = row_index.to(torch.int64)
-    # TODO pass share_input from outside
     share_input = torch.zeros((batch_size, hidden_size),
                               dtype=torch.bfloat16,
                               device="npu")
