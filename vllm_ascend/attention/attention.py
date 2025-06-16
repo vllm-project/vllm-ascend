@@ -36,7 +36,7 @@ from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.cache import concat_and_cache_mla
-from vllm_ascend.platform import CUSTOM_OP_ENABLED
+from vllm_ascend.utils import enable_custom_op
 from vllm_ascend.worker.model_runner import (
     ModelInputForNPUBuilder, ModelInputForNPUWithSamplingMetadata)
 
@@ -462,7 +462,7 @@ class AscendMetadata(AttentionMetadata):
         for i in range(num_queries):
             self.seq_lens[i] += 1
         self.max_decode_seq_len = max(self.seq_lens)
-        if CUSTOM_OP_ENABLED:
+        if enable_custom_op():
             #advance a step on NPU for existing inputs for a multi-step runner if custom ops is enabled
             torch.ops._C.advance_step_flashattn_ascendc(
                 num_seqs=num_seqs,
