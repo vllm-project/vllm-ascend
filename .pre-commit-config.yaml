@@ -40,10 +40,6 @@ repos:
   hooks:
   - id: pymarkdown
     args: [fix]
-- repo: https://github.com/rhysd/actionlint
-  rev: v1.7.7
-  hooks:
-  - id: actionlint
 - repo: local
   hooks:
   - id: mypy-local
@@ -91,6 +87,11 @@ repos:
     entry: tools/png-lint.sh
     language: script
     types: [png]
+  - id: action-lint
+    name: Lint GitHub Actions workflows
+    entry: tools/actionlint.sh
+    language: script
+    types: [shell]
   - id: signoff-commit
     name: Sign-off Commit
     entry: bash

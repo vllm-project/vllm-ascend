@@ -24,6 +24,7 @@ jobs:
     - name: Install vllm
       working-directory: vllm-empty
       run: |
+        pip install -r requirements/build.txt --extra-index-url https://download.pytorch.org/whl/cpu
         VLLM_TARGET_DEVICE=empty pip install -e .
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
       with:
