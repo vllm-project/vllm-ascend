@@ -8,12 +8,11 @@ This document describes how to install vllm-ascend manually.
 - Python: >= 3.9, < 3.12
 - A hardware with Ascend NPU. It's usually the Atlas 800 A2 series.
 - Software:
-
-    | Software  | Supported version | Note                                   |
-    |-----------|-------------------|----------------------------------------| 
-    | CANN      | >= 8.1.RC1        | Required for vllm-ascend and torch-npu |
-    | torch-npu | >= 2.5.1          | Required for vllm-ascend               |
-    | torch     | >= 2.5.1          | Required for torch-npu and vllm        |
+    | Software      | Supported version                | Note                                      |
+    |---------------|----------------------------------|-------------------------------------------|
+    | CANN          | >= 8.1.RC1                       | Required for vllm-ascend and torch-npu    |
+    | torch-npu     | == 2.5.1.post1.dev20250528       | Required for vllm-ascend                  |
+    | torch         | >= 2.5.1                         | Required for torch-npu and vllm           |
 
 You have 2 way to install:
 - **Using pip**: first prepare env manually or via CANN image, then install `vllm-ascend` using pip.
