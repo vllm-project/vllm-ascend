@@ -818,7 +818,8 @@ class AscendW8A8DynamicFusedMoEMethod:
                 1, 2).contiguous()
             layer.w2_weight.data = layer.w2_weight.data.transpose(
                 1, 2).contiguous()
-        torch_npu.npu_format_cast_(layer.w2_weight, 29)
+        if self.fused_experts_allgather_ep_enabled:
+            torch_npu.npu_format_cast_(layer.w2_weight, 29)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
             layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(
