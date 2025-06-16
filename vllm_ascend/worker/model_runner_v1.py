@@ -983,7 +983,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         elif np.all(num_valid_tokens == 1):
             if self.use_eagle:
                 attn_state = AscendAttentionState.ChunkedPrefill
-            else:
+            elif isinstance(self.drafter, MtpProposer):
                 attn_state = AscendAttentionState.SpecDecoding
         # splitfuse
         elif not ascend_config.ascend_scheduler_config.enabled or self.chunked_prefill_enabled:
@@ -1015,7 +1015,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         seq_lens = self.seq_lens[:num_reqs]
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start_loc, seq_lens=seq_lens)
-        with_prefill = attn_state != AscendAttentionState.DecodeOnly
+        with_prefill = attn_state not in [
+            AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
+        ]
 
         if self.dp_size > 1:
             max_num_tokens, with_prefill = self._get_forward_metadata_across_dp(
