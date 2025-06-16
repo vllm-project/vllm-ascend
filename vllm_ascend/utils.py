@@ -54,6 +54,8 @@ MAX_CAPTURE_SIZE = 1920
 
 ASCEND_QUATIZATION_METHOD = "ascend"
 
+CUSTOM_OP_ENABLED = None
+
 
 def try_register_lib(lib_name: str, lib_info: str = ""):
     import importlib
@@ -66,6 +68,31 @@ def try_register_lib(lib_name: str, lib_info: str = ""):
                 logger.info(lib_info)
     except Exception:
         pass
+
+
+def enable_custom_op():
+    """
+    Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component. 
+    Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
+    """
+    global CUSTOM_OP_ENABLED
+
+    if CUSTOM_OP_ENABLED is not None:
+        return CUSTOM_OP_ENABLED
+
+    else:
+        try:
+            # register custom ops into torch_library here
+            import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+            CUSTOM_OP_ENABLED = True
+
+        except ImportError:
+            CUSTOM_OP_ENABLED = False
+            logger.warning(
+                "Warning: Failed to register custom ops, all custom ops will be disabled"
+            )
+
+        return CUSTOM_OP_ENABLED
 
 
 def find_hccl_library() -> str:
