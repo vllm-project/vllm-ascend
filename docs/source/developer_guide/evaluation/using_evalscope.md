@@ -65,6 +65,7 @@ pip install gradio plotly evalscope
 ## 3. Run gsm8k accuracy test using EvalScope
 
 You can `evalscope eval` run gsm8k accuracy test:
+
 ```
 evalscope eval \
  --model Qwen/Qwen2.5-7B-Instruct \
@@ -98,6 +99,7 @@ pip install evalscope[perf] -U
 ### Basic usage
 
 You can use `evalscope perf` run perf test:
+
 ```
 evalscope perf \
     --url "http://localhost:8000/v1/chat/completions" \
@@ -111,7 +113,7 @@ evalscope perf \
 
 ### Output results
 
-After 1-2 mins, the output is as shown below: 
+After 1-2 mins, the output is as shown below:
 
 ```shell
 Benchmarking summary:

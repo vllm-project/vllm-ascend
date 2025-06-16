@@ -1,4 +1,5 @@
 # formatting
+pre-commit==4.0.1
 yapf==0.32.0
 toml==0.10.2
 tomli==2.0.2

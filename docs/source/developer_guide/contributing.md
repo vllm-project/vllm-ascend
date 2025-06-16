@@ -34,7 +34,9 @@ apt install -y gcc g++ cmake libnuma-dev
 pip install -r requirements-dev.txt
 
 # Then you can run lint and mypy test
-bash format.sh
+# Have pre-commits installed, and linters will run automatically before each commit.
+pip install -r requirements-lint.txt
+pre-commit install
 
 # Build:
 # - only supported on Linux (torch_npu available)

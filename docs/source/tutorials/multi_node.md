@@ -2,17 +2,16 @@
 
 Multi-node inference is suitable for scenarios where the model cannot be deployed on a single NPU. In such cases, the model can be distributed using tensor parallelism and pipeline parallelism. The specific parallelism strategies will be covered in the following sections. To successfully deploy multi-node inference, the following three steps need to be completed:
 
-* **Verify Multi-Node Communication Environment** 
+* **Verify Multi-Node Communication Environment**
 * **Set Up and Start the Ray Cluster**
 * **Start the Online Inference Service on multinode**
-
 
 ## Verify Multi-Node Communication Environment
 
 ### Physical Layer Requirements:
 
-- The physical machines must be located on the same WLAN, with network connectivity.
-- All NPUs are connected with optical modules, and the connection status must be normal.
+* The physical machines must be located on the same WLAN, with network connectivity.
+* All NPUs are connected with optical modules, and the connection status must be normal.
 
 ### Verification Process:
 
@@ -35,11 +34,13 @@ Execute the following commands on each node in sequence. The results must all be
 
 ### NPU Interconnect Verification:
 #### 1. Get NPU IP Addresses
+
 ```bash
 for i in {0..7}; do hccn_tool -i $i -ip -g | grep ipaddr; done
 ```
 
 #### 2. Cross-Node PING Test
+
 ```bash
 # Execute on the target node (replace with actual IP)
 hccn_tool -i 0 -ping -g address 10.20.0.20
@@ -52,8 +53,6 @@ To ensure a consistent execution environment across all nodes, including the mod
 For setting up a multi-node inference cluster with Ray, **containerized deployment** is the preferred approach. Containers should be started on both the master and worker nodes, with the `--net=host` option to enable proper network connectivity.
 
 Below is the example container setup command, which should be executed on **all nodes** :
-
-
 
 ```shell
 # Define the image and container name
@@ -96,7 +95,7 @@ Below are the commands for the head and worker nodes:
 **Head node**:
 
 :::{note}
-When starting a Ray cluster for multi-node inference, the environment variables on each node must be set **before** starting the Ray cluster for them to take effect. 
+When starting a Ray cluster for multi-node inference, the environment variables on each node must be set **before** starting the Ray cluster for them to take effect.
 Updating the environment variables requires restarting the Ray cluster.
 :::
 
@@ -109,6 +108,7 @@ export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 ray start --head --num-gpus=8
 ```
+
 **Worker node**:
 
 :::{note}
@@ -124,16 +124,15 @@ export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 ray start --address='{head_node_ip}:{port_num}' --num-gpus=8 --node-ip-address={local_ip}
 ```
+
 :::{tip}
 Before starting the Ray cluster, set the `export ASCEND_PROCESS_LOG_PATH={plog_save_path}` environment variable on each node to redirect the Ascend plog, which helps in debugging issues during multi-node execution.
 :::
 
-
 Once the cluster is started on multiple nodes, execute `ray status` and `ray list nodes` to verify the Ray cluster's status. You should see the correct number of nodes and NPUs listed.
 
-
 ## Start the Online Inference Service on multinode
-In the container, you can use vLLM as if all NPUs were on a single node. vLLM will utilize NPU resources across all nodes in the Ray cluster. You only need to run the vllm command on one node. 
+In the container, you can use vLLM as if all NPUs were on a single node. vLLM will utilize NPU resources across all nodes in the Ray cluster. You only need to run the vllm command on one node.
 
 To set up parallelism, the common practice is to set the `tensor-parallel-size` to the number of NPUs per node, and the `pipeline-parallel-size` to the number of nodes.
 
@@ -150,11 +149,13 @@ python -m vllm.entrypoints.openai.api_server \
        --disable-frontend-multiprocessing \
        --port {port_num}
 ```
+
 :::{note}
 Pipeline parallelism currently requires AsyncLLMEngine, hence the `--disable-frontend-multiprocessing`  is set.
 :::
 
 Alternatively, if you want to use only tensor parallelism, set the tensor parallel size to the total number of NPUs in the cluster. For example, with 16 NPUs across 2 nodes, set the tensor parallel size to 16:
+
 ```shell
 python -m vllm.entrypoints.openai.api_server \
        --model="Deepseek/DeepSeek-V2-Lite-Chat" \
