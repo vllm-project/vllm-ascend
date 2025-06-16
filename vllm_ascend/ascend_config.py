@@ -138,12 +138,6 @@ def check_ascend_config(vllm_config, enforce_eager):
         else:
             # torchair_graph case
             if ascend_config.torchair_graph_config.enabled:
-                # torchair_graph is not supported for V1 without mla currently.
-                if envs.VLLM_MLA_DISABLE:
-                    logger.warning(
-                        "Torchair graph mode is still experimental and not supported for V1 without mla currently, "
-                        "it has been disabled automatically.")
-                    ascend_config.torchair_graph_config.enabled = False
                 # torchair_graph is supported for deepseek model only currently.
                 if vllm_config.model_config:
                     model_type = vllm_config.model_config.hf_config.model_type
