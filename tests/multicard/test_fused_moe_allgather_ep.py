@@ -29,56 +29,54 @@ from vllm import SamplingParams
 from tests.conftest import VllmRunner
 
 
-@patch.dict(os.environ, {
-    "VLLM_USE_V1": "1",
-    "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-    "TASK_QUEUE_ENABLE": "1",
-    "VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP": "1"
-})
+@patch.dict(
+    os.environ, {
+        "VLLM_USE_V1": "1",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "TASK_QUEUE_ENABLE": "1",
+        "VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP": "1"
+    })
 def test_generate_with_allgather():
     example_prompts = ["Hello, my name is"]
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 
-    with VllmRunner(
-        snapshot_download("vllm-ascend/DeepSeek-V3-Pruning"),
-        tensor_parallel_size=16,
-        enforce_eager=True,
-        max_model_len=1024,
-        dtype="auto",
-        enable_expert_parallel=True,
-        additional_config={
-            "ascend_scheduler_config": {
-                "enabled": True,
-                "chunked_prefill_enabled": False,
-            },
-            "expert_tensor_parallel_size": 1
-        }
-    ) as vllm_model:
+    with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V3-Pruning"),
+                    tensor_parallel_size=16,
+                    enforce_eager=True,
+                    max_model_len=1024,
+                    dtype="auto",
+                    enable_expert_parallel=True,
+                    additional_config={
+                        "ascend_scheduler_config": {
+                            "enabled": True,
+                            "chunked_prefill_enabled": False,
+                        },
+                        "expert_tensor_parallel_size": 1
+                    }) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
 
-@patch.dict(os.environ, {
-    "VLLM_USE_V1": "1",
-    "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-    "TASK_QUEUE_ENABLE": "1"
-})
+@patch.dict(
+    os.environ, {
+        "VLLM_USE_V1": "1",
+        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+        "TASK_QUEUE_ENABLE": "1"
+    })
 def test_generate_with_alltoall():
     example_prompts = ["Hello, my name is"]
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 
-    with VllmRunner(
-        snapshot_download("vllm-ascend/DeepSeek-V3-Pruning"),
-        tensor_parallel_size=16,
-        enforce_eager=True,
-        max_model_len=1024,
-        dtype="auto",
-        enable_expert_parallel=True,
-        additional_config={
-            "ascend_scheduler_config": {
-                "enabled": True,
-                "chunked_prefill_enabled": False,
-            },
-            "expert_tensor_parallel_size": 1
-        }
-    ) as vllm_model:
+    with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V3-Pruning"),
+                    tensor_parallel_size=16,
+                    enforce_eager=True,
+                    max_model_len=1024,
+                    dtype="auto",
+                    enable_expert_parallel=True,
+                    additional_config={
+                        "ascend_scheduler_config": {
+                            "enabled": True,
+                            "chunked_prefill_enabled": False,
+                        },
+                        "expert_tensor_parallel_size": 1
+                    }) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
