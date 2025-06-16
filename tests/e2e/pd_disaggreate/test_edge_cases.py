@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
+# This code is from: https://github.com/vllm-project/vllm/blob/main/tests/v1/kv_connector/nixl_integration/test_edge_cases.py
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 import os
 
 import openai
