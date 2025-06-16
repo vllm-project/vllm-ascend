@@ -96,7 +96,7 @@ class EplbUpdator:
             self.update_info_all = self.block_update_queue.get()
 
         if self.update_in_flight and self.weight_update_counter < self.num_moe_layers:
-            (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = self.update_info_all.pop(0)
+            (expert_send_info, expert_recv_info, updated_expert_map, layer_id) = self.update_info_all.pop(0)
             rank_id = torch.distributed.get_rank()
             self.eplb_loader.set_log2phy_map(log2phy_map)
             expert_send_info_this_rank = expert_send_info[rank_id] if rank_id in expert_send_info else []
