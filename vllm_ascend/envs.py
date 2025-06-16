@@ -138,7 +138,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: os.getenv("DISAGGREGATED_PREFILL_RANK_TABLE_PATH", None),
 
     "VLLM_LLMDD_CHANNEL_PORT":
-    lambda: os.getenv("VLLM_LLMDD_CHANNEL_PORT", 5557)
+    lambda: int(os.getenv("VLLM_LLMDD_CHANNEL_PORT", 5557))
 }
 
 # end-env-vars-definition
