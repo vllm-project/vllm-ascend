@@ -1340,9 +1340,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.dynamic_eplb:
             self.eplb_updator.forward_end()
 
-        if self.dynamic_eplb:
-            self.eplb_updator.forward_end()
-
         return model_runner_output
 
     def _profile_multimodal(self) -> None:
