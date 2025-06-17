@@ -27,6 +27,7 @@ from abc import ABC, abstractmethod
 from vllm.logger import logger
 
 from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory, DynamicConfig
+from vllm_ascend.eplb.tool.eplb_utils import ExpertMapUtils 
 
 
 class EplbWorker:
@@ -72,7 +73,7 @@ class EplbWorker:
             if self.policy_type <= 1 else self.compose_expert_update_info_bipartite(new_expert_maps, self.old_expert_maps)
 
         self.old_expert_maps = new_expert_maps
-        logger.info("EPLB Process complete")
+        logger.info("EPLB Process compute complete")
 
         return update_info
 
@@ -322,7 +323,7 @@ class EplbWorker:
         return placement_global
 
 class EplbProcess:
-    def __init__(self, shared_dict, planner_q, block_update_q, policy_type: int = 0, enable_d2d: bool = True):
+    def __init__(self, shared_dict, planner_q, block_update_q, redundant_enable, policy_type: int = 0, enable_d2d: bool = True):
         """
         Args:
             shared_dict: Cross-process shared dict returned by Manager().dict()
@@ -334,6 +335,7 @@ class EplbProcess:
         self.enable_d2d = enable_d2d
         self.planner_q = planner_q
         self.block_update_q = block_update_q
+        self.redundant_enable = redundant_enable 
 
         # Create EplbWorker instance
         self.worker = EplbWorker(self.shared_dict, self.policy_type, self.enable_d2d)
@@ -352,7 +354,8 @@ class EplbProcess:
                 update_info_list = []
 
                 for (send_info , recv_info , new_expert_map, layer_id) in update_info_generator:
-                    update_info_list.append((send_info , recv_info , new_expert_map, layer_id))
+                    log2phy_map = ExpertMapUtils.generate_log2phy_map(new_expert_map) if self.redundant_enable else None
+                    update_info_list.append((send_info , recv_info , new_expert_map, log2phy_map, layer_id))
 
                 while True:
                     if not block_update_q.empty():

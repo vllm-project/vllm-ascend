@@ -24,17 +24,18 @@ from vllm_ascend.eplb.core.loader.device_transfer_loader import D2DExpertWeightL
 
 class EplbUpdator:
 
-    def __init__(self):
-        self.init_eplb()
+    def __init__(self, redundant_enable):
+        self.init_eplb(redundant_enable)
 
     def set_adaptor(self, adaptor):
         self.adaptor = adaptor
         self.eplb_loader = D2DExpertWeightLoader(eplb_adaptor=self.adaptor)
         self.num_moe_layers = self.adaptor.num_moe_layers
 
-    def init_eplb(self):
+    def init_eplb(self, redundant_enable):
 
-        self.num_iterations: torch.int64 = 10
+        self.redundant_enable = redundant_enable 
+        self.num_iterations: torch.int64 = 130
 
         self.weight_update_counter = 0
         self.expert_map_initialized = False
@@ -62,6 +63,7 @@ class EplbUpdator:
             shared_dict = self.shared_dict,
             planner_q = self.planner_block_queue,
             block_update_q = self.block_update_queue,
+            redundant_enable = self.redundant_enable, 
             policy_type = 0,
             enable_d2d = True
         )
@@ -94,9 +96,9 @@ class EplbUpdator:
             self.update_info_all = self.block_update_queue.get()
 
         if self.update_in_flight and self.weight_update_counter < self.num_moe_layers:
-            (expert_send_info, expert_recv_info, updated_expert_map, layer_id) = self.update_info_all.pop(0)
+            (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = self.update_info_all.pop(0)
             rank_id = torch.distributed.get_rank()
-            self.eplb_loader.generate_log2phy_map(updated_expert_map)
+            self.eplb_loader.set_log2phy_map(log2phy_map)
             expert_send_info_this_rank = expert_send_info[rank_id] if rank_id in expert_send_info else []
             expert_recv_info_this_rank = expert_recv_info[rank_id] if rank_id in expert_recv_info else []
             #logger.info(f"check update info, layer = {layer_id}, send = {expert_send_info_this_rank}, recv = {expert_recv_info_this_rank}")
@@ -118,7 +120,7 @@ class EplbUpdator:
             self.wakeup_eplb_worker()
             self.update_in_flight = True
 
-        self.eplb_loader.update_expert_map_and_weight(self.reqs)
+        self.eplb_loader.update_expert_map_and_weight(self.reqs, self.redundant_enable)
 
     def compute_and_set_moe_load(self):
         local_load = self.adaptor.get_rank_expert_workload(self.num_moe_layers)
