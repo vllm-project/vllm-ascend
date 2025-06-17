@@ -17,13 +17,13 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+import copy
 import gc
+import math
 import os
 import time
 import types
 import weakref
-import copy
-import math
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Union
@@ -39,11 +39,11 @@ from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.distributed.parallel_state import get_dp_group, get_pp_group
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
-from vllm.forward_context import set_forward_context, get_forward_context
+from vllm.distributed.parallel_state import get_dp_group, get_pp_group
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -1139,7 +1139,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     )
 
         self.maybe_wait_for_kv_save()
-        finished_sending, finished_recving = self.get_finished_kv_transfer(scheduler_output)
+        finished_sending, finished_recving = self.get_finished_kv_transfer(
+            scheduler_output)
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -1402,7 +1403,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self._update_states(scheduler_output)
             if not scheduler_output.total_num_scheduled_tokens:
                 if not has_kv_transfer_group():
-                    logger.debug("skip this step for we receive the data from remote disaggregate prefill node")
+                    logger.debug(
+                        "skip this step for we receive the data from remote disaggregate prefill node"
+                    )
                     # Return empty ModelRunnerOuptut if there's no work to do.
                     return EMPTY_MODEL_RUNNER_OUTPUT
                 return self.kv_connector_no_forward(scheduler_output)
@@ -1558,7 +1561,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         return model_runner_output
 
-
     def kv_connector_no_forward(
             self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         with set_forward_context(None, self.vllm_config):
@@ -1570,7 +1572,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # to prevent hang over the collective calls.
         if not finsihed_sending and not finished_recving:
             return EMPTY_MODEL_RUNNER_OUTPUT
-        
+
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
         output.finished_sending = finsihed_sending
         output.finished_recving = finished_recving
@@ -1595,7 +1597,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     @staticmethod
     def get_finished_kv_transfer(
-            scheduler_output: "SchedulerOutput",
+        scheduler_output: "SchedulerOutput",
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         if has_kv_transfer_group():
             return get_kv_transfer_group().get_finished(
@@ -1965,6 +1967,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         acl_format = ACL_FORMAT_FRACTAL_NZ if is_310p(
         ) else ACL_FORMAT_FRACTAL_ND
         kv_caches: Dict[str, torch.Tensor] = {}
+
         def align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
             data_ptr = tensor.data_ptr()
             aligned_addr = (data_ptr + alignment - 1) // alignment * alignment
@@ -2020,8 +2023,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             kv_cache_spec.head_size)
                     dtype = kv_cache_spec.dtype
                     if self.model_config.is_deepseek_mla:
-                        # In order to transfer kv cache through the reigster_memory api from llmdatadist, the memory 
-                        # address should be aligned by 2M. In most case, torch_npu can allocate 2M aligned memory, but 
+                        # In order to transfer kv cache through the reigster_memory api from llmdatadist, the memory
+                        # address should be aligned by 2M. In most case, torch_npu can allocate 2M aligned memory, but
                         # we found there are also some exceptions during test, so we manual align those memory here, this part
                         # of code may consume 2M * 2 * elem_size memory every layer.
                         num_blocks, block_size, num_kv_heads, head_size = kv_cache_shape
