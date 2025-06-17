@@ -348,15 +348,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.init_torchair_graph_batch_sizes()
 
         if len(self.torchair_graph_batch_sizes) == 0:
-            #If MC2 is enabled, torchair_graph_batch_size should pad to tp_size
-            if envs_ascend.VLLM_ENABLE_MC2:
-                self.torchair_graph_batch_sizes = [
-                    self.scheduler_config.max_num_seqs
-                ]
-            else:
-                self.torchair_graph_batch_sizes = [
-                    1, self.scheduler_config.max_num_seqs
-                ]
+            # TODO(zzzzwwjj): check torchair_graph_batch_sizes init code
+            self.torchair_graph_batch_sizes = [
+                self.scheduler_config.max_num_seqs
+            ]
 
         torch._dynamo.cache_size.config.cache_size_limit += len(
             self.torchair_graph_batch_sizes)
@@ -569,10 +564,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.refresh_sampling_metadata()
 
     def _get_forward_metadata_across_dp(
-            self, batch_size: int, with_prefill: bool) -> tuple[int, bool]:
-        forward_metadata = torch.tensor([batch_size, with_prefill],
-                                        device="cpu",
-                                        dtype=torch.int32)
+            self, total_num_scheduled_tokens: int,
+            with_prefill: bool) -> tuple[int, bool]:
+        forward_metadata = torch.tensor(
+            [total_num_scheduled_tokens, with_prefill],
+            device="cpu",
+            dtype=torch.int32)
         dist.all_reduce(forward_metadata,
                         op=ReduceOp.MAX,
                         group=get_dp_group().cpu_group)
@@ -901,11 +898,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.dp_size > 1:
             max_num_tokens, with_prefill = self._get_forward_metadata_across_dp(
                 total_num_scheduled_tokens, with_prefill)
+            extra_builder_kwargs['max_num_tokens_across_dp'] = max_num_tokens
             extra_builder_kwargs['with_prefill_across_dp'] = with_prefill
 
         # Add graph_pad_size here
-        if envs_ascend.VLLM_ENABLE_MC2 or (self.torchair_graph_enabled
-                                           and not with_prefill):
+        if self.torchair_graph_enabled and not with_prefill:
             if self.dp_size > 1:
                 padded_batch_size = self.select_torchair_padded_batch_size(
                     max_num_tokens)
@@ -984,8 +981,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         else:
             positions = self.positions[:num_input_tokens]
 
-        if (envs_ascend.VLLM_ENABLE_MC2
-                or self.torchair_graph_enabled) and not with_prefill:
+        if self.torchair_graph_enabled and not with_prefill:
             input_ids = self.input_ids[:padded_batch_size]
             positions = self.positions[:padded_batch_size]
 
@@ -1885,20 +1881,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return spec_token_ids
 
     def init_torchair_graph_batch_sizes(self):
+        start_graph_batch_size = 4
         tp_size = get_tensor_model_parallel_world_size()
-        batch_size_step = 8
-        largest_batch_size = 1
 
-        if envs_ascend.VLLM_ENABLE_MC2:
-            batch_size_step = max(batch_size_step, tp_size)
-            largest_batch_size = batch_size_step
-        while (largest_batch_size < 8):
-            self.torchair_graph_batch_sizes.append(largest_batch_size)
-            largest_batch_size *= 2
+        # NOTE: When use all2all | mc2, We need to slice the `num_tokens` dimension into `tp_size` blocks
+        start_graph_batch_size = max(start_graph_batch_size, tp_size)
 
-        while (largest_batch_size <= self.scheduler_config.max_num_seqs):
-            self.torchair_graph_batch_sizes.append(largest_batch_size)
-            largest_batch_size += batch_size_step
+        while (start_graph_batch_size <= self.scheduler_config.max_num_seqs):
+            self.torchair_graph_batch_sizes.append(start_graph_batch_size)
+            start_graph_batch_size *= 2
 
     def select_torchair_padded_batch_size(self, batch_size: int):
         selected_batch_size = self.max_num_reqs
