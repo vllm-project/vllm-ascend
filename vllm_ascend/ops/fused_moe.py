@@ -1186,7 +1186,8 @@ class AscendFusedMoE(FusedMoE):
             enable_force_load_balance=enable_force_load_balance,
             log2phy=self.log2phy,
             global_redundant_expert_num=self.global_redundant_expert_num,
-            shared_experts=shared_experts,
+            shared_experts=shared_experts if self.torchair_graph_enabled
+            and self.enable_multistream_moe and not is_prefill else None,
         )
 
         if shared_experts:
