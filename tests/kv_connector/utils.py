@@ -82,7 +82,7 @@ def create_vllm_config(
         enable_prefix_caching=True,
     )
     kv_transfer_config = KVTransferConfig(
-        kv_connector="LLMDataDistConnectorA3",
+        kv_connector="LLMDataDistCMgrConnector",
         kv_role="kv_both",
         kv_connector_module_path=
         "vllm_ascend.distributed.llmdatadist_connector_v1_a3")

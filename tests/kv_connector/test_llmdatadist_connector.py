@@ -4,12 +4,12 @@
 
 from tests.kv_connector.utils import (create_request, create_scheduler,
                                       create_vllm_config)
-from vllm_ascend.distributed.llmdatadist_connector_v1_a3 import \
-    LLMDataDistConnectorMetadata
+from vllm_ascend.distributed.llmdatadist_c_mgr_connector import \
+    LLMDataDistCMgrConnectorMetadata
 
 
 def test_basic_inferface():
-    """Unit test for basic LLMDataDistConnector interface functionality."""
+    """Unit test for basic LLMDataDistCMgrConnector interface functionality."""
 
     vllm_config = create_vllm_config()
     scheduler = create_scheduler(vllm_config)
@@ -26,11 +26,11 @@ def test_basic_inferface():
 
     scheduler.add_request(request)
 
-    # Remote Prefill, triggers LLMDataDistConnectorMetadata.
+    # Remote Prefill, triggers LLMDataDistCMgrConnectorMetadata.
     scheduler_output = scheduler.schedule()
     kv_connector_metadata = scheduler_output.kv_connector_metadata
     assert kv_connector_metadata is not None
-    assert isinstance(kv_connector_metadata, LLMDataDistConnectorMetadata)
+    assert isinstance(kv_connector_metadata, LLMDataDistCMgrConnectorMetadata)
 
     assert len(kv_connector_metadata.requests) == 1
     assert request_id in kv_connector_metadata.requests
@@ -67,7 +67,7 @@ def test_prompt_less_than_block_size():
     # This request should have to read async.
     kv_connector_metadata = scheduler_output.kv_connector_metadata
     assert kv_connector_metadata is not None
-    assert isinstance(kv_connector_metadata, LLMDataDistConnectorMetadata)
+    assert isinstance(kv_connector_metadata, LLMDataDistCMgrConnectorMetadata)
     assert len(kv_connector_metadata.requests) == 1
 
     # This request should not be scheduled regularly.
