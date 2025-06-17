@@ -364,12 +364,7 @@ class CustomDeepseekV2MoE(nn.Module):
         self.tp_group = get_tp_group().device_group
         self.tp_rank = get_tp_group().rank_in_group
         self.ep_group = get_ep_group()
-        additional_config = get_current_vllm_config().additional_config
-        self.enable_graph_mode = False
         self.kv_consumer = None
-        if additional_config:
-            self.enable_graph_mode = additional_config.get(
-                "enable_graph_mode", False)
         transfer_config = get_current_vllm_config().kv_transfer_config
         if transfer_config is not None:
             self.kv_consumer = transfer_config.kv_role == "kv_consumer"
