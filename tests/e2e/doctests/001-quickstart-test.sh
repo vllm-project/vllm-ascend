@@ -23,13 +23,11 @@ function simple_test() {
 }
 
 function quickstart_offline_test() {
-  export VLLM_USE_MODELSCOPE=true
   # Do real script test
   python3 "${SCRIPT_DIR}/../../examples/offline_inference_npu.py"
 }
 
 function quickstart_online_test() {
-  export VLLM_USE_MODELSCOPE=true
   vllm serve Qwen/Qwen2.5-0.5B-Instruct &
   wait_url_ready "vllm serve" "localhost:8000/v1/models"
   # Do real curl test

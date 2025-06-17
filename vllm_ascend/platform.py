@@ -16,7 +16,6 @@
 #
 
 import gc
-import logging
 import os
 from datetime import timedelta
 from typing import TYPE_CHECKING, Optional, Tuple
@@ -32,16 +31,6 @@ import vllm_ascend.envs as ascend_envs
 from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
 from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD, update_aclgraph_sizes
 
-CUSTOM_OP_ENABLED = False
-try:
-    # register custom ops into torch_library here
-    import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
-    CUSTOM_OP_ENABLED = True
-except ImportError as e:
-    logging.warning(
-        "Failed to import 'vllm_ascend.vllm_ascend_C': %s. All custom ops will be disabled. ",
-        e)
-
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
@@ -50,7 +39,6 @@ else:
     VllmConfig = None
     FlexibleArgumentParser = None
 
-os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
 os.environ["ACL_OP_INIT_MODE"] = ascend_envs.VLLM_ASCEND_ACL_OP_INIT_MODE
 
 
@@ -163,6 +151,14 @@ class NPUPlatform(Platform):
             enforce_eager = False
         else:
             enforce_eager = getattr(model_config, "enforce_eager", False)
+
+        if ascend_config.torchair_graph_config.enabled and envs.VLLM_MLA_DISABLE:
+            # torchair_graph is not supported for V1 without mla currently.
+            logger.warning(
+                "Torchair graph mode is still experimental and not supported for V1 without mla currently, "
+                "Fallback to eager mode.")
+            ascend_config.torchair_graph_config.enabled = False
+            enforce_eager = True
 
         check_ascend_config(vllm_config, enforce_eager)
 

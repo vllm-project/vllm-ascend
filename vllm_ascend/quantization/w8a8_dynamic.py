@@ -22,14 +22,12 @@ import torch.distributed as dist
 import torch_npu
 from vllm.distributed import GroupCoordinator
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import select_experts
-from vllm_ascend.utils import (dispose_tensor, npu_stream_switch,
+from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
+                               get_fused_moe_state, npu_stream_switch,
                                npu_wait_tensor)
-
-VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 
 
 def apply_mlp(hidden_states: torch.Tensor,
@@ -660,7 +658,9 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         topk_weights = topk_weights.to(x.dtype)
 
-        if VLLM_ENABLE_MC2 and not is_prefill:
+        fused_moe_state = get_fused_moe_state(self.ep_group.world_size,
+                                              is_prefill)
+        if fused_moe_state == FusedMoEState.MC2:
             return fused_experts_with_mc2(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -675,7 +675,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 log2phy=log2phy,
                 global_redundant_expert_num=global_redundant_expert_num,
                 shared_experts=shared_experts)
-        elif self.torchair_graph_enabled or self.ep_group.world_size == 1:
+        elif fused_moe_state == FusedMoEState.AllGather:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
                                  w1_scale=layer.w13_weight_scale,
