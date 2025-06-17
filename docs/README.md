@@ -20,3 +20,4 @@ python -m http.server -d _build/html/
 ```
 
 Launch your browser and open http://localhost:8000/.
+

@@ -1,7 +1,7 @@
 # Using lm-eval
 This document will guide you have a accuracy testing using [lm-eval](https://github.com/EleutherAI/lm-evaluation-harness).
 
-## 1. Run docker container
+##  1. Run docker container
 
 You can run docker container on a single NPU:
 
@@ -36,7 +36,6 @@ Install lm-eval in the container.
 ```bash
 pip install lm-eval
 ```
-
 Run the following command:
 
 ```
