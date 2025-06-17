@@ -34,20 +34,21 @@ MULTIMODAL_TASK = ["mmmu_val"]
 batch_size_dict = {"ceval-valid": 1, "mmlu": 1, "gsm8k": "auto", "mmmu_val": 1}
 
 MODEL_RUN_INFO = {
-    "Qwen/Qwen2.5-7B-Instruct":
-    ("export MODEL_ARGS='pretrained={model}, max_model_len=4096,dtype=auto,tensor_parallel_size=2,gpu_memory_utilization=0.6'\n"
-     "lm_eval --model vllm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
-     "--apply_chat_template --fewshot_as_multiturn --num_fewshot 5 --batch_size 1"
-     ),
-    "Qwen/Qwen3-8B-Base":
-    ("export MODEL_ARGS='pretrained={model}, max_model_len=4096,dtype=auto,tensor_parallel_size=2,gpu_memory_utilization=0.6'\n"
-     "lm_eval --model vllm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
-     "--apply_chat_template --fewshot_as_multiturn --num_fewshot 5 --batch_size 1"
-     ),
-    "Qwen/Qwen2.5-VL-7B-Instruct":
-    ("export MODEL_ARGS='pretrained={model}, max_model_len=8192,dtype=auto,tensor_parallel_size=4,max_images=2'\n"
-     "lm_eval --model vllm-vlm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
-     "--apply_chat_template --fewshot_as_multiturn  --batch_size 1"),
+    "Qwen/Qwen2.5-7B-Instruct": (
+        "export MODEL_ARGS='pretrained={model}, max_model_len=4096,dtype=auto,tensor_parallel_size=2,gpu_memory_utilization=0.6'\n"
+        "lm_eval --model vllm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
+        "--apply_chat_template --fewshot_as_multiturn --num_fewshot 5 --batch_size 1"
+    ),
+    "Qwen/Qwen3-8B-Base": (
+        "export MODEL_ARGS='pretrained={model}, max_model_len=4096,dtype=auto,tensor_parallel_size=2,gpu_memory_utilization=0.6'\n"
+        "lm_eval --model vllm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
+        "--apply_chat_template --fewshot_as_multiturn --num_fewshot 5 --batch_size 1"
+    ),
+    "Qwen/Qwen2.5-VL-7B-Instruct": (
+        "export MODEL_ARGS='pretrained={model}, max_model_len=8192,dtype=auto,tensor_parallel_size=4,max_images=2'\n"
+        "lm_eval --model vllm-vlm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
+        "--apply_chat_template --fewshot_as_multiturn  --batch_size 1"
+    ),
 }
 
 
@@ -99,8 +100,7 @@ def run_accuracy_multimodal(queue, model, dataset):
 
 
 def generate_md(model_name, tasks_list, args, datasets):
-    run_cmd = MODEL_RUN_INFO[model_name].format(model=model_name,
-                                                datasets=datasets)
+    run_cmd = MODEL_RUN_INFO[model_name].format(model=model_name, datasets=datasets)
     model = model_name.split("/")[1]
     preamble = f"""# 🎯 {model} Accuracy Test
   <div>
@@ -153,20 +153,38 @@ def generate_md(model_name, tasks_list, args, datasets):
                 n_shot = "5"
             else:
                 n_shot = "0"
-            row = (f"| {task_name:<37} "
-                   f"| {flt:<6} "
-                   f"| {n_shot:6} "
-                   f"| {metric:<6} "
-                   f"| ↑ {value:>5.4f} "
-                   f"| ± {stderr:>5.4f} |")
+            row = (
+                f"| {task_name:<37} "
+                f"| {flt:<6} "
+                f"| {n_shot:6} "
+                f"| {metric:<6} "
+                f"| ↑ {value:>5.4f} "
+                f"| ± {stderr:>5.4f} |"
+            )
             if not task_name.startswith("-"):
                 rows.append(row)
-                rows_sub.append("<details>" + "\n" + "<summary>" + task_name +
-                                " details" + "</summary>" + "\n" * 2 + header)
+                rows_sub.append(
+                    "<details>"
+                    + "\n"
+                    + "<summary>"
+                    + task_name
+                    + " details"
+                    + "</summary>"
+                    + "\n" * 2
+                    + header
+                )
             rows_sub.append(row)
         rows_sub.append("</details>")
-    md = preamble + "\n" + header + "\n" + "\n".join(rows) + "\n" + "\n".join(
-        rows_sub) + "\n"
+    md = (
+        preamble
+        + "\n"
+        + header
+        + "\n"
+        + "\n".join(rows)
+        + "\n"
+        + "\n".join(rows_sub)
+        + "\n"
+    )
     print(md)
     return md
 
@@ -187,9 +205,9 @@ def main(args):
     if args.model in UNIMODAL_MODEL_NAME:
         datasets = ",".join(UNIMODAL_TASK)
         for dataset in UNIMODAL_TASK:
-            p = multiprocessing.Process(target=run_accuracy_unimodal,
-                                        args=(result_queue, args.model,
-                                              dataset))
+            p = multiprocessing.Process(
+                target=run_accuracy_unimodal, args=(result_queue, args.model, dataset)
+            )
             p.start()
             p.join()
             result = result_queue.get()
@@ -198,9 +216,9 @@ def main(args):
     if args.model in MULTIMODAL_NAME:
         datasets = ",".join(MULTIMODAL_TASK)
         for dataset in MULTIMODAL_TASK:
-            p = multiprocessing.Process(target=run_accuracy_multimodal,
-                                        args=(result_queue, args.model,
-                                              dataset))
+            p = multiprocessing.Process(
+                target=run_accuracy_multimodal, args=(result_queue, args.model, dataset)
+            )
             p.start()
             p.join()
             result = result_queue.get()

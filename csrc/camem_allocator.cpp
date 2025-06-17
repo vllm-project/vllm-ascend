@@ -20,8 +20,8 @@ extern "C" {
 
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
-
 #include <sys/types.h>
+
 #include "acl/acl.h"
 
 // Global references to Python callables
@@ -29,7 +29,6 @@ extern "C" {
 // This brings the limitation that the allocator needs to be singleton.
 static PyObject* g_python_malloc_callback = nullptr;
 static PyObject* g_python_free_callback = nullptr;
-
 
 // ---------------------------------------------------------------------------
 // Helper functions:
@@ -49,7 +48,7 @@ void create_and_map(unsigned long long device, ssize_t size, void* d_mem,
   ensure_context(device);
   // Define memory allocation properties
   aclrtPhysicalMemProp prop = {};
-  prop.handleType = ACL_MEM_HANDLE_TYPE_NONE ;
+  prop.handleType = ACL_MEM_HANDLE_TYPE_NONE;
   prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
   prop.memAttr = ACL_HBM_MEM_HUGE;
   prop.location.id = device;
@@ -59,34 +58,33 @@ void create_and_map(unsigned long long device, ssize_t size, void* d_mem,
   // Allocate memory using aclrtMallocPhysical
   aclError error_code = aclrtMallocPhysical(p_memHandle, size, &prop, 0);
   if (error_code != 0) {
-    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":" \
-            << __LINE__ << std::endl;  
+    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":"
+              << __LINE__ << std::endl;
     return;
   }
   error_code = aclrtMapMem(d_mem, size, 0, *p_memHandle, 0);
   if (error_code != 0) {
-    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":" \
-            << __LINE__ << std::endl;  
+    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":"
+              << __LINE__ << std::endl;
     return;
   }
 }
 
-void unmap_and_release(unsigned long long device, ssize_t size,
-                       void* d_mem,
+void unmap_and_release(unsigned long long device, ssize_t size, void* d_mem,
                        aclrtDrvMemHandle* p_memHandle) {
   // std::cout << "unmap_and_release: device=" << device << ", size=" << size <<
   // ", d_mem=" << d_mem << ", p_memHandle=" << p_memHandle << std::endl;
   ensure_context(device);
   aclError error_code = aclrtUnmapMem(d_mem);
   if (error_code != 0) {
-    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":" \
-            << __LINE__ << std::endl;  
+    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":"
+              << __LINE__ << std::endl;
     return;
   }
   error_code = aclrtFreePhysical(*p_memHandle);
   if (error_code != 0) {
-    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":" \
-            << __LINE__ << std::endl;  
+    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":"
+              << __LINE__ << std::endl;
     return;
   }
 }
@@ -118,7 +116,8 @@ PyObject* create_tuple_from_c_integers(unsigned long long a,
 // ---------------------------------------------------------------------------
 // Our exported C functions that call Python:
 
-__attribute__ ((visibility("default"))) void* my_malloc(ssize_t size, int device, aclrtStream stream) {
+__attribute__((visibility("default"))) void* my_malloc(ssize_t size, int device,
+                                                       aclrtStream stream) {
   ensure_context(device);
 
   // first allocation, align the size, and reserve an address, and also allocate
@@ -126,7 +125,7 @@ __attribute__ ((visibility("default"))) void* my_malloc(ssize_t size, int device
 
   // Define memory allocation properties
   aclrtPhysicalMemProp prop = {};
-  prop.handleType = ACL_MEM_HANDLE_TYPE_NONE ;
+  prop.handleType = ACL_MEM_HANDLE_TYPE_NONE;
   prop.allocationType = ACL_MEM_ALLOCATION_TYPE_PINNED;
   prop.memAttr = ACL_HBM_MEM_HUGE;
   prop.location.id = device;
@@ -135,20 +134,19 @@ __attribute__ ((visibility("default"))) void* my_malloc(ssize_t size, int device
 
   // Check if the allocation is supported
   size_t granularity;
-  aclError error_code = aclrtMemGetAllocationGranularity(&prop,
-                                   ACL_RT_MEM_ALLOC_GRANULARITY_MINIMUM,
-                                   &granularity);
+  aclError error_code = aclrtMemGetAllocationGranularity(
+      &prop, ACL_RT_MEM_ALLOC_GRANULARITY_MINIMUM, &granularity);
   if (error_code != 0) {
-    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":" \
-            << __LINE__ << std::endl;  
+    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":"
+              << __LINE__ << std::endl;
     return nullptr;
   }
   size_t alignedSize = ((size + granularity - 1) / granularity) * granularity;
-  void *d_mem;
+  void* d_mem;
   error_code = aclrtReserveMemAddress(&d_mem, alignedSize, 0, nullptr, 0);
   if (error_code != 0) {
-    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":" \
-                << __LINE__ << std::endl;  
+    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":"
+              << __LINE__ << std::endl;
     return nullptr;
   }
   // allocate the aclrtDrvMemHandle
@@ -186,7 +184,9 @@ __attribute__ ((visibility("default"))) void* my_malloc(ssize_t size, int device
   return (void*)d_mem;
 }
 
-__attribute__ ((visibility("default"))) void my_free(void* ptr, ssize_t size, int device, aclrtStream stream) {
+__attribute__((visibility("default"))) void my_free(void* ptr, ssize_t size,
+                                                    int device,
+                                                    aclrtStream stream) {
   // get memory handle from the pointer
   if (!g_python_free_callback) {
     std::cerr << "ERROR: g_python_free_callback not set.\n";
@@ -223,17 +223,16 @@ __attribute__ ((visibility("default"))) void my_free(void* ptr, ssize_t size, in
 
   // Free memory
 
-  void *d_mem = (void*)recv_d_mem;
-    // allocate the aclrtDrvMemHandle
-  aclrtDrvMemHandle* p_memHandle =
-      (aclrtDrvMemHandle*)recv_p_memHandle;
+  void* d_mem = (void*)recv_d_mem;
+  // allocate the aclrtDrvMemHandle
+  aclrtDrvMemHandle* p_memHandle = (aclrtDrvMemHandle*)recv_p_memHandle;
   unmap_and_release(device, size, d_mem, p_memHandle);
 
   // free address and the handle
   aclError error_code = aclrtReleaseMemAddress(d_mem);
   if (error_code != 0) {
-    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":" \
-        << __LINE__ << std::endl;  
+    std::cerr << "acl Error, code: " << error_code << " at " << __FILE__ << ":"
+              << __LINE__ << std::endl;
     return;
   }
   free(p_memHandle);
@@ -280,9 +279,8 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
     return nullptr;
   }
 
-  void *d_mem_ptr = (void*)recv_d_mem;
-  aclrtDrvMemHandle* p_memHandle =
-      (aclrtDrvMemHandle*)recv_p_memHandle;
+  void* d_mem_ptr = (void*)recv_d_mem;
+  aclrtDrvMemHandle* p_memHandle = (aclrtDrvMemHandle*)recv_p_memHandle;
 
   unmap_and_release(recv_device, recv_size, d_mem_ptr, p_memHandle);
 
@@ -304,9 +302,8 @@ static PyObject* python_create_and_map(PyObject* self, PyObject* args) {
     return nullptr;
   }
 
-  void *d_mem_ptr = (void*)recv_d_mem;
-  aclrtDrvMemHandle* p_memHandle =
-      (aclrtDrvMemHandle*)recv_p_memHandle;
+  void* d_mem_ptr = (void*)recv_d_mem;
+  aclrtDrvMemHandle* p_memHandle = (aclrtDrvMemHandle*)recv_p_memHandle;
 
   create_and_map(recv_device, recv_size, d_mem_ptr, p_memHandle);
 
