@@ -536,9 +536,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.tp_size = get_tensor_model_parallel_world_size()
 
-        ascend_config = get_ascend_config()
-        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
-        self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
+        self.ascend_config = get_ascend_config()
+        self.torchair_graph_enabled = self.ascend_config.torchair_graph_config.enabled
+        self.enable_kv_nz = self.ascend_config.torchair_graph_config.enable_kv_nz
 
         # Adapt torch air graph mode with spec decoding.
         speculative_config = get_current_vllm_config().speculative_config
@@ -729,13 +729,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                 [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
         # Here is only 2 possibility of input, ChunkedPrefill or PrefillNoCache
-        ascend_config = get_ascend_config()
-
         if attn_metadata.attn_state in [
                 AscendAttentionState.ChunkedPrefill,
                 AscendAttentionState.SpecDecoding,
                 AscendAttentionState.PrefillCacheHit
-        ] and not ascend_config.chunked_prefill_for_mla:
+        ] and not self.ascend_config.chunked_prefill_for_mla:
             attn_output_torch = torch.empty(num_tokens,
                                             self.num_heads * self.v_head_dim,
                                             dtype=query.dtype,
