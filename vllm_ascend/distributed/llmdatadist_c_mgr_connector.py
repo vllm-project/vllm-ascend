@@ -37,8 +37,6 @@ TORCH_DTYPE_TO_NPU_DTYPE = {
     torch.int32: llm_datadist.DataType.DT_INT32
 }
 
-GET_META_MSG = b"get_meta_msg"
-
 
 class LLMDataDistCMgrAgentMetadata(msgspec.Struct):
     super_pod_id: str
@@ -160,7 +158,7 @@ class LLMDataDistCMgrConnectorScheduler():
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id = engine_id
         self.local_ip = get_ip()
-        # Can not retrive the parallel config since it is not initialized.
+        # Can not retrieve the parallel config since it is not initialized.
         self.local_dp_rank = None
         self.tp_size = None
         self.port = self.vllm_config.parallel_config.data_parallel_rank_local * self.vllm_config.parallel_config.tensor_parallel_size + envs.VLLM_LLMDD_RPC_PORT
@@ -283,7 +281,8 @@ class LLMDataDistCMgrConnectorWorker():
         self.local_ip = get_ip()
         self.kv_transfer_config: Optional[
             KVTransferConfig] = vllm_config.kv_transfer_config
-        self.local_agent_metadata: Optional[LLMDataDistCMgrAgentMetadata] = None
+        self.local_agent_metadata: Optional[
+            LLMDataDistCMgrAgentMetadata] = None
         self.vllm_config = vllm_config
 
         self.llm_datadist_role = None
@@ -296,7 +295,7 @@ class LLMDataDistCMgrConnectorWorker():
             self.llm_datadist_remote_role = LLMRole.PROMPT
         else:
             raise RuntimeError(
-                f"LLMDataDistWorker: Receive unexpected kv role in LLMDataDistWorker, this worker now only suppoert kv_producer and kv_consumer, but receiving {vllm_config.kv_transfer_config.kv_role}"
+                f"LLMDataDistWorker: Receive unexpected kv role in LLMDataDistWorker, this worker now only support kv_producer and kv_consumer, but receiving {vllm_config.kv_transfer_config.kv_role}"
             )
 
         # linked_cluster record the cluster that already build the connection its format should be {"cluster_id": "comm_name"}
@@ -486,7 +485,9 @@ class LLMDataDistCMgrConnectorWorker():
             try:
                 self.cache = self.cache_manager.register_blocks_cache(
                     self.cache_desc, self.cache_addr, self.cache_key)
-                logger.info("LLMDataDistCMgrConnectorWorker: End of register Paged Cache.")
+                logger.info(
+                    "LLMDataDistCMgrConnectorWorker: End of register Paged Cache."
+                )
             except (TypeError, ValueError):
                 raise RuntimeError(
                     f"LLMDataDistCMgrConnectorWorker: Passing unexpected parameter to register_block_cache, receiving [cache_desc: {self.cache_desc}, cache_addr: {self.cache_addr}, cache_key: {self.cache_key}]"
@@ -625,7 +626,7 @@ class LLMDataDistCMgrConnectorWorker():
         self.linked_cluster.update({remote_cluster_id: comm_id})
         logger.info(f"cached linked cluster: {self.linked_cluster}")
         logger.info(
-            f"Sucessfully build link with cluster id {remote_cluster_id} with cluster name {comm_name} !"
+            f"Successfully build link with cluster id {remote_cluster_id} with cluster name {comm_name} !"
         )
         return remote_cluster_id
 
