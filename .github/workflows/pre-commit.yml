@@ -24,7 +24,7 @@ jobs:
         path: ./vllm-empty
     - name: Install vllm-ascend dev
       run: |
-        pip install -r requirements-dev.txt
+        pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
     - name: Install vllm
       working-directory: vllm-empty
       run: |
