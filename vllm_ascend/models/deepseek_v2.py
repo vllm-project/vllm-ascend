@@ -67,13 +67,16 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer, is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.sequence import IntermediateTensors
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 
+from vllm_ascend.ops.lm_head import LMHeadTensorParallel, CustomLogitsProcessor
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import dispose_tensor, npu_prefetch
+from vllm_ascend.utils import (dispose_tensor, npu_prefetch)
 
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
@@ -851,9 +854,10 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         "experts":
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"]
     }
-
+    
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
+        self.vllm_config = vllm_config
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
@@ -861,17 +865,29 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         self.model = CustomDeepseekV2Model(vllm_config=vllm_config,
                                            prefix=maybe_prefix(
                                                prefix, "model"))
+        _enable_lmhead_parallel =  True if vllm_config.additional_config is not None \
+            and "lmhead_tensor_parallel_size" in vllm_config.additional_config else False                                   
         if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(config.vocab_size,
-                                          config.hidden_size,
-                                          quant_config=quant_config)
+            if _enable_lmhead_parallel:
+                self.lm_head = LMHeadTensorParallel(config.vocab_size,
+                                                    config.hidden_size,
+                                                    quant_config=quant_config)
+            else:
+                self.lm_head = ParallelLMHead(config.vocab_size,
+                                            config.hidden_size,
+                                            quant_config=quant_config)
         else:
             self.lm_head = PPMissingLayer()
-        self.logits_processor = LogitsProcessor(config.vocab_size)
+
+        if _enable_lmhead_parallel:
+            self.logits_processor = CustomLogitsProcessor(config.vocab_size)
+        else:
+            self.logits_processor = LogitsProcessor(config.vocab_size)
+        
         self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
-
+        
     # NOTE: This `load_weights` is mainly copied from
     # https://github.com/vllm-project/vllm/commit/07b8fae219b1fff51ef115c38c44b51395be5bb5
     # to fix CI, and it is different from the implementation in main
@@ -980,6 +996,21 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                                    inputs_embeds)
         return hidden_states
 
-
+    # NOTE: TO support_custom_lmhead_tensor_parallel 
+    # and it is different from the implementation in main
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        cu_tokens_across_dp_cpu: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        additional_config = self.vllm_config.additional_config
+        if additional_config is not None and "lmhead_tensor_parallel_size" in additional_config:
+            logits = self.logits_processor(self.lm_head, hidden_states,
+                                        cu_tokens_across_dp_cpu, sampling_metadata)
+        else:
+            logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)           
+        return logits
 class CustomDeepseekV3ForCausalLM(CustomDeepseekV2ForCausalLM):
     pass

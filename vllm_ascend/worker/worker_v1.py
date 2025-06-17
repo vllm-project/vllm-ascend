@@ -315,9 +315,19 @@ class NPUWorker(WorkerBase):
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
+
+        additional_config = self.vllm_config.additional_config
+        lmhead_tensor_parallel_size = 1
+
+        if additional_config is not None and "lmhead_tensor_parallel_size" in additional_config:
+            lmhead_tensor_parallel_size = int(
+                additional_config["lmhead_tensor_parallel_size"])
+        assert lmhead_tensor_parallel_size == 1 or parallel_config.tensor_parallel_size == 1, \
+                    "Cannot enable both model tensor parallel and lmhead tensor parallel simultaneously"
         init_ascend_model_parallel(
             parallel_config.expert_parallel_size,
             parallel_config.expert_tensor_parallel_size,
+            lmhead_tensor_parallel_size,
             parallel_config.world_size_across_dp,
         )
         ensure_kv_transfer_initialized(self.vllm_config)

@@ -71,7 +71,7 @@ from vllm.v1.worker.utils import (gather_mm_placeholders,
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
-                                                AscendMetadata)
+                                                AscendMetadata, get_forward_context)
 from vllm_ascend.attention.attention_v1_torchair import AscendTorchairMetadata
 from vllm_ascend.attention.mla_v1 import (AscendMLAMetadata,
                                           CommonAttentionMetadata)
@@ -880,7 +880,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> tuple[Union[AscendMetadata, AscendMLAMetadata,
                      AscendTorchairMetadata], torch.Tensor, SpecDecodeMetadata,
-               torch.Tensor, int, torch.Tensor, torch.Tensor, np.ndarray]:
+               torch.Tensor, int, torch.Tensor, torch.Tensor, np.ndarray, torch.Tensor]:
         # Check input valid
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -1104,11 +1104,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             positions = self.positions[:padded_batch_size]
 
         # Run forward pass
+        cu_tokens_across_dp_cpu = None
         with set_forward_context(attn_metadata,
                                  self.vllm_config,
                                  num_tokens=num_input_tokens):
             with ProfileExecuteDuration().capture_async("forward"):
                 model_kwargs = {}
+                dp_metadata = get_forward_context().dp_metadata
+                cu_tokens_across_dp_cpu = dp_metadata.cu_tokens_across_dp_cpu if dp_metadata is not None else None
                 if self.torchair_graph_enabled:
                     model_kwargs["kv_caches"] = self.kv_caches
                     model_kwargs["attn_metadata"] = attn_metadata
@@ -1137,7 +1140,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         inputs_embeds=inputs_embeds,
                         **model_kwargs,
                     )
-
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -1167,7 +1169,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
                 total_num_scheduled_tokens, logits_indices, aux_hidden_states,
-                num_scheduled_tokens)
+                num_scheduled_tokens, cu_tokens_across_dp_cpu)
 
     def _get_cumsum_and_arange(
         self,
@@ -1404,7 +1406,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 return EMPTY_MODEL_RUNNER_OUTPUT
             (attn_metadata, hidden_states, spec_decode_metadata, positions,
              num_scheduled_tokens, logits_indices, aux_hidden_states,
-             num_scheduled_tokens_np) = (self._process_reqs(
+             num_scheduled_tokens_np, cu_tokens_across_dp_cpu) = (self._process_reqs(
                  scheduler_output, intermediate_tensors))
 
         with ProfileExecuteDuration().capture_async("post process"):
@@ -1428,7 +1430,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     return self._pool(hidden_states, num_scheduled_tokens,
                                       num_scheduled_tokens_np)
                 sample_hidden_states = hidden_states[logits_indices]
-                logits = self.model.compute_logits(sample_hidden_states, None)
+                logits = self.model.compute_logits(sample_hidden_states, 
+                                                    cu_tokens_across_dp_cpu, None)
             if broadcast_pp_output:
                 model_output_broadcast_data = {
                     "logits": logits.contiguous(),
@@ -1629,6 +1632,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             with set_forward_context(None,
                                      self.vllm_config,
                                      num_tokens=num_tokens):
+                cu_dp_metadata = get_forward_context().dp_metadata
+                cu_tokens_across_dp_cpu = cu_dp_metadata.cu_tokens_across_dp_cpu \
+                                            if cu_dp_metadata is not None else None
                 if self.torchair_graph_enabled and not with_prefill:
                     attn_metadata = self.attn_metadata_builder.build_dummy(
                         num_reqs=num_tokens, num_actual_tokens=1)
@@ -1660,6 +1666,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         kv_caches=self.kv_caches,
                         attn_metadata=attn_metadata,
                     )
+                    self.model.compute_logits(hidden_states,
+                                                cu_tokens_across_dp_cpu, None)
                 else:
                     maybe_converting_weight_acl_format(self.model,
                                                        ACL_FORMAT_FRACTAL_ND)
@@ -1673,9 +1681,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         hidden_states, _ = hidden_states
                     else:
                         hidden_states = hidden_states
+                    self.model.compute_logits(hidden_states, 
+                                                cu_tokens_across_dp_cpu, None)
                     if self.use_spec_decode and isinstance(
                             self.drafter, EagleProposer):
                         self.drafter.dummy_run(num_tokens)
+                    
             return hidden_states
 
     def profile_run(self) -> None:
@@ -1695,10 +1706,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     -1] += self.max_num_tokens % self.max_num_reqs
                 num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                                 dtype=np.int32)
+                dummy_tokens_across_dp = torch.cumsum(torch.full((self.dp_size,), \
+                                         hidden_states.size(0)), dim=0)
                 logit_indices = np.cumsum(num_scheduled_tokens) - 1
                 # TODO: need to rum a dummy sampler for generate task
                 hidden_states = hidden_states[logit_indices]
-                output = self.model.compute_logits(hidden_states, None)
+                output = self.model.compute_logits(hidden_states, dummy_tokens_across_dp,None)
 
         NPUPlatform.synchronize()
         del hidden_states, output
