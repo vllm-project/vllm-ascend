@@ -209,7 +209,6 @@ class NPUPlatform(Platform):
                              kv_cache_dtype, block_size, use_v1, use_mla):
         if not use_v1:
             raise ValueError("vLLM Ascend does not support V0 engine.")
-
         use_torchair = get_ascend_config().torchair_graph_config.enabled
         if use_mla:
             return "vllm_ascend.attention.mla_v1.AscendMLABackend"

@@ -458,10 +458,10 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         self.prefix = prefix
         self.debug_layer_idx = int(self.prefix.split(".")[-2])
 
-        ascend_config = get_ascend_config()
-        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+        self.ascend_config = get_ascend_config()
+        self.torchair_graph_enabled = self.ascend_config.torchair_graph_config.enabled
         self.enable_multistream_mla = \
-            ascend_config.torchair_graph_config.enable_multistream_mla
+            self.ascend_config.torchair_graph_config.enable_multistream_mla
 
         if self.q_lora_rank is not None:
             self.q_a_proj = ReplicatedLinear(self.hidden_size,
@@ -502,7 +502,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         if (config.n_routed_experts is not None
                 and self.debug_layer_idx >= config.first_k_dense_replace
                 and self.debug_layer_idx % config.moe_layer_freq == 0 and
-                ascend_config.torchair_graph_config.enable_multistream_moe):
+                self.ascend_config.torchair_graph_config.enable_multistream_moe):
             self.o_proj = CustomDeepseekV2RowParallelLinearReplaceAllreduce(
                 self.num_heads * self.v_head_dim,
                 self.hidden_size,
@@ -596,9 +596,8 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             output = output.view(-1, output_shape[-1])
             return output
         else:
-            kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
-                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-            kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+            kv_c_normed = hidden_states
+            k_pe = None
             return self.mla_attn(hidden_states_or_q_c,
                                  kv_c_normed,
                                  k_pe,
