@@ -16,18 +16,27 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+trap clean_venv EXIT
 
-set -eo errexit
+function install_binary_test() {
 
-. $(dirname "$0")/common.sh
+    create_vllm_venv
 
-export VLLM_USE_MODELSCOPE=true
-export VLLM_LOGGING_LEVEL=ERROR
+    PIP_VLLM_VERSION=$(get_version pip_vllm_version)
+    PIP_VLLM_ASCEND_VERSION=$(get_version pip_vllm_ascend_version)
+    _info "====> Install vllm==${PIP_VLLM_VERSION} and vllm-ascend ${PIP_VLLM_ASCEND_VERSION}"
 
-_info "====> Start Quickstart test"
-. "${SCRIPT_DIR}/doctests/001-quickstart-test.sh"
+    pip install vllm=="$(get_version pip_vllm_version)"
+    pip install vllm-ascend=="$(get_version pip_vllm_ascend_version)"
 
-_info "====> Start pip binary installation test"
-. "${SCRIPT_DIR}/doctests/002-pip-binary-installation-test.sh"
+    pip list | grep vllm
 
-_info "Doctest passed."
+    # Verify the installation
+    _info "====> Run offline example test"
+    pip install modelscope
+    python3 "${SCRIPT_DIR}/../../examples/offline_inference_npu.py"
+
+}
+
+_info "====> Start install_binary_test"
+install_binary_test
