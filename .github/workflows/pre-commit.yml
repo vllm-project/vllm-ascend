@@ -30,5 +30,4 @@ jobs:
       env:
         SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086" # Exclude SC2046, SC2006, SC2086 for actionlint
       with:
-        # FIXME: should run extra_args: --all-files --hook-stage manual
-        extra_args: --hook-stage manual
+        extra_args: --all-files --hook-stage manual

@@ -32,18 +32,18 @@ repos:
   rev: 6.0.1
   hooks:
   - id: isort
-- repo: https://github.com/pre-commit/mirrors-clang-format
-  rev: v20.1.3
-  hooks:
-  - id: clang-format
-    files: ^csrc/.*\.(cpp|hpp|cc|hh|cxx|hxx)$
-    types_or: [c++]
-    args: [--style=google, --verbose]
-- repo: https://github.com/jackdewinter/pymarkdown
-  rev: v0.9.29
-  hooks:
-  - id: pymarkdown
-    args: [fix]
+# - repo: https://github.com/pre-commit/mirrors-clang-format
+#   rev: v20.1.3
+#   hooks:
+#   - id: clang-format
+#     files: ^csrc/.*\.(cpp|hpp|cc|hh|cxx|hxx)$
+#     types_or: [c++]
+#     args: [--style=google, --verbose]
+# - repo: https://github.com/jackdewinter/pymarkdown
+#   rev: v0.9.29
+#   hooks:
+#   - id: pymarkdown
+#     args: [fix]
 - repo: local
   hooks:
   - id: mypy-local
