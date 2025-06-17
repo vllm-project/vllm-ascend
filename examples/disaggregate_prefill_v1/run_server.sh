@@ -20,7 +20,7 @@ vllm serve model_path \
   --trust-remote-code \
   --gpu-memory-utilization 0.9  \
   --kv-transfer-config  \
-  '{"kv_connector": "LLMDataDistConnectorA3",
+  '{"kv_connector": "LLMDataDistCMgrConnector",
   "kv_buffer_device": "npu",
   "kv_role": "kv_consumer",
   "kv_parallel_size": 1,

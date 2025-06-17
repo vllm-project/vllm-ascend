@@ -14,8 +14,7 @@ The rank table is a JSON file that specifies the mapping of Ascend NPU ranks to 
 Run the following command on every node to generate the rank table:
 ```bash
 cd vllm-ascend/examples/disaggregate_prefill_v1/
-bash gen_ranktable.sh --ips 172.19.32.175 172.19.241.49 172.19.123.51 172.19.190.36 \
-  --network-card-name enp189s0f0 --prefill-device-cnt 16 --decode-device-cnt 16
+bash generate_ranktable.sh 16 16
 ```
 Rank table will generated at `/vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1/ranktable.json`
 
@@ -57,7 +56,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   --enforce-eager \
   --gpu-memory-utilization 0.9  \
   --kv-transfer-config  \
-  '{"kv_connector": "LLMDataDistConnectorA3",
+  '{"kv_connector": "LLMDataDistCMgrConnector",
   "kv_buffer_device": "npu",
   "kv_role": "kv_producer",
   "kv_parallel_size": 1,
@@ -99,7 +98,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   --enforce-eager \
   --gpu-memory-utilization 0.9  \
   --kv-transfer-config  \
-  '{"kv_connector": "LLMDataDistConnectorA3",
+  '{"kv_connector": "LLMDataDistCMgrConnector",
   "kv_buffer_device": "npu",
   "kv_role": "kv_producer",
   "kv_parallel_size": 1,
@@ -140,7 +139,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   --enforce-eager \
   --gpu-memory-utilization 0.9  \
   --kv-transfer-config  \
-  '{"kv_connector": "LLMDataDistConnectorA3",
+  '{"kv_connector": "LLMDataDistCMgrConnector",
   "kv_buffer_device": "npu",
   "kv_role": "kv_consumer",
   "kv_parallel_size": 1,
@@ -182,7 +181,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   --enforce-eager \
   --gpu-memory-utilization 0.9  \
   --kv-transfer-config  \
-  '{"kv_connector": "LLMDataDistConnectorA3",
+  '{"kv_connector": "LLMDataDistCMgrConnector",
   "kv_buffer_device": "npu",
   "kv_role": "kv_consumer",
   "kv_parallel_size": 1,

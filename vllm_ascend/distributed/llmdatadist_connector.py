@@ -130,7 +130,7 @@ class KVTransferEngine:
         return cluster
 
 
-class LLMDataDistConnector(KVConnectorBase):
+class LLMDataDistCMgrConnector(KVConnectorBase):
 
     def __init__(
         self,
