@@ -39,13 +39,13 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.expert_weight_names = ["w13_weight", "w2_weight", "w13_weight_scale", "w13_weight_offset",
             "w2_weight_scale", "w2_weight_offset"]
 
-        self.expert_map_per_layer = dict()
+        self.expert_map_per_layer = dict()     # reference to expert map on device for expert map update
+        self.expert_map_per_layer_cpu = dict() # copy of expert map on CPU to avoid device synchronize frequently
         for layer_idx in range(self.num_moe_layers):
             self.expert_map_per_layer[self.num_dense_layers + layer_idx] =\
                 self.model.get_expert_map(self.num_dense_layers + layer_idx)
 
-        self.buffer_tensor_dict = dict()     # reference to expert map on device for expert map update
-        self.buffer_tensor_dict_cpu = dict() # copy of expert map on CPU to avoid device synchronize frequently
+        self.buffer_tensor_dict = dict()
         # TODO: here we set number of buffer tensor equal to number of expert in each laryer, which can be improved
         num_buffer_tensor = torch.where(self.expert_map_per_layer[self.num_dense_layers] != -1)[0].numel()
         self.init_buffer_tensor_dict(num_buffer_tensor)
@@ -89,7 +89,7 @@ class VllmEplbAdaptor(EplbAdaptor):
         all_expert_maps = all_maps.cpu()
 
         for layer_idx in range(num_moe_layers):
-            self.log2phy_map_per_layer_cpu[self.num_dense_layers + layer_idx] = \
+            self.expert_map_per_layer_cpu[self.num_dense_layers + layer_idx] = \
                 all_expert_maps[layer_idx][self.rank_id]
 
         return all_expert_maps
