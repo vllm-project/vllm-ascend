@@ -32,7 +32,8 @@ import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
+                         get_current_vllm_config)
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
                               get_tp_group, split_tensor_along_last_dim,
@@ -67,7 +68,6 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer, is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.sequence import IntermediateTensors
-from vllm.utils import logger
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
@@ -368,11 +368,11 @@ class CustomDeepseekV2MoE(nn.Module):
         self.enable_graph_mode = False
         self.kv_consumer = None
         if additional_config:
-            self.enable_graph_mode = additional_config.get("enable_graph_mode", False)
+            self.enable_graph_mode = additional_config.get(
+                "enable_graph_mode", False)
         transfer_config = get_current_vllm_config().kv_transfer_config
         if transfer_config is not None:
             self.kv_consumer = transfer_config.kv_role == "kv_consumer"
-
 
         self.params_dtype = torch.get_default_dtype()
         self.rm_router_logits = self.experts.rm_router_logits

@@ -1,5 +1,7 @@
 from dataclasses import dataclass
+
 import torch_npu
+
 
 @dataclass
 class NPUSocInfo:

@@ -20,8 +20,10 @@
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.request import FinishReason, RequestStatus
 
-from tests.kv_connector.utils import (assert_scheduler_empty, create_model_runner_output,
-                    create_request, create_scheduler, create_vllm_config)
+from tests.kv_connector.utils import (assert_scheduler_empty,
+                                      create_model_runner_output,
+                                      create_request, create_scheduler,
+                                      create_vllm_config)
 
 
 def test_basic_lifecycle():
@@ -84,9 +86,9 @@ def test_prefix_cache_lifecycle():
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
     request_remote_a = create_request(request_id=1,
-                                    max_tokens=1,
-                                    num_tokens=NUM_TOKENS,
-                                    do_remote_decode=True)
+                                      max_tokens=1,
+                                      num_tokens=NUM_TOKENS,
+                                      do_remote_decode=True)
 
     scheduler.add_request(request_remote_a)
     scheduler_output = scheduler.schedule()
@@ -104,8 +106,8 @@ def test_prefix_cache_lifecycle():
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
     request_remote_b = create_request(request_id=1,
-                                    num_tokens=NUM_TOKENS,
-                                    do_remote_decode=True)
+                                      num_tokens=NUM_TOKENS,
+                                      do_remote_decode=True)
 
     scheduler.add_request(request_remote_b)
     scheduler_output = scheduler.schedule()
@@ -113,7 +115,9 @@ def test_prefix_cache_lifecycle():
     eco = scheduler.update_from_output(scheduler_output, model_runner_output)
     kv_transfer_params = eco[0].outputs[0].kv_transfer_params
     # Ensure we send all block ids, even if there is a cache hit.
-    assert (len(kv_transfer_params["remote_block_ids"]) == (NUM_EXTERNAL_FULL_BLOCKS + 1))
+    assert (len(
+        kv_transfer_params["remote_block_ids"]) == (NUM_EXTERNAL_FULL_BLOCKS +
+                                                    1))
 
     scheduler.schedule()
     assert_scheduler_empty(scheduler)

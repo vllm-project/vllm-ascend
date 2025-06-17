@@ -1192,7 +1192,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             #     key=key,
             #     key_cache=kv_cache,
             #     slot_indices=attn_metadata.slot_mapping.flatten())
-            kv_c_normed = kv_c_normed.view([num_actual_toks, self.num_kv_heads, -1])
+            kv_c_normed = kv_c_normed.view(
+                [num_actual_toks, self.num_kv_heads, -1])
             torch_npu._npu_reshape_and_cache(
                 key=kv_c_normed,
                 value=k_pe,
@@ -1206,7 +1207,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             # TODO: use an elegant way to overlap
             output_prefill = self._forward_prefill(prefill_q,
                                                    prefill_k_c_normed,
-                                                   prefill_k_pe, combined_cache,
+                                                   prefill_k_pe,
+                                                   combined_cache,
                                                    attn_metadata)
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
@@ -1223,11 +1225,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                                             kv_cache, attn_metadata,
                                             enable_multistream_mla)
             else:
-                output_decode = self._forward_decode(decode_ql_nope,
-                                                     decode_q_pe,
-                                                     decode_k_nope,
-                                                     decode_k_pe, combined_cache,
-                                                     attn_metadata)
+                output_decode = self._forward_decode(
+                    decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe,
+                    combined_cache, attn_metadata)
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
                 with torch.npu.stream(current_ms_metadata.comm_stream):
