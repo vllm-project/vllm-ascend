@@ -16,6 +16,7 @@
 #
 
 import torch
+import random
 
 class ExpertMapUtils():
 
@@ -48,7 +49,7 @@ class ExpertMapUtils():
                 result_dict[key] = []
             result_dict[key].append(idx)
 
-        log2phy_map = torch.full((ranks_num, self.global_expert_num),
+        log2phy_map = torch.full((ranks_num, global_expert_num),
                                     -1,
                                     dtype=torch.int32)
         for rank in range(ranks_num):
