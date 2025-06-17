@@ -46,6 +46,9 @@ class EplbUpdator:
 
         self.cur_iterations: torch.int64 = 0
 
+        self.wait_worker_iterations: torch.int64 = 0
+        self.num_wait_worker_iterations: torch.int64 = 10
+
         self.planner_block_queue = Queue()
         self.block_update_queue = Queue(maxsize=1)
 
@@ -64,7 +67,7 @@ class EplbUpdator:
             planner_q = self.planner_block_queue,
             block_update_q = self.block_update_queue,
             redundant_enable = self.redundant_enable, 
-            policy_type = 0,
+            policy_type = 2,
             enable_d2d = True
         )
 
@@ -92,10 +95,12 @@ class EplbUpdator:
         self.get_init_expert_map()
 
         # Batch after eplb process being triggered, get update info provided by eplb process
-        if self.update_in_flight and self.weight_update_counter == 0:
+        if self.update_in_flight and self.weight_update_counter == 0 and self.wait_worker_iterations == self.num_wait_worker_iterations:
+            self.wait_worker_iterations = 0
             self.update_info_all = self.block_update_queue.get()
+            self.weight_loading = True
 
-        if self.update_in_flight and self.weight_update_counter < self.num_moe_layers:
+        if self.update_in_flight and self.weight_loading and self.weight_update_counter < self.num_moe_layers:
             (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = self.update_info_all.pop(0)
             rank_id = torch.distributed.get_rank()
             self.eplb_loader.set_log2phy_map(log2phy_map)
@@ -119,6 +124,11 @@ class EplbUpdator:
             moe_load = self.compute_and_set_moe_load()
             self.wakeup_eplb_worker()
             self.update_in_flight = True
+            self.wait_worker_iterations = 0
+            self.weight_loading = False
+
+        if self.update_in_flight:
+            self.wait_worker_iterations = self.wait_worker_iterations + 1
 
         self.eplb_loader.update_expert_map_and_weight(self.reqs, self.redundant_enable)
 
