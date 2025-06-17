@@ -38,10 +38,10 @@ class ExpertMapUtils():
     @classmethod
     def generate_log2phy_map(cls, expert_map):
         num_local_experts = expert_map.max() + 1
-        expert_map = cls.global2local(expert_map, num_local_experts)
         ranks_num, global_expert_num = expert_map.shape
-        concatenated = torch.flatten(expert_map)
-        rank_expert_to_global = cls.generate_index_dicts(expert_map)
+        local_expert_map = cls.global2local(expert_map, num_local_experts)
+        concatenated = torch.flatten(local_expert_map)
+        rank_expert_to_global = cls.generate_index_dicts(local_expert_map)
         result_dict: Dict[int, List[int]] = {}
         for idx, value in enumerate(concatenated):
             key = value.item()
