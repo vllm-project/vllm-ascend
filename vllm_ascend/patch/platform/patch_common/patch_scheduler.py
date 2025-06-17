@@ -17,6 +17,7 @@
 # This file is a part of the vllm-ascend project.
 from vllm.v1.core.sched.scheduler import Scheduler
 
+
 def ascend_update_waiting_for_remote_kv(self, request) -> bool:
     """
     P/D: check if the request_id is finished_recving.
@@ -32,9 +33,9 @@ def ascend_update_waiting_for_remote_kv(self, request) -> bool:
     if request.request_id not in self.finished_recving_kv_req_ids:
         return False
     assert len(self.kv_cache_config.kv_cache_groups
-                ) == 1, "KV connector only supports one KV cache group now"
+               ) == 1, "KV connector only supports one KV cache group now"
     # Now that the blocks are ready, actually cache them.
-    # In order to make decode node always do the decode step, we transfer every block as long as it contains the 
+    # In order to make decode node always do the decode step, we transfer every block as long as it contains the
     # data computed by prefill node.
     num_computed_tokens = request.num_tokens
     if num_computed_tokens == request.num_tokens:
@@ -51,5 +52,6 @@ def ascend_update_waiting_for_remote_kv(self, request) -> bool:
     # Return that we are ready.
     self.finished_recving_kv_req_ids.remove(request.request_id)
     return True
+
 
 Scheduler._update_waiting_for_remote_kv = ascend_update_waiting_for_remote_kv

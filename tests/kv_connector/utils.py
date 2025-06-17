@@ -3,11 +3,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+import os
 from typing import Any, Optional
 
 import torch
-import os
-
 from vllm import SamplingParams
 from vllm.config import (CacheConfig, DeviceConfig, KVTransferConfig,
                          ModelConfig, SchedulerConfig, VllmConfig)
@@ -85,8 +84,8 @@ def create_vllm_config(
     kv_transfer_config = KVTransferConfig(
         kv_connector="LLMDataDistConnectorA3",
         kv_role="kv_both",
-        kv_connector_module_path="vllm_ascend.distributed.llmdatadist_connector_v1_a3"
-    )
+        kv_connector_module_path=
+        "vllm_ascend.distributed.llmdatadist_connector_v1_a3")
     return VllmConfig(scheduler_config=scheduler_config,
                       model_config=model_config,
                       cache_config=cache_config,

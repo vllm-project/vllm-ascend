@@ -16,4 +16,4 @@
 #
 
 import vllm_ascend.patch.platform.patch_common.patch_distributed  # noqa
-import vllm_ascend.patch.platform.patch_common.patch_scheduler    # noqa
+import vllm_ascend.patch.platform.patch_common.patch_scheduler  # noqa
