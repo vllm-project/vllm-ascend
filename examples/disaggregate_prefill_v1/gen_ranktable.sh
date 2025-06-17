@@ -46,7 +46,7 @@ do
     fi
 done
 if [[ $NODE_RANK == "" ]];then
-    echo "[Error] para \"NODE_RANK\" must be confing"
+    echo "[Error] para \"NODE_RANK\" must be config"
     exit 1
 fi
 

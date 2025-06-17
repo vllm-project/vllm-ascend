@@ -142,12 +142,12 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "DISAGGREGATED_PREFILL_RANK_TABLE_PATH":
     lambda: os.getenv("DISAGGREGATED_PREFILL_RANK_TABLE_PATH", None),
     # `LLMDataDistCMgrConnector` required variable. `VLLM_ASCEND_LLMDD_RPC_IP` is used as the
-    # rpc communication listening ip, which will be used to receive the agent metadata from the 
+    # rpc communication listening ip, which will be used to receive the agent metadata from the
     # remote worker.
     "VLLM_ASCEND_LLMDD_RPC_IP":
     lambda: os.getenv("VLLM_ASCEND_LLMDD_RPC_IP", "0.0.0.0"),
     # `LLMDataDistCMgrConnector` required variable. `VLLM_LLMDD_RPC_PORT` is used as the
-    # rpc communication listening port, which will be used to receive the agent metadata from the 
+    # rpc communication listening port, which will be used to receive the agent metadata from the
     # remote worker.
     "VLLM_LLMDD_RPC_PORT":
     lambda: int(os.getenv("VLLM_LLMDD_RPC_PORT", 5557))
