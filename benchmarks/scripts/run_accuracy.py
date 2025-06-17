@@ -34,38 +34,31 @@ MULTIMODAL_TASK = ["mmmu_val"]
 BATCH_SIZE = {"ceval-valid": 1, "mmlu": 1, "gsm8k": "auto", "mmmu_val": 1}
 
 MODEL_RUN_INFO = {
-    "Qwen/Qwen2.5-7B-Instruct":
-    ("export MODEL_ARGS='pretrained={model},max_model_len=4096,dtype=auto,tensor_parallel_size=2,gpu_memory_utilization=0.6'\n"
-     "lm_eval --model vllm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
-     "--apply_chat_template --fewshot_as_multiturn --num_fewshot 5 --batch_size 1"
-     ),
-    "Qwen/Qwen3-8B-Base":
-    ("export MODEL_ARGS='pretrained={model},max_model_len=4096,dtype=auto,tensor_parallel_size=2,gpu_memory_utilization=0.6'\n"
-     "lm_eval --model vllm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
-     "--apply_chat_template --fewshot_as_multiturn --num_fewshot 5 --batch_size 1"
-     ),
-    "Qwen/Qwen2.5-VL-7B-Instruct":
-    ("export MODEL_ARGS='pretrained={model},max_model_len=8192,dtype=auto,tensor_parallel_size=4,max_images=2'\n"
-     "lm_eval --model vllm-vlm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
-     "--apply_chat_template --fewshot_as_multiturn  --batch_size 1"),
+    "Qwen/Qwen2.5-7B-Instruct": (
+        "export MODEL_ARGS='pretrained={model},max_model_len=4096,dtype=auto,tensor_parallel_size=2,gpu_memory_utilization=0.6'\n"
+        "lm_eval --model vllm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
+        "--apply_chat_template --fewshot_as_multiturn --num_fewshot 5 --batch_size 1"
+    ),
+    "Qwen/Qwen3-8B-Base": (
+        "export MODEL_ARGS='pretrained={model},max_model_len=4096,dtype=auto,tensor_parallel_size=2,gpu_memory_utilization=0.6'\n"
+        "lm_eval --model vllm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
+        "--apply_chat_template --fewshot_as_multiturn --num_fewshot 5 --batch_size 1"
+    ),
+    "Qwen/Qwen2.5-VL-7B-Instruct": (
+        "export MODEL_ARGS='pretrained={model},max_model_len=8192,dtype=auto,tensor_parallel_size=4,max_images=2'\n"
+        "lm_eval --model vllm-vlm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
+        "--apply_chat_template --fewshot_as_multiturn  --batch_size 1"
+    ),
 }
 FILTER = {
     "gsm8k": "exact_match,flexible-extract",
     "ceval-valid": "acc,none",
-    "mmmu_val": "acc,none"
+    "mmmu_val": "acc,none",
 }
 EXPECTED_VALUE = {
-    "Qwen/Qwen2.5-7B-Instruct": {
-        "ceval-valid": 0.80,
-        "gsm8k": 0.72
-    },
-    "Qwen/Qwen3-8B-Base": {
-        "ceval-valid": 0.82,
-        "gsm8k": 0.83
-    },
-    "Qwen/Qwen2.5-VL-7B-Instruct": {
-        "mmmu_val": 0.51
-    }
+    "Qwen/Qwen2.5-7B-Instruct": {"ceval-valid": 0.80, "gsm8k": 0.72},
+    "Qwen/Qwen3-8B-Base": {"ceval-valid": 0.82, "gsm8k": 0.83},
+    "Qwen/Qwen2.5-VL-7B-Instruct": {"mmmu_val": 0.51},
 }
 RTOL = 0.03
 ACCURACY_FLAG = {}
@@ -119,14 +112,14 @@ def run_accuracy_multimodal(queue, model, dataset):
 
 
 def generate_md(model_name, tasks_list, args, datasets):
-    run_cmd = MODEL_RUN_INFO[model_name].format(model=model_name,
-                                                datasets=datasets)
+    run_cmd = MODEL_RUN_INFO[model_name].format(model=model_name, datasets=datasets)
     model = model_name.split("/")[1]
     version_info = (
         f"**vLLM Version**: vLLM: {args.vllm_version} "
         f"([{args.vllm_commit}]({args.vllm_commit_url})), "
         f"**vLLM Ascend**: {args.vllm_ascend_version} "
-        f"([{args.vllm_ascend_commit}]({args.vllm_ascend_commit_url}))")
+        f"([{args.vllm_ascend_commit}]({args.vllm_ascend_commit_url}))"
+    )
 
     preamble = f"""# 🎯 {model}
 {version_info}
@@ -171,20 +164,38 @@ def generate_md(model_name, tasks_list, args, datasets):
             else:
                 n_shot = "0"
             flag = ACCURACY_FLAG.get(task_name, "")
-            row = (f"| {task_name:<37} "
-                   f"| {flt:<6} "
-                   f"| {n_shot:6} "
-                   f"| {metric:<6} "
-                   f"| {flag}{value:>5.4f} "
-                   f"| ± {stderr:>5.4f} |")
+            row = (
+                f"| {task_name:<37} "
+                f"| {flt:<6} "
+                f"| {n_shot:6} "
+                f"| {metric:<6} "
+                f"| {flag}{value:>5.4f} "
+                f"| ± {stderr:>5.4f} |"
+            )
             if not task_name.startswith("-"):
                 rows.append(row)
-                rows_sub.append("<details>" + "\n" + "<summary>" + task_name +
-                                " details" + "</summary>" + "\n" * 2 + header)
+                rows_sub.append(
+                    "<details>"
+                    + "\n"
+                    + "<summary>"
+                    + task_name
+                    + " details"
+                    + "</summary>"
+                    + "\n" * 2
+                    + header
+                )
             rows_sub.append(row)
         rows_sub.append("</details>")
-    md = preamble + "\n" + header + "\n" + "\n".join(rows) + "\n" + "\n".join(
-        rows_sub) + "\n"
+    md = (
+        preamble
+        + "\n"
+        + header
+        + "\n"
+        + "\n".join(rows)
+        + "\n"
+        + "\n".join(rows_sub)
+        + "\n"
+    )
     print(md)
     return md
 
@@ -206,15 +217,18 @@ def main(args):
         datasets = ",".join(UNIMODAL_TASK)
         for dataset in UNIMODAL_TASK:
             accuracy_expected = EXPECTED_VALUE[args.model][dataset]
-            p = multiprocessing.Process(target=run_accuracy_unimodal,
-                                        args=(result_queue, args.model,
-                                              dataset))
+            p = multiprocessing.Process(
+                target=run_accuracy_unimodal, args=(result_queue, args.model, dataset)
+            )
             p.start()
             p.join()
             result = result_queue.get()
             print(result)
-            if accuracy_expected - RTOL < result[dataset][
-                    FILTER[dataset]] < accuracy_expected + RTOL:
+            if (
+                accuracy_expected - RTOL
+                < result[dataset][FILTER[dataset]]
+                < accuracy_expected + RTOL
+            ):
                 ACCURACY_FLAG[dataset] = "✅"
             else:
                 ACCURACY_FLAG[dataset] = "❌"
@@ -223,15 +237,18 @@ def main(args):
         datasets = ",".join(MULTIMODAL_TASK)
         for dataset in MULTIMODAL_TASK:
             accuracy_expected = EXPECTED_VALUE[args.model][dataset]
-            p = multiprocessing.Process(target=run_accuracy_multimodal,
-                                        args=(result_queue, args.model,
-                                              dataset))
+            p = multiprocessing.Process(
+                target=run_accuracy_multimodal, args=(result_queue, args.model, dataset)
+            )
             p.start()
             p.join()
             result = result_queue.get()
             print(result)
-            if accuracy_expected - RTOL < result[dataset][
-                    FILTER[dataset]] < accuracy_expected + RTOL:
+            if (
+                accuracy_expected - RTOL
+                < result[dataset][FILTER[dataset]]
+                < accuracy_expected + RTOL
+            ):
                 ACCURACY_FLAG[dataset] = "✅"
             else:
                 ACCURACY_FLAG[dataset] = "❌"
@@ -241,7 +258,7 @@ def main(args):
 
 
 if __name__ == "__main__":
-    multiprocessing.set_start_method('spawn', force=True)
+    multiprocessing.set_start_method("spawn", force=True)
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=str, required=True)
     parser.add_argument("--model", type=str, required=True)
@@ -252,9 +269,7 @@ if __name__ == "__main__":
     parser.add_argument("--cann_version", type=str, required=False)
     parser.add_argument("--vllm_commit", type=lambda s: s[:7], required=False)
     parser.add_argument("--vllm_commit_url", type=str, required=False)
-    parser.add_argument("--vllm_ascend_commit",
-                        type=lambda s: s[:7],
-                        required=False)
+    parser.add_argument("--vllm_ascend_commit", type=lambda s: s[:7], required=False)
     parser.add_argument("--vllm_ascend_commit_url", type=str, required=False)
     parser.add_argument("--vllm_use_v1", type=str, required=False)
     args = parser.parse_args()
