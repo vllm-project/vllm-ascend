@@ -246,7 +246,8 @@ for output in outputs:
 Then run:
 
 ```bash
-# export VLLM_USE_MODELSCOPE=true to speed up download if huggingface is not reachable.
+# Try `export VLLM_USE_MODELSCOPE=true` and `pip install modelscope`
+# to speed up download if huggingface is not reachable.
 python example.py
 ```
 
