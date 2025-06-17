@@ -1054,6 +1054,7 @@ class AscendFusedMoE(FusedMoE):
 
         ascend_config = get_ascend_config()
         expert_map_path = ascend_config.expert_map_path
+        self.dynamic_eplb = ascend_config.dynamic_eplb
         if expert_map_path and os.path.exists(expert_map_path):
             # moe expert load balance
             expert_load_balancer = ExpertLoadBalancer(expert_map_path,
@@ -1181,7 +1182,9 @@ class AscendFusedMoE(FusedMoE):
             else:
                 return e_hidden_states
 
-        self.calculate_moe_load()
+        #EPLB calculate moe load
+        if self.dynamic_eplb == True:
+            self.calculate_moe_load()
 
         # if self.enable_multistream_shared_expert and not is_prefill:
         #     hidden_states, shared_output = hidden_states
