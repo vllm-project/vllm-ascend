@@ -371,7 +371,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.dynamic_eplb = ascend_config.dynamic_eplb
         if self.dynamic_eplb == True:
             self.eplb_adaptor = None
-            self.eplb_updator = EplbUpdator()
+            self.eplb_updator = EplbUpdator(ascend_config.expert_map_path != None)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler

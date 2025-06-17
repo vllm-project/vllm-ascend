@@ -69,8 +69,8 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
 
         self.state = ExpertWeightUpdateState.READY
 
-    def generate_log2phy_map(self,expert_map):
-        self.updated_log2phy_map = self.eplb_adaptor.generate_log2phy_map(expert_map)
+    def set_log2phy_map(self, log2phy_map):
+        self.updated_log2phy_map = log2phy_map
 
     def asyn_expert_weight_transfer(self, reqs):
         # Only when send/recv tasks are parsed into self.comm_op_list, d2d send/recv tasks can be luanched
@@ -83,7 +83,7 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
 
         self.state = ExpertWeightUpdateState.TRANSFERING
 
-    def update_expert_map_and_weight(self, reqs):
+    def update_expert_map_and_weight(self, reqs, redundant_enable):
         # Only after send/recv tasks have been luanched, expert_map and weight can be updated
         if self.state != ExpertWeightUpdateState.TRANSFERING:
             return
@@ -99,7 +99,8 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
         self.eplb_adaptor.do_update_expert_map(self.layer_id, self.updated_expert_map)
 
         #update log2phy_map
-        self.eplb_adaptor.do_update_log2phy_map(self.layer_id, self.updated_log2phy_map)
+        if redundant_enable:
+            self.eplb_adaptor.do_update_log2phy_map(self.layer_id, self.updated_log2phy_map)
 
         # update expert weight
         buffer_tensor_id = 0
