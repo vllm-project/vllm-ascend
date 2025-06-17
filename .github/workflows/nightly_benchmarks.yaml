@@ -167,6 +167,8 @@ jobs:
           cp -r benchmarks/* /github/home/benchmarks/
 
       - name: Run benchmark iteration
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         if: github.event_name != 'pull_request'
         run: |
           while IFS= read -r line || [[ -n "$line" ]]; do
