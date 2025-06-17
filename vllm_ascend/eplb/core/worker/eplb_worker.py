@@ -17,6 +17,7 @@
 
 import time
 import numpy as np
+import networkx as nx
 import torch
 import torch_npu
 import logging
@@ -67,7 +68,9 @@ class EplbWorker:
 
         logger.debug(f"[EPLB Process  new_map differs, performing D2D")
 
-        update_info = self.compose_expert_update_info(new_expert_maps, self.old_expert_maps)
+        update_info = self.compose_expert_update_info_greedy(new_expert_maps, self.old_expert_maps)\
+            if self.policy_type <= 1 else self.compose_expert_update_info_bipartite(new_expert_maps, self.old_expert_maps)
+
         self.old_expert_maps = new_expert_maps
         logger.info("EPLB Process complete")
 
@@ -95,8 +98,100 @@ class EplbWorker:
                     new_placement[layer_id] = old_placement[layer_id]
                     break
 
+    def compose_expert_update_info_bipartite(self, updated_expert_maps_org, current_expert_maps_org):
+        # transform numpy array to torch tensor
+        updated_expert_maps = updated_expert_maps_org.clone()
+        current_expert_maps = current_expert_maps_org.clone()
+        updated_expert_maps = np.array(updated_expert_maps)
+        current_expert_maps = np.array(current_expert_maps)
+
+        num_layers = current_expert_maps.shape[0]
+        num_ranks = current_expert_maps.shape[1]
+        num_experts = current_expert_maps.shape[2]
+
+        for layer_id in range(num_layers):
+            updated_expert_maps_this_layer = updated_expert_maps[layer_id]
+            current_expert_maps_this_layer = current_expert_maps[layer_id]
+            updated_expert_maps_this_layer_org = updated_expert_maps_org[layer_id]
+
+            expert_send_info_this_layer = dict()
+            expert_recv_info_this_layer = dict()
+
+            # Guard Clause: if there is no expert weight update, avoid subsequent processing
+            if (np.equal(updated_expert_maps_this_layer,
+                        current_expert_maps_this_layer)).all():
+                yield (expert_send_info_this_layer, expert_recv_info_this_layer,
+                    updated_expert_maps_this_layer_org, layer_id)
+
+            # Parse expert_ids each rank needs to receive from other ranks
+            dst_rank_indices, experts_to_recv = np.where((current_expert_maps_this_layer == -1)
+                                                        & (updated_expert_maps_this_layer != -1))
+
+            # record src ranks for potential transfer
+            src_ranks_set = dict()
+            for idx in range(len(dst_rank_indices)):
+                expert_id = experts_to_recv[idx].item()
+                if expert_id not in src_ranks_set:
+                    src_ranks_set[expert_id] = np.where(
+                        current_expert_maps_this_layer[:, expert_id] != -1)[0]
+
+            # loop until all experts are scheduled
+            while len(dst_rank_indices) > 0:
+                # construct bipartite graph
+                graph_expert_update = nx.Graph()
+                for idx in range(len(dst_rank_indices)):
+                    dst_rank_id = dst_rank_indices[idx].item()
+                    expert_id = experts_to_recv[idx].item()
+                    # add src ranks
+                    src_rank_ids = src_ranks_set[expert_id]
+                    graph_expert_update.add_nodes_from(src_rank_ids, bipartite=0)
+                    # add dest rank
+                    graph_expert_update.add_nodes_from(str(dst_rank_id), bipartite=1)
+                    # add edges
+                    for src_rank_id in src_rank_ids:
+                        graph_expert_update.add_edge(src_rank_id, str(dst_rank_id))
+
+                # graph may not be connected
+                connected_components = list(nx.connected_components(graph_expert_update))
+                all_matches = {}
+                # matching in this loop
+                for i, component in enumerate(connected_components):
+                    subgraph = graph_expert_update.subgraph(component)
+                    component_matching = nx.bipartite.maximum_matching(subgraph)
+                    all_matches.update(component_matching)
+
+                for src_rank, dst_rank in all_matches.items():
+                    dst_rank = int(dst_rank)
+                    assert src_rank != dst_rank
+                    if graph_expert_update.nodes[src_rank]['bipartite'] == 0:
+                        # currently not scheduled experts in rank dst_rank
+                        experts_v = experts_to_recv[np.where(
+                            dst_rank_indices == dst_rank)]
+                        # src: src_rank, dest: dst_rank, expert: expert_id
+                        expert_id = np.intersect1d(experts_v, np.where(
+                            current_expert_maps_this_layer[src_rank] != -1))[0]
+
+                        # record send/rcv pairs
+                        if src_rank not in expert_send_info_this_layer:
+                            expert_send_info_this_layer[src_rank] = []
+                        if dst_rank not in expert_recv_info_this_layer:
+                            expert_recv_info_this_layer[dst_rank] = []
+                        expert_send_info_this_layer[src_rank].append((dst_rank, expert_id))
+                        expert_recv_info_this_layer[dst_rank].append((src_rank, expert_id))
+
+                        remove_index = np.where(np.logical_and(
+                            dst_rank_indices == dst_rank, experts_to_recv == expert_id))
+
+                        # update
+                        dst_rank_indices = np.delete(
+                            dst_rank_indices, remove_index)
+                        experts_to_recv = np.delete(experts_to_recv, remove_index)
+
+            yield (expert_send_info_this_layer, expert_recv_info_this_layer,
+                updated_expert_maps_this_layer_org, layer_id)
+
     # TODO: Here only expert weight exchange is considered, need to be extended to cover other weight update cases
-    def compose_expert_update_info(self, updated_expert_maps, current_expert_maps):
+    def compose_expert_update_info_greedy(self, updated_expert_maps, current_expert_maps):
         num_layers = current_expert_maps.shape[0]
         num_ranks = current_expert_maps.shape[1]
         num_experts = current_expert_maps.shape[2]
@@ -225,93 +320,6 @@ class EplbWorker:
         placement_global[l_idx, g_idx, gid_idx] = slot_idx
 
         return placement_global
-
-
-def compose_expert_update_info_bipartite(updated_expert_maps,
-                                         current_expert_maps):
-    num_layers = current_expert_maps.shape[0]
-    num_ranks = current_expert_maps.shape[1]
-    num_experts = current_expert_maps.shape[2]
-
-    for layer_id in range(num_layers):
-        updated_expert_maps_this_layer = updated_expert_maps[layer_id]
-        current_expert_maps_this_layer = current_expert_maps[layer_id]
-
-        expert_send_info_this_layer = dict()
-        expert_recv_info_this_layer = dict()
-
-        # Guard Clause: if there is no expert weight update, avoid subsequent processing
-        if (np.equal(updated_expert_maps_this_layer,
-                     current_expert_maps_this_layer)).all():
-            yield (expert_send_info_this_layer, expert_recv_info_this_layer,
-                   updated_expert_maps_this_layer, layer_id)
-
-        # Parse expert_ids each rank needs to receive from other ranks
-        dst_rank_indices, experts_to_recv = np.where((current_expert_maps_this_layer == -1)
-                                                     & (updated_expert_maps_this_layer != -1))
-
-        # record src ranks for potential transfer
-        src_ranks_set = dict()
-        for idx in range(len(dst_rank_indices)):
-            expert_id = experts_to_recv[idx].item()
-            if expert_id not in src_ranks_set:
-                src_ranks_set[expert_id] = np.where(
-                    current_expert_maps_this_layer[:, expert_id] != -1)[0]
-
-        # loop until all experts are scheduled
-        while len(dst_rank_indices) > 0:
-            # construct bipartite graph
-            G = nx.Graph()
-            for idx in range(len(dst_rank_indices)):
-                dst_rank_id = dst_rank_indices[idx].item()
-                expert_id = experts_to_recv[idx].item()
-                # add src ranks
-                src_rank_ids = src_ranks_set[expert_id]
-                G.add_nodes_from(src_rank_ids, bipartite=0)
-                # add dest rank
-                G.add_nodes_from(str(dst_rank_id), bipartite=1)
-                # add edges
-                for src_rank_id in src_rank_ids:
-                    G.add_edge(src_rank_id, str(dst_rank_id))
-
-            # graph may not be connected
-            connected_components = list(nx.connected_components(G))
-            all_matches = {}
-            # matching in this loop
-            for i, component in enumerate(connected_components):
-                subgraph = G.subgraph(component)
-                component_matching = nx.bipartite.maximum_matching(subgraph)
-                all_matches.update(component_matching)
-
-            for u, v in all_matches.items():
-                v = int(v)
-                assert u != v
-                if G.nodes[u]['bipartite'] == 0:
-                    # currently not scheduled experts in rank v
-                    experts_v = experts_to_recv[np.where(
-                        dst_rank_indices == v)]
-                    # src: u, dest: v, expert: expert_id
-                    expert_id = np.intersect1d(experts_v, np.where(
-                        current_expert_maps_this_layer[u] != -1))[0]
-
-                    # record send/rcv pairs
-                    if u not in expert_send_info_this_layer:
-                        expert_send_info_this_layer[u] = []
-                    if v not in expert_recv_info_this_layer:
-                        expert_recv_info_this_layer[v] = []
-                    expert_send_info_this_layer[u].append((v, expert_id))
-                    expert_recv_info_this_layer[v].append((u, expert_id))
-
-                    remove_index = np.where(np.logical_and(
-                        dst_rank_indices == v, experts_to_recv == expert_id))
-
-                    # update
-                    dst_rank_indices = np.delete(
-                        dst_rank_indices, remove_index)
-                    experts_to_recv = np.delete(experts_to_recv, remove_index)
-
-        yield expert_send_info_this_layer, expert_recv_info_this_layer, updated_expert_maps_this_layer, layer_id
-
 
 class EplbProcess:
     def __init__(self, shared_dict, planner_q, block_update_q, policy_type: int = 0, enable_d2d: bool = True):
