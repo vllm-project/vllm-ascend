@@ -205,16 +205,17 @@ class LLMDataDistCMgrConnectorScheduler():
             f"LLMDataDistCMgrConnector update states num_externel_tokens: {num_externel_tokens} kv_transfer_params: {params}"
         )
         if params is not None and params.get("do_remote_prefill"):
-            if all(p in params for p in ("remote_engine_id", "remote_host",
-                                         "remote_port")):
-                self._reqs_need_recv[request.request_id] = (
-                    request, blocks.get_unhashed_block_ids())
+            if params.get("remote_block_ids"):
+                if all(p in params for p in ("remote_engine_id", "remote_host",
+                                            "remote_port")):
+                    self._reqs_need_recv[request.request_id] = (
+                        request, blocks.get_unhashed_block_ids())
+                else:
+                    logger.warning("" \
+                    f"Invalid KVTransferParams {params}, This request will be discard")
             else:
-                logger.warning("" \
-                f"Invalid KVTransferParams {params}, This request will be discard")
-        else:
-            assert num_externel_tokens == 0
-        params["do_remote_prefill"] = False
+                assert num_externel_tokens == 0
+            params["do_remote_prefill"] = False
 
     def build_connector_meta(
         self,
