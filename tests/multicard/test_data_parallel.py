@@ -25,13 +25,11 @@ import pytest
 
 from tests.conftest import VllmRunner
 from tests.model_utils import check_outputs_equal
-from vllm_ascend.utils import vllm_version_is
 
 MODELS = ["Qwen/Qwen2.5-0.5B-Instruct"]
 
 
-@pytest.mark.skipif(vllm_version_is("0.9.0"),
-                    reason="Data parallel only support on >= 0.9.1")
+@pytest.mark.skipif(True, reason="OPEN ME when dp is supported on A2")
 @pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
                     reason="Data parallel only support on v1")
 @pytest.mark.parametrize("model", MODELS)
