@@ -29,6 +29,7 @@ class VllmEplbAdaptor(EplbAdaptor):
     def __init__(self, model, **args):
         super().__init__(**args)
         self.model = model
+        self.rank_id = torch.distributed.get_rank()
         self.param_dict = dict(self.model.named_parameters())
         self.num_dense_layers = self.model.config.first_k_dense_replace
         self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
@@ -43,7 +44,8 @@ class VllmEplbAdaptor(EplbAdaptor):
             self.expert_map_per_layer[self.num_dense_layers + layer_idx] =\
                 self.model.get_expert_map(self.num_dense_layers + layer_idx)
 
-        self.buffer_tensor_dict = dict()
+        self.buffer_tensor_dict = dict()     # reference to expert map on device for expert map update
+        self.buffer_tensor_dict_cpu = dict() # copy of expert map on CPU to avoid device synchronize frequently
         # TODO: here we set number of buffer tensor equal to number of expert in each laryer, which can be improved
         num_buffer_tensor = torch.where(self.expert_map_per_layer[self.num_dense_layers] != -1)[0].numel()
         self.init_buffer_tensor_dict(num_buffer_tensor)
@@ -66,7 +68,7 @@ class VllmEplbAdaptor(EplbAdaptor):
     def get_expert_tensor(self, layer_id, global_expert_id_to_send):
         for name in self.expert_weight_names:
             complete_name = "model.layers." + str(layer_id) + ".mlp.experts." + name
-            local_expert_id = self.expert_map_per_layer[layer_id][global_expert_id_to_send].item()
+            local_expert_id = self.expert_map_per_layer_cpu[layer_id][global_expert_id_to_send].item()
             yield self.param_dict[complete_name].data[local_expert_id]
 
     def get_rank_expert_workload(self, num_moe_layers):
@@ -86,16 +88,20 @@ class VllmEplbAdaptor(EplbAdaptor):
         all_maps = gathered.permute(1, 0, 2)
         all_expert_maps = all_maps.cpu()
 
+        for layer_idx in range(num_moe_layers):
+            self.log2phy_map_per_layer_cpu[self.num_dense_layers + layer_idx] = \
+                all_expert_maps[layer_idx][self.rank_id]
+
         return all_expert_maps
 
     def do_update_expert_map(self, layer_id, updated_expert_map):
         self.expert_map_per_layer[layer_id].copy_(updated_expert_map)
+        self.expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)
 
-    def do_update_expert_weight(self, layer_id, expert_id_before_replace, buffer_tensor_id):
+    def do_update_expert_weight(self, layer_id, local_expert_to_replace, buffer_tensor_id):
         for name in self.expert_weight_names:
             complete_name = "model.layers." + str(layer_id) + ".mlp.experts." + name
-            local_expert_id = self.expert_map_per_layer[layer_id][expert_id_before_replace].item()
-            expert_tensor = self.param_dict[complete_name].data[local_expert_id]
+            expert_tensor = self.param_dict[complete_name].data[local_expert_to_replace]
             expert_tensor.copy_(self.buffer_tensor_dict[name][buffer_tensor_id])
 
     def generate_index_dicts(self, tensor_2d):
@@ -140,9 +146,8 @@ class VllmEplbAdaptor(EplbAdaptor):
         return log2phy_map
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
-        rank_id = torch.distributed.get_rank()
         if self.log2phy_map_per_layer[layer_id] is not None:
-            self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map[rank_id])
+            self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map[self.rank_id])
 
     def global2local(self,
         placement: torch.Tensor,
