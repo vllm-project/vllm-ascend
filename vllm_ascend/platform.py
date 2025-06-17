@@ -27,7 +27,7 @@ from torch.distributed.distributed_c10d import PrefixStore
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
-from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config, get_ascend_config
 from vllm_ascend.utils import (ASCEND_QUATIZATION_METHOD, is_310p,
                                update_aclgraph_sizes)
 
@@ -224,6 +224,8 @@ class NPUPlatform(Platform):
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla):
         if use_v1 and use_mla:
+            if get_ascend_config().use_factored_mla:
+                return "vllm_ascend.attention.mla_v1_refactored.AscendRefactoredMLABackend"
             return "vllm_ascend.attention.mla_v1.AscendMLABackend"
         if use_v1:
             return "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
