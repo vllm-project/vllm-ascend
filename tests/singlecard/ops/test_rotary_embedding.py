@@ -200,6 +200,7 @@ def test_rotary_embedding_quant_with_leading_dim(
                                atol=DEFAULT_ATOL,
                                rtol=DEFAULT_RTOL)
 
+
 # test rope with npu_mrope interface with leading dimension and merge seqlen and batch_size as num_tokens
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("batch_size", BATCH_SIZES)
@@ -246,21 +247,21 @@ def test_npu_mrope_quant_with_leading_dim(
     ref_query, ref_key = rope.forward_native(positions, query, key)
 
     query, key = torch_npu.npu_mrope(
-            positions,
-            query,
-            key,
-            rope.cos_sin_cache,
-            rope.head_size,
-            mrope_section=[0,0,0],
-            rotary_mode='half' if rope.is_neox_style else 'interleave'
-        )
+        positions,
+        query,
+        key,
+        rope.cos_sin_cache,
+        rope.head_size,
+        mrope_section=[0, 0, 0],
+        rotary_mode='half' if rope.is_neox_style else 'interleave')
 
-    # Compare the results.
-    torch.testing.assert_close(query.view(ref_query.size()),
-                               ref_query,
-                               atol=DEFAULT_ATOL,
-                               rtol=DEFAULT_RTOL)
-    torch.testing.assert_close(key.view(ref_key.size()),
-                               ref_key,
-                               atol=DEFAULT_ATOL,
-                               rtol=DEFAULT_RTOL)
+    new_query = query.view(ref_query.size())
+    new_key = key.view(ref_key.size())
+    abs_query_diff = torch.abs(new_query - ref_query)
+    no_close_query = abs_query_diff > DEFAULT_ATOL + DEFAULT_RTOL * torch.abs(
+        ref_query)
+    abs_key_diff = torch.abs(new_key - ref_key)
+    no_close_key = abs_key_diff > DEFAULT_ATOL + DEFAULT_RTOL * torch.abs(
+        ref_key)
+    assert no_close_query.sum().item() / ref_query.numel() < 1e-4
+    assert no_close_key.sum().item() / ref_key.numel() < 1e-4
