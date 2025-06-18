@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
-import llm_datadist     # type: ignore[import-not-found]
+import llm_datadist  # type: ignore[import-not-found]
 import msgspec
 import torch
 import zmq
@@ -762,7 +762,8 @@ class LLMDataDistCMgrConnectorWorker():
 
 # adopt this from  https://github.com/vllm-project/vllm/blob/main/vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:     # type: ignore[name-defined]
+def zmq_ctx(socket_type: Any,
+            addr: str) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
     """Context manager for a ZMQ socket"""
 
     ctx: Optional[zmq.Context] = None  # type: ignore[name-defined]
