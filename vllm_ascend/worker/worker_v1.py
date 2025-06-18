@@ -38,7 +38,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
@@ -247,15 +246,15 @@ class NPUWorker(WorkerBase):
 
     def execute_dummy_batch(self) -> None:
         runner = self.model_runner
-        num_tokens = 1
+        max_num_tokens = 1
+        with_prefill = False
         if runner.dp_size > 1:
             max_num_tokens, with_prefill = runner._get_forward_metadata_across_dp(
-                1, False)
-        if envs_ascend.VLLM_ENABLE_MC2 or runner.torchair_graph_enabled:
-            if not with_prefill:
-                num_tokens = max_num_tokens
-            num_tokens = runner.select_torchair_padded_batch_size(num_tokens)
-        runner._dummy_run(num_tokens,
+                max_num_tokens, with_prefill)
+        if runner.torchair_graph_enabled and not with_prefill:
+            max_num_tokens = runner.select_torchair_padded_batch_size(
+                max_num_tokens)
+        runner._dummy_run(max_num_tokens,
                           is_compile=False,
                           with_prefill=with_prefill)
 

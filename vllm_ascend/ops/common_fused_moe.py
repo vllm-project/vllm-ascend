@@ -21,7 +21,8 @@ import torch
 from vllm.model_executor.layers.fused_moe.layer import \
     UnquantizedFusedMoEMethod
 
-from vllm_ascend.ops.fused_moe import fused_experts, select_experts
+from vllm_ascend.ops.fused_moe import fused_experts, select_experts, fused_experts_with_all2all
+from vllm.distributed.parallel_state import get_ep_group
 
 
 def forward_oot(
@@ -55,7 +56,16 @@ def forward_oot(
         e_score_correction_bias=e_score_correction_bias,
     )
 
-    return fused_experts(
+    # return fused_experts(
+    #     hidden_states=x,
+    #     w1=layer.w13_weight,
+    #     w2=layer.w2_weight,
+    #     topk_weights=topk_weights,
+    #     topk_ids=topk_ids,
+    #     top_k=top_k,
+    #     expert_map=expert_map,
+    #     apply_router_weight_on_input=apply_router_weight_on_input)
+    return fused_experts_with_all2all(
         hidden_states=x,
         w1=layer.w13_weight,
         w2=layer.w2_weight,
@@ -63,7 +73,8 @@ def forward_oot(
         topk_ids=topk_ids,
         top_k=top_k,
         expert_map=expert_map,
-        apply_router_weight_on_input=apply_router_weight_on_input)
+        ep_group=get_ep_group()
+        )
 
 
 UnquantizedFusedMoEMethod.forward_oot = forward_oot

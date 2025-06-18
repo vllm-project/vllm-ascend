@@ -17,9 +17,6 @@
 name: 'e2e test / pd-disaggregation'
 
 on:
-  schedule:
-    # Runs at 23:00 UTC (7:00 AM Beijing) every day
-    - cron: '0 23 * * *'
   pull_request:
     types: [ labeled ]
 
@@ -41,7 +38,7 @@ jobs:
     if: ${{ contains(github.event.pull_request.labels.*.name, 'pd-test') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') || github.event_name == 'schedule' }}
     strategy:
       matrix:
-        vllm_verison: [main, v0.9.1]
+        vllm_verison: [v0.9.1]
     name: vLLM Ascend prefilling decoding disaggregation test
     runs-on: linux-arm64-npu-static-8
 
