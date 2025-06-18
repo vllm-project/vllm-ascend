@@ -1217,9 +1217,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
 
         if self.dynamic_eplb:
-            if self.eplb_adaptor == None:
-                self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
-                self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.forward_before()
 
         with ProfileExecuteDuration().capture_async(
@@ -1510,6 +1507,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         positions=positions,
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=inputs_embeds)
+
+                #EPLB
+                if self.dynamic_eplb == True:
+                    self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
+                    self.eplb_updator.set_adaptor(self.eplb_adaptor)
+                    self.eplb_updator.warm_up_eplb()
+
                 return hidden_states
 
     def profile_run(self) -> None:

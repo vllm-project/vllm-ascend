@@ -70,7 +70,7 @@ class VllmEplbAdaptor(EplbAdaptor):
             for name in self.expert_weight_names]
 
     def get_rank_expert_workload(self, num_moe_layers):
-        return self.model.get_all_moe_loads(num_moe_layers)
+        return self.model.get_all_moe_loads(num_moe_layers, self.global_expert_num)
 
     def get_init_expert_map(self, num_moe_layers):
         expert_map = self.model.get_all_expert_map(num_moe_layers)

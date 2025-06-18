@@ -138,13 +138,12 @@ class EplbUpdator:
         self._gather_buffer = None
         if dist.is_initialized():
             self.world_size = dist.get_world_size()
-        if dist.is_initialized():
-            device = local_load.device
+            self.device = local_load.device
             if self._gather_buffer is None:
                 shape = (self.world_size, *local_load.shape)
                 self._gather_buffer = torch.empty(shape,
                                                   dtype=local_load.dtype,
-                                                  device=device)
+                                                  device=self.device)
 
             dist.all_gather_into_tensor(self._gather_buffer, local_load)
 
@@ -156,6 +155,34 @@ class EplbUpdator:
             self.shared_dict["moe_load"] = moe_load.cpu()
             logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
         return moe_load
+
+    def warm_up_eplb(self):
+
+        self.compute_and_set_moe_load()
+
+        src_tensor = torch.empty((1,), device=self.device)
+        self_rank = dist.get_rank()
+
+        comm_op_list = []
+
+        for dst_rank in range(self.world_size):
+            if dst_rank == self_rank:
+                continue
+            comm_op_list.append(
+                dist.P2POp(dist.isend, src_tensor, dst_rank)
+            )
+
+        for src_rank in range(self.world_size):
+            if src_rank == self_rank:
+                continue
+            comm_op_list.append(
+                dist.P2POp(dist.irecv, src_tensor, src_rank)
+        )
+        if comm_op_list:
+            reqs = dist.batch_isend_irecv(comm_op_list)
+
+        for req in reqs:
+            req.wait()
 
     def shutdown(self):
         """

@@ -1251,18 +1251,3 @@ class AscendFusedMoE(FusedMoE):
     def get_log2phy_map(self):
         return self.log2phy
 
-    def get_moe_load(self):
-        return self.moe_load
-
-    def calculate_moe_load(self):
-        if self.moe_load is None:
-            self.moe_load = torch.zeros(self.num_experts,
-                                        dtype=torch.int64,
-                                        device=self.topk_ids.device)
-
-        ids     = self.topk_ids.flatten().to(torch.int64)
-
-        ones = torch.ones_like(ids, dtype=torch.int64, device=ids.device)
-        self.moe_load.scatter_add_(0, ids, ones)
-
-        return self.moe_load
