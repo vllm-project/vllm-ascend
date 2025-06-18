@@ -101,7 +101,7 @@ def test_generate_log2phy_expert_map(mock_expert_load_balancer):
 
 def test_get_rank_placement_map(mock_expert_load_balancer, mocker):
     mocker.patch("torch_npu.npu._lazy_init")
-    mocker.patch('torch.npu.current_device', return_value=0)
+    mocker.patch('torch.npu.current_device', return_value='cpu')
     layer_id = 0
     rank_id = 0
     rank_local_expert_num, rank_expert_map = mock_expert_load_balancer.get_rank_placement_map(
