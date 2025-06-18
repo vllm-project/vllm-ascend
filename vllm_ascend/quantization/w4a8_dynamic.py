@@ -31,7 +31,7 @@ class AscendW4A8DynamicLinearMethod:
     """
 
     def __init__(self):
-        self.transpose_weight =True
+        self.transpose_weight = True
         self.group_size = get_current_vllm_config(
         ).quant_config.quant_description.get("group_size", 256)
 
@@ -62,10 +62,12 @@ class AscendW4A8DynamicLinearMethod:
                                                    1,
                                                    dtype=params_dtype)
         params_dict["weight_scale_second"] = torch.empty(output_size,
-                                                         input_size // self.group_size,
+                                                         input_size //
+                                                         self.group_size,
                                                          dtype=params_dtype)
         params_dict["weight_offset_second"] = torch.empty(output_size,
-                                                          input_size // self.group_size,
+                                                          input_size //
+                                                          self.group_size,
                                                           dtype=params_dtype)
         return params_dict
 
