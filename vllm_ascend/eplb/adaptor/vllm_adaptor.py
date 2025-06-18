@@ -69,8 +69,28 @@ class VllmEplbAdaptor(EplbAdaptor):
         return [self.param_dict["model.layers." + str(layer_id) + ".mlp.experts." + name].data[local_expert_id]
             for name in self.expert_weight_names]
 
-    def get_rank_expert_workload(self, num_moe_layers):
-        return self.model.get_all_moe_loads(num_moe_layers, self.global_expert_num)
+    def get_rank_expert_workload(
+        self,
+        num_moe_layers: int,
+    ) -> torch.Tensor:
+        # 收集各层 topk_ids -> list of [B, K]
+        all_topk_ids = [self.model.get_topk_ids(i) for i in range(num_moe_layers)]
+        # stack & flatten -> ids2d: [L, B*K]
+        stacked = torch.stack(all_topk_ids, dim=0)          # [L, B, K]
+        L, B, K = stacked.shape
+        ids2d   = stacked.view(L, B * K).to(torch.int64)   # [L, N]
+
+        device   = ids2d.device
+        moe_load = torch.zeros((L, self.global_expert_num),
+                            dtype=torch.int64, device=device)
+
+        ones2d = torch.ones_like(ids2d, dtype=torch.int64)
+
+        assert moe_load.dim() == 2 and ids2d.dim() == 2 and ones2d.dim() == 2
+        assert ids2d.shape == ones2d.shape
+
+        moe_load.scatter_add_(dim=1, index=ids2d, src=ones2d)
+        return moe_load
 
     def get_init_expert_map(self, num_moe_layers):
         expert_map = self.model.get_all_expert_map(num_moe_layers)
