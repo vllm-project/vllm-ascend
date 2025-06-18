@@ -99,6 +99,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to enable the trace recompiles from pytorch.
     "VLLM_ASCEND_TRACE_RECOMPILES":
     lambda: bool(int(os.getenv("VLLM_ASCEND_TRACE_RECOMPILES", '0'))),
+    # Whether to enable fused_experts_allgather_ep. MoeInitRoutingV3 and
+    # GroupedMatmulFinalizeRouting operators are combined to implement EP.
     "VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP":
     lambda: bool(int(os.getenv("VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP", '0'))
                  ),

@@ -22,8 +22,9 @@ import torch.distributed as dist
 import torch_npu
 from vllm.distributed import GroupCoordinator
 
+import vllm_ascend.envs as envs
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
+from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import select_experts
 from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
                                get_fused_moe_state, npu_stream_switch,
@@ -631,11 +632,6 @@ class AscendW8A8DynamicFusedMoEMethod:
         self.transpose_weight = True
 
         self.ep_group = get_ep_group()
-        self.etp_group = get_etp_group()
-
-        self.fused_experts_allgather_ep_enabled = envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and \
-            self.ep_group.world_size > 1 and \
-            self.etp_group.world_size == 1
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
@@ -757,8 +753,19 @@ class AscendW8A8DynamicFusedMoEMethod:
         topk_weights = topk_weights.to(x.dtype)
 
         fused_moe_state = get_fused_moe_state(self.ep_group.world_size,
-                                              is_prefill)
-        if fused_moe_state == FusedMoEState.MC2:
+                                              is_prefill, is_deepseek_v3_r1)
+        if fused_moe_state == FusedMoEState.AllGatherEP:
+            return fused_experts_with_allgather(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w1_scale=layer.w13_weight_scale,
+                w2=layer.w2_weight,
+                w2_scale=layer.w2_weight_scale,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                top_k=top_k,
+                expert_map=expert_map)
+        elif fused_moe_state == FusedMoEState.MC2:
             return fused_experts_with_mc2(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -809,7 +816,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 1, 2).contiguous()
             layer.w2_weight.data = layer.w2_weight.data.transpose(
                 1, 2).contiguous()
-        if self.fused_experts_allgather_ep_enabled:
+        if envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP:
             torch_npu.npu_format_cast_(layer.w2_weight, 29)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
             layer.w13_weight_scale.data.shape[0], -1)
