@@ -131,7 +131,7 @@ for **x86** machine:
 pip config set global.extra-index-url https://download.pytorch.org/whl/cpu/  
 ```
 
-for turch-npu **dev** version:
+for torch-npu **dev** version:
 
 ```bash
 pip config set global.extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
