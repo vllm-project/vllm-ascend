@@ -812,30 +812,6 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 
     def get_topk_ids(self,layer_id):
         return self.model.layers[layer_id+3].mlp.experts.topk_ids
-        
-    def get_all_moe_loads(
-        self,
-        num_moe_layers: int,
-        num_experts_per_layer: int
-    ) -> torch.Tensor:
-        # 收集各层 topk_ids -> list of [B, K]
-        all_topk_ids = [self.get_topk_ids(i) for i in range(num_moe_layers)]
-        # stack & flatten -> ids2d: [L, B*K]
-        stacked = torch.stack(all_topk_ids, dim=0)          # [L, B, K]
-        L, B, K = stacked.shape
-        ids2d   = stacked.view(L, B * K).to(torch.int64)   # [L, N]
-
-        device   = ids2d.device
-        moe_load = torch.zeros((L, num_experts_per_layer),
-                            dtype=torch.int64, device=device)
-
-        ones2d = torch.ones_like(ids2d, dtype=torch.int64)
-
-        assert moe_load.dim() == 2 and ids2d.dim() == 2 and ones2d.dim() == 2
-        assert ids2d.shape == ones2d.shape
-
-        moe_load.scatter_add_(dim=1, index=ids2d, src=ones2d)
-        return moe_load
 
 class CustomDeepseekV3ForCausalLM(CustomDeepseekV2ForCausalLM):
     pass
