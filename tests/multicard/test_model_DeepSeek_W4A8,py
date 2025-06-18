@@ -33,8 +33,8 @@ prompts = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [100])
 def test_model_w4a8(
-        model: str,
-        max_tokens: int,
+    model: str,
+    max_tokens: int,
 ) -> None:
     sampling_params = SamplingParams(
         max_tokens=max_tokens,
