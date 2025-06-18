@@ -12,9 +12,10 @@ This demo document provides instructions for running a disaggregated vLLM-ascend
 The rank table is a JSON file that specifies the mapping of Ascend NPU ranks to nodes. The following command generates a rank table for all nodes with 16 cards prefill and 16 cards decode:
 
 Run the following command on every node to generate the rank table:
-```bash
+```shell
 cd vllm-ascend/examples/disaggregate_prefill_v1/
-bash generate_ranktable.sh 16 16
+bash gen_ranktable.sh --ips 172.19.32.175 172.19.241.49 172.19.123.51 172.19.190.36 \
+  --npus-per-node 8 --network-card-name enp189s0f0 --prefill-device-cnt 16 --decode-device-cnt 16
 ```
 Rank table will generated at `/vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1/ranktable.json`
 
@@ -28,7 +29,7 @@ Execution Sequence
 - Start proxy server on Node1
 
 * Run prefill server P1 on first node
-```bash
+```shell
 export HCCL_IF_IP=`hostname -I|awk -F " " '{print$1}'`
 export GLOO_SOCKET_IFNAME="eth0"
 export TP_SOCKET_IFNAME="eth0"
@@ -62,14 +63,14 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   "kv_parallel_size": 1,
   "kv_port": "20001",
   "engine_id": "0",
-  "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_connector_v1_a3"
+  "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enable": false, "enable_multistream_shared_expert": false}, "expert_tensor_parallel_size": 1}'
+  '{"torchair_graph_config": {"enabled": false, "enable_multistream_shared_expert": false}, "expert_tensor_parallel_size": 1}'
 ```
 
 * Run prefill server P2 on second node
-```bash
+```shell
 export HCCL_IF_IP=`hostname -I|awk -F " " '{print$1}'`
 export GLOO_SOCKET_IFNAME="eth0"
 export TP_SOCKET_IFNAME="eth0"
@@ -104,14 +105,14 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   "kv_parallel_size": 1,
   "kv_port": "20001",
   "engine_id": "0",
-  "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_connector_v1_a3"
+  "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enable": false, "enable_multistream_shared_expert": false}, "expert_tensor_parallel_size": 1}' 
+  '{"torchair_graph_config": {"enabled": false, "enable_multistream_shared_expert": false}, "expert_tensor_parallel_size": 1}' 
 ```
 
 * Run decode server d1 on third node
-```bash
+```shell
 export HCCL_IF_IP=`hostname -I|awk -F " " '{print$1}'`
 export GLOO_SOCKET_IFNAME="eth0"
 export TP_SOCKET_IFNAME="eth0"
@@ -145,14 +146,14 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   "kv_parallel_size": 1,
   "kv_port": "20001",
   "engine_id": "0",
-  "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_connector_v1_a3"
+  "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enable": false, "enable_multistream_shared_expert": false}, "expert_tensor_parallel_size": 1}'
+  '{"torchair_graph_config": {"enabled": false, "enable_multistream_shared_expert": false}, "expert_tensor_parallel_size": 1}'
 ```
 
 * Run decode server d2 on last node
-```bash
+```shell
 export HCCL_IF_IP=`hostname -I|awk -F " " '{print$1}'`
 export GLOO_SOCKET_IFNAME="eth0"
 export TP_SOCKET_IFNAME="eth0"
@@ -187,27 +188,47 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   "kv_parallel_size": 1,
   "kv_port": "20001",
   "engine_id": "0",
-  "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_connector_v1_a3"
+  "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enable": false, "enable_multistream_shared_expert": false}, "expert_tensor_parallel_size": 1}' 
+  '{"torchair_graph_config": {"enabled": false, "enable_multistream_shared_expert": false}, "expert_tensor_parallel_size": 1}' 
 ```
 
 * Run proxy server on the first node
-```bash
+```shell
 cd /vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1
 python toy_proxy_server.py --host 172.19.32.175 --port 1025 --prefiller-hosts 172.19.241.49 --prefiller-port 20002 --decoder-hosts 172.19.123.51 --decoder-ports 20002
 ```
 
 * Verification
 Check service health using the proxy server endpoint:
-```bash
+```shell
 curl http://localhost:1025/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
         "model": "deepseek",
-        "prompt": "你是谁？",
+        "prompt": "Who are you?",
         "max_tokens": 100,
         "temperature": 0
     }'
+```
+
+* Performance
+Test performance with vllm benchmark
+```shell
+cd /vllm-workspace/vllm/benchmarks
+python3 benchmark_serving.py \
+    --backend vllm \
+    --dataset-name random \
+    --random-input-len 4096 \
+    --random-output-len 1536 \
+    --num-prompts 256 \
+    --ignore-eos \
+    --model deepseek \
+    --tokenizer /data01/deepseek_r1_w8a8_zhw \
+    --host localhost \
+    --port 8000 \
+    --endpoint /v1/completions \
+    --max-concurrency 4 \
+    --request-rate 4
 ```
