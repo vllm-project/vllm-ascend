@@ -207,7 +207,7 @@ class LLMDataDistCMgrConnectorScheduler():
         if params is not None and params.get("do_remote_prefill"):
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host",
-                                            "remote_port")):
+                                             "remote_port")):
                     self._reqs_need_recv[request.request_id] = (
                         request, blocks.get_unhashed_block_ids())
                 else:
