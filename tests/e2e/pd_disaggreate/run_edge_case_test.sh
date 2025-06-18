@@ -1,15 +1,18 @@
 #!/bin/bash
-set -xe
-
 export VLLM_USE_V1=1
+
+set -xe
 
 # Models to run
 MODELS=(
-    "deepseekv3-lite-base-latest-w8a8-dynamic"
+    "deepseek-ai/DeepSeek-V2-Lite"
 )
 
 # Find the git repository root directory
 GIT_ROOT=$(git rev-parse --show-toplevel)
+
+# Trap the SIGINT signal (triggered by Ctrl+C)
+trap 'kill $(jobs -pr)' SIGINT SIGTERM EXIT
 
 # Gen ranktable
 RANKTABLE_PATH=${GIT_ROOT}/examples/disaggregate_prefill_v1/ranktable.json
@@ -21,9 +24,6 @@ LOCAL_HOST=`hostname -I|awk -F " " '{print$1}'`
 bash gen_ranktable.sh --ips $LOCAL_HOST  --network-card-name enp189s0f0 --prefill-device-cnt 1 --decode-device-cnt 1
 cd -
 export DISAGGREGATED_PREFILL_RANK_TABLE_PATH="$RANKTABLE_PATH"
-
-# Trap the SIGINT signal (triggered by Ctrl+C)
-trap 'kill $(jobs -pr)' SIGINT SIGTERM EXIT
 
 # Waits for vLLM to start.
 wait_for_server() {
@@ -46,7 +46,7 @@ get_model_args() {
   local model_name=$1
   local extra_args=""
 
-  if [[ "$model_name" == *"deepseekv3"* ]]; then
+  if [[ "$model_name" == *"deepseek"* ]]; then
     extra_args="--trust-remote-code"
   fi
 
@@ -72,7 +72,7 @@ run_tests_for_model() {
   --enforce-eager \
   --disable-log-requests \
   --gpu-memory-utilization 0.8 \
-  --kv-transfer-config '{\"kv_connector\":\"LLMDataDistCMgrConnector\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"npu\",\"kv_parallel_size\":\"1\",\"kv_port\":\"20001\",\"engine_id\":\"0\",\"kv_connector_module_path\":\"vllm_ascend.distributed.llmdatadist_connector_v1_a3\"}'"
+  --kv-transfer-config '{\"kv_connector\":\"LLMDataDistCMgrConnector\",\"kv_role\":\"kv_producer\",\"kv_buffer_device\":\"npu\",\"kv_parallel_size\":\"1\",\"kv_port\":\"20001\",\"engine_id\":\"0\",\"kv_connector_module_path\":\"vllm_ascend.distributed.llmdatadist_c_mgr_connector\"}'"
 
   if [ -n "$model_args" ]; then
   FULL_CMD="$BASE_CMD $model_args"
@@ -91,7 +91,7 @@ run_tests_for_model() {
   --enforce-eager \
   --disable-log-requests \
   --gpu-memory-utilization 0.8 \
-  --kv-transfer-config '{\"kv_connector\":\"LLMDataDistCMgrConnector\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"npu\",\"kv_parallel_size\":\"1\",\"kv_port\":\"20001\",\"engine_id\":\"0\",\"kv_connector_module_path\":\"vllm_ascend.distributed.llmdatadist_connector_v1_a3\"}'"
+  --kv-transfer-config '{\"kv_connector\":\"LLMDataDistCMgrConnector\",\"kv_role\":\"kv_consumer\",\"kv_buffer_device\":\"npu\",\"kv_parallel_size\":\"1\",\"kv_port\":\"20001\",\"engine_id\":\"0\",\"kv_connector_module_path\":\"vllm_ascend.distributed.llmdatadist_c_mgr_connector\"}'"
 
   if [ -n "$model_args" ]; then
   FULL_CMD="$BASE_CMD $model_args"
