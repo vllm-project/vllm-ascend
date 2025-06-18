@@ -897,7 +897,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         **kwargs,
     ) -> torch.Tensor:
 
-        is_deepseek_v3_r1 = global_num_experts == 256        
+        is_deepseek_v3_r1 = global_num_experts == 256
         # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
         if is_deepseek_v3_r1:
             topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
@@ -1139,7 +1139,7 @@ class AscendFusedMoE(FusedMoE):
 
         tp_size = get_tensor_model_parallel_world_size()
         if (tp_size > 1 and fused_moe_state != FusedMoEState.AllGather
-            and fused_moe_state != FusedMoEState.AllGatherEP):
+                and fused_moe_state != FusedMoEState.AllGatherEP):
             if num_tokens < tp_size:
                 hidden_states = nn.functional.pad(
                     hidden_states, (0, 0, 0, tp_size - num_tokens))
@@ -1198,7 +1198,7 @@ class AscendFusedMoE(FusedMoE):
                 e_hidden_states, shared_hidden_states = e_hidden_states
 
         if (tp_size > 1 and fused_moe_state != FusedMoEState.AllGather
-            and fused_moe_state != FusedMoEState.AllGatherEP):
+                and fused_moe_state != FusedMoEState.AllGatherEP):
             dist.all_gather(list(chunk_hidden_states), e_hidden_states,
                             self.tp_group)
             final_hidden_states = torch.cat(chunk_hidden_states, dim=0)
