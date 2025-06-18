@@ -1182,7 +1182,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                                                  key_cache=kv_cache[0],
                                                  value_cache=kv_cache[1],
                                                  slot_indices=slots)
-        elif len(kv_cache):
+        elif len(kv_cache) > 1:
             kv_c_normed = kv_c_normed.view(
                 [num_actual_toks, self.num_kv_heads, -1])
             torch_npu._npu_reshape_and_cache(
