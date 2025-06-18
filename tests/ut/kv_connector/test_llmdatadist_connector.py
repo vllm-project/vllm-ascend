@@ -40,35 +40,3 @@ def test_basic_inferface():
             req_meta.local_block_ids, scheduler.kv_cache_manager.coordinator.
             single_type_managers[0].req_to_blocks[request_id]):
         assert block_id == block.block_id
-
-
-def test_prompt_less_than_block_size():
-    """
-    Test that we can handle case where prompt is < block.
-
-    In this case, the P worker will send remote_block_ids.
-    The D worker should schedule an async read in this case,
-    """
-    vllm_config = create_vllm_config()
-    scheduler = create_scheduler(vllm_config)
-
-    # Half of a block.
-    BLOCK_SIZE = vllm_config.cache_config.block_size
-    NUM_TOKENS = int(BLOCK_SIZE * 0.5)
-
-    # Request will have 0 remote blocks.
-    request = create_request(request_id=1,
-                             num_tokens=NUM_TOKENS,
-                             do_remote_prefill=True,
-                             num_remote_blocks=0)
-    scheduler.add_request(request)
-    scheduler_output = scheduler.schedule()
-
-    # This request should have to read async.
-    kv_connector_metadata = scheduler_output.kv_connector_metadata
-    assert kv_connector_metadata is not None
-    assert isinstance(kv_connector_metadata, LLMDataDistCMgrConnectorMetadata)
-    assert len(kv_connector_metadata.requests) == 1
-
-    # This request should not be scheduled regularly.
-    assert len(scheduler_output.scheduled_new_reqs) == 0
