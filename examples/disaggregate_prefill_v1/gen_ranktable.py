@@ -8,6 +8,10 @@ from vllm_ascend.soc_info import NPUSocInfo
 
 parser = argparse.ArgumentParser(
     description="Arguments of rank table generator", )
+parser.add_argument("--local-host",
+                    type=str,
+                    required=True,
+                    help="local ip")
 parser.add_argument("--prefill-device-cnt",
                     type=int,
                     required=True,
@@ -17,6 +21,7 @@ parser.add_argument("--decode-device-cnt",
                     required=True,
                     help="number of decode devices")
 args = parser.parse_args()
+local_host = args.local_host
 prefill_device_cnt = args.prefill_device_cnt
 decode_device_cnt = args.decode_device_cnt
 
@@ -40,7 +45,6 @@ def get_cmd_stdout(cmd):
                           shell=True).stdout.decode("utf-8").strip()
 
 
-local_host = get_cmd_stdout("hostname -I | awk -F \" \" \'{print$1}\'")
 print(f"local_host: {local_host}")
 print("gen ranktable.json")
 
