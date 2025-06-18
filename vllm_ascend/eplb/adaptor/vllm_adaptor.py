@@ -62,14 +62,12 @@ class VllmEplbAdaptor(EplbAdaptor):
             self.buffer_tensor_dict[name] = torch.empty_like(expert_tensor)
 
     def get_buffer_tensor(self, buffer_tensor_id):
-        for name in self.expert_weight_names:
-            yield self.buffer_tensor_dict[name][buffer_tensor_id]
+        return [self.buffer_tensor_dict[name][buffer_tensor_id] for name in self.expert_weight_names]
 
     def get_expert_tensor(self, layer_id, global_expert_id_to_send):
-        for name in self.expert_weight_names:
-            complete_name = "model.layers." + str(layer_id) + ".mlp.experts." + name
-            local_expert_id = self.expert_map_per_layer_cpu[layer_id][global_expert_id_to_send].item()
-            yield self.param_dict[complete_name].data[local_expert_id]
+        local_expert_id = self.expert_map_per_layer_cpu[layer_id][global_expert_id_to_send].item()
+        return [self.param_dict["model.layers." + str(layer_id) + ".mlp.experts." + name].data[local_expert_id]
+            for name in self.expert_weight_names]
 
     def get_rank_expert_workload(self, num_moe_layers):
         return self.model.get_all_moe_loads(num_moe_layers)
