@@ -810,6 +810,9 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 
         return torch.stack(all_loads, dim=0)
 
+    def get_topk_ids(self,layer_id):
+        return self.model.layers[layer_id+3].mlp.experts.topk_ids
+        
     def get_all_moe_loads(
         self,
         num_moe_layers: int,
