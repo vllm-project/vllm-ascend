@@ -4,7 +4,7 @@ import json
 import logging
 import os
 
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt  # type: ignore
 import numpy as np
 import torch
 
@@ -32,7 +32,7 @@ def save_matrix_to_json(output_path, file_name, deployment):
 
     file_name = f"{output_path}{file_name}.json"
 
-    # 保存为 JSON 文件
+    # Save as JSON file
     try:
         with open(file_name, 'w') as f:
             json.dump(data, f, indent=4)
@@ -49,12 +49,12 @@ def calculate_average(lst):
     count = 0
 
     for element in lst:
-        # 检查元素是否为数值类型
+        # Check if element is numeric
         if isinstance(element, (int, float, np.int64, np.float64)):
             total += float(element)
             count += 1
         else:
-            # 非数值类型元素会被忽略，并打印警告
+            # Non-numeric elements will be ignored with a warning
             print(f"warning: element {element} is not a number, ignored")
 
     if count == 0:
@@ -79,12 +79,12 @@ def layer_imblance_polt(y_list, label_names, device_num, output_path,
     plt.xlabel('layer')
     plt.ylabel('Device Load')
 
-    # 显示网格线
+    # Show grid lines
     plt.grid(True)
 
     plt.savefig(os.path.join(output_path, file_name), dpi=300)
 
-    # 清理当前图表
+    # Clear current plot
     plt.close()
 
 
@@ -96,7 +96,7 @@ def deepseek_deploy(workload, num_redundancy_expert, num_groups, num_nodes,
                                                 num_groups, num_nodes,
                                                 num_gpus)
 
-    # convert to global_deployment
+    # Convert to global_deployment
     workload = workload.cpu().numpy()
     global_deployment = []
     layer_num = log2phy.shape[0]
@@ -113,7 +113,7 @@ def deepseek_deploy(workload, num_redundancy_expert, num_groups, num_nodes,
             layer_deployment.append(local_deployment.tolist())
         global_deployment.append(layer_deployment)
 
-    # remapping expert distribution according to log2phy
+    # Remap expert distribution according to log2phy
     original_weights = []
     max_weights = []
     average_weights = []
