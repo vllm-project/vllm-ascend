@@ -20,7 +20,7 @@
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.request import FinishReason, RequestStatus
 
-from tests.kv_connector.utils import (assert_scheduler_empty,
+from tests.ut.kv_connector.utils import (assert_scheduler_empty,
                                       create_model_runner_output,
                                       create_request, create_scheduler,
                                       create_vllm_config)
