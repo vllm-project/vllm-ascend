@@ -1138,8 +1138,8 @@ class AscendFusedMoE(FusedMoE):
                 shared_hidden_states = shared_experts(hidden_states)
 
         tp_size = get_tensor_model_parallel_world_size()
-        if tp_size > 1 and fused_moe_state != FusedMoEState.AllGather
-            and fused_moe_state != FusedMoEState.AllGatherEP:
+        if (tp_size > 1 and fused_moe_state != FusedMoEState.AllGather
+            and fused_moe_state != FusedMoEState.AllGatherEP):
             if num_tokens < tp_size:
                 hidden_states = nn.functional.pad(
                     hidden_states, (0, 0, 0, tp_size - num_tokens))
@@ -1197,8 +1197,8 @@ class AscendFusedMoE(FusedMoE):
             if isinstance(e_hidden_states, tuple):
                 e_hidden_states, shared_hidden_states = e_hidden_states
 
-        if tp_size > 1 and fused_moe_state != FusedMoEState.AllGather
-            and fused_moe_state != FusedMoEState.AllGatherEP:
+        if (tp_size > 1 and fused_moe_state != FusedMoEState.AllGather
+            and fused_moe_state != FusedMoEState.AllGatherEP):
             dist.all_gather(list(chunk_hidden_states), e_hidden_states,
                             self.tp_group)
             final_hidden_states = torch.cat(chunk_hidden_states, dim=0)
