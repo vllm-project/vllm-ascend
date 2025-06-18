@@ -528,7 +528,7 @@ class LLMDataDistCMgrConnectorWorker():
                               meta.remote_tp_size)
             self.finished_reqs.add(req_id)
 
-    def add_remote_agent(self, metadata: LLMDataDistCMgrAgentMetadata) -> str:
+    def add_remote_agent(self, metadata: LLMDataDistCMgrAgentMetadata) -> int:
         assert self.local_agent_metadata is not None
         remote_cluster_id = metadata.cluster_id
         if remote_cluster_id in self.linked_cluster:
