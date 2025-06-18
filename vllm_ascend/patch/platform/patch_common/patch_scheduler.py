@@ -42,7 +42,6 @@ def ascend_update_waiting_for_remote_kv(self, request) -> bool:
         num_computed_tokens -= 1
     self.kv_cache_manager.cache_blocks(
         request,
-        self.kv_cache_manager.req_to_block_hashes[request.request_id],
         num_computed_tokens,
     )
 
