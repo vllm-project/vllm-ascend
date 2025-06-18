@@ -21,10 +21,6 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 
-import vllm_ascend.envs as envs_ascend
-
-VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
-
 
 class AscendW4A8DynamicLinearMethod:
     """Linear method for Ascend W4A8_DYNAMIC
