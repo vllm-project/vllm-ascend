@@ -16,51 +16,57 @@
 #
 """
 Compare the outputs of vLLM with and without aclgraph.
+
 Run `pytest tests/multicard/test_data_parallel.py`.
 """
 
 import os
+import subprocess
+import sys
 
 import pytest
-
-from tests.conftest import VllmRunner
-from tests.model_utils import check_outputs_equal
 
 MODELS = ["Qwen/Qwen2.5-0.5B-Instruct"]
 
 
-@pytest.mark.skipif(True, reason="OPEN ME when dp is supported on A2")
 @pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
                     reason="Data parallel only support on v1")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-def test_data_parallel_correctness(
-    model: str,
-    max_tokens: int,
-) -> None:
-    example_prompts = [
-        "Hello, my name is", "The president of the United States is",
-        "The capital of France is", "The future of AI is"
+@patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})
+def test_data_parallel_inference(model, max_tokens):
+    script = "examples/offline_data_parallel.py"
+
+    env = os.environ.copy()
+
+    cmd = [
+        sys.executable,
+        script,
+        "--model",
+        model,
+        "--dp-size",
+        "2",
+        "--tp-size",
+        "1",
+        "--node-size",
+        "1",
+        "--node-rank",
+        "0",
+        "--trust-remote-code",
+        "--enforce-eager",
     ]
 
-    with VllmRunner(model_name=model,
-                    max_model_len=1024,
-                    max_num_seqs=16,
-                    data_parallel_size=2,
-                    distributed_executor_backend="mp") as vllm_model:
-        vllm_dp_outputs = vllm_model.generate_greedy(example_prompts,
-                                                     max_tokens)
+    print(f"Running subprocess: {' '.join(cmd)}")
+    proc = subprocess.run(cmd,
+                          env=env,
+                          stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT,
+                          timeout=300)
+    output = proc.stdout.decode()
 
-    with VllmRunner(
-            model_name=model,
-            max_model_len=1024,
-            max_num_seqs=16,
-    ) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+    print(output)
 
-    check_outputs_equal(
-        outputs_0_lst=vllm_outputs,
-        outputs_1_lst=vllm_dp_outputs,
-        name_0="vllm_outputs",
-        name_1="vllm_dp_outputs",
-    )
+    assert "DP rank 0 needs to process" in output
+    assert "DP rank 1 needs to process" in output
+    assert "Generated text:" in output
+    assert proc.returncode == 0
