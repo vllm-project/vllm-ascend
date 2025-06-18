@@ -530,7 +530,7 @@ class LLMDataDistCMgrConnectorWorker():
 
     def add_remote_agent(self, metadata: LLMDataDistCMgrAgentMetadata) -> int:
         assert self.local_agent_metadata is not None
-        remote_cluster_id = metadata.cluster_id
+        remote_cluster_id = str(metadata.cluster_id)
         if remote_cluster_id in self.linked_cluster:
             logger.debug(
                 f"LLMDataDistCMgrConnectorWorker: remote cluster_id: {metadata.cluster_id} already linked with this server, skip the connection"
