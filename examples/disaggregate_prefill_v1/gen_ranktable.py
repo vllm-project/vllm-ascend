@@ -90,10 +90,10 @@ global_device_list = [None] * dist.get_world_size()
 dist.all_gather_object(global_device_list, local_device_list)
 global_device_list = [
     device_info for device_list in global_device_list
-    for device_info in device_list
+    for device_info in device_list  # type: ignore[attr-defined]
 ]
 cnt = 1
-for device_info in global_device_list:
+for device_info in global_device_list:  # type: ignore[assignment]
     device_info["cluster_id"] = str(cnt)
     cnt += 1
 assert (prefill_device_cnt + decode_device_cnt) <= len(global_device_list), \
