@@ -141,7 +141,8 @@ def create_request(
                                   remote_block_ids=list(
                                       range(num_remote_blocks)),
                                   remote_host="my-host",
-                                  remote_port=1234)
+                                  remote_port=1234,
+                                  remote_tp_size=1)
 
     max_tokens = 1 if do_remote_decode else max_tokens
     sampling_params = SamplingParams(max_tokens=max_tokens)
