@@ -1182,10 +1182,6 @@ class AscendFusedMoE(FusedMoE):
             else:
                 return e_hidden_states
 
-        #EPLB calculate moe load
-        if self.dynamic_eplb == True:
-            self.calculate_moe_load()
-
         # if self.enable_multistream_shared_expert and not is_prefill:
         #     hidden_states, shared_output = hidden_states
 
