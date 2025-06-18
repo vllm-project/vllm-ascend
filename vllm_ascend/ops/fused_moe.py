@@ -1129,7 +1129,7 @@ class AscendFusedMoE(FusedMoE):
             real_top_k = self.top_k
 
         num_tokens, hidden_size = hidden_states.shape
-        is_deepseek_v3_r1 = self.num_experts == 256
+        is_deepseek_v3_r1 = self.global_num_experts == 256
 
         fused_moe_state = get_fused_moe_state(self.moe_parallel_config.ep_size,
                                               is_prefill, is_deepseek_v3_r1)
