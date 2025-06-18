@@ -206,7 +206,7 @@ Alternatively, follow these example steps to implement your own plugin:
     LoRAResolverRegistry.register_resolver("s3_resolver", s3_resolver)
     ```
 
-    For more details, refer to the [vLLM's Plugins System](../design/plugin_system.md).
+    For more details, refer to the [vLLM's Plugins System](https://github.com/vllm-project/vllm/blob/main/docs/design/plugin_system.md).
 
 ## New format for `--lora-modules`
 
