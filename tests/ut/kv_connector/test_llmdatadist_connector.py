@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-from tests.kv_connector.utils import (create_request, create_scheduler,
+from tests.ut.kv_connector.utils import (create_request, create_scheduler,
                                       create_vllm_config)
 from vllm_ascend.distributed.llmdatadist_c_mgr_connector import \
     LLMDataDistCMgrConnectorMetadata
