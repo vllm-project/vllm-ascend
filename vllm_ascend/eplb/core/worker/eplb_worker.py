@@ -27,7 +27,7 @@ from abc import ABC, abstractmethod
 from vllm.logger import logger
 
 from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory, DynamicConfig
-from vllm_ascend.eplb.tool.eplb_utils import ExpertMapUtils 
+from vllm_ascend.eplb.tool.eplb_utils import ExpertMapUtils
 
 
 class EplbWorker:
@@ -147,7 +147,7 @@ class EplbWorker:
                     src_rank_ids = src_ranks_set[expert_id]
                     graph_expert_update.add_nodes_from(src_rank_ids, bipartite=0)
                     # add dest rank
-                    graph_expert_update.add_nodes_from(str(dst_rank_id), bipartite=1)
+                    graph_expert_update.add_node(str(dst_rank_id), bipartite=1)
                     # add edges
                     for src_rank_id in src_rank_ids:
                         graph_expert_update.add_edge(src_rank_id, str(dst_rank_id))
@@ -335,7 +335,7 @@ class EplbProcess:
         self.enable_d2d = enable_d2d
         self.planner_q = planner_q
         self.block_update_q = block_update_q
-        self.redundant_enable = redundant_enable 
+        self.redundant_enable = redundant_enable
 
         # Create EplbWorker instance
         self.worker = EplbWorker(self.shared_dict, self.policy_type, self.enable_d2d)
