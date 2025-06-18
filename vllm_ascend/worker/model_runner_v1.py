@@ -890,7 +890,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> tuple[SpecDecodeMetadata, torch.Tensor, SpecDecodeMetadata,
-               torch.Tensor, int, torch.Tensor, torch.Tensor]:
+               torch.Tensor, int, torch.Tensor, torch.Tensor, Optional[set[str]], Optional[set[str]]]:
         # Check input valid
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
