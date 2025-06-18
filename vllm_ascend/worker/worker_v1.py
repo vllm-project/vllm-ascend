@@ -248,9 +248,10 @@ class NPUWorker(WorkerBase):
         runner = self.model_runner
         max_num_tokens = 1
         with_prefill = False
+        enable_dbo = False
         if runner.dp_size > 1:
-            max_num_tokens, with_prefill = runner._get_forward_metadata_across_dp(
-                max_num_tokens, with_prefill)
+            max_num_tokens, with_prefill, _ = runner._get_forward_metadata_across_dp(
+                max_num_tokens, with_prefill, enable_dbo)
         if runner.torchair_graph_enabled and not with_prefill:
             max_num_tokens = runner.select_torchair_padded_batch_size(
                 max_num_tokens)
