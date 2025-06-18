@@ -22,11 +22,11 @@ from typing import Any, Dict, List, Optional
 
 from vllm.logger import logger
 
-from .func_wrapper import (wrapper_load_model, wrapper_rmsnorm_forward_oot,
-                           wrapper_rmsnorm_init)
+from .func_wrapper import wrapper_load_model, wrapper_rmsnorm_forward_oot, wrapper_rmsnorm_init
+from .w4a8_dynamic import AscendW4A8DynamicLinearMethod
 from .w8a8 import AscendW8A8LinearMethod
-from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
-                           AscendW8A8DynamicLinearMethod)
+from .w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod, AscendW8A8DynamicLinearMethod
+
 
 CUSTOMIZED_QUANTIZER_TYPE: List[str] = []
 
@@ -263,6 +263,13 @@ class VLLMAscendQuantizer:
                                   f"{list(SUPPORT_ASCEND_QUANTIZER_TYPE.keys())}")
 
 
+class W4A8DYNAMICQuantizer(VLLMAscendQuantizer):
+
+    @staticmethod
+    def build_linear_method():
+        return AscendW4A8DynamicLinearMethod()
+
+
 class W8A8Quantizer(VLLMAscendQuantizer):
 
     @staticmethod
@@ -282,6 +289,7 @@ class W8A8DYNAMICQuantizer(VLLMAscendQuantizer):
 
 
 SUPPORT_ASCEND_QUANTIZER_TYPE = {
+    "W4A8_DYNAMIC": W4A8DYNAMICQuantizer,
     "W8A8": W8A8Quantizer,
     "W8A8_DYNAMIC": W8A8DYNAMICQuantizer,
 }
