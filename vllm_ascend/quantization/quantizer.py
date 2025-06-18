@@ -27,6 +27,7 @@ from .func_wrapper import (wrapper_load_model, wrapper_rmsnorm_forward_oot,
 from .w8a8 import AscendW8A8LinearMethod
 from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
                            AscendW8A8DynamicLinearMethod)
+from .w4a8_dynamic import AscendW4A8DynamicFusedMoEMethod
 
 CUSTOMIZED_QUANTIZER_TYPE: List[str] = []
 
@@ -280,8 +281,14 @@ class W8A8DYNAMICQuantizer(VLLMAscendQuantizer):
     def build_moe_method():
         return AscendW8A8DynamicFusedMoEMethod()
 
+class W4A8DYNAMICQuantizer(VLLMAscendQuantizer):
+
+    @staticmethod
+    def build_moe_method():
+        return AscendW4A8DynamicFusedMoEMethod()
 
 SUPPORT_ASCEND_QUANTIZER_TYPE = {
     "W8A8": W8A8Quantizer,
     "W8A8_DYNAMIC": W8A8DYNAMICQuantizer,
+    "W4A8_DYNAMIC": W4A8DYNAMICQuantizer
 }
