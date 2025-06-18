@@ -285,6 +285,7 @@ class FusedMoEState(Enum):
     MC2 = 2
     AllGatherEP = 3
 
+
 # TODO(zzzzwwjj): add soc_version to choose branch
 def get_fused_moe_state(ep_size: int, with_prefill: bool,
                         is_deepseek_v3_r1: bool):
