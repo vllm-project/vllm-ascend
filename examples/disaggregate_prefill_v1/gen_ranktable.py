@@ -8,10 +8,7 @@ from vllm_ascend.soc_info import NPUSocInfo
 
 parser = argparse.ArgumentParser(
     description="Arguments of rank table generator", )
-parser.add_argument("--local-host",
-                    type=str,
-                    required=True,
-                    help="local ip")
+parser.add_argument("--local-host", type=str, required=True, help="local ip")
 parser.add_argument("--prefill-device-cnt",
                     type=int,
                     required=True,
