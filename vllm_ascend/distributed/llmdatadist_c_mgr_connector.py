@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
-import llm_datadist
+import llm_datadist     # type: ignore[import-not-found]
 import msgspec
 import torch
 import zmq
@@ -338,7 +338,7 @@ class LLMDataDistCMgrConnectorWorker():
         logger.info(
             f"LLMDataDistCMgrConnectorWorker: Cluster {self.local_agent_metadata.cluster_id} start to listen request from peers"
         )
-        with zmq_ctx(zmq.ROUTER, url) as sock:
+        with zmq_ctx(zmq.ROUTER, url) as sock:  # type: ignore[attr-defined]
             event.set()
             while True:
                 identity, _, msg = sock.recv_multipart()
@@ -356,6 +356,7 @@ class LLMDataDistCMgrConnectorWorker():
                     )
 
     def init_llm_datadist(self):
+        assert self.local_agent_metadata is not None
         llm_config = LLMConfig()
         llm_config.device_id = self.local_rank
         llm_config.sync_kv_timeout = 20000
@@ -421,7 +422,7 @@ class LLMDataDistCMgrConnectorWorker():
                 device_id=device_id_,
                 device_ip=device_ip_,
                 super_device_id=super_device_id_,
-                cluster_id=cluster_id_,
+                cluster_id=str(cluster_id_),
             )
         assert agent_metadata is not None, f"Can't read the target server_id {server_id} and device_rank {device_rank} from rank table"
         return agent_metadata
@@ -761,10 +762,10 @@ class LLMDataDistCMgrConnectorWorker():
 
 # adopt this from  https://github.com/vllm-project/vllm/blob/main/vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
+def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:     # type: ignore[name-defined]
     """Context manager for a ZMQ socket"""
 
-    ctx: Optional[zmq.Context] = None  # type: ignore[attr-defined]
+    ctx: Optional[zmq.Context] = None  # type: ignore[name-defined]
     try:
         ctx = zmq.Context()  # type: ignore[attr-defined]
 
