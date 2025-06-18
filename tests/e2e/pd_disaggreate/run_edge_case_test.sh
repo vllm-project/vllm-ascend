@@ -8,7 +8,7 @@ set -xe
 
 # Models to run
 MODELS=(
-    ""Qwen/Qwen2.5-0.5B-Instruct""
+    "Qwen/Qwen2.5-0.5B-Instruct"
 )
 
 # Find the git repository root directory
