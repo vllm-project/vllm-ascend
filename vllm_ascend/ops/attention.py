@@ -15,7 +15,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 from vllm.model_executor.layers.linear import ColumnParallelLinear
@@ -37,7 +37,7 @@ def vanilla_chunked_prefill(
     scale: float,
     alibi_slopes: Optional[torch.Tensor],
     causal: bool = True,
-) -> None:
+) -> torch.Tensor:
     num_query_heads = query.shape[1]
     head_dim = value_cache.shape[3]
     num_kv_heads = value_cache.shape[2]
@@ -138,7 +138,8 @@ def vanilla_chunked_prefill(
 def vanilla_chunked_prefill_mla(
         output: torch.Tensor,  # (num_tokens, num_heads, v_head_dim)
         query: torch.Tensor,  # (num_tokens, num_heads, nope_dim + rope_dim)
-        kv_cache: torch.Tensor,  # (num_blocks, block_size, latent_kv)
+        kv_cache: Tuple[
+            torch.Tensor],  # [nope, rope] (num_blocks, block_size, latent_kv)
         block_tables: torch.Tensor,  # (batch_size, max_num_blocks_per_seq)
         query_lens: torch.Tensor,  # (batch_size)
         context_lens: torch.Tensor,  # (batch_size)
@@ -152,22 +153,25 @@ def vanilla_chunked_prefill_mla(
         alibi_slopes: Optional[torch.Tensor],
         causal: bool = True) -> None:
     batch_size = block_tables.size(0)
+    assert len(kv_cache) > 1
     assert query_lens.size(0) == batch_size
     num_heads = query.size(1)
-    block_size = kv_cache.size(1)
-    latent_kv_dim = kv_cache.size(-1) - rope_dim
+    nope_cache = kv_cache[0]
+    rope_cache = kv_cache[1]
+    block_size = nope_cache.size(1)
+    latent_kv_dim = nope_cache.size(-1)
     max_num_blocks_per_seq = block_tables.size(1)
     batch_size = query_lens.size(0)
-    kv_cache = kv_cache.squeeze()
-    # select kv_c out as [batch_size, max_context_len, latent_kv + rope_dim]
-    cache_kv_c_pe = kv_cache[block_tables].view(
-        batch_size, max_num_blocks_per_seq * block_size,
-        latent_kv_dim + rope_dim)[:, :max_context_len, :]
-    # get kv_c and k_pe
+    nope_cache = nope_cache.squeeze()
+    # select kv_c out as [batch_size, max_context_len, latent_kv + rope_dim] and get kv_c and k_pe
     # cached_kv_c: [batch_size, max_context_len, latent_kv]
     # cached_k_pe: [batch_size, max_context_len, rope_dim]
-    cache_kv_c = cache_kv_c_pe[:, :, :latent_kv_dim]
-    cache_k_pe = cache_kv_c_pe[:, :, latent_kv_dim:]
+    cache_kv_c = nope_cache[block_tables].view(
+        batch_size, max_num_blocks_per_seq * block_size,
+        latent_kv_dim)[:, :max_context_len, :]
+    cache_k_pe = rope_cache[block_tables].view(
+        batch_size, max_num_blocks_per_seq * block_size,
+        rope_dim)[:, :max_context_len, :]
     # get k_rope and v
     # k_nope: [batch_size, max_context_len, num_heads, nope_dim]
     # value:  [batch_size, max_context_len, num_heads, v_head_dim]

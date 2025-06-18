@@ -668,12 +668,13 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _compute_prefill_context(
         self,
         query: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
+        kv_c_and_k_pe_cache: Tuple[torch.Tensor],
         rope_dim: int,
         attn_metadata: AscendMLAMetadata,
         prefix_output: torch.Tensor,
         prefix_lse: torch.Tensor,
     ):
+        assert len(kv_c_and_k_pe_cache) > 1
         prefill_metadata = attn_metadata.prefill
         if prefill_metadata is None or prefill_metadata.chunked_context is None:
             return prefix_output, prefix_lse
@@ -683,21 +684,22 @@ class AscendMLAImpl(MLAAttentionImpl):
         q_nope = query[..., :self.qk_nope_head_dim]
 
         seq_len1 = torch.tensor(prefill_metadata.query_lens, dtype=torch.int32)
-        latent_kv_dim = kv_c_and_k_pe_cache.size(3) - rope_dim
-        cache_kv_c = kv_c_and_k_pe_cache[:, :, :, :latent_kv_dim]
-        cache_k_pe = kv_c_and_k_pe_cache[:, :, :, latent_kv_dim:]
+        cache_kv_c = kv_c_and_k_pe_cache[0]
+        cache_k_pe = kv_c_and_k_pe_cache[1]
+        num_heads = cache_k_pe.size(2)
+        latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
 
             seq_len2 = prefill_metadata.chunked_context.chunk_seq_lens[i]
             seq_len = torch.stack([seq_len1, seq_len2])
             kv_c_normed = torch.empty(toks,
-                                      kv_c_and_k_pe_cache.size(2),
+                                      num_heads,
                                       latent_kv_dim,
                                       dtype=query.dtype,
                                       device=query.device)
             k_pe = torch.empty(toks,
-                               kv_c_and_k_pe_cache.size(2),
+                               num_heads,
                                rope_dim,
                                dtype=query.dtype,
                                device=query.device)
@@ -747,10 +749,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         query: torch.Tensor,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
+        kv_c_and_k_pe_cache: Tuple[torch.Tensor],
         attn_metadata: AscendMLAMetadata,
     ) -> torch.Tensor:
         assert attn_metadata.prefill is not None
+        assert len(kv_c_and_k_pe_cache) > 1
 
         num_tokens = query.size(0)
         attn_output = torch.empty(num_tokens,
@@ -1202,8 +1205,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             # TODO: use an elegant way to overlap
             output_prefill = self._forward_prefill(prefill_q,
                                                    prefill_k_c_normed,
-                                                   prefill_k_pe,
-                                                   combined_cache,
+                                                   prefill_k_pe, kv_cache,
                                                    attn_metadata)
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
@@ -1220,6 +1222,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                                             kv_cache, attn_metadata,
                                             enable_multistream_mla)
             else:
+                combined_cache = torch.cat([kv_cache[0], kv_cache[1]], dim=-1)
                 output_decode = self._forward_decode(
                     decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe,
                     combined_cache, attn_metadata)
