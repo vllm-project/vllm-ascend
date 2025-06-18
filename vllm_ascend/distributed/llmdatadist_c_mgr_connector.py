@@ -54,6 +54,7 @@ class ReqMeta:
     remote_host: str
     remote_port: str
     engine_id: str
+    remote_tp_size: str
 
 
 class LLMDataDistCMgrConnectorMetadata(KVConnectorMetadata):
@@ -69,6 +70,7 @@ class LLMDataDistCMgrConnectorMetadata(KVConnectorMetadata):
             engine_id=kv_transfer_params["remote_engine_id"],
             remote_host=kv_transfer_params["remote_host"],
             remote_port=kv_transfer_params["remote_port"],
+            remote_tp_size=kv_transfer_params["remote_tp_size"],
         )
 
 
@@ -215,7 +217,7 @@ class LLMDataDistCMgrConnectorScheduler():
         if params is not None and params.get("do_remote_prefill"):
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host",
-                                             "remote_port")):
+                                             "remote_port", "remote_tp_size")):
                     self._reqs_need_recv[request.request_id] = (
                         request, blocks.get_unhashed_block_ids())
                 else:
@@ -268,6 +270,8 @@ class LLMDataDistCMgrConnectorScheduler():
             remote_engine_id=self.engine_id,
             remote_host=self.local_ip,
             remote_port=self.port,
+            remote_tp_size=str(
+                self.vllm_config.parallel_config.tensor_parallel_size),
         )
 
 
@@ -520,7 +524,8 @@ class LLMDataDistCMgrConnectorWorker():
             logger.debug(f"Start to transmit {req_id}")
             self._read_blocks(meta.local_block_ids,
                               meta.remote_block_ids, meta.remote_host,
-                              int(meta.remote_port), meta.engine_id, req_id)
+                              int(meta.remote_port), meta.engine_id, req_id,
+                              meta.remote_tp_size)
             self.finished_reqs.add(req_id)
 
     def add_remote_agent(self, metadata: LLMDataDistCMgrAgentMetadata) -> str:
@@ -691,10 +696,12 @@ class LLMDataDistCMgrConnectorWorker():
         remote_port: int,
         remote_engine_id: str,
         request_id: str,
+        remote_tp_size: str,
     ):
         # if remote_ip not in self.linked_cluster:
+        tp_offset = self.tp_rank % int(remote_tp_size)
         remote_cluster_id = self.connect_to_remote_agent(
-            remote_ip, remote_port + self.tp_rank)
+            remote_ip, remote_port + tp_offset)
         num_local_blocks = len(local_block_ids)
         if num_local_blocks == 0:
             return
