@@ -44,7 +44,7 @@ class LLMDataDistCMgrAgentMetadata(msgspec.Struct):
     device_id: str
     device_ip: str
     super_device_id: str
-    cluster_id: str
+    cluster_id: int
 
 
 @dataclass
@@ -426,7 +426,7 @@ class LLMDataDistCMgrConnectorWorker():
                 device_id=device_id_,
                 device_ip=device_ip_,
                 super_device_id=super_device_id_,
-                cluster_id=str(cluster_id_),
+                cluster_id=cluster_id_,
             )
         assert agent_metadata is not None, f"Can't read the target server_id {server_id} and device_rank {device_rank} from rank table"
         return agent_metadata
