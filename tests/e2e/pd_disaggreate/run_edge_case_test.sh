@@ -1,11 +1,14 @@
 #!/bin/bash
+export LCCL_DETERMINISTIC=1
+export HCCL_DETERMINISTIC=true
+export CLOSE_MATMUL_K_SHIFT=1
 export VLLM_USE_V1=1
 
 set -xe
 
 # Models to run
 MODELS=(
-    "deepseek-ai/DeepSeek-V2-Lite"
+    ""Qwen/Qwen2.5-0.5B-Instruct""
 )
 
 # Find the git repository root directory
@@ -69,6 +72,7 @@ run_tests_for_model() {
 
   BASE_CMD="ASCEND_RT_VISIBLE_DEVICES=0 VLLM_LLMDD_RPC_PORT=5559 vllm serve $model_name \
   --port $PREFILL_PORT \
+  --seed 1024 \
   --enforce-eager \
   --disable-log-requests \
   --gpu-memory-utilization 0.8 \
@@ -88,6 +92,7 @@ run_tests_for_model() {
   # Build the command with or without model-specific args
   BASE_CMD="ASCEND_RT_VISIBLE_DEVICES=1 VLLM_LLMDD_RPC_PORT=6000 vllm serve $model_name \
   --port $DECODE_PORT \
+  --seed 1024 \
   --enforce-eager \
   --disable-log-requests \
   --gpu-memory-utilization 0.8 \
