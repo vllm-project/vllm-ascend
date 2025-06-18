@@ -810,19 +810,29 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 
         return torch.stack(all_loads, dim=0)
 
-    def get_moe_load(self,layer_id):
-        return self.model.layers[layer_id].mlp.experts.get_moe_load()
+    def get_all_moe_loads(
+        self,
+        num_moe_layers: int,
+        num_experts_per_layer: int
+    ) -> torch.Tensor:
+        # 收集各层 topk_ids -> list of [B, K]
+        all_topk_ids = [self.get_topk_ids(i) for i in range(num_moe_layers)]
+        # stack & flatten -> ids2d: [L, B*K]
+        stacked = torch.stack(all_topk_ids, dim=0)          # [L, B, K]
+        L, B, K = stacked.shape
+        ids2d   = stacked.view(L, B * K).to(torch.int64)   # [L, N]
 
-    def get_all_moe_loads(self, num_moe_layers) -> torch.Tensor:
-        """
-        output: [num_moe_layers, num_experts_per_layer]
-        """
-        all_loads = []
-        for layer_id in range(num_moe_layers):
-            load_tensor = self.get_moe_load(3+layer_id)  
-            all_loads.append(load_tensor)
+        device   = ids2d.device
+        moe_load = torch.zeros((L, num_experts_per_layer),
+                            dtype=torch.int64, device=device)
 
-        return torch.stack(all_loads, dim=0)
+        ones2d = torch.ones_like(ids2d, dtype=torch.int64)
+
+        assert moe_load.dim() == 2 and ids2d.dim() == 2 and ones2d.dim() == 2
+        assert ids2d.shape == ones2d.shape
+
+        moe_load.scatter_add_(dim=1, index=ids2d, src=ones2d)
+        return moe_load
 
 class CustomDeepseekV3ForCausalLM(CustomDeepseekV2ForCausalLM):
     pass
