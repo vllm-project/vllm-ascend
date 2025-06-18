@@ -1,8 +1,8 @@
 import pytest
 
 from tests.conftest import VllmRunner
-from tests.singlecard.test_ilama_lora import (EXPECTED_LORA_OUTPUT, MODEL_PATH,
-                                              do_sample)
+from tests.e2e.singlecard.test_ilama_lora import (EXPECTED_LORA_OUTPUT,
+                                                  MODEL_PATH, do_sample)
 
 
 @pytest.mark.parametrize("distributed_executor_backend", ["mp"])

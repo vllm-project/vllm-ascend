@@ -115,6 +115,8 @@ jobs:
           VLLM_TARGET_DEVICE=empty pip install -e .
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           pip install -e .
           pip install -r benchmarks/requirements-bench.txt
@@ -165,6 +167,8 @@ jobs:
           cp -r benchmarks/* /github/home/benchmarks/
 
       - name: Run benchmark iteration
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         if: github.event_name != 'pull_request'
         run: |
           while IFS= read -r line || [[ -n "$line" ]]; do

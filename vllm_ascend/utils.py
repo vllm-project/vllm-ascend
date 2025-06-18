@@ -20,10 +20,12 @@
 import atexit
 import math
 from contextlib import contextmanager, nullcontext
+from enum import Enum
 from threading import Lock
 from typing import TYPE_CHECKING, List, Tuple
 
 import torch
+import torch_npu  # noqa: F401
 import torchair  # type: ignore[import]  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
@@ -53,6 +55,8 @@ MAX_CAPTURE_SIZE = 1920
 
 ASCEND_QUATIZATION_METHOD = "ascend"
 
+CUSTOM_OP_ENABLED = None
+
 
 def try_register_lib(lib_name: str, lib_info: str = ""):
     import importlib
@@ -65,6 +69,31 @@ def try_register_lib(lib_name: str, lib_info: str = ""):
                 logger.info(lib_info)
     except Exception:
         pass
+
+
+def enable_custom_op():
+    """
+    Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component. 
+    Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
+    """
+    global CUSTOM_OP_ENABLED
+
+    if CUSTOM_OP_ENABLED is not None:
+        return CUSTOM_OP_ENABLED
+
+    else:
+        try:
+            # register custom ops into torch_library here
+            import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+            CUSTOM_OP_ENABLED = True
+
+        except ImportError:
+            CUSTOM_OP_ENABLED = False
+            logger.warning(
+                "Warning: Failed to register custom ops, all custom ops will be disabled"
+            )
+
+        return CUSTOM_OP_ENABLED
 
 
 def find_hccl_library() -> str:
@@ -247,3 +276,21 @@ def npu_wait_tensor(self: torch.Tensor,
                     *,
                     enabled: bool = True):
     return _npu_wait_tensor(self, dependency) if enabled else self
+
+
+# TODO(zzzzwwjj): move this into forward_context
+class FusedMoEState(Enum):
+    AllGather = 0
+    All2All = 1
+    MC2 = 2
+
+
+# TODO(zzzzwwjj): add soc_version to choose branch
+def get_fused_moe_state(ep_size: int, with_prefill: bool):
+    if ep_size == 1:
+        return FusedMoEState.AllGather
+    # NOTE: mc2 need ep_size >= 16 & all2all can't use in torchair graph.
+    elif ep_size < 16 or with_prefill:
+        return FusedMoEState.All2All
+    else:
+        return FusedMoEState.MC2
