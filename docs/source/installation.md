@@ -123,10 +123,24 @@ apt update  -y
 apt install -y gcc g++ cmake libnuma-dev wget git
 ```
 
-**[Optional]** Config the extra-index of `pip` if you are working on a **x86** machine, so that the torch with cpu could be found:
+**[Optional]**
+
+for **x86** machine:
 
 ```bash
-pip config set global.extra-index-url https://download.pytorch.org/whl/cpu/
+pip config set global.extra-index-url https://download.pytorch.org/whl/cpu/  
+```
+
+for turch-npu **dev** version:
+
+```bash
+pip config set global.extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
+```
+
+for torch-npu **dev** version and **x86** machine:
+
+```bash
+pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"  
 ```
 
 Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
@@ -156,7 +170,6 @@ cd ..
 # Install vLLM Ascend
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
-export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 pip install -v -e .
 cd ..
 ```
