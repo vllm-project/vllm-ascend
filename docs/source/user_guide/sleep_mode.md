@@ -12,7 +12,7 @@ This module provides a custom memory allocator for Ascend NPUs using the [CANN](
 +-------------------+            +---------------------------+          +----------------------------+
 |    Python Layer   |  ----->    |   CaMemAllocator (class)  |  --->    | C Extension (vllm_ascend_C)|
 +-------------------+            +---------------------------+          +----------------------------+
-    ⬇ Registers                      ⬇ Tracks & Tags                    ⬇ Calls into CANN
+    ⬇ Registers                      ⬇ Tracks & Tags                         ⬇ Calls into CANN
 init_module(malloc, free)         pointer_to_data[ptr] = data         aclrtMallocPhysical, aclrtMapMem, etc.
 ```
 

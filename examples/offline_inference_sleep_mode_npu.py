@@ -22,7 +22,6 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.utils import GiB_bytes
 
-
 os.environ["VLLM_USE_V1"] = "1"
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
@@ -41,7 +40,9 @@ if __name__ == "__main__":
     llm.sleep(level=1)
 
     free_npu_bytes_after_sleep, total = torch.npu.mem_get_info()
-    print(f"Free memory after sleep: {free_npu_bytes_after_sleep / 1024 ** 3:.2f} GiB")
+    print(
+        f"Free memory after sleep: {free_npu_bytes_after_sleep / 1024 ** 3:.2f} GiB"
+    )
     used_bytes = total - free_npu_bytes_after_sleep - used_bytes_baseline
     # now the memory usage should be less than the model weights
     # (0.5B model, 1GiB weights)
