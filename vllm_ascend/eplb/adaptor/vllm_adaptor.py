@@ -45,29 +45,38 @@ class VllmEplbAdaptor(EplbAdaptor):
             self.expert_map_per_layer[self.num_dense_layers + layer_idx] =\
                 self.model.get_expert_map(self.num_dense_layers + layer_idx)
 
-        self.buffer_tensor_dict = dict()
         # TODO: here we set number of buffer tensor equal to number of expert in each laryer, which can be improved
         num_buffer_tensor = torch.where(self.expert_map_per_layer[self.num_dense_layers] != -1)[0].numel()
-        self.init_buffer_tensor_dict(num_buffer_tensor)
+        self.buffer_tensor_list = [[] for _ in range(num_buffer_tensor)]
+        self.init_buffer_tensor(num_buffer_tensor)
+
+        self.expert_param_per_layer = dict()
+        self.init_expert_param_per_layer()
 
         self.log2phy_map_per_layer = dict()
         for layer_idx in range(self.num_moe_layers):
             self.log2phy_map_per_layer[self.num_dense_layers + layer_idx] =\
                 self.model.get_log2phy_map(self.num_dense_layers + layer_idx)
 
-    def init_buffer_tensor_dict(self, num_buffer_tensor):
+    def init_buffer_tensor(self, num_buffer_tensor):
         for name in self.expert_weight_names:
             complete_name = "model.layers." + str(self.num_dense_layers) + ".mlp.experts." + name
             expert_tensor = self.param_dict[complete_name].data[0:num_buffer_tensor]
-            self.buffer_tensor_dict[name] = torch.empty_like(expert_tensor)
+            buffer_tensors = torch.empty_like(expert_tensor)
+            for buffer_id in range(num_buffer_tensor):
+                self.buffer_tensor_list[buffer_id].append(buffer_tensors[buffer_id])
 
-    def get_buffer_tensor(self, buffer_tensor_id):
-        return [self.buffer_tensor_dict[name][buffer_tensor_id] for name in self.expert_weight_names]
-
-    def get_expert_tensor(self, layer_id, global_expert_id_to_send):
-        local_expert_id = self.expert_map_per_layer_cpu[layer_id][global_expert_id_to_send].item()
-        return [self.param_dict["model.layers." + str(layer_id) + ".mlp.experts." + name].data[local_expert_id]
-            for name in self.expert_weight_names]
+    def init_expert_param_per_layer(self):
+        num_local_expert = self.param_dict["model.layers." + str(self.num_dense_layers) +\
+            ".mlp.experts." + self.expert_weight_names[0]].data.shape[0]
+        for moe_layer_id in range(self.num_moe_layers):
+            layer_idx = self.num_dense_layers + moe_layer_id
+            self.expert_param_per_layer[layer_idx] = list()
+            for local_expert_id in range(num_local_expert):
+                self.expert_param_per_layer[layer_idx].append(
+                    [self.param_dict["model.layers." + str(layer_idx) + ".mlp.experts." + name].data[local_expert_id]
+                        for name in self.expert_weight_names]
+                )
 
     def get_rank_expert_workload(
         self,
@@ -117,10 +126,11 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.expert_map_per_layer_cpu[layer_id].copy_(updated_expert_map)
 
     def do_update_expert_weight(self, layer_id, local_expert_to_replace, buffer_tensor_id):
-        for name in self.expert_weight_names:
-            complete_name = "model.layers." + str(layer_id) + ".mlp.experts." + name
-            expert_tensor = self.param_dict[complete_name].data[local_expert_to_replace]
-            expert_tensor.copy_(self.buffer_tensor_dict[name][buffer_tensor_id])
+        for expert_tensor, buffer_tensor in zip(
+            self.expert_param_per_layer[layer_id][local_expert_to_replace],
+            self.buffer_tensor_list[buffer_tensor_id]
+        ):
+            expert_tensor.copy_(buffer_tensor)
 
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
         if self.log2phy_map_per_layer[layer_id] is not None:
