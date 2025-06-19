@@ -38,28 +38,27 @@ class ExpertMapUtils():
     @classmethod
     def generate_log2phy_map(cls, expert_map):
         num_local_experts = expert_map.max() + 1
-        ranks_num, global_expert_num = expert_map.shape
-        local_expert_map = cls.global2local(expert_map, num_local_experts)
-        concatenated = torch.flatten(local_expert_map)
-        rank_expert_to_global = cls.generate_index_dicts(local_expert_map)
-        result_dict: Dict[int, List[int]] = {}
-        for idx, value in enumerate(concatenated):
-            key = value.item()
-            if key not in result_dict:
-                result_dict[key] = []
-            result_dict[key].append(idx)
+        log2phy_map = expert_map.clone()
+        num_ranks, num_global_expert = log2phy_map.shape
 
-        log2phy_map = torch.full((ranks_num, global_expert_num),
-                                    -1,
-                                    dtype=torch.int32)
-        for rank in range(ranks_num):
-            for key in result_dict:
-                indices_in_concat = result_dict[key]
-                if key in rank_expert_to_global[rank]:
-                    log2phy_map[rank][key] = rank_expert_to_global[rank][key]
-                else:
-                    chosen_index = random.choice(indices_in_concat)
-                    log2phy_map[rank][key] = chosen_index
+        row_indices = torch.arange(num_ranks).view(-1, 1).expand(num_ranks,\
+            num_global_expert) * num_local_experts
+        log2phy_map[log2phy_map != -1] += row_indices[log2phy_map != -1]
+
+        for idx in range(num_global_expert):
+            positive_rank_idx = torch.where(log2phy_map[:, idx] != -1)[0]
+            negative_rank_idx = torch.where(log2phy_map[:, idx] == -1)[0]
+            num_rank_holding_expert = positive_rank_idx.size(0)
+
+            if num_rank_holding_expert == 1:
+                log2phy_map[negative_rank_idx, idx] = torch.full((num_ranks - 1,),
+                                    log2phy_map[positive_rank_idx, idx].item(),
+                                    dtype=log2phy_map.dtype)
+            else:
+                random_list = [random.choice(log2phy_map[positive_rank_idx, idx])
+                    for _ in range(num_ranks - num_rank_holding_expert)]
+                log2phy_map[negative_rank_idx, idx] = torch.tensor(random_list)
+
         return log2phy_map
 
     @classmethod
