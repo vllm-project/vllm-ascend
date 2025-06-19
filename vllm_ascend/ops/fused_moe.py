@@ -953,7 +953,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         self.max_model_len = vllm_config.model_config.max_model_len
 
         ascend_config = get_ascend_config()
-        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+        self.fused_moe_max_chunk_size = ascend_config.fused_moe_max_chunk_size
 
         try:
             device_group = self.ep_group.device_group
@@ -1049,13 +1049,29 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         elif fused_moe_state in [
                 FusedMoEState.AllGather, FusedMoEState.NaiveMulticast
         ]:
-            return fused_experts(hidden_states=x,
-                                 w1=layer.w13_weight,
-                                 w2=layer.w2_weight,
-                                 topk_weights=topk_weights,
-                                 topk_ids=topk_ids,
-                                 top_k=top_k,
-                                 expert_map=expert_map)
+            max_chunk_size = self.fused_moe_max_chunk_size
+            x_list = x.split(max_chunk_size)
+            topk_weights_list = topk_weights.split(max_chunk_size)
+            topk_ids_list = topk_ids.split(max_chunk_size)
+            num_chunks = len(x_list)
+            assert num_chunks == len(topk_weights_list) == len(topk_ids_list)
+            for i in range(len(x_list)):
+                hidden_states_chunk = fused_experts(
+                    hidden_states=x_list[i],
+                    w1=layer.w13_weight,
+                    w2=layer.w2_weight,
+                    topk_weights=topk_weights_list[i],
+                    topk_ids=topk_ids_list[i],
+                    top_k=top_k,
+                    expert_map=expert_map)
+                if num_chunks > 1:
+                    # use inplace copy to save memory
+                    x_list[i].copy_(hidden_states_chunk)
+                    del hidden_states_chunk
+                else:
+                    # num_chunks == 1, return the result directly
+                    return hidden_states_chunk
+            return x
         elif MOE_ALL2ALL_BUFFER:
             return fused_experts_with_all2all_buffer(
                 hidden_states=x,

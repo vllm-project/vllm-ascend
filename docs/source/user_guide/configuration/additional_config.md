@@ -33,6 +33,7 @@ The following table lists the additional configuration options available in vLLM
 | `expert_map_path`             | str  | `None` | When using expert load balancing for the MOE model, an expert map path needs to be passed in. |
 | `chunked_prefill_for_mla`     | bool | `False` | Whether to enable the fused operator-like chunked_prefill. |
 | `kv_cache_dtype`     | str | `None` | When using the kv cache quantization method, kv cache dtype needs to be set, currently only int8 is supported. |
+| `fused_moe_max_chunk_size`    | int | 8192 | The maximum token chunk size for the fused MoE operation. Input exceeding this size is split into multiple chunks for processing. |
 
 The details of each config option are as follows:
 
@@ -76,6 +77,7 @@ An example of additional configuration is as follows:
         "enable_chunked_prefill": True,
     },
     "expert_tensor_parallel_size": 1,
+    "fused_moe_max_chunk_size": 8192,
     "refresh": False,
 }
 ```
