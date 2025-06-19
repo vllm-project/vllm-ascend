@@ -27,7 +27,6 @@ from torch.distributed.distributed_c10d import PrefixStore
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
-import vllm_ascend.envs as ascend_envs
 from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
 from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD, update_aclgraph_sizes
 
@@ -38,8 +37,6 @@ else:
     ModelConfig = None
     VllmConfig = None
     FlexibleArgumentParser = None
-
-os.environ["ACL_OP_INIT_MODE"] = ascend_envs.VLLM_ASCEND_ACL_OP_INIT_MODE
 
 
 class NPUPlatform(Platform):
@@ -188,6 +185,9 @@ class NPUPlatform(Platform):
             if envs.VLLM_USE_V1:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
             elif vllm_config.speculative_config:
+                # NOTE: We set this var to `1` in vllm-ascend to avoid segment
+                # fault when using spec decode with V0 engine.
+                os.environ["ACL_OP_INIT_MODE"] = "1"
                 parallel_config.worker_cls = "vllm.spec_decode.spec_decode_worker.create_spec_worker"
                 parallel_config.sd_worker_cls = "vllm_ascend.worker.worker.NPUWorker"
             elif vllm_config.scheduler_config.is_multi_step:
