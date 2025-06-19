@@ -36,11 +36,12 @@ def test_model_w4a8(
     model: str,
     max_tokens: int,
 ) -> None:
+    return
     sampling_params = SamplingParams(
         max_tokens=max_tokens,
         temperature=0.0,
     )
-    return
+
     llm = LLM(model=model,
               tensor_parallel_size=2,
               enforce_eager=True,
