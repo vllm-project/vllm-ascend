@@ -1198,7 +1198,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                 key_cache=kv_cache[0],
                 value_cache=kv_cache[1],
                 slot_indices=attn_metadata.slot_mapping)
-        combined_cache = torch.cat([kv_cache[0], kv_cache[1]], dim=-1)
         if has_prefill:
             # FIX: aicore move should be also placed on the comm stream in dbo,
             # otherwise it may affect the accuracy
