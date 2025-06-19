@@ -2,7 +2,7 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # This file is a part of the vllm-ascend project.
 #
-# Licensed under the Apache License, Version 2.0 (the "License");A
+# Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
@@ -16,17 +16,18 @@
 #
 
 from typing import Any, Callable, Dict, Optional
+
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch_npu
+from vllm.config import get_current_vllm_config
 from vllm.distributed import GroupCoordinator
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import select_experts
 from vllm_ascend.utils import dispose_tensor
-from vllm.config import get_current_vllm_config
 
 
 def apply_mlp(hidden_states: torch.Tensor,
