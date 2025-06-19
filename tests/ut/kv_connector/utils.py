@@ -159,6 +159,7 @@ def create_request(
         multi_modal_inputs=None,
         multi_modal_placeholders=None,
         multi_modal_hashes=None,
+        pooling_params=None,
         eos_token_id=EOS_TOKEN_ID,
     )
     req.kv_transfer_params = kv_transfer_params
