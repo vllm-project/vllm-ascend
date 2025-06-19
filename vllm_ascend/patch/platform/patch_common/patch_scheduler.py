@@ -307,7 +307,8 @@ def ascend_schedule(self) -> SchedulerOutput:
                         num_new_tokens):
                     num_new_tokens = (
                         self.scheduler_config.long_prefill_token_threshold)
-                if num_new_tokens > token_budget:
+                if self.connector is not None and not self.cache_config.enable_prefix_caching \
+                    and num_new_tokens > token_budget:
                     continue
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
