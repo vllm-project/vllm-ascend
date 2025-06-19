@@ -4,46 +4,59 @@
 It's recommended to set up a local development environment to build and test
 before you submit a PR.
 
-### Prepare environment and build
-
-Theoretically, the vllm-ascend build is only supported on Linux because
-`vllm-ascend` dependency `torch_npu` only supports Linux.
-
-But you can still set up dev env on Linux/Windows/macOS for linting and basic
+### Local Development Environment
+You can set up dev env on Linux/Windows/macOS for linting and basic
 test as following commands:
 
+#### Run lint locally
 ```bash
 # Choose a base dir (~/vllm-project/) and set up venv
 cd ~/vllm-project/
 python3 -m venv .venv
 source ./.venv/bin/activate
 
-# Clone vllm code and install
-git clone https://github.com/vllm-project/vllm.git
+# Clone vllm-ascend and install
+git clone https://github.com/vllm-project/vllm-ascend.git
+cd vllm-ascend
+
+# Install lint requirement and enable pre-commit hook
+pip install -r requirements-lint.txt && pre-commit install
+
+# Run lint
+bash format.sh
+```
+
+#### Run CI locally
+
+After complete "Run lint" setup, you can run CI locally:
+
+```{code-block} bash
+   :substitutions:
+
+cd ~/vllm-project/
+
+# Run CI need vLLM installed
+git clone --branch |vllm_version| https://github.com/vllm-project/vllm.git
 cd vllm
 pip install -r requirements/build.txt
 VLLM_TARGET_DEVICE="empty" pip install .
 cd ..
 
-# Clone vllm-ascend and install
-git clone https://github.com/vllm-project/vllm-ascend.git
+# Install requirements
 cd vllm-ascend
-# install system requirement
-apt install -y gcc g++ cmake libnuma-dev
-# install project requirement
+# For Linux:
 pip install -r requirements-dev.txt
+# For non Linux:
+cat requirements-dev.txt | grep -Ev '^#|^--|^$|^-r' | while read PACKAGE; do pip install "$PACKAGE"; done
+cat requirements.txt | grep -Ev '^#|^--|^$|^-r' | while read PACKAGE; do pip install "$PACKAGE"; done
 
-# Then you can run lint and mypy test
-bash format.sh
+# Run ci:
+bash format.sh ci
+```
 
-# Build:
-# - only supported on Linux (torch_npu available)
-# pip install -e .
-# - build without deps for debugging in other OS
-# pip install -e . --no-deps
-# - build without custom ops
-# COMPILE_CUSTOM_KERNELS=0 pip install -e .
+#### Submit the commit
 
+```bash
 # Commit changed files using `-s`
 git commit -sm "your commit info"
 ```

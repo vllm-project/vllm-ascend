@@ -13,10 +13,6 @@ repos:
     args: [--in-place, --verbose]
     # Keep the same list from yapfignore here to avoid yapf failing without any inputs
     exclude: '(.github|benchmarks|examples|docs)/.*'
-- repo: https://github.com/rhysd/actionlint
-  rev: v1.7.7
-  hooks:
-  - id: actionlint
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.11.7
   hooks:
@@ -44,6 +40,10 @@ repos:
 #   hooks:
 #   - id: pymarkdown
 #     args: [fix]
+- repo: https://github.com/rhysd/actionlint
+  rev: v1.7.7
+  hooks:
+  - id: actionlint
 - repo: local
   hooks:
   # For local development, you can run mypy using tools/mypy.sh script if needed.
@@ -56,24 +56,28 @@ repos:
   - id: mypy-3.9 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.9
     entry: tools/mypy.sh 1 "3.9"
+    # Use system python because vllm installation is required
     language: system
     types: [python]
     stages: [manual] # Only run in CI
   - id: mypy-3.10 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.10
     entry: tools/mypy.sh 1 "3.10"
+    # Use system python because vllm installation is required
     language: system
     types: [python]
     stages: [manual] # Only run in CI
   - id: mypy-3.11 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.11
     entry: tools/mypy.sh 1 "3.11"
+    # Use system python because vllm installation is required
     language: system
     types: [python]
     stages: [manual] # Only run in CI
   - id: mypy-3.12 # TODO: Use https://github.com/pre-commit/mirrors-mypy when mypy setup is less awkward
     name: Run mypy for Python 3.12
     entry: tools/mypy.sh 1 "3.12"
+    # Use system python because vllm installation is required
     language: system
     types: [python]
     stages: [manual] # Only run in CI
