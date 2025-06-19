@@ -285,9 +285,10 @@ class LLMDataDistCMgrConnectorWorker():
         logger.info("Initialize the LLMDataDistCMgrConnectorWorker")
         # we assume the local node only contains dp and tp, and tp will not communicate inter-node.
         # for any scenario beyond this scope, the functionality of this connector is not guaranteed.
-        self.local_rank = get_world_group().rank % (
+        self.local_rank_on_node = get_world_group().rank % (
             vllm_config.parallel_config.data_parallel_size_local *
             vllm_config.parallel_config.tensor_parallel_size)
+        self.local_rank = get_world_group().local_rank
         self.local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.tp_rank = get_tp_group().rank_in_group
@@ -317,7 +318,7 @@ class LLMDataDistCMgrConnectorWorker():
         self.decode_device_list: list[tuple[int, int]] = []
         global_rank_table = self.read_offline_rank_table()
         self.local_agent_metadata = self.read_agent_metadata(
-            global_rank_table, self.local_ip, self.local_rank,
+            global_rank_table, self.local_ip, self.local_rank_on_node,
             self.llm_datadist_role)
         self.llm_datadist = LLMDataDist(self.llm_datadist_role,
                                         self.local_agent_metadata.cluster_id)
