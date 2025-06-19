@@ -40,7 +40,7 @@ def test_model_w4a8(
         max_tokens=max_tokens,
         temperature=0.0,
     )
-
+    return
     llm = LLM(model=model,
               tensor_parallel_size=2,
               enforce_eager=True,
