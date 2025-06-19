@@ -74,7 +74,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import CommonAttentionMetadata
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
-from vllm_ascend.utils import ProfileExecuteDuration
+from vllm_ascend.utils import ProfileExecuteDuration, vllm_version_is
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 
 if TYPE_CHECKING:
@@ -420,19 +420,33 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 generator.manual_seed(sampling_params.seed)
             else:
                 generator = None
-
-            self.requests[req_id] = CachedRequestState(
-                req_id=req_id,
-                prompt_token_ids=new_req_data.prompt_token_ids,
-                mm_inputs=new_req_data.mm_inputs,
-                mm_positions=new_req_data.mm_positions,
-                sampling_params=sampling_params,
-                generator=generator,
-                block_ids=new_req_data.block_ids,
-                num_computed_tokens=new_req_data.num_computed_tokens,
-                output_token_ids=[],
-                lora_request=new_req_data.lora_request,
-            )
+            if vllm_version_is("0.9.1"):
+                self.requests[req_id] = CachedRequestState(
+                    req_id=req_id,
+                    prompt_token_ids=new_req_data.prompt_token_ids,
+                    mm_inputs=new_req_data.mm_inputs,
+                    mm_positions=new_req_data.mm_positions,
+                    sampling_params=sampling_params,
+                    generator=generator,
+                    block_ids=new_req_data.block_ids,
+                    num_computed_tokens=new_req_data.num_computed_tokens,
+                    output_token_ids=[],
+                    lora_request=new_req_data.lora_request,
+                )
+            else:
+                self.requests[req_id] = CachedRequestState(
+                    req_id=req_id,
+                    prompt_token_ids=new_req_data.prompt_token_ids,
+                    mm_inputs=new_req_data.mm_inputs,
+                    mm_positions=new_req_data.mm_positions,
+                    sampling_params=sampling_params,
+                    pooling_params=None,
+                    generator=generator,
+                    block_ids=new_req_data.block_ids,
+                    num_computed_tokens=new_req_data.num_computed_tokens,
+                    output_token_ids=[],
+                    lora_request=new_req_data.lora_request,
+                )
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
@@ -1305,15 +1319,25 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 hidden_states,
                 attn_metadata,
             )
-
-            model_runner_output = ModelRunnerOutput(
-                req_ids=self.input_batch.req_ids,
-                req_id_to_index=self.input_batch.req_id_to_index,
-                sampled_token_ids=valid_sampled_token_ids,
-                spec_token_ids=spec_token_ids,
-                logprobs=logprobs_lists,
-                prompt_logprobs_dict={},
-            )
+            if vllm_version_is("0.9.1"):
+                model_runner_output = ModelRunnerOutput(
+                    req_ids=self.input_batch.req_ids,
+                    req_id_to_index=self.input_batch.req_id_to_index,
+                    sampled_token_ids=valid_sampled_token_ids,
+                    spec_token_ids=spec_token_ids,
+                    logprobs=logprobs_lists,
+                    prompt_logprobs_dict={},
+                )
+            else:
+                model_runner_output = ModelRunnerOutput(
+                    req_ids=self.input_batch.req_ids,
+                    req_id_to_index=self.input_batch.req_id_to_index,
+                    sampled_token_ids=valid_sampled_token_ids,
+                    spec_token_ids=spec_token_ids,
+                    logprobs=logprobs_lists,
+                    prompt_logprobs_dict={},
+                    pooler_output=[],
+                )
 
         durations = ProfileExecuteDuration().pop_captured_sync()
         if durations:
