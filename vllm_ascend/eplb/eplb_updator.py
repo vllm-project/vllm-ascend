@@ -75,7 +75,6 @@ class EplbUpdator:
 
         logger.info(f"[ModelRunner] Launched EPLB process (pid={self.eplb_process.pid})")
 
-
     def get_update_iteration(self):
         self.cur_iterations = self.cur_iterations + 1
         return self.cur_iterations % self.num_iterations == 0
@@ -191,16 +190,25 @@ class EplbUpdator:
         """
         send_all, recv_all, stacked_maps, stacked_log2phy, layer_id_tensor = packed_update_info
 
-        # 拆分 Tensor，得到 N 个张量的 tuple
-        maps = stacked_maps.unbind(0)
-        log2phy = stacked_log2phy.unbind(0)
-
-        # 把 layer_id_tensor 转成 Python int 列表
+        maps     = stacked_maps.unbind(0)
         layer_ids = layer_id_tensor.tolist()
 
+        if self.redundant_enable:
+            log2phy_list = stacked_log2phy.unbind(0)
+        else:
+            log2phy_list = [None] * len(maps)
+
+        _zip = zip
+        _send = send_all
+        _recv = recv_all
+        _maps = maps
+        _l2p  = log2phy_list
+        _lids = layer_ids
+
         recovered = [
-            (s, r, m, l, lid)
-            for s, r, m, l, lid in zip(send_all, recv_all, maps, log2phy, layer_ids)
+            (_s, _r, _m, _lp, _lid)
+            for _s, _r, _m, _lp, _lid
+            in _zip(_send, _recv, _maps, _l2p, _lids)
         ]
         return recovered
 

@@ -343,19 +343,23 @@ class EplbWorker:
 
             maps.append(new_expert_map[self.rank_id])
 
-            log2phy_map = ExpertMapUtils.generate_log2phy_map(new_expert_map) if self.redundant_enable else None
-            log2phy_all.append(log2phy_map)
+            if self.redundant_enable is not None:
+                log2phy_map = ExpertMapUtils.generate_log2phy_map(new_expert_map) 
+                log2phy_all.append(log2phy_map)
 
             layer_ids.append(layer_id)
 
         # 把 list of Tensor 堆成一个大 Tensor
-        stacked_maps      = torch.stack(maps,      dim=0)  # [N, ...]
-        stacked_log2phy   = torch.stack(log2phy_all, dim=0)  # [N, ...]
-        layer_id_tensor   = torch.as_tensor(layer_ids, dtype=torch.int64)  # [N]
+        stacked_maps      = torch.stack(maps,      dim=0)  
+        layer_id_tensor   = torch.as_tensor(layer_ids, dtype=torch.int64)  
+        stacked_maps.share_memory_()
+        layer_id_tensor.share_memory_()
 
-        # 跨进程零拷贝
-        for t in (stacked_maps, stacked_log2phy, layer_id_tensor):
-            t.share_memory_()
+        if self.redundant_enable:
+            stacked_log2phy = torch.stack(log2phy_all, dim=0)
+            stacked_log2phy.share_memory_()
+        else:
+            stacked_log2phy = None
 
         return send_all, recv_all, stacked_maps, stacked_log2phy, layer_id_tensor
         
@@ -375,7 +379,7 @@ class EplbProcess:
         self.redundant_enable = redundant_enable
 
         # Create EplbWorker instance
-        self.worker = EplbWorker(self.shared_dict, self.policy_type, self.enable_d2d)
+        self.worker = EplbWorker(self.shared_dict, self.policy_type, self.enable_d2d, self.redundant_enable)
 
 
     def worker_process(self, planner_q, block_update_q):
@@ -387,17 +391,12 @@ class EplbProcess:
 
                 planner_q.get()
 
-                update_info_generator = self.worker.do_update()
-                update_info_list = []
-
-                for (send_info , recv_info , new_expert_map, layer_id) in update_info_generator:
-                    log2phy_map = ExpertMapUtils.generate_log2phy_map(new_expert_map) if self.redundant_enable else None
-                    update_info_list.append((send_info , recv_info , new_expert_map, log2phy_map, layer_id))
+                packed_update_info = self.worker.do_update()
 
                 while True:
                     if not block_update_q.empty():
                         continue
-                    block_update_q.put(update_info_list)
+                    block_update_q.put(packed_update_info)
                     break
 
             except Exception as e:
