@@ -97,7 +97,8 @@ class EplbUpdator:
         # Batch after eplb process being triggered, get update info provided by eplb process
         if self.update_in_flight and self.weight_update_counter == 0 and self.wait_worker_iterations == self.num_wait_worker_iterations:
             self.wait_worker_iterations = 0
-            self.update_info_all = self.block_update_queue.get()
+            packed_update_info = self.block_update_queue.get()
+            self.update_info_all = self.unpack_update_batch(packed_update_info)
             self.weight_loading = True
 
         if self.update_in_flight and self.weight_loading and self.weight_update_counter < self.num_moe_layers:
@@ -108,7 +109,7 @@ class EplbUpdator:
             expert_recv_info_this_rank = expert_recv_info[rank_id] if rank_id in expert_recv_info else []
             #logger.info(f"check update info, layer = {layer_id}, send = {expert_send_info_this_rank}, recv = {expert_recv_info_this_rank}")
             self.eplb_loader.generate_expert_d2d_transfer_task(expert_send_info_this_rank,
-                expert_recv_info_this_rank, updated_expert_map[rank_id], layer_id + 3)
+                expert_recv_info_this_rank, updated_expert_map, layer_id + 3)
             self.weight_update_counter += 1
             if self.weight_update_counter == self.num_moe_layers:
                 self.weight_update_counter = 0
@@ -183,6 +184,25 @@ class EplbUpdator:
 
         for req in reqs:
             req.wait()
+
+    def unpack_update_batch(self, packed_update_info):
+        """
+        Unpack the IPC batch back into original update_info_list.
+        """
+        send_all, recv_all, stacked_maps, stacked_log2phy, layer_id_tensor = packed_update_info
+
+        # 拆分 Tensor，得到 N 个张量的 tuple
+        maps = stacked_maps.unbind(0)
+        log2phy = stacked_log2phy.unbind(0)
+
+        # 把 layer_id_tensor 转成 Python int 列表
+        layer_ids = layer_id_tensor.tolist()
+
+        recovered = [
+            (s, r, m, l, lid)
+            for s, r, m, l, lid in zip(send_all, recv_all, maps, log2phy, layer_ids)
+        ]
+        return recovered
 
     def shutdown(self):
         """
