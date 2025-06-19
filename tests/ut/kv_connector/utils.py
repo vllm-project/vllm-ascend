@@ -159,7 +159,6 @@ def create_request(
         multi_modal_inputs=None,
         multi_modal_placeholders=None,
         multi_modal_hashes=None,
-        pooling_params=None,
         eos_token_id=EOS_TOKEN_ID,
     )
     req.kv_transfer_params = kv_transfer_params
@@ -190,7 +189,6 @@ def create_model_runner_output(
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
-        pooler_output=[None],
         finished_sending=finished_sending,
         finished_recving=finished_recving,
     )
