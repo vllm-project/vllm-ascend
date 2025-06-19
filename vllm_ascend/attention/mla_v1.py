@@ -657,12 +657,13 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _compute_prefill_context(
         self,
         query: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
+        kv_c_and_k_pe_cache: Tuple[torch.Tensor],
         rope_dim: int,
         attn_metadata: AscendMLAMetadata,
         prefix_output: torch.Tensor,
         prefix_lse: torch.Tensor,
     ):
+        assert len(kv_c_and_k_pe_cache) > 1
         prefill_metadata = attn_metadata.prefill
         if prefill_metadata is None or prefill_metadata.chunked_context is None:
             return prefix_output, prefix_lse
@@ -672,21 +673,22 @@ class AscendMLAImpl(MLAAttentionImpl):
         q_nope = query[..., :self.qk_nope_head_dim]
 
         seq_len1 = torch.tensor(prefill_metadata.query_lens, dtype=torch.int32)
-        latent_kv_dim = kv_c_and_k_pe_cache.size(3) - rope_dim
-        cache_kv_c = kv_c_and_k_pe_cache[:, :, :, :latent_kv_dim]
-        cache_k_pe = kv_c_and_k_pe_cache[:, :, :, latent_kv_dim:]
+        cache_kv_c = kv_c_and_k_pe_cache[0]
+        cache_k_pe = kv_c_and_k_pe_cache[1]
+        num_heads = cache_k_pe.size(2)
+        latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
 
             seq_len2 = prefill_metadata.chunked_context.chunk_seq_lens[i]
             seq_len = torch.stack([seq_len1, seq_len2])
             kv_c_normed = torch.empty(toks,
-                                      kv_c_and_k_pe_cache.size(2),
+                                      num_heads,
                                       latent_kv_dim,
                                       dtype=query.dtype,
                                       device=query.device)
             k_pe = torch.empty(toks,
-                               kv_c_and_k_pe_cache.size(2),
+                               num_heads,
                                rope_dim,
                                dtype=query.dtype,
                                device=query.device)
@@ -736,10 +738,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         query: torch.Tensor,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
+        kv_c_and_k_pe_cache: Tuple[torch.Tensor],
         attn_metadata: AscendMLAMetadata,
     ) -> torch.Tensor:
         assert attn_metadata.prefill is not None
+        assert len(kv_c_and_k_pe_cache) > 1
 
         num_tokens = query.size(0)
         attn_output = torch.empty(num_tokens,
@@ -831,10 +834,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                 num_kv_heads=self.num_heads,
                 out=attn_output)
             attn_output = attn_output.view(-1, self.num_heads, self.v_head_dim)
-        else:
-            raise RuntimeError(
-                "Unexpected path reached, AscendMLAImpl should only have PrefillNoCache, ChunkedPrefill and SpecDecoding scenario in forward prefill, please file a bug to vllm-ascend !"
-            )
         attn_output = attn_output.reshape(
             [num_tokens, self.num_heads * self.v_head_dim])
         if attn_metadata.attn_state in [
@@ -1027,7 +1026,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         hidden_states_or_q_c: torch.Tensor,  # query in unified attn
         hidden_states_or_kv_c_normed: torch.Tensor,  # key in unified attn
         k_pe: torch.Tensor,  # value in unified attn
-        kv_cache: torch.Tensor,
+        kv_cache: Tuple[torch.Tensor],
         attn_metadata: M,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
@@ -1146,8 +1145,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                     prefill_q_pe.contiguous(),
                     prefill_k_pe,
                     max_seq_len=attn_metadata.prefill.max_seq_lens)
+
+        assert len(
+            kv_cache
+        ) > 1, "the number of kv cache should be greater than 1, namely (nope_cache and rope_cache)"
         if self.torchair_graph_enabled:
-            if len(kv_cache) > 0 and kv_cache[0].numel(
+            if kv_cache[0].numel(
             ) > 0 and attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
                 slots = attn_metadata.slot_mapping
                 # NOTE: Separate the kv cache in advance to avoid OOM or other issues
@@ -1157,16 +1160,15 @@ class AscendMLAImpl(MLAAttentionImpl):
                                                  key_cache=kv_cache[0],
                                                  value_cache=kv_cache[1],
                                                  slot_indices=slots)
-        elif kv_cache.numel() > 0:
-            key = torch.cat([
-                kv_c_normed.view([num_actual_toks, self.num_kv_heads, -1]),
-                k_pe
-            ],
-                            dim=2)
-            torch_npu._npu_reshape_and_cache_siso(
-                key=key,
-                key_cache=kv_cache,
-                slot_indices=attn_metadata.slot_mapping.flatten())
+        else:
+            kv_c_normed = kv_c_normed.view(
+                [num_actual_toks, self.num_kv_heads, -1])
+            torch_npu._npu_reshape_and_cache(
+                key=kv_c_normed,
+                value=k_pe,
+                key_cache=kv_cache[0],
+                value_cache=kv_cache[1],
+                slot_indices=attn_metadata.slot_mapping)
         if has_prefill:
             # FIX: aicore move should be also placed on the comm stream in dbo,
             # otherwise it may affect the accuracy
@@ -1189,11 +1191,10 @@ class AscendMLAImpl(MLAAttentionImpl):
                                             decode_k_nope, decode_k_pe,
                                             kv_cache, attn_metadata)
             else:
-                output_decode = self._forward_decode(decode_ql_nope,
-                                                     decode_q_pe,
-                                                     decode_k_nope,
-                                                     decode_k_pe, kv_cache,
-                                                     attn_metadata)
+                combined_cache = torch.cat([kv_cache[0], kv_cache[1]], dim=-1)
+                output_decode = self._forward_decode(
+                    decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe,
+                    combined_cache, attn_metadata)
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
                 with torch.npu.stream(current_ms_metadata.comm_stream):
