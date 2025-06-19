@@ -325,10 +325,6 @@ class LLMDataDistCMgrConnectorWorker():
         self.init_llm_datadist()
         self.finished_reqs: set[str] = set()
         self.soc_info = NPUSocInfo()
-        # remote_ip, remote_rank = self.get_remote_ip_and_rank()
-        # for idx in range(len(remote_ip)):
-        #   remote_agent_meta = self.read_agent_metadata(global_rank_table, remote_ip[idx], remote_rank[idx], self.llm_datadist_remote_role)
-        #   self.add_remote_agent(remote_agent_meta)
 
     def listen_for_agent_metadata_req(self, event: threading.Event):
         assert self.local_agent_metadata is not None
@@ -529,9 +525,9 @@ class LLMDataDistCMgrConnectorWorker():
                               meta.remote_tp_size)
             self.finished_reqs.add(req_id)
 
-    def add_remote_agent(self, metadata: LLMDataDistCMgrAgentMetadata) -> str:
+    def add_remote_agent(self, metadata: LLMDataDistCMgrAgentMetadata) -> int:
         assert self.local_agent_metadata is not None
-        remote_cluster_id = str(metadata.cluster_id)
+        remote_cluster_id = metadata.cluster_id
         if remote_cluster_id in self.linked_cluster:
             logger.debug(
                 f"LLMDataDistCMgrConnectorWorker: remote cluster_id: {metadata.cluster_id} already linked with this server, skip the connection"
@@ -673,7 +669,7 @@ class LLMDataDistCMgrConnectorWorker():
             f"Successfully remove remote client with cluster id {cluster_id} !"
         )
 
-    def connect_to_remote_agent(self, host: str, port: int):
+    def connect_to_remote_agent(self, host: str, port: int) -> int:
         url = f"tcp://{host}:{port}"
         logger.debug(f"Querying metadata from url: {url}")
         msg_encoder = msgspec.msgpack.Encoder()
