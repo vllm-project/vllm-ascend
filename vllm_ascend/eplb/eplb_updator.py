@@ -22,6 +22,7 @@ from vllm.logger import logger
 from vllm_ascend.eplb.core.worker.eplb_worker import EplbProcess
 from vllm_ascend.eplb.core.loader.device_transfer_loader import D2DExpertWeightLoader
 
+
 class EplbUpdator:
 
     def __init__(self, redundant_enable):
@@ -34,7 +35,7 @@ class EplbUpdator:
 
     def init_eplb(self, redundant_enable):
 
-        self.redundant_enable = redundant_enable 
+        self.redundant_enable = redundant_enable
         self.num_iterations: torch.int64 = 130
 
         self.weight_update_counter = 0
@@ -63,18 +64,25 @@ class EplbUpdator:
         })
 
         self.eplb = EplbProcess(
-            shared_dict = self.shared_dict,
-            planner_q = self.planner_block_queue,
-            block_update_q = self.block_update_queue,
-            redundant_enable = self.redundant_enable, 
-            policy_type = 2,
-            enable_d2d = True
+            shared_dict=self.shared_dict,
+            planner_q=self.planner_block_queue,
+            block_update_q=self.block_update_queue,
+            redundant_enable=self.redundant_enable,
+            policy_type=2,
+            enable_d2d=True
         )
 
         self.eplb_process = self.eplb._launch_process()
 
+        # todo - 新增 eplb 周期统计
+
+
         logger.info(f"[ModelRunner] Launched EPLB process (pid={self.eplb_process.pid})")
 
+    def get_expert_load(self) -> str:
+        """todo 确认moe_load的值是什么类型"""
+        # return '{"a":"b"}' # mock
+        return self.shared_dict['moe_load']
 
     def get_update_iteration(self):
         self.cur_iterations = self.cur_iterations + 1
@@ -101,14 +109,16 @@ class EplbUpdator:
             self.weight_loading = True
 
         if self.update_in_flight and self.weight_loading and self.weight_update_counter < self.num_moe_layers:
-            (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = self.update_info_all.pop(0)
+            (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = self.update_info_all.pop(
+                0)
             rank_id = torch.distributed.get_rank()
             self.eplb_loader.set_log2phy_map(log2phy_map)
             expert_send_info_this_rank = expert_send_info[rank_id] if rank_id in expert_send_info else []
             expert_recv_info_this_rank = expert_recv_info[rank_id] if rank_id in expert_recv_info else []
-            #logger.info(f"check update info, layer = {layer_id}, send = {expert_send_info_this_rank}, recv = {expert_recv_info_this_rank}")
+            # logger.info(f"check update info, layer = {layer_id}, send = {expert_send_info_this_rank}, recv = {expert_recv_info_this_rank}")
             self.eplb_loader.generate_expert_d2d_transfer_task(expert_send_info_this_rank,
-                expert_recv_info_this_rank, updated_expert_map[rank_id], layer_id + 3)
+                                                               expert_recv_info_this_rank, updated_expert_map[rank_id],
+                                                               layer_id + 3)
             self.weight_update_counter += 1
             if self.weight_update_counter == self.num_moe_layers:
                 self.weight_update_counter = 0
@@ -177,7 +187,7 @@ class EplbUpdator:
                 continue
             comm_op_list.append(
                 dist.P2POp(dist.irecv, src_tensor, src_rank)
-        )
+            )
         if comm_op_list:
             reqs = dist.batch_isend_irecv(comm_op_list)
 

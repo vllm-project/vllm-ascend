@@ -71,7 +71,7 @@ class VllmEplbAdaptor(EplbAdaptor):
 
     def get_rank_expert_workload(
         self,
-        num_moe_layers: int,
+            num_moe_layers: int,
     ) -> torch.Tensor:
         # 收集各层 topk_ids -> list of [B, K]
         all_topk_ids = [self.model.get_topk_ids(i) for i in range(num_moe_layers)]

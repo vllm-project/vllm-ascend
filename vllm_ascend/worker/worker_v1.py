@@ -180,6 +180,11 @@ class NPUWorker(WorkerBase):
         output = self.model_runner.execute_model(scheduler_output)
         return output if self.is_driver_worker else None
 
+    def get_expert_load(self) -> str:
+        """ todo 一共几个worker"""
+        moe_load = self.model_runner.do_get_expert_load()
+        return moe_load
+
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CaMemAllocator.get_instance()
