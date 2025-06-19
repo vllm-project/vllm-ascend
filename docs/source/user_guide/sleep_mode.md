@@ -4,6 +4,8 @@
 
 Sleep Mode is the API which can selectively exposed to offload weight, discard kv cache from NPU memory, and it is strong needed for RL post-training workloads, in online PPO (or GRPO, online DPO), the policy model will perform auto-regressive generation (using vLLM or other inference engines) and fwd + bwd computation with training infrastructure. Therefore, in the training stage, so it is necessary to free the KVCache and even offload the model parameter stored in the vLLM (as the model parallel strategies during generation and training could be different).
 
+## Getting started
+
 This module provides a custom memory allocator for Ascend NPUs using the [CANN](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html) runtime. It integrates tightly with PyTorch via `torch.npu.memory.NPUPluggableAllocator` and supports a "sleep mode", which allows tensors to offload memory to the CPU and release NPU memory when it's no longer immediately needed. This improves memory efficiency and allows large-scale inference to run in constrained environments.
 
 ```bash
@@ -13,8 +15,6 @@ This module provides a custom memory allocator for Ascend NPUs using the [CANN](
     ⬇ Registers                      ⬇ Tracks & Tags                    ⬇ Calls into CANN
 init_module(malloc, free)         pointer_to_data[ptr] = data         aclrtMallocPhysical, aclrtMapMem, etc.
 ```
-
-## Getting started
 
 Since this feature uses the AscendCL API, in order to use sleep mode, you should follow the [installation guide](https://vllm-ascend.readthedocs.io/en/latest/installation.html) and building from source, if you are using v0.7.3, remember to set `export COMPILE_CUSTOM_KERNELS=1`, for the latest version(v0.9.x+), the environment variable COMPILE_CUSTOM_KERNELS will be set 1 by default while building from source.
 
