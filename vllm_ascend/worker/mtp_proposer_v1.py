@@ -97,7 +97,6 @@ class MtpProposer:
                              cu_target_query_lens[:-1])
         # [a, b, c] -> [a - n1, b - n2, c - n3]
         num_tokens_per_req = query_len_per_req - num_rejected_tokens
-        num_tokens_per_req[:] = 1
 
         cu_num_tokens = torch.empty_like(cu_target_query_lens)
         torch.cumsum(num_tokens_per_req, dim=0, out=cu_num_tokens[1:])
@@ -169,7 +168,8 @@ class MtpProposer:
         # )
         extra_builder_kwargs = self.runner.extra_builder_kwargs
         if self.runner.torchair_graph_enabled and not self.runner.with_prefill:
-            self.runner.attn_state = AscendAttentionState.DecodeOnly
+            if num_tokens == 1:
+                self.runner.attn_state = AscendAttentionState.DecodeOnly
             graph_pad_size = self.runner.padded_batch_size - num_tokens
             extra_builder_kwargs['graph_pad_size'] = graph_pad_size
 
