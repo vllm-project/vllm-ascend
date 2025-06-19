@@ -32,12 +32,14 @@ from vllm_ascend.eplb.tool.eplb_utils import ExpertMapUtils
 
 class EplbWorker:
 
-    def __init__(self, shared_dict, policy_type, enable_d2d: bool = True):
+    def __init__(self, shared_dict, policy_type, enable_d2d: bool = True, redundant_enable=0):
         self.policy_type = policy_type
         self.policy = PolicyFactory.generate_policy(policy_type, DynamicConfig())
         self.shared_dict = shared_dict
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
+        self.redundant_enable = redundant_enable
+        self.rank_id  = dist.get_rank()
 
     def do_update(self):
         # put data in to queue
@@ -75,7 +77,9 @@ class EplbWorker:
         self.old_expert_maps = new_expert_maps
         logger.info("EPLB Process compute complete")
 
-        return update_info
+        packed_update_info = self.pack_update_info(update_info)
+
+        return packed_update_info
 
     def check_expert_placement(self, old_placement, new_placement):
         num_layers = old_placement.shape[0]
@@ -322,6 +326,39 @@ class EplbWorker:
 
         return placement_global
 
+    def pack_update_info(self, update_info_generator):
+        """
+        Pack a list of update info tuples for efficient IPC.
+        """
+        send_all = []
+        recv_all = []
+        maps = []
+        log2phy_all = []
+        layer_ids = []
+
+        for send_info, recv_info, new_expert_map, layer_id in update_info_generator:
+
+            send_all.append(send_info)
+            recv_all.append(recv_info)
+
+            maps.append(new_expert_map[self.rank_id])
+
+            log2phy_map = ExpertMapUtils.generate_log2phy_map(new_expert_map) if self.redundant_enable else None
+            log2phy_all.append(log2phy_map)
+
+            layer_ids.append(layer_id)
+
+        # 把 list of Tensor 堆成一个大 Tensor
+        stacked_maps      = torch.stack(maps,      dim=0)  # [N, ...]
+        stacked_log2phy   = torch.stack(log2phy_all, dim=0)  # [N, ...]
+        layer_id_tensor   = torch.as_tensor(layer_ids, dtype=torch.int64)  # [N]
+
+        # 跨进程零拷贝
+        for t in (stacked_maps, stacked_log2phy, layer_id_tensor):
+            t.share_memory_()
+
+        return send_all, recv_all, stacked_maps, stacked_log2phy, layer_id_tensor
+        
 class EplbProcess:
     def __init__(self, shared_dict, planner_q, block_update_q, redundant_enable, policy_type: int = 0, enable_d2d: bool = True):
         """
