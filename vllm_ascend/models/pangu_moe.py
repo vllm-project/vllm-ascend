@@ -4,6 +4,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 import torch
 import torch.nn.functional as F
 from torch import nn
+from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -33,7 +34,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.distributed.parallel_state import get_ep_group
-from vllm_ascend.models.configuration_pangu_moe import PanGuMoEConfig
 
 logger = init_logger(__name__)
 
@@ -94,7 +94,7 @@ class PanGuMoeSparseMoeBlock(nn.Module):
         ep_size = get_ep_group().world_size
         local_num_experts = global_num_experts // ep_size
         local_num_group = topk // ep_size
-        router_scale = _ROUTER_SCALE.squeeze()
+        router_scale = _ROUTER_SCALE.squeeze()  # type: ignore
         scores = F.softmax(gating_output, dim=1)
         scores = scores[...,
                         get_ep_group().rank_in_group *
@@ -124,7 +124,7 @@ class PanGuMoeSparseMoeBlock(nn.Module):
 
     def __init__(
         self,
-        config: PanGuMoEConfig,
+        config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
@@ -174,7 +174,7 @@ class PanGuMoeSparseMoeBlock(nn.Module):
                 prefix=f"{prefix}.shared_expert",
             )
         else:
-            self.shared_expert = None
+            self.shared_expert = None  # type: ignore
 
     def forward(
             self,
@@ -292,7 +292,7 @@ class PanGuMoeDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: PanGuMoEConfig,
+        config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
