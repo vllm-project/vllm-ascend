@@ -1,15 +1,14 @@
 """Inference-only PanGuMoE model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, sTuple, Union
 
 import torch
 import torch.nn.functional as F
 from torch import nn
-import vllm.envs as envs
 from vllm.forward_context import get_forward_context
 from vllm_ascend.models.configuration_pangu_moe import PanGuMoEConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -28,7 +27,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, maybe_remap_kv_scale_name)
+    default_weight_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
@@ -37,7 +36,6 @@ from vllm.model_executor.models.utils import (extract_layer_index, is_pp_missing
                                                 make_empty_intermediate_tensors_factory, make_layers,
                                                 maybe_prefix)
 
-from vllm.distributed.parallel_state import get_tp_group, get_dp_group
 from vllm_ascend.distributed.parallel_state import get_ep_group
 
 logger = init_logger(__name__)
@@ -166,15 +164,6 @@ class PanGuMoeSparseMoeBlock(nn.Module):
     def forward(self, 
                 hidden_states: torch.Tensor,
                 attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
-        if attn_metadata is None:
-            attn_metadata = get_forward_context().attn_metadata
-        
-        if attn_metadata is None or not hasattr(attn_metadata, "num_prefills"):
-            # for profile run
-            is_prefill = True
-        else:
-            is_prefill = attn_metadata.num_prefills > 0
-
         # NOTE: hidden_states can have either 1D or 2D shape.
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
