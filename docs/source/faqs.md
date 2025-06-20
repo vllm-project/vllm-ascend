@@ -125,7 +125,7 @@ And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tenso
 ```
 
 ### 17. Failed to reinstall vllm-ascend from source after uninstalling vllm-ascend?
-You may encounter the problem of C compilation failure when reinstalling vllm-ascend from source if the build directory is not cleaned up. So when reinstalling vllm-ascend from source, the build directory needs to be deleted:
+You may encounter the problem of C compilation failure when reinstalling vllm-ascend from source using pip if the build directory is not cleaned up. So when reinstalling vllm-ascend from source, the build directory needs to be deleted:
 
 ```bash
 cd vllm-ascend
