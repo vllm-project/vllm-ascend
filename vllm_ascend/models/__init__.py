@@ -49,5 +49,5 @@ def register_model():
         "vllm_ascend.models.qwen3_moe:CustomQwen3MoeForCausalLM")
 
     ModelRegistry.register_model(
-        "PanGuMoEForCausalLM",
-        "vllm_ascend.models.pangu_moe:PanGuMoEForCausalLM")
+        "PanguProMoEForCausalLM",
+        "vllm_ascend.models.pangu_moe:PanguProMoEForCausalLM")

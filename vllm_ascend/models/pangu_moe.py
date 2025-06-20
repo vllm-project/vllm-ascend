@@ -1,4 +1,20 @@
-"""Inference-only PanGuMoE model compatible with HuggingFace weights."""
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
@@ -40,7 +56,7 @@ logger = init_logger(__name__)
 _ROUTER_SCALE = None
 
 
-class PanGuMoeMLP(nn.Module):
+class PanguProMoEMLP(nn.Module):
 
     def __init__(
         self,
@@ -79,7 +95,7 @@ class PanGuMoeMLP(nn.Module):
         return x
 
 
-class PanGuMoeSparseMoeBlock(nn.Module):
+class PanguProMoESparseMoeBlock(nn.Module):
 
     @staticmethod
     def pangu_group8_topk(
@@ -152,7 +168,8 @@ class PanGuMoeSparseMoeBlock(nn.Module):
             intermediate_size=config.moe_intermediate_size,
             reduce_results=False,
             quant_config=quant_config,
-            custom_routing_function=PanGuMoeSparseMoeBlock.pangu_group8_topk,
+            custom_routing_function=PanguProMoESparseMoeBlock.
+            pangu_group8_topk,
             prefix=f"{prefix}.experts",
         )
 
@@ -165,7 +182,7 @@ class PanGuMoeSparseMoeBlock(nn.Module):
         )
 
         if config.shared_expert_intermediate_size > 0:
-            self.shared_expert = PanGuMoeMLP(
+            self.shared_expert = PanguProMoEMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.shared_expert_intermediate_size,
                 hidden_act=config.hidden_act,
@@ -201,7 +218,7 @@ class PanGuMoeSparseMoeBlock(nn.Module):
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 
-class PanGuMoeAttention(nn.Module):
+class PanguProMoEAttention(nn.Module):
 
     def __init__(
         self,
@@ -288,7 +305,7 @@ class PanGuMoeAttention(nn.Module):
         return output
 
 
-class PanGuMoeDecoderLayer(nn.Module):
+class PanguProMoEDecoderLayer(nn.Module):
 
     def __init__(
         self,
@@ -304,7 +321,7 @@ class PanGuMoeDecoderLayer(nn.Module):
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
 
-        self.self_attn = PanGuMoeAttention(
+        self.self_attn = PanguProMoEAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
@@ -322,13 +339,13 @@ class PanGuMoeDecoderLayer(nn.Module):
                            config.mlp_only_layers)
         if (layer_idx
                 not in mlp_only_layers) and (config.num_experts > 0):  ### ???
-            self.mlp = PanGuMoeSparseMoeBlock(
+            self.mlp = PanguProMoESparseMoeBlock(
                 config=config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
         else:
-            self.mlp = PanGuMoeMLP(
+            self.mlp = PanguProMoEMLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=config.intermediate_size,
                 hidden_act=config.hidden_act,
@@ -370,7 +387,7 @@ class PanGuMoeDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class PanGuMoEModel(nn.Module):
+class PanguProMoEModel(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -390,10 +407,10 @@ class PanGuMoEModel(nn.Module):
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: PanGuMoeDecoderLayer(config=config,
-                                                cache_config=cache_config,
-                                                quant_config=quant_config,
-                                                prefix=prefix),
+            lambda prefix: PanguProMoEDecoderLayer(config=config,
+                                                   cache_config=cache_config,
+                                                   quant_config=quant_config,
+                                                   prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -439,7 +456,7 @@ class PanGuMoEModel(nn.Module):
         return hidden_states
 
 
-class PanGuMoEForCausalLM(nn.Module, SupportsPP):
+class PanguProMoEForCausalLM(nn.Module, SupportsPP):
 
     fall_back_to_pt_during_load = False
 
@@ -456,8 +473,8 @@ class PanGuMoEForCausalLM(nn.Module, SupportsPP):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.model = PanGuMoEModel(vllm_config=vllm_config,
-                                   prefix=maybe_prefix(prefix, "model"))
+        self.model = PanguProMoEModel(vllm_config=vllm_config,
+                                      prefix=maybe_prefix(prefix, "model"))
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
