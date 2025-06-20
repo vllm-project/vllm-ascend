@@ -4,6 +4,7 @@ modelscope
 openai
 pytest >= 6.0
 pytest-asyncio
+pytest-mock
 lm-eval
 ray
 types-jsonschema
