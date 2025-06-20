@@ -57,7 +57,6 @@ ASCEND_QUATIZATION_METHOD = "ascend"
 
 CUSTOM_OP_ENABLED = None
 
-# 310P3 202, 910B4 224
 SOC_VERSION = None
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 
@@ -66,6 +65,11 @@ ACL_FORMAT_FRACTAL_NZ = 29
 
 
 def is_310p():
+    if not torch.npu.is_available():
+        return False
+    device_count = torch.npu.device_count()
+    if device_count <= 0:
+        return False
     global SOC_VERSION
     if SOC_VERSION is None:
         SOC_VERSION = torch.npu.get_device_name(0)

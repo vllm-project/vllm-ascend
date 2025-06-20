@@ -27,27 +27,25 @@ template <> struct AccType<bfloat16_t> {
 #endif
 
 template <> struct AccType<half> {
-  using type = half;
+    using type = half;
 };
 
 template <> struct AccType<float> {
-  using type = float;
+    using type = float;
 };
 
 template <> struct AccType<int8_t> {
-  using type = int;
+    using type = int;
 };
 
 template <typename scalar_t>
-__aicore__ inline void local_mem_copy(AscendC::LocalTensor<scalar_t> dst,
-                                      AscendC::LocalTensor<scalar_t> src,
-                                      int size) {
-  constexpr int loadSize = 256 / sizeof(scalar_t);
-  int loopCnt = size / loadSize;
-  int tailSize = size % loadSize;
-  if (loopCnt)
-    AscendC::Copy(dst, src, loadSize, loopCnt, {1, 1, 8, 8});
-  AscendC::Copy(dst[loopCnt * loadSize], src[loopCnt * loadSize], tailSize, 1,
-                {1, 1, 8, 8});
+__aicore__ inline void local_mem_copy(AscendC::LocalTensor<scalar_t> dst, AscendC::LocalTensor<scalar_t> src, int size)
+{
+    constexpr int loadSize = 256 / sizeof(scalar_t);
+    int loopCnt = size / loadSize;
+    int tailSize = size % loadSize;
+    if (loopCnt)
+        AscendC::Copy(dst, src, loadSize, loopCnt, {1, 1, 8, 8});
+    AscendC::Copy(dst[loopCnt * loadSize], src[loopCnt * loadSize], tailSize, 1, {1, 1, 8, 8});
 }
 } // namespace vllm_ascend

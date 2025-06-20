@@ -408,8 +408,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         out=output)
 
         # to make in-place change to the output tensor
-        if not id(ori_output) == id(output):
-            ori_output[:, :, :] = output[:num_tokens, :, :]
+        ori_output[:, :, :] = output[:num_tokens, :, :]
         return output.view(num_tokens, self.hidden_size)
 
 

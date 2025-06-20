@@ -25,7 +25,6 @@ from torch.distributed import ProcessGroup
 from vllm.config import ParallelConfig
 from vllm.distributed.utils import \
     stateless_init_torch_distributed_process_group
-from vllm.logger import logger
 
 from vllm_ascend.utils import NullHandle, is_310p
 
@@ -151,5 +150,4 @@ def communication_adaptation_310p():
 
 
 if is_310p():
-    logger.info("patch torch communication while using Ascend 310P")
     communication_adaptation_310p()
