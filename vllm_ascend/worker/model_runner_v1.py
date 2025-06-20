@@ -142,6 +142,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.device = device
 
         self.is_multimodal_model = self.model_config.is_multimodal_model
+        self.max_model_len = self.model_config.max_model_len
         self.block_size = vllm_config.cache_config.block_size
 
         self.max_num_blocks_per_req = cdiv(self.model_config.max_model_len,
@@ -206,10 +207,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
 
         # Set up speculative decoding.
-        self.use_spec_decode = False
         self.spec_attn_mask = None
         if self.speculative_config:
-            self.use_spec_decode = True
             self.spec_attn_mask = torch.triu(torch.ones(2048,
                                                         2048,
                                                         dtype=torch.bool),
@@ -771,7 +770,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 mm_embeds.append(mm_embeds_item)
         return mm_embeds
 
-    def _process_reqs(
+    def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
@@ -872,8 +871,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
             attn_state = AscendAttentionState.DecodeOnly
-        # Speculative decoding.
-        elif np.all(num_valid_tokens == 1):
+        # NOTE: Set this var only when using Mtp, since other drafters like
+        # Ngram will come across errors.
+        elif np.all(num_valid_tokens == 1) and isinstance(
+                self.drafter, MtpProposer):
             attn_state = AscendAttentionState.SpecDecoding
         # splitfuse
         elif not ascend_config.ascend_scheduler_config.enabled or self.chunked_prefill_enabled:
@@ -1190,7 +1191,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         hidden_states: torch.Tensor,
         attn_metadata: SpecDecodeMetadata,
     ) -> Optional[list[list[int]]]:
-        if not self.use_spec_decode:
+        if not self.speculative_config:
             # Speculative decoding is not enabled.
             spec_token_ids = None
         elif self.speculative_config.method == "ngram":
@@ -1223,8 +1224,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 return EMPTY_MODEL_RUNNER_OUTPUT
             (attn_metadata, hidden_states, spec_decode_metadata, positions,
              num_scheduled_tokens,
-             sample_indices) = (self._process_reqs(scheduler_output,
-                                                   intermediate_tensors))
+             sample_indices) = (self._prepare_inputs(scheduler_output,
+                                                     intermediate_tensors))
 
         with ProfileExecuteDuration().capture_async("post process"):
             logits = self.model.compute_logits(hidden_states[sample_indices],
@@ -1821,6 +1822,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Add sampled_token_ids to token_ids_cpu.
             start_idx = self.input_batch.num_tokens_no_spec[i]
             end_idx = start_idx + num_sampled_ids
+            if end_idx >= self.max_model_len:
+                # Skip requests that have already reached the max model length.
+                draft_token_ids.append([])
+                continue
+
             self.input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
             drafter_output = self.drafter.propose(
                 self.input_batch.token_ids_cpu[i, :end_idx])
