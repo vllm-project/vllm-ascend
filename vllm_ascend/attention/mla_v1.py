@@ -1001,9 +1001,13 @@ class AscendMLAImpl(MLAAttentionImpl):
                 actual_seq_lengths_kv=decode_meta.seq_lens_list,
             )
         else:
+            key_cache = kv_c_and_k_pe_cache
+            if isinstance(kv_c_and_k_pe_cache, Tuple):
+                assert len(kv_c_and_k_pe_cache) > 1
+                key_cache = torch.cat([key_cache[0], key_cache[1]], dim=-1)
             torch_npu._npu_paged_attention_mla(
                 query=q,
-                key_cache=kv_c_and_k_pe_cache,
+                key_cache=key_cache,
                 num_kv_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
                 scale_value=self.scale,
@@ -1191,10 +1195,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                                             decode_k_nope, decode_k_pe,
                                             kv_cache, attn_metadata)
             else:
-                combined_cache = torch.cat([kv_cache[0], kv_cache[1]], dim=-1)
                 output_decode = self._forward_decode(
                     decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe,
-                    combined_cache, attn_metadata)
+                    kv_cache, attn_metadata)
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
                 with torch.npu.stream(current_ms_metadata.comm_stream):
