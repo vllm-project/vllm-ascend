@@ -18,6 +18,7 @@
 #
 
 import atexit
+import gc
 import math
 from contextlib import contextmanager, nullcontext
 from enum import Enum
@@ -405,3 +406,9 @@ def get_fused_moe_state(ep_size: int, with_prefill: bool):
         return FusedMoEState.All2All
     else:
         return FusedMoEState.MC2
+
+
+def clear_npu_memory():
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()

@@ -15,7 +15,6 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import gc
 import os
 from datetime import timedelta
 from typing import TYPE_CHECKING, Optional, Tuple
@@ -107,12 +106,6 @@ class NPUPlatform(Platform):
     @classmethod
     def mem_get_info(cls) -> Tuple[int, int]:
         return torch.npu.mem_get_info()
-
-    @classmethod
-    def clear_npu_memory(cls):
-        gc.collect()
-        torch.npu.empty_cache()
-        torch.npu.reset_peak_memory_stats()
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:

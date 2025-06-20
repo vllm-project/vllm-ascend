@@ -23,7 +23,6 @@ from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 import msgpack  # type: ignore
 import torch
-import torch.distributed
 import zmq
 from torch import nn
 from vllm import envs
@@ -52,7 +51,7 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               is_310p, try_register_lib)
+                               is_310p, clear_npu_memory, try_register_lib)
 from vllm_ascend.worker.model_runner import NPUModelRunner
 from vllm_ascend.worker.pooling_model_runner import NPUPoolingModelRunner
 
@@ -281,7 +280,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
-        NPUPlatform.empty_cache()
+        clear_npu_memory()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
