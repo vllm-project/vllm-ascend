@@ -24,18 +24,19 @@ from vllm_ascend.eplb.core.loader.device_transfer_loader import D2DExpertWeightL
 
 class EplbUpdator:
 
-    def __init__(self, redundant_enable):
-        self.init_eplb(redundant_enable)
+    def __init__(self, expert_map_path):
+        self.init_eplb(expert_map_path)
 
     def set_adaptor(self, adaptor):
         self.adaptor = adaptor
         self.eplb_loader = D2DExpertWeightLoader(eplb_adaptor=self.adaptor)
         self.num_moe_layers = self.adaptor.num_moe_layers
 
-    def init_eplb(self, redundant_enable):
+    def init_eplb(self, expert_map_path):
 
-        self.redundant_enable = redundant_enable 
+        self.redundant_enable = (expert_map_path != None)
         self.num_iterations: torch.int64 = 130
+        self.expert_map_path = expert_map_path
 
         self.weight_update_counter = 0
         self.expert_map_initialized = False
@@ -82,7 +83,7 @@ class EplbUpdator:
     def get_init_expert_map(self):
         try:
             if not self.expert_map_initialized:
-                self.shared_dict["expert_maps"] = self.adaptor.get_init_expert_map(self.num_moe_layers)
+                self.shared_dict["expert_maps"] = self.adaptor.get_init_expert_map_from_file(self.num_moe_layers, self.expert_map_path)
                 self.expert_map_initialized = True
         except Exception as e:
             logger.warning(f"[ModelRunner] Failed to wake EPLB process: {e}", exc_info=True)

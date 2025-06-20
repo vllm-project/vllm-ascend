@@ -375,7 +375,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.dynamic_eplb = ascend_config.dynamic_eplb
         if self.dynamic_eplb == True:
             self.eplb_adaptor = None
-            self.eplb_updator = EplbUpdator(ascend_config.expert_map_path != None)
+            self.eplb_updator = EplbUpdator(ascend_config.expert_map_path)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -1517,12 +1517,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=inputs_embeds)
 
-                #EPLB
-                if self.dynamic_eplb == True:
-                    self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
-                    self.eplb_updator.set_adaptor(self.eplb_adaptor)
-                    self.eplb_updator.warm_up_eplb()
-
                 return hidden_states
 
     def profile_run(self) -> None:
@@ -1563,6 +1557,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         del hidden_states, logits
         self.encoder_cache.clear()
         gc.collect()
+
+    def eplb_warmup(self):
+        #EPLBMore actions
+        if self.dynamic_eplb == True:
+            self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
+            self.eplb_updator.set_adaptor(self.eplb_adaptor)
+            self.eplb_updator.warm_up_eplb()
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
