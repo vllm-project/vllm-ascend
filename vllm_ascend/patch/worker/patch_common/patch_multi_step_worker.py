@@ -88,20 +88,4 @@ def sampler_output(
     return filtered_model_outputs, True
 
 
-def set_include_gpu_probs_tensor(self) -> None:
-    # Need include_gpu_probs_tensor for MultiSteoWorker
-    if hasattr(self.model_runner.model, "sampler"):
-        self.model_runner.model.sampler.include_gpu_probs_tensor = True
-    self.model_runner.sampler.include_gpu_probs_tensor = True
-
-
-def set_should_modify_greedy_probs_inplace(self) -> None:
-    if hasattr(self.model_runner.model, "sampler"):
-        self.model_runner.model.sampler.should_modify_greedy_probs_inplace = (
-            True)
-    self.model_runner.sampler.should_modify_greedy_probs_inplace = True
-
-
 MultiStepWorker.sampler_output = torch.inference_mode()(sampler_output)
-MultiStepWorker.set_include_gpu_probs_tensor = set_include_gpu_probs_tensor
-MultiStepWorker.set_should_modify_greedy_probs_inplace = set_should_modify_greedy_probs_inplace
