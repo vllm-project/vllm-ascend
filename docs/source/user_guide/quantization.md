@@ -8,7 +8,7 @@ Since 0.9.0rc2 version, quantization feature is experimentally supported in vLLM
 
 To quantize a model, users should install [ModelSlim](https://gitee.com/ascend/msit/blob/master/msmodelslim/README.md) which is the Ascend compression and acceleration tool. It is an affinity-based compression tool designed for acceleration, using compression as its core technology and built upon the Ascend platform.
 
-Currently, only the specific tag [modelslim-VLLM-8.1.RC1.b020_001](https://gitee.com/ascend/msit/blob/modelslim-VLLM-8.1.RC1.b020_001/msmodelslim/README.md) of modelslim works with vLLM Ascend. Please do not install other version until modelslim master version is avaliable for vLLM Ascend in the future.
+Currently, only the specific tag [modelslim-VLLM-8.1.RC1.b020_001](https://gitee.com/ascend/msit/blob/modelslim-VLLM-8.1.RC1.b020_001/msmodelslim/README.md) of modelslim works with vLLM Ascend. Please do not install other version until modelslim master version is available for vLLM Ascend in the future.
 
 Install modelslim:
 ```bash
@@ -34,7 +34,7 @@ You can also download the quantized model that we uploaded. Please note that the
 
 Once convert action is done, there are two important files generated.
 
-1. [confg.json](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V2-Lite-W8A8/file/view/master/config.json?status=1). Please make sure that there is no `quantization_config` field in it.
+1. [config.json](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V2-Lite-W8A8/file/view/master/config.json?status=1). Please make sure that there is no `quantization_config` field in it.
 
 2. [quant_model_description.json](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V2-Lite-W8A8/file/view/master/quant_model_description.json?status=1). All the converted weights info are recorded in this file.
 
@@ -77,7 +77,7 @@ sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40)
 llm = LLM(model="{quantized_model_save_path}",
           max_model_len=2048,
           trust_remote_code=True,
-          # Enable quantization by specifing `quantization="ascend"`
+          # Enable quantization by specifying `quantization="ascend"`
           quantization="ascend")
 
 outputs = llm.generate(prompts, sampling_params)
@@ -90,7 +90,7 @@ for output in outputs:
 ### Online inference
 
 ```bash
-# Enable quantization by specifing `--quantization ascend`
+# Enable quantization by specifying `--quantization ascend`
 vllm serve {quantized_model_save_path} --served-model-name "deepseek-v2-lite-w8a8" --max-model-len 2048 --quantization ascend --trust-remote-code
 ```
 
