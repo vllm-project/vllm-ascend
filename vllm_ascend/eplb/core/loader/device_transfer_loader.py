@@ -81,7 +81,8 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
 
         # set asynchronous stream for d2d expert weight transfer
         if self.comm_op_list:
-            reqs = dist.batch_isend_irecv(self.comm_op_list)
+            ret_list = dist.batch_isend_irecv(self.comm_op_list)
+            reqs.extend(ret_list)
 
         self.state = ExpertWeightUpdateState.TRANSFERING
 
