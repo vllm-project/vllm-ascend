@@ -138,6 +138,7 @@ class AscendMLAMetadata:
 
     max_num_tokens_across_dp: int = 0
     with_prefill_across_dp: bool = False
+    enable_dbo_across_dp: bool = False
 
     query_lens: Optional[list[int]] = None
     # The dimension of the attention heads
@@ -357,17 +358,16 @@ class AscendMLAMetadataBuilder:
             block_tables=block_table,
         )
 
-    def build(
-        self,
-        num_reqs: int,
-        num_actual_tokens: int,
-        max_query_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-        common_prefix_len: Optional[int] = None,
-        graph_pad_size: int = -1,
-        max_num_tokens_across_dp: int = 0,
-        with_prefill_across_dp: bool = False,
-    ) -> AscendMLAMetadata:
+    def build(self,
+              num_reqs: int,
+              num_actual_tokens: int,
+              max_query_len: int,
+              common_attn_metadata: CommonAttentionMetadata,
+              common_prefix_len: Optional[int] = None,
+              graph_pad_size: int = -1,
+              max_num_tokens_across_dp: int = 0,
+              with_prefill_across_dp: bool = False,
+              enable_dbo_across_dp: bool = False) -> AscendMLAMetadata:
         assert self._num_decodes + self._num_prefills == num_reqs
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
@@ -513,7 +513,7 @@ class AscendMLAMetadataBuilder:
             seq_lens=seq_lens,
             max_num_tokens_across_dp=max_num_tokens_across_dp,
             with_prefill_across_dp=with_prefill_across_dp,
-        )
+            enable_dbo_across_dp=enable_dbo_across_dp)
 
 
 class AscendMLAImpl(MLAAttentionImpl):
