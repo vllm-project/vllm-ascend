@@ -1001,6 +1001,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             # The MLA_PA path will be used as default path in the future, `_npu_paged_attention_mla` will
             # be removed after the torch_npu contains `torch_npu.atb.npu_multi_head_latent_attention` become
             # public avaliable
+            assert len(kv_c_and_k_pe_cache) > 1
             if envs.VLLM_ASCEND_MLA_PA:
                 attn_output = torch_npu.atb.npu_multi_head_latent_attention(
                     q_nope, q_pe, kv_c_and_k_pe_cache[0],
