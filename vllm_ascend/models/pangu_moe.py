@@ -4,7 +4,6 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 import torch
 import torch.nn.functional as F
 from torch import nn
-from vllm_ascend.models.configuration_pangu_moe import PanGuMoEConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -25,47 +24,49 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import SupportsPP
+from vllm.model_executor.models.utils import (
+    extract_layer_index, is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from vllm.model_executor.models.interfaces import SupportsPP
-from vllm.model_executor.models.utils import (extract_layer_index, is_pp_missing_parameter,
-                                                make_empty_intermediate_tensors_factory, make_layers,
-                                                maybe_prefix)
-
 from vllm_ascend.distributed.parallel_state import get_ep_group
+from vllm_ascend.models.configuration_pangu_moe import PanGuMoEConfig
 
 logger = init_logger(__name__)
 
 _ROUTER_SCALE = None
 
+
 class PanGuMoeMLP(nn.Module):
 
     def __init__(
-            self,
-            hidden_size: int,
-            intermediate_size: int,
-            hidden_act: str,
-            quant_config: Optional[QuantizationConfig] = None,
-            reduce_results: bool = True,
-            prefix: str = "",
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: Optional[QuantizationConfig] = None,
+        reduce_results: bool = True,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
+            hidden_size,
+            [intermediate_size] * 2,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj",
-            )
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           quant_config=quant_config,
-                                           reduce_results=reduce_results,
-                                           prefix=f"{prefix}.down_proj",
-                                           )
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            reduce_results=reduce_results,
+            prefix=f"{prefix}.down_proj",
+        )
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -76,7 +77,6 @@ class PanGuMoeMLP(nn.Module):
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
-
 
 
 class PanGuMoeSparseMoeBlock(nn.Module):
@@ -96,24 +96,37 @@ class PanGuMoeSparseMoeBlock(nn.Module):
         local_num_group = topk // ep_size
         router_scale = _ROUTER_SCALE.squeeze()
         scores = F.softmax(gating_output, dim=1)
-        scores = scores[...,get_ep_group().rank_in_group * local_num_experts:(get_ep_group().rank_in_group+1) * local_num_experts]
+        scores = scores[...,
+                        get_ep_group().rank_in_group *
+                        local_num_experts:(get_ep_group().rank_in_group + 1) *
+                        local_num_experts]
 
-        router_weights = router_scale[get_ep_group().rank_in_group * local_num_experts:(get_ep_group().rank_in_group+1) * local_num_experts]
-        topk_weights, topk_ids = torch.max(scores.view(scores.shape[0], local_num_group, -1), dim = -1)
-        bias = torch.arange(0, local_num_experts, topk, device=scores.device, dtype=torch.int32).unsqueeze(0)
+        router_weights = router_scale[get_ep_group().rank_in_group *
+                                      local_num_experts:
+                                      (get_ep_group().rank_in_group + 1) *
+                                      local_num_experts]
+        topk_weights, topk_ids = torch.max(scores.view(scores.shape[0],
+                                                       local_num_group, -1),
+                                           dim=-1)
+        bias = torch.arange(0,
+                            local_num_experts,
+                            topk,
+                            device=scores.device,
+                            dtype=torch.int32).unsqueeze(0)
         topk_ids = topk_ids.to(torch.int32) + bias
 
         flatten_topk_ids = topk_ids.view(-1)
-        router_weights = router_weights.index_select(0, flatten_topk_ids).view(topk_ids.shape)
+        router_weights = router_weights.index_select(0, flatten_topk_ids).view(
+            topk_ids.shape)
         topk_weights *= router_weights
 
         return topk_weights, topk_ids
 
     def __init__(
-            self,
-            config: PanGuMoEConfig,
-            quant_config: Optional[QuantizationConfig] = None,
-            prefix: str = "",
+        self,
+        config: PanGuMoEConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -124,11 +137,14 @@ class PanGuMoeSparseMoeBlock(nn.Module):
                 f"Tensor parallel size {self.tp_size} is greater than "
                 f"the number of experts {config.num_experts}.")
 
-        self.local_num_group = config.num_experts_per_tok // get_ep_group().world_size
+        self.local_num_group = config.num_experts_per_tok // get_ep_group(
+        ).world_size
         self.num_experts_per_tok = config.num_experts_per_tok
-        self.local_num_experts = config.num_experts // get_ep_group().world_size
-        self.router_scale = torch.nn.Parameter(torch.ones((1, self.num_experts)))
-        
+        self.local_num_experts = config.num_experts // get_ep_group(
+        ).world_size
+        self.router_scale = torch.nn.Parameter(
+            torch.ones((1, self.num_experts)))
+
         self.experts = FusedMoE(
             num_experts=config.num_experts,
             top_k=config.num_experts_per_tok,
@@ -138,15 +154,15 @@ class PanGuMoeSparseMoeBlock(nn.Module):
             quant_config=quant_config,
             custom_routing_function=PanGuMoeSparseMoeBlock.pangu_group8_topk,
             prefix=f"{prefix}.experts",
-            )
+        )
 
-
-        self.gate = ReplicatedLinear(config.hidden_size,
-                                     config.num_experts,
-                                     bias=False,
-                                     quant_config=None,
-                                     prefix=f"{prefix}.gate",
-                                     )
+        self.gate = ReplicatedLinear(
+            config.hidden_size,
+            config.num_experts,
+            bias=False,
+            quant_config=None,
+            prefix=f"{prefix}.gate",
+        )
 
         if config.shared_expert_intermediate_size > 0:
             self.shared_expert = PanGuMoeMLP(
@@ -160,9 +176,10 @@ class PanGuMoeSparseMoeBlock(nn.Module):
         else:
             self.shared_expert = None
 
-    def forward(self, 
-                hidden_states: torch.Tensor,
-                attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
+    def forward(
+            self,
+            hidden_states: torch.Tensor,
+            attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
         # NOTE: hidden_states can have either 1D or 2D shape.
         num_tokens, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.view(-1, hidden_dim)
@@ -187,16 +204,16 @@ class PanGuMoeSparseMoeBlock(nn.Module):
 class PanGuMoeAttention(nn.Module):
 
     def __init__(
-            self,
-            hidden_size: int,
-            num_heads: int,
-            num_kv_heads: int,
-            rope_theta: float = 10000,
-            rope_scaling: Optional[Dict[str, Any]] = None,
-            max_position_embeddings: int = 8192,
-            cache_config: Optional[CacheConfig] = None,
-            quant_config: Optional[QuantizationConfig] = None,
-            prefix: str = "",
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        rope_theta: float = 10000,
+        rope_scaling: Optional[Dict[str, Any]] = None,
+        max_position_embeddings: int = 8192,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -217,7 +234,7 @@ class PanGuMoeAttention(nn.Module):
         self.head_dim = hidden_size // self.total_num_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
-        self.scaling = self.head_dim ** -0.5
+        self.scaling = self.head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
 
@@ -246,21 +263,22 @@ class PanGuMoeAttention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-        self.attn = Attention(self.num_heads,
-                              self.head_dim,
-                              self.scaling,
-                              num_kv_heads=self.num_kv_heads,
-                              cache_config=cache_config,
-                              quant_config=quant_config,
-                              prefix=f"{prefix}.attn",
-                              )
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor,
-            kv_cache: Optional[torch.Tensor] = None,
-            attn_metadata: Optional[AttentionMetadata] = None,
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        kv_cache: Optional[torch.Tensor] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -285,7 +303,7 @@ class PanGuMoeDecoderLayer(nn.Module):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
-        
+
         self.self_attn = PanGuMoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -302,12 +320,13 @@ class PanGuMoeDecoderLayer(nn.Module):
         layer_idx = extract_layer_index(prefix)
         mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
                            config.mlp_only_layers)
-        if (layer_idx not in mlp_only_layers) and (
-                config.num_experts > 0): ### ???
-            self.mlp = PanGuMoeSparseMoeBlock(config=config,
-                                              quant_config=quant_config,
-                                              prefix=f"{prefix}.mlp",
-                                              )
+        if (layer_idx
+                not in mlp_only_layers) and (config.num_experts > 0):  ### ???
+            self.mlp = PanGuMoeSparseMoeBlock(
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
+            )
         else:
             self.mlp = PanGuMoeMLP(
                 hidden_size=config.hidden_size,
@@ -322,12 +341,12 @@ class PanGuMoeDecoderLayer(nn.Module):
                                                 eps=config.rms_norm_eps)
 
     def forward(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor,
-            residual: Optional[torch.Tensor],
-            kv_cache: Optional[torch.Tensor] = None,
-            attn_metadata: Optional[AttentionMetadata] = None,
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: Optional[torch.Tensor],
+        kv_cache: Optional[torch.Tensor] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
@@ -349,6 +368,7 @@ class PanGuMoeDecoderLayer(nn.Module):
 
         return hidden_states, residual
 
+
 @support_torch_compile
 class PanGuMoEModel(nn.Module):
 
@@ -366,7 +386,7 @@ class PanGuMoEModel(nn.Module):
             config.vocab_size,
             config.hidden_size,
             quant_config=quant_config,
-            prefix=f"{prefix}.embed_tokens") 
+            prefix=f"{prefix}.embed_tokens")
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -380,18 +400,18 @@ class PanGuMoEModel(nn.Module):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
-    
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            kv_caches: Optional[List[torch.Tensor]] = None,
-            attn_metadata: Optional[AttentionMetadata] = None,
-            intermediate_tensors: Optional[IntermediateTensors] = None,
-            inputs_embeds: Optional[torch.Tensor] = None,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: Optional[List[torch.Tensor]] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -436,12 +456,14 @@ class PanGuMoEForCausalLM(nn.Module, SupportsPP):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.model = PanGuMoEModel(vllm_config=vllm_config, 
-                                    prefix=maybe_prefix(prefix, "model"))
-        self.lm_head = ParallelLMHead(config.vocab_size,
-                                      config.hidden_size,
-                                      quant_config=quant_config,
-                                      prefix=f"{prefix}.lm_head",)
+        self.model = PanGuMoEModel(vllm_config=vllm_config,
+                                   prefix=maybe_prefix(prefix, "model"))
+        self.lm_head = ParallelLMHead(
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.lm_head",
+        )
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
@@ -503,7 +525,7 @@ class PanGuMoEForCausalLM(nn.Module, SupportsPP):
 
         # expert_params_mapping = []
 
-        params_dict = dict(self.named_parameters()) # from model
+        params_dict = dict(self.named_parameters())  # from model
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             # =======================================================
@@ -598,4 +620,3 @@ class PanGuMoEForCausalLM(nn.Module, SupportsPP):
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
-

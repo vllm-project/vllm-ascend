@@ -19,9 +19,8 @@
 # limitations under the License.
 """ PanGuMoE model configuration"""
 
-from transformers.utils import logging
 from transformers.configuration_utils import PretrainedConfig
-
+from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
 
@@ -29,7 +28,7 @@ PanGuMoE_PRETRAINED_CONFIG_ARCHIVE_MAP = {}
 
 
 class PanGuMoEConfig(PretrainedConfig):
-   
+
     model_type = "PanGuMoE"
     _auto_class = "AutoConfig"
 
