@@ -123,23 +123,14 @@ apt update  -y
 apt install -y gcc g++ cmake libnuma-dev wget git
 ```
 
-**[Optional]**
-
-for **x86** machine:
+**[Optional]** Then config the extra-index of `pip` if you are working on a x86 machine or using torch-npu dev version:
 
 ```bash
+# For x86 machine
 pip config set global.extra-index-url https://download.pytorch.org/whl/cpu/  
-```
-
-for torch-npu **dev** version:
-
-```bash
+# For torch-npu dev version
 pip config set global.extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
-```
-
-for torch-npu **dev** version and **x86** machine:
-
-```bash
+# For x86 torch-npu dev version
 pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"  
 ```
 
