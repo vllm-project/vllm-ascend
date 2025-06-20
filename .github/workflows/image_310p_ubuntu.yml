@@ -16,8 +16,8 @@ on:
       - 'main'
       - '*-dev'
     paths:
-      - '.github/workflows/image_ubuntu.yml'
-      - 'Dockerfile'
+      - '.github/workflows/image_310p.ubuntu.yml'
+      - 'Dockerfile.310p'
       - 'vllm_ascend/**'
       - 'setup.py'
       - 'pyproject.toml'
@@ -33,8 +33,8 @@ on:
     tags:
       - 'v*'
     paths:
-      - '.github/workflows/image_ubuntu.yml'
-      - 'Dockerfile'
+      - '.github/workflows/image_310p_ubuntu.yml'
+      - 'Dockerfile.310p'
       - 'vllm_ascend/**'
 jobs:
 
@@ -66,9 +66,9 @@ jobs:
         #      which follow the rule from vLLM with prefix v
         # TODO(yikun): the post release might be considered as latest release
         tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=pep440,pattern={{raw}}
+          type=ref,event=branch,suffix=-310p
+          type=ref,event=pr,suffix=-310p
+          type=pep440,pattern={{raw}},suffix=-310p
 
     - name: Free up disk space
       uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
@@ -90,7 +90,7 @@ jobs:
         username: ${{ vars.QUAY_USERNAME }}
         password: ${{ secrets.QUAY_PASSWORD }}
 
-    - name: Build and push 910b
+    - name: Build and push 310p
       uses: docker/build-push-action@v6
       with:
         platforms: >-
@@ -101,7 +101,7 @@ jobs:
           }}
         # use the current repo path as the build context, ensure .git is contained
         context: .
-        file: Dockerfile
+        file: Dockerfile.310p
         # only trigger when tag, branch/main push
         push: ${{ github.event_name == 'push' && github.repository_owner == 'vllm-project' }}
         labels: ${{ steps.meta.outputs.labels }}
