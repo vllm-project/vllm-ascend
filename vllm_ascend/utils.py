@@ -21,6 +21,7 @@ import atexit
 import math
 from contextlib import contextmanager, nullcontext
 from enum import Enum
+from functools import lru_cache
 from threading import Lock
 from typing import TYPE_CHECKING, List, Tuple
 
@@ -57,23 +58,31 @@ ASCEND_QUATIZATION_METHOD = "ascend"
 
 CUSTOM_OP_ENABLED = None
 
-SOC_VERSION = None
 SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
 
 ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
 
-def is_310p():
+@lru_cache(maxsize=None)
+def _get_soc_version():
+    """Gets the SOC version and caches it."""
     if not torch.npu.is_available():
-        return False
+        return ""
     device_count = torch.npu.device_count()
     if device_count <= 0:
-        return False
-    global SOC_VERSION
-    if SOC_VERSION is None:
-        SOC_VERSION = torch.npu.get_device_name(0)
-    return SOC_VERSION in SOC_VERSION_INFERENCE_SERIES
+        return ""
+    try:
+        return torch.npu.get_device_name(0)
+    except Exception:
+        return ""
+
+
+_SOC_VERSION = _get_soc_version()
+
+
+def is_310p():
+    return _SOC_VERSION in SOC_VERSION_INFERENCE_SERIES
 
 
 class NullHandle:
