@@ -1,4 +1,4 @@
-name: 'image / Ubuntu'
+name: 'image / openEuler'
 # This is a docker build check and publish job:
 # 1. PR Triggered docker image build check
 #   - is for image build check
@@ -9,15 +9,15 @@ name: 'image / Ubuntu'
 #   - commits are merge into main/*-dev  ==> vllm-ascend:main / vllm-ascend:*-dev
 # 3. tags push trigger image publish
 #   - is for final release image
-#   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3|latest / vllm-ascend:v1.2.3rc1
+#   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3-openeuler|latest / vllm-ascend:v1.2.3rc1-openeuler
 on:
   pull_request:
     branches:
       - 'main'
       - '*-dev'
     paths:
-      - '.github/workflows/image_ubuntu.yml'
-      - 'Dockerfile'
+      - '.github/workflows/image_310p_openeuler.yml'
+      - 'Dockerfile.310p.openEuler'
       - 'vllm_ascend/**'
       - 'setup.py'
       - 'pyproject.toml'
@@ -33,15 +33,19 @@ on:
     tags:
       - 'v*'
     paths:
-      - '.github/workflows/image_ubuntu.yml'
-      - 'Dockerfile'
+      - '.github/workflows/image_310p.openeuler.yml'
+      - 'Dockerfile.310p.openEuler'
       - 'vllm_ascend/**'
-jobs:
 
+jobs:
   build:
     name: vllm-ascend image build
-    runs-on: ubuntu-latest
-
+    runs-on: >-
+      ${{
+          github.event_name == 'push' && github.repository_owner == 'vllm-project' &&
+          'ubuntu-latest' ||
+          'ubuntu-24.04-arm'
+      }}
     steps:
     - uses: actions/checkout@v4
 
@@ -59,16 +63,16 @@ jobs:
         # Note for test case
         # https://github.com/marketplace/actions/docker-metadata-action#typeref
         # 1. branch job pulish per main/*-dev branch commits
-        # 2. main and dev pull_request is build only, so the tag pr-N is fine
+        # 2. main and dev pull_request is build only, so the tag pr-N-openeuler is fine
         # 3. only pep440 matched tag will be published:
-        #    - v0.7.1 --> v0.7.1, latest
-        #    - pre/post/dev: v0.7.1rc1/v0.7.1rc1/v0.7.1rc1.dev1/v0.7.1.post1, no latest
+        #    - v0.7.1 --> v0.7.1-openeuler, latest
+        #    - pre/post/dev: v0.7.1rc1-openeuler/v0.7.1rc1-openeuler/v0.7.1rc1.dev1-openeuler/v0.7.1.post1-openeuler, no latest
         #      which follow the rule from vLLM with prefix v
         # TODO(yikun): the post release might be considered as latest release
         tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=pep440,pattern={{raw}}
+          type=ref,event=branch,suffix=-310p-openeuler
+          type=ref,event=pr,suffix=-openeuler
+          type=pep440,pattern={{raw}},suffix=-310p-openeuler
 
     - name: Free up disk space
       uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
@@ -90,21 +94,21 @@ jobs:
         username: ${{ vars.QUAY_USERNAME }}
         password: ${{ secrets.QUAY_PASSWORD }}
 
-    - name: Build and push 910b
+    - name: Build and push 310p
       uses: docker/build-push-action@v6
       with:
         platforms: >-
           ${{
               github.event_name == 'push' && github.repository_owner == 'vllm-project' &&
               'linux/amd64,linux/arm64' ||
-              'linux/amd64'
+              'linux/arm64'
           }}
         # use the current repo path as the build context, ensure .git is contained
         context: .
-        file: Dockerfile
         # only trigger when tag, branch/main push
         push: ${{ github.event_name == 'push' && github.repository_owner == 'vllm-project' }}
         labels: ${{ steps.meta.outputs.labels }}
         tags: ${{ steps.meta.outputs.tags }}
+        file: Dockerfile.310p.openEuler
         build-args: |
           PIP_INDEX_URL=https://pypi.org/simple
