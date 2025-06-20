@@ -759,6 +759,7 @@ def select_experts(
     custom_routing_function: Optional[Callable] = None,
     scoring_func: str = "softmax",
     e_score_correction_bias: Optional[torch.Tensor] = None,
+    global_num_experts: Optional[torch.Tensor] = None
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Select top-k experts based on router logits.
@@ -826,7 +827,8 @@ def select_experts(
             hidden_states=hidden_states,
             gating_output=router_logits,
             topk=top_k,
-            renormalize=renormalize)
+            renormalize=renormalize,
+            global_num_experts=global_num_experts)
         # Required by npu_moe_init_routing
         topk_ids = topk_ids.to(torch.int32)
         return topk_weights, topk_ids
