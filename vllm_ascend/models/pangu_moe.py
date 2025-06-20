@@ -1,10 +1,9 @@
 """Inference-only PanGuMoE model compatible with HuggingFace weights."""
-from typing import Any, Dict, Iterable, List, Optional, Set, sTuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn.functional as F
 from torch import nn
-from vllm.forward_context import get_forward_context
 from vllm_ascend.models.configuration_pangu_moe import PanGuMoEConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
