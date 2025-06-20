@@ -1558,6 +1558,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.encoder_cache.clear()
         gc.collect()
 
+    def do_get_expert_load(self) -> str:More actions
+        return self.eplb_updator.get_expert_load()
+
     def eplb_warmup(self):
         #EPLBMore actions
         if self.dynamic_eplb == True:

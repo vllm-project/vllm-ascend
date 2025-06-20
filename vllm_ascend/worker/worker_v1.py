@@ -204,12 +204,17 @@ class NPUWorker(WorkerBase):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
             self.model_runner.eplb_warmup()
-            
+
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
+
+    def get_expert_load(self) -> str:
+        """ todo 一共几个worker"""
+        moe_load = self.model_runner.do_get_expert_load()More actions
+        return moe_load
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
