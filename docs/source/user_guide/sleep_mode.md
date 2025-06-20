@@ -109,7 +109,7 @@ curl -X GET http://127.0.0.1:8000/is_sleeping
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "Qwen/Qwen3-8B",
+        "model": "Qwen/Qwen2.5-0.5B-Instruct",
         "prompt": "The future of AI is",
         "max_tokens": 7,
         "temperature": 0
