@@ -86,12 +86,20 @@ class CustomDeepseekDBOMLP(CustomDeepseekV2MLP):
         current_ms_metadata = get_multistream_comm_context()
         assert current_ms_metadata is not None
         gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        current_ms_metadata.before_comm_event.record()
-        with torch.npu.stream(current_ms_metadata.comm_stream):
-            current_ms_metadata.before_comm_event.wait()
-            x, _ = self.down_proj(x)
-            current_ms_metadata.after_comm_event.record()
+        x, dynamic_scale = self.act_fn(gate_up)
+        x = torch_npu.npu_quant_matmul(
+            x,
+            self.down_proj.weight,
+            self.down_proj.weight_scale,
+            pertoken_scale=dynamic_scale,
+            output_dtype=torch.bfloat16,
+        )
+        if self.down_proj.reduce_results and self.down_proj.tp_size > 1:
+            current_ms_metadata.before_comm_event.record()
+            with torch.npu.stream(current_ms_metadata.comm_stream):
+                current_ms_metadata.before_comm_event.wait()
+                x = tensor_model_parallel_all_reduce(x)
+                current_ms_metadata.after_comm_event.record()
         return x
 
 
@@ -187,24 +195,20 @@ class CustomDeepseekDBOMoE(nn.Module):
             if hasattr(attn_metadata, 'with_prefill_across_dp'):
                 is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
 
-        old_hidden_states = hidden_states.clone()
-
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
 
-        hidden_states = self.experts(
+        experts_hidden_states = self.experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
             is_prefill=is_prefill,
             top_k=CustomDeepseekDBOMoE.top_k,
             enable_force_load_balance=enable_force_load_balance,
-        ) * self.routed_scaling_factor
+            shared_experts=self.shared_experts)
 
-        if self.n_shared_experts is not None:
-            shared_output = self.shared_experts(old_hidden_states)
-
-        if shared_output is not None:
-            hidden_states = hidden_states + shared_output
+        hidden_states = (
+            experts_hidden_states[0] * self.routed_scaling_factor +
+            experts_hidden_states[1])
 
         return hidden_states
 
@@ -223,31 +227,6 @@ class CustomDeepseekDBOMoE(nn.Module):
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
         return router_logits
-
-    def _forward_ms_op_tp_allgather(
-        self,
-        hidden_states: torch.Tensor,
-        chunk_hidden_states: torch.Tensor,
-        num_tokens: int = 0,
-    ):
-        current_ms_metadata = get_multistream_comm_context()
-        if current_ms_metadata is None:
-            dist.all_gather(list(chunk_hidden_states), hidden_states,
-                            self.tp_group)
-            final_hidden_states = torch.cat(chunk_hidden_states, dim=0)
-            if num_tokens > 0:
-                final_hidden_states = final_hidden_states[:-num_tokens]
-        else:
-            current_ms_metadata.before_comm_event.record()
-            with torch.npu.stream(current_ms_metadata.comm_stream):
-                current_ms_metadata.before_comm_event.wait()
-                dist.all_gather(list(chunk_hidden_states), hidden_states,
-                                self.tp_group)
-                final_hidden_states = torch.cat(chunk_hidden_states, dim=0)
-                if num_tokens > 0:
-                    final_hidden_states = final_hidden_states[:-num_tokens]
-                current_ms_metadata.after_comm_event.record()
-        return final_hidden_states
 
 
 class CustomDeepseekDBOMLAAttention(DeepseekV2MLAAttention):
@@ -460,6 +439,8 @@ class CustomDeepseekDBODecoderLayer(DeepseekV2DecoderLayer):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
         )
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.dp_size = get_dp_group().world_size
 
         if (config.n_routed_experts is not None
                 and layer_idx >= config.first_k_dense_replace
@@ -564,7 +545,6 @@ class CustomDeepseekDBODecoderLayer(DeepseekV2DecoderLayer):
         hidden_dims = []
         shared_outputs = []
         router_logits = []
-        chunk_hidden_states = []
 
         # block 1 : attention
         # block 2 : attn tp communication
@@ -638,22 +618,7 @@ class CustomDeepseekDBODecoderLayer(DeepseekV2DecoderLayer):
                 is_prefill = attn_metadata[i].num_prefills > 0
                 enable_force_load_balance = False
 
-            if self.mlp.tp_size > 1:
-                num_token, _ = hidden_states[i].shape
-                padded_num_tokens = (self.mlp.tp_size - num_tokens[i] %
-                                     self.mlp.tp_size) % self.mlp.tp_size
-                if padded_num_tokens > 0:
-                    hidden_states[i] = nn.functional.pad(
-                        hidden_states[i], (0, 0, 0, padded_num_tokens))
-                chunk_hidden_state = torch.tensor_split(hidden_states[i],
-                                                        self.mlp.tp_size,
-                                                        dim=0)
-                chunk_hidden_states.append(chunk_hidden_state)
-                local_hidden_states = chunk_hidden_state[self.mlp.tp_rank]
-            else:
-                local_hidden_states = hidden_states[i]
-
-            router_logit = self.mlp._forward_ms_op_gate(local_hidden_states)
+            router_logit = self.mlp._forward_ms_op_gate(hidden_states[i])
             router_logits.append(router_logit)
 
             if CustomDeepseekDBOMoE.top_k:
@@ -661,8 +626,25 @@ class CustomDeepseekDBODecoderLayer(DeepseekV2DecoderLayer):
             else:
                 real_top_k = self.mlp.experts.top_k
 
+            if self.dp_size > 1:
+                if attn_metadata[i] is not None:
+                    max_num_tokens_across_dp = attn_metadata[
+                        i].max_num_tokens_across_dp
+                    if num_tokens[i] < max_num_tokens_across_dp:
+                        hidden_states[i] = nn.functional.pad(
+                            hidden_states[i],
+                            (0, 0, 0,
+                             max_num_tokens_across_dp - num_tokens[i]))
+                        router_logits[i] = nn.functional.pad(
+                            router_logits[i],
+                            (0, 0, 0,
+                             max_num_tokens_across_dp - num_tokens[i]))
+                hidden_states[i] = get_dp_group().all_gather(
+                    hidden_states[i], 0)
+                router_logits[i] = get_dp_group().all_gather(
+                    router_logits[i], 0)
             hidden_states[i] = self.mlp.experts._forward_ms_fused_moe_comp(
-                local_hidden_states, router_logits[i], is_prefill, real_top_k,
+                hidden_states[i], router_logits[i], is_prefill, real_top_k,
                 enable_force_load_balance)
 
             # the following kernels will be submitted to the comm stream to overlap the computation of the
@@ -672,46 +654,28 @@ class CustomDeepseekDBODecoderLayer(DeepseekV2DecoderLayer):
                 before_comm_event=ms_metadata.ms_events[layer_index][i][
                     MSEventKey.FFN_COM_FINISH],
                 after_comm_event=ms_metadata.ms_events[layer_index][i][
-                    MSEventKey.MOE_AFTER_COMM],
+                    MSEventKey.FFN_AR_FINISH],
             )
             context.before_comm_event.record()
             with torch.npu.stream(ms_metadata.communicate_stream):
                 context.before_comm_event.wait()
-                if self.mlp.experts.reduce_results and (
-                        self.mlp.experts.tp_size > 1
-                        or self.mlp.experts.ep_size > 1):
+                if self.dp_size > 1:
+                    hidden_states[
+                        i] = dist._functional_collectives.reduce_scatter_tensor(
+                            hidden_states[i],
+                            "sum",
+                            scatter_dim=0,
+                            group=get_dp_group().device_group)
+                    hidden_states[i] = hidden_states[i][:num_tokens[i]]
+                if self.tp_size > 1:
                     hidden_states[i] = tensor_model_parallel_all_reduce(
                         hidden_states[i])
-                hidden_states[
-                    i] = hidden_states[i] * self.mlp.routed_scaling_factor
-                context.after_comm_event.record()
-
-            context = MultiStreamStepMetadata(
-                comm_stream=ms_metadata.communicate_stream,
-                before_comm_event=ms_metadata.ms_events[layer_index][i][
-                    MSEventKey.MOE_AFTER_COMM],
-                after_comm_event=ms_metadata.ms_events[layer_index][i][
-                    MSEventKey.FFN_AR_FINISH],
-            )
-            with set_multistream_context(context, i):
-                if self.mlp.tp_size > 1:
-                    hidden_states[i] = self.mlp._forward_ms_op_tp_allgather(
-                        hidden_states[i], chunk_hidden_states[i],
-                        padded_num_tokens)
-            with torch.npu.stream(ms_metadata.communicate_stream):
                 # last
                 if shared_outputs[i] is not None:
-                    hidden_states[i] = hidden_states[i] + shared_outputs[i]
+                    hidden_states[i] = hidden_states[
+                        i] * self.routed_scaling_factor + shared_outputs[i]
                 hidden_states[i] = hidden_states[i].view(
                     num_tokens[i], hidden_dims[i])
-                if isinstance(self.mlp, CustomDeepseekDBOMLP
-                              ) and hidden_states[i].dtype == torch.float16:
-                    # Fix FP16 overflow
-                    # Scaling the DeepseekV2MLP output, it is the input of
-                    # input_layernorm of next decoder layer.
-                    # The scaling of DeepseekV2MOE output would be done in the forward
-                    # of DeepseekV2MOE
-                    hidden_states[i] *= 1. / self.routed_scaling_factor
                 context.after_comm_event.record()
         return hidden_states, residual
 
