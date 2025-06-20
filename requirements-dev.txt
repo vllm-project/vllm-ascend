@@ -11,3 +11,4 @@ types-jsonschema
 xgrammar
 zmq
 types-psutil
+pytest-cov
