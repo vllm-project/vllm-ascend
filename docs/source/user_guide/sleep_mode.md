@@ -8,7 +8,7 @@ Sleep Mode is the API which can selectively exposed to offload weight, discard k
 
 This module provides a custom memory allocator for Ascend NPUs using the [CANN](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html) runtime. It integrates tightly with PyTorch via `torch.npu.memory.NPUPluggableAllocator` and supports a "sleep mode", which allows tensors to offload memory to the CPU and release NPU memory when it's no longer immediately needed. This improves memory efficiency and allows large-scale inference to run in constrained environments.
 
-With `enable_sleep_mode=True`, the way we manage memory(malloc, free) in vllm will under the `use_memory_pool` Context Managers, and all memory allocation created inside the context will be allocated, in the memory pool, and has the specified tag.
+With `enable_sleep_mode=True`, the way we manage memory(malloc, free) in vllm will under the `use_memory_pool` Context Managers, and all memory allocation created inside the context will be allocated in the memory pool, and has the specified tag.
 
 ```bash
 +-------------------+            +---------------------------+          +----------------------------+
