@@ -32,87 +32,86 @@ The following is a simple example of how to use sleep mode.
 
 - offline inference:
 
-````python
-import os
+    ```python
+    import os
 
-import torch
-from vllm import LLM, SamplingParams
-from vllm.utils import GiB_bytes
+    import torch
+    from vllm import LLM, SamplingParams
+    from vllm.utils import GiB_bytes
 
 
-os.environ["VLLM_USE_V1"] = "1"
-os.environ["VLLM_USE_MODELSCOPE"] = "True"
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+    os.environ["VLLM_USE_V1"] = "1"
+    os.environ["VLLM_USE_MODELSCOPE"] = "True"
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-if __name__ == "__main__":
-    prompt = "How are you?"
+    if __name__ == "__main__":
+        prompt = "How are you?"
 
-    free, total = torch.npu.mem_get_info()
-    print(f"Free memory before sleep: {free / 1024 ** 3:.2f} GiB")
-    # record npu memory use baseline in case other process is running
-    used_bytes_baseline = total - free
-    llm = LLM("Qwen/Qwen2.5-0.5B-Instruct", enable_sleep_mode=True)
-    sampling_params = SamplingParams(temperature=0, max_tokens=10)
-    output = llm.generate(prompt, sampling_params)
+        free, total = torch.npu.mem_get_info()
+        print(f"Free memory before sleep: {free / 1024 ** 3:.2f} GiB")
+        # record npu memory use baseline in case other process is running
+        used_bytes_baseline = total - free
+        llm = LLM("Qwen/Qwen2.5-0.5B-Instruct", enable_sleep_mode=True)
+        sampling_params = SamplingParams(temperature=0, max_tokens=10)
+        output = llm.generate(prompt, sampling_params)
 
-    llm.sleep(level=1)
+        llm.sleep(level=1)
 
-    free_npu_bytes_after_sleep, total = torch.npu.mem_get_info()
-    print(f"Free memory after sleep: {free_npu_bytes_after_sleep / 1024 ** 3:.2f} GiB")
-    used_bytes = total - free_npu_bytes_after_sleep - used_bytes_baseline
-    # now the memory usage should be less than the model weights
-    # (0.5B model, 1GiB weights)
-    assert used_bytes < 1 * GiB_bytes
+        free_npu_bytes_after_sleep, total = torch.npu.mem_get_info()
+        print(f"Free memory after sleep: {free_npu_bytes_after_sleep / 1024 ** 3:.2f} GiB")
+        used_bytes = total - free_npu_bytes_after_sleep - used_bytes_baseline
+        # now the memory usage should be less than the model weights
+        # (0.5B model, 1GiB weights)
+        assert used_bytes < 1 * GiB_bytes
 
-    llm.wake_up()
-    output2 = llm.generate(prompt, sampling_params)
-    # cmp output
-    assert output[0].outputs[0].text == output2[0].outputs[0].text
-````
+        llm.wake_up()
+        output2 = llm.generate(prompt, sampling_params)
+        # cmp output
+        assert output[0].outputs[0].text == output2[0].outputs[0].text
+    ```
 
 - online serving:
-:::{note}
-Considering there may be a risk of malicious access, please make sure you are under a dev-mode, and explicit specify the develop env: `VLLM_SERVER_DEV_MODE` to expose these endpoints(sleep/wake up).
-:::
+    :::{note}
+    Considering there may be a risk of malicious access, please make sure you are under a dev-mode, and explicit specify the develop env: `VLLM_SERVER_DEV_MODE` to expose these endpoints(sleep/wake up).
+    :::
 
-```bash
-export VLLM_SERVER_DEV_MODE="1"
-export VLLM_USE_V1="1"
-export VLLM_WORKER_MULTIPROC_METHOD="spawn"
-export VLLM_USE_MODELSCOPE="True"
+    ```bash
+    export VLLM_SERVER_DEV_MODE="1"
+    export VLLM_USE_V1="1"
+    export VLLM_WORKER_MULTIPROC_METHOD="spawn"
+    export VLLM_USE_MODELSCOPE="True"
 
-vllm serve Qwen/Qwen2.5-0.5B-Instruct --enable-sleep-mode
+    vllm serve Qwen/Qwen2.5-0.5B-Instruct --enable-sleep-mode
 
-# after serveing is up, post these endpoints
+    # after serveing is up, post these endpoints
 
-# sleep level 1
-curl -X POST http://127.0.0.1:8000/sleep \
-     -H "Content-Type: application/json" \
-     -d '{"level": "1"}'
+    # sleep level 1
+    curl -X POST http://127.0.0.1:8000/sleep \
+        -H "Content-Type: application/json" \
+        -d '{"level": "1"}'
 
-curl -X GET http://127.0.0.1:8000/is_sleeping
+    curl -X GET http://127.0.0.1:8000/is_sleeping
 
-# sleep level 2
-curl -X POST http://127.0.0.1:8000/sleep \
-     -H "Content-Type: application/json" \
-     -d '{"level": "2"}'
+    # sleep level 2
+    curl -X POST http://127.0.0.1:8000/sleep \
+        -H "Content-Type: application/json" \
+        -d '{"level": "2"}'
 
-# wake up
-curl -X POST http://127.0.0.1:8000/wake_up
+    # wake up
+    curl -X POST http://127.0.0.1:8000/wake_up
 
-# wake up with tag, tags must be in ["weights", "kv_cache"]
-curl -X POST "http://127.0.0.1:8000/wake_up?tags=weights"
+    # wake up with tag, tags must be in ["weights", "kv_cache"]
+    curl -X POST "http://127.0.0.1:8000/wake_up?tags=weights"
 
-curl -X GET http://127.0.0.1:8000/is_sleeping
+    curl -X GET http://127.0.0.1:8000/is_sleeping
 
-# after sleep and wake up, the serving is still available
-curl http://localhost:8000/v1/completions \
-    -H "Content-Type: application/json" \
-    -d '{
-        "model": "Qwen/Qwen2.5-0.5B-Instruct",
-        "prompt": "The future of AI is",
-        "max_tokens": 7,
-        "temperature": 0
-    }'
-
-```
+    # after sleep and wake up, the serving is still available
+    curl http://localhost:8000/v1/completions \
+        -H "Content-Type: application/json" \
+        -d '{
+            "model": "Qwen/Qwen2.5-0.5B-Instruct",
+            "prompt": "The future of AI is",
+            "max_tokens": 7,
+            "temperature": 0
+        }'
+    ```
