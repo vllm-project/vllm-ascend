@@ -85,7 +85,7 @@ def create_vllm_config(
         kv_connector="LLMDataDistCMgrConnector",
         kv_role="kv_both",
         kv_connector_module_path=
-        "vllm_ascend.distributed.llmdatadist_connector_v1_a3")
+        "vllm_ascend.distributed.llmdatadist_c_mgr_connector")
     return VllmConfig(scheduler_config=scheduler_config,
                       model_config=model_config,
                       cache_config=cache_config,
