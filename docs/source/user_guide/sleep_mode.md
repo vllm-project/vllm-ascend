@@ -9,17 +9,30 @@ Since the generation and training phases may employ different model parallelism 
 
 ## Getting started
 
-With `enable_sleep_mode=True`, the way we manage memory(malloc, free) in vllm will under the management of a specific memory pool, during loading model weight and initialize kv_caches, we tag the memory as a map: `{"weight": data, "kv_cache": data}`
+With `enable_sleep_mode=True`, the way we manage memory(malloc, free) in vllm will under the management of a specific memory pool, during loading model weight and initialize kv_caches, we tag the memory as a map: `{"weight": data, "kv_cache": data}`.
 
+The engine(v0/v1) supports two sleep levels to manage memory during idle periods:
 
-Since this feature uses the AscendCL API, in order to use sleep mode, you should follow the [installation guide](https://vllm-ascend.readthedocs.io/en/latest/installation.html) and building from source, if you are using v0.7.3, remember to set `export COMPILE_CUSTOM_KERNELS=1`, for the latest version(v0.9.x+), the environment variable COMPILE_CUSTOM_KERNELS will be set 1 by default while building from source.
+- Level 1 Sleep
+    - Action: Offloads model weights and discards the KV cache.
+    - Memory: Model weights are moved to CPU memory; KV cache is forgotten.
+    - Use Case: Suitable when reusing the same model later.
+    - Note: Ensure sufficient CPU memory is available to hold the model weights.
+
+- Level 2 Sleep
+    - Action: Discards both model weights and KV cache.
+    - Memory: The content of both the model weights and kv cache is forgotten.
+    - Use Case: Ideal when switching to a different model or updating the current one.
+
+Since this feature uses the low-level API [AscendCL](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html), in order to use sleep mode, you should follow the [installation guide](https://vllm-ascend.readthedocs.io/en/latest/installation.html) and building from source, if you are using v0.7.3, remember to set `export COMPILE_CUSTOM_KERNELS=1`, for the latest version(v0.9.x+), the environment variable `COMPILE_CUSTOM_KERNELS` will be set 1 by default while building from source.
 
 ## Usage
 
-Let's take the default parameters of v1 engine as an example
+The following is a simple example of how to use sleep mode.
 
-- For offline inference:
-```python
+- offline inference:
+
+````python
 import os
 
 import torch
@@ -55,12 +68,13 @@ if __name__ == "__main__":
     output2 = llm.generate(prompt, sampling_params)
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
-```
+````
 
-- For online serving:
+- online serving:
+:::{note}
 Considering there may be a risk of malicious access, please make sure you are under a dev-mode, and explicit specify the develop env: `VLLM_SERVER_DEV_MODE` to expose these endpoints(sleep/wake up).
+:::
 
-server command:
 ```bash
 export VLLM_SERVER_DEV_MODE="1"
 export VLLM_USE_V1="1"
@@ -71,13 +85,34 @@ vllm serve Qwen/Qwen2.5-0.5B-Instruct --enable-sleep-mode
 
 # after serveing is up, post these endpoints
 
-# 1. sleep
-curl -X POST http://127.0.0.1:8000/sleep
+# sleep level 1
+curl -X POST http://127.0.0.1:8000/sleep \
+     -H "Content-Type: application/json" \
+     -d '{"level": "1"}'
 
-curl -X POST http://127.0.0.1:8000/is_sleeping
+curl -X GET http://127.0.0.1:8000/is_sleeping
 
-# 2. wake up
+# sleep level 2
+curl -X POST http://127.0.0.1:8000/sleep \
+     -H "Content-Type: application/json" \
+     -d '{"level": "2"}'
+
+# wake up
 curl -X POST http://127.0.0.1:8000/wake_up
-curl -X POST http://127.0.0.1:8000/is_sleeping
+
+# wake up with tag, tags must be in ["weights", "kv_cache"]
+curl -X POST "http://127.0.0.1:8000/wake_up?tags=weights"
+
+curl -X GET http://127.0.0.1:8000/is_sleeping
+
+# after sleep and wake up, the serving is still available
+curl http://localhost:8000/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "Qwen/Qwen3-8B",
+        "prompt": "The future of AI is",
+        "max_tokens": 7,
+        "temperature": 0
+    }'
 
 ```
