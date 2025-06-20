@@ -8,6 +8,8 @@ Sleep Mode is the API which can selectively exposed to offload weight, discard k
 
 This module provides a custom memory allocator for Ascend NPUs using the [CANN](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/82RC1alpha002/API/appdevgapi/appdevgapi_07_0000.html) runtime. It integrates tightly with PyTorch via `torch.npu.memory.NPUPluggableAllocator` and supports a "sleep mode", which allows tensors to offload memory to the CPU and release NPU memory when it's no longer immediately needed. This improves memory efficiency and allows large-scale inference to run in constrained environments.
 
+With `enable_sleep_mode=True`, the way we manage memory(malloc, free) in vllm will under the `use_memory_pool` Context Managers, and all memory allocation created inside the context will be allocated, in the memory pool, and has the specified tag.
+
 ```bash
 +-------------------+            +---------------------------+          +----------------------------+
 |    Python Layer   |  ----->    |   CaMemAllocator (class)  |  --->    | C Extension (vllm_ascend_C)|
@@ -22,6 +24,7 @@ Since this feature uses the AscendCL API, in order to use sleep mode, you should
 
 Let's take the default parameters of v1 engine as an example
 
+- For offline inference:
 ```python
 import os
 
@@ -58,4 +61,29 @@ if __name__ == "__main__":
     output2 = llm.generate(prompt, sampling_params)
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
+```
+
+- For online serving:
+Considering there may be a risk of malicious access, please make sure you are under a dev-mode, and explicit specify the develop env: `VLLM_SERVER_DEV_MODE` to expose these endpoints(sleep/wake up).
+
+server command:
+```bash
+export VLLM_SERVER_DEV_MODE="1"
+export VLLM_USE_V1="1"
+export VLLM_WORKER_MULTIPROC_METHOD="spawn"
+export VLLM_USE_MODELSCOPE="True"
+
+vllm serve Qwen/Qwen2.5-0.5B-Instruct --enable-sleep-mode
+
+# after serveing is up, post these endpoints
+
+# 1. sleep
+curl -X POST http://127.0.0.1:8000/sleep
+
+curl -X POST http://127.0.0.1:8000/is_sleeping
+
+# 2. wake up
+curl -X POST http://127.0.0.1:8000/wake_up
+curl -X POST http://127.0.0.1:8000/is_sleeping
+
 ```
