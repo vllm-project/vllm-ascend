@@ -23,10 +23,12 @@ Run `pytest tests/test_offline_inference.py`.
 import os
 from unittest.mock import patch
 
+import pytest
 from modelscope import snapshot_download  # type: ignore
 from vllm import SamplingParams
 
 from tests.conftest import VllmRunner
+from tests.model_utils import check_outputs_equal
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
@@ -39,21 +41,6 @@ def test_models_distributed_QwQ():
     max_tokens = 5
     with VllmRunner(
             "Qwen/QwQ-32B",
-            dtype=dtype,
-            tensor_parallel_size=4,
-            distributed_executor_backend="mp",
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
-def test_models_distributed_DeepSeek():
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    dtype = "half"
-    max_tokens = 5
-    with VllmRunner(
-            "deepseek-ai/DeepSeek-V2-Lite",
             dtype=dtype,
             tensor_parallel_size=4,
             distributed_executor_backend="mp",
@@ -83,18 +70,36 @@ def test_models_distributed_topk() -> None:
         vllm_model.generate(example_prompts, sampling_params)
 
 
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DBO": "1"})
-def test_models_distributed_DeepSeek_dbo():
-    example_prompts = ["The president of the United States is"] * 41
-    dtype = "half"
-    sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
-    with VllmRunner(
-            "deepseek-ai/DeepSeek-V2-Lite",
-            dtype=dtype,
-            tensor_parallel_size=4,
-            distributed_executor_backend="mp",
-    ) as vllm_model:
-        vllm_model.generate(example_prompts, sampling_params)
+def test_models_distributed_DeepSeek_dbo(monkeypatch: pytest.MonkeyPatch):
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_ASCEND_ENABLE_DBO", "1")
+
+        example_prompts = ["The president of the United States is"] * 41
+        dtype = "half"
+        sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
+        with VllmRunner(
+                "deepseek-ai/DeepSeek-V2-Lite",
+                dtype=dtype,
+                tensor_parallel_size=4,
+                distributed_executor_backend="mp",
+        ) as vllm_model:
+            dpo_output = vllm_model.generate(example_prompts, sampling_params)
+
+        m.setenv("VLLM_ASCEND_ENABLE_DBO", "0")
+        with VllmRunner(
+                "deepseek-ai/DeepSeek-V2-Lite",
+                dtype=dtype,
+                tensor_parallel_size=4,
+                distributed_executor_backend="mp",
+        ) as vllm_model:
+            output = vllm_model.generate(example_prompts, sampling_params)
+
+    check_outputs_equal(
+        outputs_0_lst=output,
+        outputs_1_lst=dpo_output,
+        name_0="vllm_outputs",
+        name_1="vllm_dbo_outputs",
+    )
 
 
 def test_models_distributed_DeepSeek_W8A8():
