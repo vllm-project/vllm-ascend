@@ -18,8 +18,22 @@
 name: 'test'
 
 on:
-  schedule:
-    - cron: '0 23 * * *'
+  push:
+    # Enable merged test per commit
+    branches:
+      - 'main'
+    paths:
+      - '*.txt'
+      - '**/*.py'
+      - '.github/workflows/vllm_ascend_test.yaml'
+      - '!docs/**'
+      - 'pytest.ini'
+      - '!benchmarks/**'
+      - 'tools/mypy.sh'
+      - 'mypy.ini'
+      - '.github/workflows/*.ya?ml'
+      - '.github/workflows/actionlint.*'
+      - '.github/workflows/matchers/actionlint.json'
   pull_request:
     branches:
       - 'main'
@@ -131,7 +145,7 @@ jobs:
       - name: Install packages
         run: |
           apt-get update -y
-          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev
+          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v4
@@ -163,7 +177,17 @@ jobs:
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         run: |
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
-          pytest -sv tests/ut
+          pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut
+
+      - name: Upload coverage to Codecov
+        if: ${{ matrix.vllm_version == 'main' }}
+        uses: codecov/codecov-action@v5
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        with:
+          flags: unittests
+          name: vllm-ascend
+          verbose: true
 
   e2e:
     needs: [lint]
