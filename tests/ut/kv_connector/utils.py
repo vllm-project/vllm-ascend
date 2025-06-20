@@ -16,6 +16,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
+from vllm_ascend.utils import vllm_version_is
 
 EOS_TOKEN_ID = 50256
 os.environ["VLLM_USE_V1"] = "1"
@@ -85,7 +86,7 @@ def create_vllm_config(
         kv_connector="LLMDataDistCMgrConnector",
         kv_role="kv_both",
         kv_connector_module_path=
-        "vllm_ascend.distributed.llmdatadist_connector_v1_a3")
+        "vllm_ascend.distributed.llmdatadist_c_mgr_connector")
     return VllmConfig(scheduler_config=scheduler_config,
                       model_config=model_config,
                       cache_config=cache_config,
@@ -159,7 +160,7 @@ def create_request(
         multi_modal_inputs=None,
         multi_modal_placeholders=None,
         multi_modal_hashes=None,
-        pooling_params=None,
+        **({"pooling_params": []} if not vllm_version_is("0.9.1") else {}),
         eos_token_id=EOS_TOKEN_ID,
     )
     req.kv_transfer_params = kv_transfer_params
@@ -190,7 +191,7 @@ def create_model_runner_output(
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
-        pooler_output=[None],
+        **({"pooler_output": []} if not vllm_version_is("0.9.1") else {}),
         finished_sending=finished_sending,
         finished_recving=finished_recving,
     )

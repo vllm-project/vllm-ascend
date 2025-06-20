@@ -8,7 +8,6 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --ips)
             shift
-            # 收集所有后续参数直到遇到下一个选项或结束
             while [[ $# -gt 0 && ! "$1" == --* ]]; do
                 IPs+=("$1")
                 shift
