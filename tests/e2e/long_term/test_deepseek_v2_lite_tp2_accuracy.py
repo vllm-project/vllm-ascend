@@ -38,7 +38,7 @@ EXPECTED_VALUE = 0.3843821076573162
 
 
 def run_test(model_name, queue, more_args=None):
-    model_args = f"pretrained={model_name},max_model_len=4096,trust_remote_code=True,tensor_parallel_size=4"
+    model_args = f"pretrained={model_name},max_model_len=4096,trust_remote_code=True,tensor_parallel_size=4,enforce_eager=True"
     if more_args is not None:
         model_args = f"{model_args},{more_args}"
     results = lm_eval.simple_evaluate(
