@@ -25,7 +25,7 @@
 # # vllm-project/vllm/vllm/model_executor/models/deepseek_v2.py
 # """Inference-only DeepseekV2/DeepseekV3 model."""
 
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union, Iterable
 
 import torch
 import torch_npu
@@ -764,6 +764,14 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                                    attn_metadata, intermediate_tensors,
                                    inputs_embeds)
         return hidden_states
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        weights = filter(lambda x: ".module." not in x[0], weights)
+        # weights = ((name, data) for name, data in weights if ".module." not in name)
+        loaded_params = super().load_weights(weights)
+
+        return loaded_params
 
 
 class CustomDeepseekV3ForCausalLM(CustomDeepseekV2ForCausalLM):

@@ -204,6 +204,7 @@ jobs:
             VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_dbo
             VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeekV3_dbo
             VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/ --ignore=tests/multicard/test_ilama_lora_tp2.py --ignore=tests/multicard/test_offline_inference_distributed.py
+            VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_w4a8_deepseek.py::test_deepseek_W4A8
           fi
 
       - name: Run vllm-project/vllm-ascend test on V0 engine
