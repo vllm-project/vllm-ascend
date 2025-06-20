@@ -201,7 +201,7 @@ class NPUWorker(WorkerBase):
         for size in sorted(warmup_sizes, reverse=True):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
-            
+
         self.model_runner.eplb_warmup()
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
@@ -211,7 +211,7 @@ class NPUWorker(WorkerBase):
 
     def get_expert_load(self) -> str:
         """ todo 一共几个worker"""
-        moe_load = self.model_runner.do_get_expert_load()More actions
+        moe_load = self.model_runner.do_get_expert_load()
         return moe_load
 
     def get_model(self) -> nn.Module:

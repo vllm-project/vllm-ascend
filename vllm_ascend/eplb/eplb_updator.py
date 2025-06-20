@@ -213,7 +213,7 @@ class EplbUpdator:
         ]
         return recovered
 
-    def get_expert_load(self) -> str:More actions
+    def get_expert_load(self) -> str:
         """todo 确认moe_load的值是什么类型"""
         # return '{"a":"b"}' # mock
         return self.shared_dict['moe_load']
