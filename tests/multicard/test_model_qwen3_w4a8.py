@@ -22,6 +22,7 @@ Run `pytest tests/multicard/test_model_qwen3_w4a8.py`.
 import os
 
 import pytest
+from modelscope import snapshot_download  # type: ignore
 from vllm import LLM, SamplingParams
 
 MODELS = ["vllm-ascend/Qwen3-8B-W4A8"]
@@ -43,7 +44,7 @@ def test_qwen3_model_with_w4a8_linear_method(model: str,
         ignore_eos=False,
     )
     llm = LLM(
-        model=model,
+        model=snapshot_download(model),
         max_model_len=1024,
         tensor_parallel_size=2,
         enforce_eager=True,
