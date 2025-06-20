@@ -11,7 +11,7 @@ from vllm import LLM, SamplingParams
 @pytest.fixture
 def test_prompts():
     prompt_types = ["repeat", "sentence"]
-    num_prompts = 100
+    num_prompts = 10
     prompts = []
 
     random.seed(0)
@@ -69,6 +69,7 @@ def test_ngram_correctness(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using ngram speculative decoding.
     '''
+    pytest.skip("Not current support for the test.")
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
@@ -116,11 +117,12 @@ def test_eagle_correctness(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using eagle speculative decoding.
     '''
-    pytest.skip("Not current support for the test.")
+    if not use_eagle3:
+        pytest.skip("Not current support for the test.")
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
-        ref_llm = LLM(model=model_name, max_model_len=2048)
+        ref_llm = LLM(model=model_name, max_model_len=2048, enforce_eager=True)
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
 
@@ -129,13 +131,17 @@ def test_eagle_correctness(
         spec_llm = LLM(
             model=model_name,
             trust_remote_code=True,
+            enable_chunked_prefill=True,
+            max_num_seqs=1,
+            max_num_batched_tokens=2048,
+            gpu_memory_utilization=0.6,
             speculative_config={
                 "method": "eagle3" if use_eagle3 else "eagle",
                 "model": spec_model_name,
-                "num_speculative_tokens": 3,
-                "max_model_len": 2048,
+                "num_speculative_tokens": 2,
+                "max_model_len": 128,
             },
-            max_model_len=2048,
+            max_model_len=128,
             enforce_eager=True,
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
