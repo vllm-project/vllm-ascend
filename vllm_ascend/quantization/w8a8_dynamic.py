@@ -119,7 +119,6 @@ def fused_experts_with_mc2(
     shared_experts: Optional[Any] = None,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     if log2phy is not None:
-    if log2phy is not None:
         topk_ids = log2phy[topk_ids]
     global_bs = 0
     moe_expert_num = len(expert_map) + global_redundant_expert_num
