@@ -19,6 +19,7 @@
 from typing import Optional
 
 import torch
+import torch_npu
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler, random_sample
 from vllm.v1.sample.sampler import Sampler
 
@@ -51,6 +52,9 @@ def _apply_top_k_top_p(
     p: torch.Tensor,
     k: torch.Tensor,
 ) -> torch.Tensor:
+    if p is not None and k is not None:
+        return torch_npu.npu_top_k_top_p(logits, p, k)
+
     probs = logits.softmax(dim=-1)
     probs_sort, _ = probs.sort(dim=-1, descending=False)
 
