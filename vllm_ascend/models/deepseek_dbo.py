@@ -29,7 +29,7 @@ from typing import Any, Dict, List, Optional, Union
 
 import torch
 import torch.distributed as dist
-import torch_npu
+import torch_npu  # noqa: F401
 import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
@@ -40,13 +40,10 @@ from vllm.distributed import (get_pp_group,
                               get_tp_group, tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
                                                ReplicatedLinear,
-                                               RowParallelLinear,
-                                               UnquantizedLinearMethod)
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -54,9 +51,9 @@ from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.models.deepseek_v2 import \
-    DeepseekV2ForCausalLM  # ruff: noqa: E501
+    DeepseekV2ForCausalLM  # noqa: E501
 from vllm.model_executor.models.deepseek_v2 import \
-    yarn_get_mscale  # ruff: noqa: E501
+    yarn_get_mscale  # noqa: E501
 from vllm.model_executor.models.deepseek_v2 import (DeepseekV2Attention,
                                                     DeepseekV2DecoderLayer,
                                                     DeepseekV2MLAAttention)
@@ -67,6 +64,7 @@ from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.models.deepseek_v2 import CustomDeepseekV2MLP
 from vllm_ascend.multistream.base import MSEventKey
 from vllm_ascend.multistream.context import (
     advance_step_multistream_layer_context, get_multistream_comm_context,
@@ -76,119 +74,17 @@ from vllm_ascend.multistream.layers import (MultiStreamPostTransformerLayer,
 from vllm_ascend.multistream.metadata import (MultiStreamConfig,
                                               MultiStreamStepMetadata,
                                               make_multistream_metadata_ds)
-from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
-from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import dispose_tensor
 
 VLLM_ASCEND_ENABLE_DBO: bool = envs_ascend.VLLM_ASCEND_ENABLE_DBO
-VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 
 
-class CustomDeepseekDBOMLP(nn.Module):
-
-    def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        hidden_act: str,
-        quant_config: Optional[QuantizationConfig] = None,
-        reduce_results: bool = True,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size, [intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj")
-        self.down_proj = RowParallelLinear(intermediate_size,
-                                           hidden_size,
-                                           bias=False,
-                                           quant_config=quant_config,
-                                           reduce_results=reduce_results,
-                                           prefix=f"{prefix}.down_proj")
-        if hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {hidden_act}. "
-                             "Only silu is supported for now.")
-        self.act_fn = SiluAndMul()
-
-        # NOTE: `torch_npu.npu_dequant_swiglu_quant` can only be enabled in dynamic quant
-        self.is_dynamic_quant = not isinstance(
-            self.gate_up_proj.quant_method,
-            UnquantizedLinearMethod) and isinstance(
-                self.gate_up_proj.quant_method.quant_method,
-                AscendW8A8DynamicLinearMethod)
-
-    def forward(self, x):
-        if self.is_dynamic_quant:
-            x, dynamic_scale = torch_npu.npu_dynamic_quant(x)
-            x = torch_npu.npu_quant_matmul(
-                x,
-                self.gate_up_proj.weight,
-                self.gate_up_proj.weight_scale,
-                output_dtype=torch.int32,
-            )
-            x, dynamic_scale = torch_npu.npu_dequant_swiglu_quant(
-                x=x,
-                weight_scale=self.gate_up_proj.weight_scale_fp32,
-                activation_scale=dynamic_scale,
-                bias=None,
-                quant_scale=None,
-                quant_offset=None,
-                group_index=None,
-                activate_left=True,
-                quant_mode=1)
-            x = torch_npu.npu_quant_matmul(
-                x,
-                self.down_proj.weight,
-                self.down_proj.weight_scale,
-                pertoken_scale=dynamic_scale,
-                output_dtype=torch.bfloat16,
-            )
-            if self.down_proj.reduce_results and self.down_proj.tp_size > 1:
-                x = tensor_model_parallel_all_reduce(x)
-            return x
-        gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
-        return x
+class CustomDeepseekDBOMLP(CustomDeepseekV2MLP):
 
     def _forward_ms_mlp(self, x):
         current_ms_metadata = get_multistream_comm_context()
         assert current_ms_metadata is not None
-        if self.is_dynamic_quant:
-            x, dynamic_scale = torch_npu.npu_dynamic_quant(x)
-            x = torch_npu.npu_quant_matmul(
-                x,
-                self.gate_up_proj.weight,
-                self.gate_up_proj.weight_scale,
-                output_dtype=torch.int32,
-            )
-            x, dynamic_scale = torch_npu.npu_dequant_swiglu_quant(
-                x=x,
-                weight_scale=self.gate_up_proj.weight_scale_fp32,
-                activation_scale=dynamic_scale,
-                bias=None,
-                quant_scale=None,
-                quant_offset=None,
-                group_index=None,
-                activate_left=True,
-                quant_mode=1)
-            x = torch_npu.npu_quant_matmul(
-                x,
-                self.down_proj.weight,
-                self.down_proj.weight_scale,
-                pertoken_scale=dynamic_scale,
-                output_dtype=torch.bfloat16,
-            )
-            if self.down_proj.reduce_results and self.down_proj.tp_size > 1:
-                current_ms_metadata.before_comm_event.record()
-                with torch.npu.stream(current_ms_metadata.comm_stream):
-                    current_ms_metadata.before_comm_event.wait()
-                    x = tensor_model_parallel_all_reduce(x)
-                    current_ms_metadata.after_comm_event.record()
-            return x
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         current_ms_metadata.before_comm_event.record()
@@ -291,25 +187,7 @@ class CustomDeepseekDBOMoE(nn.Module):
             if hasattr(attn_metadata, 'with_prefill_across_dp'):
                 is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
 
-        num_tokens, hidden_size = hidden_states.shape
-
         old_hidden_states = hidden_states.clone()
-
-        if self.tp_size > 1:
-            if envs_ascend.VLLM_ENABLE_MC2 and not is_prefill:
-                chunks = torch.chunk(hidden_states, self.tp_size, dim=0)
-                hidden_states = chunks[self.tp_rank]
-            elif not self.torchair_graph_enabled:
-                num_padding_tokens = (self.tp_size -
-                                      num_tokens % self.tp_size) % self.tp_size
-                # Pad hidden_states to make it divisible by tp_size to avoid cross-ring AllGatherV on 910B2C
-                if num_padding_tokens > 0:
-                    hidden_states = nn.functional.pad(
-                        hidden_states, (0, 0, 0, num_padding_tokens))
-                chunk_hidden_states = torch.tensor_split(hidden_states,
-                                                         self.tp_size,
-                                                         dim=0)
-                hidden_states = chunk_hidden_states[self.tp_rank]
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
@@ -322,33 +200,13 @@ class CustomDeepseekDBOMoE(nn.Module):
             enable_force_load_balance=enable_force_load_balance,
         ) * self.routed_scaling_factor
 
-        if self.tp_size > 1:
-            if self.torchair_graph_enabled:
-                if envs_ascend.VLLM_ENABLE_MC2 and not is_prefill:
-                    final_hidden_states = torch.zeros(
-                        [num_tokens, hidden_size],
-                        dtype=self.params_dtype,
-                        device="npu")
-                    dist.all_gather_into_tensor(final_hidden_states,
-                                                hidden_states, self.tp_group)
-                    hidden_states = final_hidden_states
-                else:
-                    hidden_states = tensor_model_parallel_all_reduce(
-                        hidden_states)
-            else:
-                dist.all_gather(list(chunk_hidden_states), hidden_states,
-                                self.tp_group)
-                hidden_states = torch.cat(chunk_hidden_states, dim=0)
-                if num_padding_tokens > 0:
-                    hidden_states = hidden_states[:-num_padding_tokens]
-
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(old_hidden_states)
 
         if shared_output is not None:
             hidden_states = hidden_states + shared_output
 
-        return hidden_states.view(num_tokens, hidden_size)
+        return hidden_states
 
     # ----------------------------------------- TBO-related --------------------------------------------
     def _forward_ms_op_shared_expert(
@@ -782,7 +640,7 @@ class CustomDeepseekDBODecoderLayer(DeepseekV2DecoderLayer):
 
             if self.mlp.tp_size > 1:
                 num_token, _ = hidden_states[i].shape
-                padded_num_tokens = (self.mlp.tp_size - num_token %
+                padded_num_tokens = (self.mlp.tp_size - num_tokens[i] %
                                      self.mlp.tp_size) % self.mlp.tp_size
                 if padded_num_tokens > 0:
                     hidden_states[i] = nn.functional.pad(
@@ -992,7 +850,8 @@ class CustomDeepseekDBOModel(nn.Module):
                              if VLLM_ASCEND_ENABLE_DBO and self.can_run_ms()
                              else self.end_layer - self.start_layer)
 
-        for i in range(self.start_layer, self.start_layer + num_normal_layers):
+        moe_start_layer = self.start_layer + num_normal_layers
+        for i in range(self.start_layer, min(moe_start_layer, self.end_layer)):
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions, hidden_states, residual,
@@ -1000,8 +859,7 @@ class CustomDeepseekDBOModel(nn.Module):
                           self.start_layer] if kv_caches is not None else None,
                 attn_metadata)
 
-        moe_start_layer = self.start_layer + num_normal_layers
-        if moe_start_layer != self.end_layer:
+        if moe_start_layer < self.end_layer:
             # if we enable multistream/dbo, process sparse layers here
             hidden_states, residual = self._forward_ms_layers(
                 positions=positions,
@@ -1022,22 +880,8 @@ class CustomDeepseekDBOModel(nn.Module):
 
     def can_run_ms(self):
         attn_metadata = get_forward_context().attn_metadata
-        # support mla attention and V1 engine at present
-        if not self.use_mla or not envs.VLLM_USE_V1:
-            return False
         # enable prefill overlap
-        if attn_metadata is None or attn_metadata.num_prefills == 0:
-            return False
-        else:
-            [token_index, seq_index
-             ] = compute_split_seq_index(attn_metadata.query_lens,
-                                         attn_metadata.attn_state,
-                                         attn_metadata.num_decode_tokens)
-            if token_index == 0 or seq_index == 0 or seq_index == len(
-                    attn_metadata.query_lens):
-                return False
-        # check whether the total tokens exceed the threshold
-        if self.multistream_config is None or attn_metadata.num_actual_tokens < self.multistream_config.min_total_tokens_to_split:
+        if attn_metadata is None or attn_metadata.num_prefills == 0 or not attn_metadata.enable_dbo_across_dp:
             return False
         return True
 

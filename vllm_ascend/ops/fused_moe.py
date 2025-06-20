@@ -16,16 +16,18 @@
 # Adapted from vllm/tests/kernels/test_moe.py
 
 import os
-from typing import Callable, List, Optional
+from typing import Any, Callable, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
 import torch_npu
+from torch import nn
 from vllm.config import get_current_vllm_config
-from vllm.distributed import (GroupCoordinator,
+from vllm.distributed import (GroupCoordinator, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.distributed.parallel_state import get_dp_group
+from vllm.distributed.parallel_state import get_dp_group, get_tp_group
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEParallelConfig, MoEConfig, UnquantizedFusedMoEMethod,
     determine_expert_map)
@@ -36,9 +38,10 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
+from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
+                               get_fused_moe_state, npu_stream_switch,
+                               npu_wait_tensor)
 
-VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
-USING_LCCL_COM: bool = envs_ascend.USING_LCCL_COM
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
 
 
@@ -106,15 +109,17 @@ def process_topk_ids(topk_ids: torch.Tensor, expert_num: int, ep_size: int,
     return topk_ids_pad, unpad_indices
 
 
-def fused_experts_with_mc2(hidden_states: torch.Tensor,
-                           w1: torch.Tensor,
-                           w2: torch.Tensor,
-                           topk_weights: torch.Tensor,
-                           topk_ids: torch.Tensor,
-                           top_k: int,
-                           expert_map: torch.Tensor = None,
-                           moe_all_to_all_group_name: Optional[str] = None,
-                           **kwargs) -> torch.Tensor:
+def fused_experts_with_mc2(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    top_k: int,
+    expert_map: torch.Tensor = None,
+    moe_all_to_all_group_name: Optional[str] = None,
+    shared_experts: Optional[Any] = None
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     global_bs = 0
     moe_expert_num = len(expert_map)
     kwargs_mc2 = {
@@ -153,6 +158,13 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
     # comm_stream.wait_stream(torch.npu.current_stream())
     expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[
         0:5]
+
+    if shared_experts is not None:
+        with npu_stream_switch("moe_secondary", 0):
+            npu_wait_tensor(hidden_states, topk_weights)
+            shared_gate_up, _ = shared_experts.gate_up_proj(hidden_states)
+            npu_wait_tensor(shared_gate_up, expand_x)
+            shared_act = shared_experts.act_fn(shared_gate_up)
 
     w1 = w1.transpose(1, 2)
 
@@ -210,7 +222,13 @@ def fused_experts_with_mc2(hidden_states: torch.Tensor,
 
     hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
 
-    return hidden_states
+    if shared_experts is None:
+        return hidden_states
+    else:
+        with npu_stream_switch("moe_secondary", 0):
+            npu_wait_tensor(shared_act, down_out_list)
+            shared_hidden_states, _ = shared_experts.down_proj(shared_act)
+        return hidden_states, shared_hidden_states
 
 
 def apply_mlp(hidden_states_wrapper: List[torch.Tensor],
@@ -829,8 +847,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super().__init__(moe=moe)
         vllm_config = get_current_vllm_config()
 
-        ep_group = get_ep_group()
-        self.ep_size = ep_group.world_size
+        self.ep_group = get_ep_group()
+        self.ep_size = self.ep_group.world_size
         self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.local_batch_size = self.global_batch_size // self.ep_size
         self.max_model_len = vllm_config.model_config.max_model_len
@@ -839,7 +857,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
 
         try:
-            device_group = ep_group.device_group
+            device_group = self.ep_group.device_group
             # TODO: Try local_rank = ep_group.rank_in_group
             local_rank = torch.distributed.get_rank(group=device_group)
             backend = device_group._get_backend(torch.device("npu"))
@@ -875,6 +893,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = False,
         enable_force_load_balance: bool = False,
+        shared_experts: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
 
@@ -914,7 +933,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
-        if VLLM_ENABLE_MC2 and not is_prefill:
+        fused_moe_state = get_fused_moe_state(self.ep_group.world_size,
+                                              is_prefill)
+        if fused_moe_state == FusedMoEState.MC2:
             return fused_experts_with_mc2(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -924,8 +945,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 top_k=top_k,
                 expert_map=expert_map,
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name,
-                **kwargs)
-        elif self.torchair_graph_enabled or get_ep_group().world_size == 1:
+                shared_experts=shared_experts)
+        elif fused_moe_state == FusedMoEState.AllGather:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
                                  w2=layer.w2_weight,
@@ -1005,9 +1026,6 @@ class AscendFusedMoE(FusedMoE):
                           get_dp_group().world_size),
                 vllm_parallel_config=vllm_config.parallel_config))
 
-        self.moe_parallel_config.ep_size = get_ep_group().world_size
-        self.moe_parallel_config.tp_size = get_etp_group().world_size
-
         self.top_k = top_k
         self.num_experts = num_experts
         self.global_num_experts = num_experts
@@ -1049,13 +1067,9 @@ class AscendFusedMoE(FusedMoE):
                 self.ep_size,
                 get_ep_group().rank_in_group, self.global_num_experts)
 
-        self.moe_parallel_config.tp_rank = get_etp_group().rank_in_group
-        self.moe_parallel_config.ep_rank = get_ep_group().rank_in_group
-
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
-        # NOTE: multistream only effective when `VLLM_ENABLE_MC2` is on
-        self.enable_multistream_shared_expert = \
-            ascend_config.torchair_graph_config.enable_multistream_shared_expert and VLLM_ENABLE_MC2
+        self.enable_multistream_moe = \
+            ascend_config.torchair_graph_config.enable_multistream_moe
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
@@ -1095,6 +1109,8 @@ class AscendFusedMoE(FusedMoE):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
         self.ep_group = get_ep_group()
+        # NOTE: self.tp_group is not expert_tp_group
+        self.tp_group = get_tp_group().device_group
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
     def forward(self,
@@ -1102,8 +1118,8 @@ class AscendFusedMoE(FusedMoE):
                 router_logits: torch.Tensor,
                 is_prefill: bool,
                 enable_force_load_balance: bool = False,
-                top_k=None,
-                **kwargs):
+                top_k: Optional[int] = None,
+                shared_experts: Optional[Any] = None):
         assert self.quant_method is not None
 
         if top_k:
@@ -1111,28 +1127,48 @@ class AscendFusedMoE(FusedMoE):
         else:
             real_top_k = self.top_k
 
-        #                MC2   ag/rs  broadcast/all_reduce
-        #  prefill_req     x      x            √
-        #  decode_req     √      x            √
-        #  graph_mode     √      √            x
-        if self.dp_size > 1:
-            if VLLM_ENABLE_MC2 and not is_prefill:
-                ...
-            elif self.torchair_graph_enabled:
-                if USING_LCCL_COM:  # type: ignore
-                    hidden_states = get_dp_group().all_gather(
-                        hidden_states, 0, False)
-                    router_logits = get_dp_group().all_gather(
-                        router_logits, 0, False)
-                elif self.torchair_graph_enabled and not is_prefill:
-                    hidden_states = get_dp_group().all_gather(hidden_states, 0)
-                    router_logits = get_dp_group().all_gather(router_logits, 0)
-                else:
-                    hidden_states, router_logits = get_ep_group().dispatch(
-                        hidden_states, router_logits)
+        num_tokens, hidden_size = hidden_states.shape
+
+        fused_moe_state = get_fused_moe_state(self.moe_parallel_config.ep_size,
+                                              is_prefill)
+        if shared_experts:
+            if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
+                shared_hidden_states = shared_experts(hidden_states)
+
+        tp_size = get_tensor_model_parallel_world_size()
+        if tp_size > 1 and fused_moe_state != FusedMoEState.AllGather:
+            if num_tokens < tp_size:
+                hidden_states = nn.functional.pad(
+                    hidden_states, (0, 0, 0, tp_size - num_tokens))
+                router_logits = nn.functional.pad(
+                    router_logits, (0, 0, 0, tp_size - num_tokens))
+            chunk_hidden_states = torch.tensor_split(hidden_states,
+                                                     tp_size,
+                                                     dim=0)
+            chunk_router_logits = torch.tensor_split(router_logits,
+                                                     tp_size,
+                                                     dim=0)
+            tp_rank = get_tensor_model_parallel_rank()
+            hidden_states = chunk_hidden_states[tp_rank]
+            router_logits = chunk_router_logits[tp_rank]
+        if self.dp_size > 1 and fused_moe_state == FusedMoEState.AllGather:
+            # NOTE: When in torchair graph, it has been padded in model_runner_v1
+            if not self.torchair_graph_enabled or is_prefill:
+                attn_metadata = get_forward_context().attn_metadata
+                if attn_metadata is not None:
+                    max_num_tokens_across_dp = attn_metadata.max_num_tokens_across_dp
+                    if num_tokens < max_num_tokens_across_dp:
+                        hidden_states = nn.functional.pad(
+                            hidden_states,
+                            (0, 0, 0, max_num_tokens_across_dp - num_tokens))
+                        router_logits = nn.functional.pad(
+                            router_logits,
+                            (0, 0, 0, max_num_tokens_across_dp - num_tokens))
+            hidden_states = get_dp_group().all_gather(hidden_states, 0)
+            router_logits = get_dp_group().all_gather(router_logits, 0)
 
         # Matrix multiply.
-        hidden_states = self.quant_method.apply(
+        e_hidden_states = self.quant_method.apply(
             layer=self,
             x=hidden_states,
             router_logits=router_logits,
@@ -1150,36 +1186,40 @@ class AscendFusedMoE(FusedMoE):
             enable_force_load_balance=enable_force_load_balance,
             log2phy=self.log2phy,
             global_redundant_expert_num=self.global_redundant_expert_num,
-            **kwargs)
+            shared_experts=shared_experts if self.torchair_graph_enabled
+            and self.enable_multistream_moe and not is_prefill else None,
+        )
 
-        if self.enable_multistream_shared_expert and not is_prefill:
-            hidden_states, shared_output = hidden_states
+        if shared_experts:
+            if isinstance(e_hidden_states, tuple):
+                e_hidden_states, shared_hidden_states = e_hidden_states
 
-        if self.dp_size > 1:
-            if VLLM_ENABLE_MC2 and not is_prefill:
-                ...
-            elif self.torchair_graph_enabled:
-                if USING_LCCL_COM:  # type: ignore
-                    hidden_states = dist._functional_collectives.reduce_scatter_tensor(
-                        hidden_states,
-                        "sum",
-                        scatter_dim=0,
-                        group=get_dp_group().device_group)
-                elif self.torchair_graph_enabled and not is_prefill:
-                    hidden_states = dist._functional_collectives.reduce_scatter_tensor(
-                        hidden_states,
-                        "sum",
-                        scatter_dim=0,
-                        group=get_dp_group().device_group)
-                else:
-                    hidden_states = get_ep_group().combine(hidden_states)
+        if tp_size > 1 and fused_moe_state != FusedMoEState.AllGather:
+            dist.all_gather(list(chunk_hidden_states), e_hidden_states,
+                            self.tp_group)
+            final_hidden_states = torch.cat(chunk_hidden_states, dim=0)
+            if num_tokens < tp_size:
+                final_hidden_states = final_hidden_states[:num_tokens]
+            dispose_tensor(e_hidden_states)
+        elif self.dp_size > 1 and fused_moe_state == FusedMoEState.AllGather:
+            final_hidden_states = dist._functional_collectives.reduce_scatter_tensor(
+                e_hidden_states,
+                "sum",
+                scatter_dim=0,
+                group=get_dp_group().device_group)
+            final_hidden_states = final_hidden_states[:num_tokens]
+            dispose_tensor(e_hidden_states)
+        else:
+            final_hidden_states = e_hidden_states
 
-        if self.reduce_results and (self.tp_size > 1 or self.ep_size > 1):
-            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+        if tp_size > 1 and fused_moe_state == FusedMoEState.AllGather:
+            final_hidden_states = tensor_model_parallel_all_reduce(
+                final_hidden_states)
 
-        if self.enable_multistream_shared_expert and not is_prefill:
-            return hidden_states, shared_output
-        return hidden_states
+        if shared_experts:
+            return final_hidden_states, shared_hidden_states
+        else:
+            return final_hidden_states
 
     # ----------------------------------------- TBO-related --------------------------------------------
 

@@ -37,6 +37,10 @@ MODELS = [
     "Qwen/Qwen3-0.6B-Base",
 ]
 MULTIMODALITY_MODELS = ["Qwen/Qwen2.5-VL-3B-Instruct"]
+
+QUANTIZATION_MODELS = [
+    "vllm-ascend/Qwen2.5-0.5B-Instruct-W8A8",
+]
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 QUANTIZATION_MODELS = [
@@ -85,8 +89,6 @@ def test_quantization_models(model: str, max_tokens: int) -> None:
 
 
 @pytest.mark.parametrize("model", MULTIMODALITY_MODELS)
-@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "1",
-                    reason="qwen2.5_vl is not supported on v1")
 def test_multimodal(model, prompt_template, vllm_runner):
     image = ImageAsset("cherry_blossom") \
         .pil_image.convert("RGB")

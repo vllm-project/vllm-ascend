@@ -6,6 +6,7 @@
 using_lm_eval
 using_opencompass
 using_evalscope
+accuracy_report/index
 :::
 
 :::{toctree}
