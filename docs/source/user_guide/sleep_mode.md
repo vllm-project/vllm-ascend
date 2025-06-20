@@ -9,7 +9,7 @@ Since the generation and training phases may employ different model parallelism 
 
 ## Getting started
 
-With `enable_sleep_mode=True`, the way we manage memory(malloc, free) in vllm will under the management of a specific memory pool, during loading model weight and initialize kv_caches, we tag the memory as a map: `{"weight": data, "kv_cache": data}`.
+With `enable_sleep_mode=True`, the way we manage memory(malloc, free) in vllm will under a specific memory pool, during loading model and initialize kv_caches, we tag the memory as a map: `{"weight": data, "kv_cache": data}`.
 
 The engine(v0/v1) supports two sleep levels to manage memory during idle periods:
 
