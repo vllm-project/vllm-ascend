@@ -1972,16 +1972,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             device=self.device)
                         kv_caches[layer_name] = (layer_kv_cache_nope,
                                                  layer_kv_cache_pe)
-                        kv_caches[layer_name][0] = \
-                            torch_npu.npu_format_cast(kv_caches[layer_name][0], acl_format)
-                        kv_caches[layer_name][1] = \
-                            torch_npu.npu_format_cast(kv_caches[layer_name][1], acl_format)
+                        torch_npu.npu_format_cast(kv_caches[layer_name][0],
+                                                  acl_format)
+                        torch_npu.npu_format_cast(kv_caches[layer_name][1],
+                                                  acl_format)
                     else:
                         kv_caches[layer_name] = torch.zeros(kv_cache_shape,
                                                             dtype=dtype,
                                                             device=self.device)
-                        kv_caches[layer_name] = \
-                            torch_npu.npu_format_cast(kv_caches[layer_name], acl_format)
+                        torch_npu.npu_format_cast(kv_caches[layer_name],
+                                                  acl_format)
                 else:
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
