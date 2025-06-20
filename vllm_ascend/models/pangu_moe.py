@@ -38,11 +38,8 @@ from vllm.model_executor.models.utils import (extract_layer_index, is_pp_missing
                                                 maybe_prefix)
 
 from vllm.distributed.parallel_state import get_tp_group, get_dp_group
-from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ops.fused_moe import AscendFusedMoE
-from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
+from vllm_ascend.distributed.parallel_state import get_ep_group
 
-import torchair
 logger = init_logger(__name__)
 
 _ROUTER_SCALE = None
@@ -101,11 +98,10 @@ class PanGuMoeSparseMoeBlock(nn.Module):
         local_num_experts = global_num_experts // ep_size
         local_num_group = topk // ep_size
         router_scale = _ROUTER_SCALE.squeeze()
-        scores = F.softmax(gating_output, dim=1, dtype=torch.float16)
-        num_token = scores.shape[0]
+        scores = F.softmax(gating_output, dim=1)
         scores = scores[...,get_ep_group().rank_in_group * local_num_experts:(get_ep_group().rank_in_group+1) * local_num_experts]
 
-        router_weights = router_scale[get_ep_group().rank_in_group * local_num_experts:(get_ep_group().rank_in_group+1) * local_num_experts].to(torch.float16)
+        router_weights = router_scale[get_ep_group().rank_in_group * local_num_experts:(get_ep_group().rank_in_group+1) * local_num_experts]
         topk_weights, topk_ids = torch.max(scores.view(scores.shape[0], local_num_group, -1), dim = -1)
         bias = torch.arange(0, local_num_experts, topk, device=scores.device, dtype=torch.int32).unsqueeze(0)
         topk_ids = topk_ids.to(torch.int32) + bias
@@ -270,8 +266,6 @@ class PanGuMoeAttention(nn.Module):
                               quant_config=quant_config,
                               prefix=f"{prefix}.attn",
                               )
-        ascend_config = get_ascend_config()
-        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
 
     def forward(
             self,
@@ -283,22 +277,7 @@ class PanGuMoeAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        if self.torchair_graph_enabled:
-            forward_kwargs = {'trace_flag': False}
-            if envs.VLLM_USE_V1:
-                output_shape = q.shape
-                attn_output = torch.empty(output_shape,
-                                     dtype=q.dtype,
-                                     device=q.device)
-                forward_kwargs['output'] = attn_output
-
-            attn_output = self.attn.impl.forward(self.attn,
-                                                q, k, v,
-                                                kv_cache,
-                                                attn_metadata,
-                                                **forward_kwargs)
-        else:
-            attn_output = self.attn(q, k, v)
+        attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
 
