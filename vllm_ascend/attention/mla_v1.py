@@ -13,6 +13,7 @@ from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.utils import cdiv, round_down
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention import _ALLOWED_NUM_QUERIES_PER_KV
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -21,7 +22,6 @@ from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
 from vllm_ascend.utils import npu_stream_switch, npu_wait_tensor
-from vllm_ascend import envs
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -1003,30 +1003,26 @@ class AscendMLAImpl(MLAAttentionImpl):
             # public avaliable
             if envs.VLLM_ASCEND_MLA_PA:
                 attn_output = torch_npu.atb.npu_multi_head_latent_attention(
-                    q_nope,
-                    q_pe,
-                    kv_c_and_k_pe_cache[0],
-                    kv_c_and_k_pe_cache[1],
-                    attn_metadata.decode.block_table,
-                    attn_metadata.decode.seq_lens,
-                    self.num_heads,
-                    self.scale,
-                    self.num_kv_heads
-                )
+                    q_nope, q_pe, kv_c_and_k_pe_cache[0],
+                    kv_c_and_k_pe_cache[1], attn_metadata.decode.block_table,
+                    attn_metadata.decode.seq_lens, self.num_heads, self.scale,
+                    self.num_kv_heads)
             else:
                 q = torch.cat([q_nope, q_pe], dim=-1)
                 attn_output = torch.empty(
                     [num_tokens, self.num_heads, self.kv_lora_rank],
                     dtype=q.dtype,
                     device=q.device)
-                k_cache = torch.cat([kv_c_and_k_pe_cache[0], kv_c_and_k_pe_cache[1]], dim=-1)
+                k_cache = torch.cat(
+                    [kv_c_and_k_pe_cache[0], kv_c_and_k_pe_cache[1]], dim=-1)
                 torch_npu._npu_paged_attention_mla(
                     query=q,
                     key_cache=k_cache,
                     num_kv_heads=self.num_kv_heads,
                     num_heads=self.num_heads,
                     scale_value=self.scale,
-                    block_table=attn_metadata.decode.block_table,  # type:ignore
+                    block_table=attn_metadata.decode.
+                    block_table,  # type:ignore
                     context_lens=attn_metadata.decode.seq_lens,  # type:ignore
                     mla_vheadsize=self.kv_lora_rank,
                     out=attn_output)
@@ -1210,9 +1206,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                                             decode_k_nope, decode_k_pe,
                                             kv_cache, attn_metadata)
             else:
-                output_decode = self._forward_decode(
-                    decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe,
-                    kv_cache, attn_metadata)
+                output_decode = self._forward_decode(decode_ql_nope,
+                                                     decode_q_pe,
+                                                     decode_k_nope,
+                                                     decode_k_pe, kv_cache,
+                                                     attn_metadata)
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
                 with torch.npu.stream(current_ms_metadata.comm_stream):
