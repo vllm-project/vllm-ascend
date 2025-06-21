@@ -2118,14 +2118,26 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         nope_allocate_shape_alignment = nope_allocate_shape + alignment
                         rope_allocate_shape = num_blocks * block_size * num_kv_heads * rope_dim
                         rope_allocate_shape_alignment = rope_allocate_shape + alignment
-                        nope_cache_shape = (num_blocks, block_size, num_kv_heads, nope_dim)
-                        rope_cache_shape = (num_blocks, block_size, num_kv_heads, rope_dim)
-                        rope_cache = torch.zeros(nope_allocate_shape_alignment, dtype=dtype, device=self.device)
-                        nope_cache = torch.zeros(rope_allocate_shape_alignment, dtype=dtype, device=self.device)
-                        rope_cache = align_memory(nope_cache, alignment)[:nope_allocate_shape].view(nope_cache_shape)
-                        nope_cache = align_memory(rope_cache, alignment)[:rope_allocate_shape].view(rope_cache_shape)
-                        rope_cache = torch_npu.npu_format_cast(rope_cache, acl_format)
-                        nope_cache = torch_npu.npu_format_cast(nope_cache, acl_format)
+                        nope_cache_shape = (num_blocks, block_size,
+                                            num_kv_heads, nope_dim)
+                        rope_cache_shape = (num_blocks, block_size,
+                                            num_kv_heads, rope_dim)
+                        rope_cache = torch.zeros(nope_allocate_shape_alignment,
+                                                 dtype=dtype,
+                                                 device=self.device)
+                        nope_cache = torch.zeros(rope_allocate_shape_alignment,
+                                                 dtype=dtype,
+                                                 device=self.device)
+                        rope_cache = align_memory(
+                            nope_cache, alignment)[:nope_allocate_shape].view(
+                                nope_cache_shape)
+                        nope_cache = align_memory(
+                            rope_cache, alignment)[:rope_allocate_shape].view(
+                                rope_cache_shape)
+                        rope_cache = torch_npu.npu_format_cast(
+                            rope_cache, acl_format)
+                        nope_cache = torch_npu.npu_format_cast(
+                            nope_cache, acl_format)
                         kv_caches[layer_name] = (nope_cache, rope_cache)
                     else:
                         num_caches = kv_cache_shape[0]
@@ -2134,9 +2146,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             cache_shape = kv_cache_shape[1:]
                             cache_size = math.prod(cache_shape)
                             cache_size_aligned = cache_size + alignment
-                            kv_cache = torch.zeros(cache_size_aligned, dtype=dtype, device=self.device)
-                            kv_cache = align_memory(kv_cache, alignment)[:cache_size].view(cache_shape)
-                            kv_cache_for_compute = torch_npu.npu_format_cast(kv_cache_for_compute, acl_format)
+                            kv_cache = torch.zeros(cache_size_aligned,
+                                                   dtype=dtype,
+                                                   device=self.device)
+                            kv_cache = align_memory(
+                                kv_cache,
+                                alignment)[:cache_size].view(cache_shape)
+                            kv_cache = torch_npu.npu_format_cast(
+                                kv_cache, acl_format)
                             kv_cache_list.append(kv_cache)
                         kv_caches[layer_name] = kv_cache_list
                 else:
