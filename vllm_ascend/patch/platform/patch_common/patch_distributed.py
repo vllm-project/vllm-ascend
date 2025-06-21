@@ -22,9 +22,10 @@ import vllm
 import vllm.distributed
 import vllm.envs as envs
 from torch.distributed import ProcessGroup
-from vllm.config import ParallelConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed.utils import \
     stateless_init_torch_distributed_process_group
+from vllm.v1.engine.core import DPEngineCoreProc
 
 from vllm_ascend.utils import NullHandle, is_310p
 
@@ -81,7 +82,22 @@ def stateless_init_dp_group(self) -> "ProcessGroup":
     return dp_group
 
 
+def _init_data_parallel(self, vllm_config: VllmConfig):
+    # Configure NPUs and stateless process group for data parallel.
+    dp_rank = vllm_config.parallel_config.data_parallel_rank
+    dp_size = vllm_config.parallel_config.data_parallel_size
+    local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
+
+    assert dp_size > 1
+    assert 0 <= local_dp_rank <= dp_rank < dp_size
+
+    self.local_dp_rank = local_dp_rank
+    self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
+    self.current_wave = 0
+
+
 vllm.distributed.parallel_state.destroy_model_parallel = ascend_destroy_model_parallel
+DPEngineCoreProc._init_data_parallel = _init_data_parallel
 ParallelConfig.get_next_dp_init_port = parallel_config_get_dp_port
 ParallelConfig.stateless_init_dp_group = stateless_init_dp_group
 
