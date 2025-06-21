@@ -121,7 +121,10 @@ def fused_experts_with_mc2(
     if log2phy:
         topk_ids = log2phy[topk_ids]
     global_bs = 0
-    moe_expert_num = len(expert_map) + global_redundant_expert_num
+    if (expert_map is not None):
+        moe_expert_num = len(expert_map) + global_redundant_expert_num
+    else:
+        moe_expert_num = global_redundant_expert_num
     # hidden_states = hidden_states.bfloat16()
     kwargs_mc2 = {
         "x": hidden_states,

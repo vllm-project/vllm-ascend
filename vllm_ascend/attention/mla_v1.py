@@ -933,18 +933,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         q_pe: torch.Tensor,
         k_nope: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
+        kv_c_and_k_pe_cache: Tuple[torch.Tensor],
         attn_metadata: AscendMLAMetadata,
     ) -> torch.Tensor:
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
-
-        q = torch.cat([q_nope, q_pe], dim=-1)
-        num_tokens = q.size(0)
-        attn_output = torch.empty(
-            [num_tokens, self.num_heads, self.kv_lora_rank],
-            dtype=q.dtype,
-            device=q.device)
+        num_tokens = q_nope.size(0)
         if self.running_in_graph:
             # TorchAir's shape is [bs, num_heads_per_rank, q_seq_len, dim]
             if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
@@ -1003,16 +997,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                 actual_seq_lengths_kv=decode_meta.seq_lens_list,
             )
         else:
-            torch_npu._npu_paged_attention_mla(
-                query=q,
-                key_cache=kv_c_and_k_pe_cache,
-                num_kv_heads=self.num_kv_heads,
-                num_heads=self.num_heads,
-                scale_value=self.scale,
-                block_table=attn_metadata.decode.block_table,  # type:ignore
-                context_lens=attn_metadata.decode.seq_lens,  # type:ignore
-                mla_vheadsize=self.kv_lora_rank,
-                out=attn_output)
+            assert len(kv_c_and_k_pe_cache) > 1
+            attn_output = torch_npu.atb.npu_multi_head_latent_attention(
+                q_nope, q_pe, kv_c_and_k_pe_cache[0], kv_c_and_k_pe_cache[1],
+                attn_metadata.decode.block_table,
+                attn_metadata.decode.seq_lens, self.num_heads, self.scale,
+                self.num_kv_heads)
         current_ms_metadata = get_multistream_comm_context()
         if current_ms_metadata is None:
             return self._v_up_proj_and_o_proj(attn_output)
@@ -1193,10 +1183,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                                             decode_k_nope, decode_k_pe,
                                             kv_cache, attn_metadata)
             else:
-                combined_cache = torch.cat([kv_cache[0], kv_cache[1]], dim=-1)
-                output_decode = self._forward_decode(
-                    decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe,
-                    combined_cache, attn_metadata)
+                output_decode = self._forward_decode(decode_ql_nope,
+                                                     decode_q_pe,
+                                                     decode_k_nope,
+                                                     decode_k_pe, kv_cache,
+                                                     attn_metadata)
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
                 with torch.npu.stream(current_ms_metadata.comm_stream):
