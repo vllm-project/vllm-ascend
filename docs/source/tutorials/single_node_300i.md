@@ -1,6 +1,6 @@
-# 310P (310I Duo)
+# Single Node (Atlas 300I series)
 
-## Run vllm-ascend with 310P
+## Run vLLM on Altlas 300I series
 
 Run docker container:
 
@@ -27,7 +27,6 @@ docker run --rm \
 -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /root/.cache:/root/.cache \
--v /data/mnj/:/home/mnj/ \
 -p 8000:8000 \
 -it $IMAGE bash
 ```
