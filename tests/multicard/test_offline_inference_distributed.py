@@ -63,7 +63,6 @@ def test_models_distributed_DeepSeek():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-@pytest.mark.skip(reason="Call hccl api failed")
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "1"})
 def test_models_distributed_topk() -> None:
     example_prompts = [
@@ -86,7 +85,6 @@ def test_models_distributed_topk() -> None:
         vllm_model.generate(example_prompts, sampling_params)
 
 
-@pytest.mark.skip(reason="Call hccl api failed")
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DBO": "1"})
 def test_models_distributed_DeepSeek_dbo():
     example_prompts = ["The president of the United States is"] * 41
