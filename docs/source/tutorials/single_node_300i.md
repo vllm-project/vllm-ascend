@@ -43,7 +43,14 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 
 ### Online Inference on NPU
 
-Run the following script to start the vLLM server on NPU(Qwen3-0.6B:1 card, Qwen2.5-7B-Instruct:2 cards, Pangu-72B-MoE: 8 cards):
+Run the following script to start the vLLM server on NPU(Qwen3-0.6B:1 card, Qwen2.5-7B-Instruct:2 cards, Pangu-Pro-MoE-72B: 8 cards):
+
+One of the ways to download Pangu-Pro-MoE-72B:
+
+```bash
+git lfs install
+git clone https://gitcode.com/ascend-tribe/pangu-pro-moe-model.git
+```
 
 :::::{tab-set}
 ::::{tab-item} Qwen3-0.6B
@@ -90,7 +97,7 @@ python -m vllm.entrypoints.api_server \
 ```
 ::::
 
-::::{tab-item} pangu-72b-MoE
+::::{tab-item} Pangu-Pro-MoE-72B
 
 ```{code-block} bash
    :substitutions:
@@ -175,7 +182,7 @@ llm = LLM(
     max_num_seqs=4,
     trust_remote_code=True,
     tensor_parallel_size=1,
-    enforce_eager=True,
+    enforce_eager=True, # For ascend 310P eager mode, only single-operator model is supported.
     dtype="float16", # IMPORTANT cause some ATB ops cannot support bf16 on 310P
     disable_custom_all_reduce=True, # IMPORTANT cause 310p needed
     compilation_config={"custom_ops":["+rms_norm", "+rotary_embedding"]}, # IMPORTANT cause 310p needed custom ops
@@ -230,7 +237,7 @@ llm = LLM(
     max_num_seqs=4,
     trust_remote_code=True,
     tensor_parallel_size=2,
-    enforce_eager=True,
+    enforce_eager=True, # For ascend 310P eager mode, only single-operator model is supported.
     dtype="float16", # IMPORTANT cause some ATB ops cannot support bf16 on 310P
     disable_custom_all_reduce=True, # IMPORTANT cause 310p needed
     compilation_config={"custom_ops":["+rms_norm", "+rotary_embedding"]}, # IMPORTANT cause 310p needed custom ops
@@ -284,7 +291,7 @@ if __name__ == "__main__":
             max_num_batched_tokens=2048,
             gpu_memory_utilization=0.5,
             max_num_seqs=4,
-            enforce_eager=True,
+            enforce_eager=True, # For ascend 310P eager mode, only single-operator model is supported.
             trust_remote_code=True,
             max_model_len=1024,
             disable_custom_all_reduce=True, # IMPORTANT cause 310p needed custom ops
