@@ -71,9 +71,8 @@ class EplbWorker:
 
         logger.debug(f"[EPLB Process  new_map differs, performing D2D")
 
-        update_info = self.compose_expert_update_info_greedy(new_expert_maps, self.old_expert_maps)\
-            if self.policy_type <= 1 else self.compose_expert_update_info_bipartite(new_expert_maps, self.old_expert_maps)
-
+        update_info = self.compose_expert_update_info_bipartite(new_expert_maps, self.old_expert_maps)\
+            if self.policy_type <= 2 else self.compose_expert_update_info_greedy(new_expert_maps, self.old_expert_maps)
         self.old_expert_maps = new_expert_maps
         logger.info("EPLB Process compute complete")
 
@@ -86,6 +85,12 @@ class EplbWorker:
         num_ranks = old_placement.shape[1]
 
         for layer_id in range(num_layers):
+            # check if any logical expert is not placed on any rank
+            if torch.unique(new_placement[layer_id]).numel() < torch.unique(old_placement[layer_id]).numel():
+                logger.error(f"There exists expert not placed on any rank in layer {layer_id}")
+                new_placement[layer_id] = old_placement[layer_id]
+                continue
+
             for rank_id in range(num_ranks):
                 new_placement_check = new_placement[layer_id][rank_id]
                 old_placement_check = old_placement[layer_id][rank_id]
@@ -344,14 +349,14 @@ class EplbWorker:
             maps.append(new_expert_map[self.rank_id])
 
             if self.redundant_enable is not None:
-                log2phy_map = ExpertMapUtils.generate_log2phy_map(new_expert_map) 
+                log2phy_map = ExpertMapUtils.generate_log2phy_map(new_expert_map)
                 log2phy_all.append(log2phy_map)
 
             layer_ids.append(layer_id)
 
         # 把 list of Tensor 堆成一个大 Tensor
-        stacked_maps      = torch.stack(maps,      dim=0)  
-        layer_id_tensor   = torch.as_tensor(layer_ids, dtype=torch.int64)  
+        stacked_maps      = torch.stack(maps,      dim=0)
+        layer_id_tensor   = torch.as_tensor(layer_ids, dtype=torch.int64)
         stacked_maps.share_memory_()
         layer_id_tensor.share_memory_()
 
@@ -362,7 +367,7 @@ class EplbWorker:
             stacked_log2phy = None
 
         return send_all, recv_all, stacked_maps, stacked_log2phy, layer_id_tensor
-        
+
 class EplbProcess:
     def __init__(self, shared_dict, planner_q, block_update_q, redundant_enable, policy_type: int = 0, enable_d2d: bool = True):
         """

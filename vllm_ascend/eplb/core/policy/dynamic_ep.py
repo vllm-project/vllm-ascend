@@ -21,7 +21,7 @@ class DynamicTable:
     placement_table = None
 
 
-class DynamicEP(EplbPolicy):
+class DynamicEplb(EplbPolicy):
 
     def __init__(self, config: DynamicConfig):
         super().__init__(config)
@@ -233,7 +233,7 @@ class DynamicEP(EplbPolicy):
     def get_redundant_num(npu_num, counts):
         redundant_num_each_npu = np.sum(counts - 1)
         return redundant_num_each_npu
-    
+
     @staticmethod
     def calculate_max_heat_per_layer(workload_table, layer_num):
         max_heat_per_layer = []
