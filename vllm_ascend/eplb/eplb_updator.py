@@ -42,6 +42,8 @@ class EplbUpdator:
         self.expert_map_initialized = False
         self.update_in_flight = False
 
+        self.gate_eplb = True
+
         self.reqs = []
         self.update_info_all = []
 
@@ -78,7 +80,10 @@ class EplbUpdator:
 
     def get_update_iteration(self):
         self.cur_iterations = self.cur_iterations + 1
-        return self.cur_iterations % self.num_iterations == 0
+        if not self.gate_eplb:
+            return self.cur_iterations % self.num_iterations == 0
+        else:
+            return return self.cur_iterations == self.num_iterations
 
     def get_init_expert_map(self):
         try:
