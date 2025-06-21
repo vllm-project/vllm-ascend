@@ -94,8 +94,9 @@ python -m vllm.entrypoints.api_server \
 
 ```{code-block} bash
    :substitutions:
+# Update the MODEL
+export MODEL=
 export VLLM_USE_V1=1
-export MODEL="/home/mnj/pangu_model/pangu-pro-moe-model"
 python -m vllm.entrypoints.api_server \
     --model $MODEL \
     --tensor-parallel-size 8 \
@@ -172,7 +173,7 @@ llm = LLM(
     max_model_len=4096,
     max_num_seqs=4,
     trust_remote_code=True,
-    tensor_parallel_size=2,
+    tensor_parallel_size=1,
     dtype="float16", # IMPORTANT cause some ATB ops cannot support bf16 on 310P
     disable_custom_all_reduce=True, # IMPORTANT cause 310p needed
     compilation_config={"custom_ops":["+rms_norm", "+rotary_embedding"]}, # IMPORTANT cause 310p needed custom ops
