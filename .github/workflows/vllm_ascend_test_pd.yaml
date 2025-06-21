@@ -106,3 +106,7 @@ jobs:
       - name: Run vllm-project/vllm-ascend PD Disaggregation test
         run: |
           pytest -sv tests/e2e/pd_disaggreate/test_pd_e2e.py
+      
+      - name: Run vllm-project/vllm-ascend PD Disaggregation edge test
+        run: |
+          bash tests/e2e/pd_disaggreate/run_edge_case_test.sh

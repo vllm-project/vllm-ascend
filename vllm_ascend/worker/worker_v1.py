@@ -75,6 +75,9 @@ class NPUWorker(WorkerBase):
                          is_driver_worker=is_driver_worker)
 
         # Try to import mindie_turbo to accelerate vLLM inference.
+        local_dp_rank = self.vllm_config.parallel_config.data_parallel_rank_local
+        world_size = self.vllm_config.parallel_config.world_size
+        self.local_rank_across_dp = local_dp_rank * world_size + self.local_rank
         try_register_lib(
             "mindie_turbo",
             "MindIE Turbo is installed. vLLM inference will be accelerated with MindIE Turbo."

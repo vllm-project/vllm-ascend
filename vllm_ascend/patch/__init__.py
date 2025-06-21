@@ -65,7 +65,19 @@
 #    Related PR (if no, explain why):
 #       Need a PR to vllm to support more backend.
 #    Future Plan:
-#       Remove those patch when vllm support more backend.
+#       Remove those patch when vllm merged them
+#
+# ** File: platform/patch_common/patch_scheduler.py**
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.core.sched.scheduler.Scheduler.destroy_model_parallel()`
+#    Why:
+#       Vllm transfer the kv blocks data only when this block have already been full filled. However, this behaviour may cause decode node
+#       exist prefill behaviour. In order to make decode node work as expected, we always transfer all data whether or not the block is filled.
+#    How：
+#       The num_computed_token shall always equals to the token number of request during scheduling.
+#    Related PR (if no, explain why): https://github.com/vllm-project/vllm/pull/17751 (nixl implementation)
+#    Future Plan:
+#       No plan, we will maintain this patch util vllm change it behaviour
 #
 # * Worker Patch:
 # ===============
