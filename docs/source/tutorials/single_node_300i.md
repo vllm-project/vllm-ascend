@@ -7,7 +7,7 @@ Run docker container:
 ```{code-block} bash
    :substitutions:
 # Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:main-310p
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|-310p
 docker run --rm \
 --name vllm-ascend \
 --device /dev/davinci0 \
@@ -102,7 +102,7 @@ python -m vllm.entrypoints.api_server \
 ```{code-block} bash
    :substitutions:
 # Update the MODEL
-export MODEL=
+export MODEL="/path/to/pangu-pro-moe-model"
 export VLLM_USE_V1=1
 python -m vllm.entrypoints.api_server \
     --model $MODEL \
@@ -182,10 +182,10 @@ llm = LLM(
     max_num_seqs=4,
     trust_remote_code=True,
     tensor_parallel_size=1,
-    enforce_eager=True, # For ascend 310P eager mode, only single-operator model is supported.
-    dtype="float16", # IMPORTANT cause some ATB ops cannot support bf16 on 310P
-    disable_custom_all_reduce=True, # IMPORTANT cause 310p needed
-    compilation_config={"custom_ops":["+rms_norm", "+rotary_embedding"]}, # IMPORTANT cause 310p needed custom ops
+    enforce_eager=True, # For 300I series, only eager mode is supported.
+    dtype="float16", # IMPORTANT cause some ATB ops cannot support bf16 on 300I series
+    disable_custom_all_reduce=True, # IMPORTANT cause 300I series needed
+    compilation_config={"custom_ops":["+rms_norm", "+rotary_embedding"]}, # IMPORTANT cause 300I series needed custom ops
 )
 
 # Generate texts from the prompts.
@@ -237,10 +237,10 @@ llm = LLM(
     max_num_seqs=4,
     trust_remote_code=True,
     tensor_parallel_size=2,
-    enforce_eager=True, # For ascend 310P eager mode, only single-operator model is supported.
-    dtype="float16", # IMPORTANT cause some ATB ops cannot support bf16 on 310P
-    disable_custom_all_reduce=True, # IMPORTANT cause 310p needed
-    compilation_config={"custom_ops":["+rms_norm", "+rotary_embedding"]}, # IMPORTANT cause 310p needed custom ops
+    enforce_eager=True, # For 300I series, only eager mode is supported.
+    dtype="float16", # IMPORTANT cause some ATB ops cannot support bf16 on 300I series
+    disable_custom_all_reduce=True, # IMPORTANT cause 300I series needed
+    compilation_config={"custom_ops":["+rms_norm", "+rotary_embedding"]}, # IMPORTANT cause 300I series needed custom ops
 )
 
 # Generate texts from the prompts.
@@ -279,7 +279,7 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 if __name__ == "__main__":
     # Update the model_path
-    model_path=
+    model_path="/path/to/pangu-pro-moe-model"
 
     prompts = [
         "Hello, my name is",
@@ -291,14 +291,14 @@ if __name__ == "__main__":
             max_num_batched_tokens=2048,
             gpu_memory_utilization=0.5,
             max_num_seqs=4,
-            enforce_eager=True, # For ascend 310P eager mode, only single-operator model is supported.
+            enforce_eager=True, # For 300I series, only eager mode is supported.
             trust_remote_code=True,
             max_model_len=1024,
-            disable_custom_all_reduce=True, # IMPORTANT cause 310p needed custom ops
+            disable_custom_all_reduce=True, # IMPORTANT cause 300I series needed custom ops
             enable_expert_parallel=True,
 
-            dtype="float16", # IMPORTANT cause some ATB ops cannot support bf16 on 310P
-            compilation_config={"custom_ops":["+rms_norm", "+rotary_embedding"]}, # IMPORTANT cause 310p needed custom ops
+            dtype="float16", # IMPORTANT cause some ATB ops cannot support bf16 on 300I series
+            compilation_config={"custom_ops":["+rms_norm", "+rotary_embedding"]}, # IMPORTANT cause 300I series needed custom ops
 
             additional_config = {
                 'ascend_scheduler_config': {
