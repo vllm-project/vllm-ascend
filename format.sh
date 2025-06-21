@@ -273,7 +273,7 @@ echo 'vllm-ascend isort: Done'
 # Clang-format section
 # Exclude some files for formatting because they are vendored
 CLANG_FORMAT_EXCLUDES=(
-    'csrc/kernels/pos_encoding_kernels.cpp' 'csrc/kernels/advance_step.cpp' 'csrc/kernels/get_masked_input_and_mask_kernel.cpp' 'csrc/torch_binding.cpp' 'csrc/ops.h'
+    'csrc/kernels/utils.h' 'csrc/kernels/pos_encoding_kernels.cpp' 'csrc/kernels/advance_step.cpp' 'csrc/kernels/get_masked_input_and_mask_kernel.cpp' 'csrc/torch_binding.cpp' 'csrc/ops.h'
 )
 
 # Format specified files with clang-format

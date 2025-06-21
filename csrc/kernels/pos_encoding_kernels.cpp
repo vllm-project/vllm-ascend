@@ -30,7 +30,11 @@ using vllm_ascend::local_mem_copy;
 template <typename scalar_t, bool isNeox> class RotaryEmbedding {
     // NOTE(ganyi): we use 512B as load stride for pipe, need to find another way to
     // retrieve this size from runtime for more Soc support
-    static int constexpr loadSize = 512;
+    #if (__CCE_AICORE__ >= 220)
+        static int constexpr loadSize = 512;
+    #else
+        static int constexpr loadSize = 1024 * 4;
+    #endif
     using dst_t = scalar_t;
     using acc_t = typename AccType<scalar_t>::type;
     // only half tensor have cast instruct to int8, hardcode acc_dst_t as half
@@ -326,7 +330,9 @@ private:
 
 // Declare all the kernel entry here
 ROPE_CUSTOM_KERNEL_DECLARE(half)
-ROPE_CUSTOM_KERNEL_DECLARE(bfloat16_t)
+#if (__CCE_AICORE__ >= 220)
+    ROPE_CUSTOM_KERNEL_DECLARE(bfloat16_t)
+#endif
 
 namespace vllm_ascend {
 
@@ -342,7 +348,7 @@ namespace vllm_ascend {
             reinterpret_cast<TYPE *>(cosSinCache), rotDim, queryStride, keyStride, dstQueryStride, dstKeyStride, \
             numHeads, numKvHeads, headSize, numTokens, loopCnt, blockDim);
 
-// maximum number for runtime to launch a ascendc kernel. 
+// maximum number for runtime to launch a ascendc kernel.
 // we use this to constrain the maximum number of block size
 static const int64_t maxParallelSize = 65535;
 
@@ -357,9 +363,13 @@ extern void rotary_embedding_impl(AscendType type, bool isNeox, void *stream, in
     int blockDim = maxParallelSize > numTokens ? numTokens : maxParallelSize;
     if (type == AscendType::FP16) {
         ROTARY_EMBEDDING_KERNEL_CALL(half);
-    } else if (type == AscendType::BF16) {
+    }
+    #if (__CCE_AICORE__ >= 220)
+    else if (type == AscendType::BF16) {
         ROTARY_EMBEDDING_KERNEL_CALL(bfloat16_t);
-    } else {
+    }
+    #endif
+    else {
         return;
     }
 }
