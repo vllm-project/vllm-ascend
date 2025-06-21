@@ -192,6 +192,7 @@ class NPUWorker(WorkerBase):
             self.model_runner.load_model()
 
     def compile_or_warm_up_model(self) -> None:
+        self.model_runner.eplb_warmup()
         warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
         if not self.model_config.enforce_eager:
             warmup_sizes = [
@@ -202,7 +203,6 @@ class NPUWorker(WorkerBase):
             logger.info("Compile and warming up model for size %d", size)
             self.model_runner._dummy_run(size)
 
-        self.model_runner.eplb_warmup()
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
         # Reset the seed to ensure that the random state is not affected by

@@ -370,6 +370,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.dynamic_eplb = ascend_config.dynamic_eplb
         if self.dynamic_eplb == True:
             self.eplb_adaptor = None
+            self.is_eplb_warmuped = False
             self.eplb_updator = EplbUpdator(ascend_config.expert_map_path)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
@@ -1457,6 +1458,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         num_tokens: int,
         is_compile: bool = False,
         with_prefill: bool = True,
+        is_profile_run: bool = False,
     ) -> torch.Tensor:
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
@@ -1471,6 +1473,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
+
+        if not is_compile and not is_profile_run and self.dynamic_eplb:
+            self.eplb_updator.forward_before()
+
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
             model = self.model
@@ -1537,6 +1543,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=inputs_embeds)
 
+                if not is_compile and not is_profile_run and self.dynamic_eplb:
+                    self.eplb_updator.forward_end()
                 return hidden_states
 
     def profile_run(self) -> None:
@@ -1565,7 +1573,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # TODO: call maybe_profile_with_lora()
 
         # Trigger compilation for general shape.
-        hidden_states = self._dummy_run(self.max_num_tokens)
+        hidden_states = self._dummy_run(num_tokens = self.max_num_tokens, is_profile_run=True)
 
         if get_pp_group().is_last_rank:
             hidden_states = hidden_states[logit_indices]
@@ -1583,7 +1591,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def eplb_warmup(self):
         #EPLB
-        if self.dynamic_eplb == True:
+        if self.dynamic_eplb and not self.is_eplb_warmuped:
+            self.is_eplb_warmuped = True
             self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
             self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.warm_up_eplb()
