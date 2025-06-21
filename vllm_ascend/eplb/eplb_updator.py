@@ -33,7 +33,7 @@ class EplbUpdator:
         self.num_moe_layers = self.adaptor.num_moe_layers
 
     def init_eplb(self, expert_map_path):
-
+        self.num_expert_load_gather = 0
         self.redundant_enable = (expert_map_path != None)
         self.num_iterations: torch.int64 = 130
         self.expert_map_path = expert_map_path
@@ -228,6 +228,13 @@ class EplbUpdator:
                         '{\"expert_0\":3,\"expert_2\":1}},{\"layer_5\":{\"expert_0\":3,\"expert_2\":1}}],'
                         '\"card_1\":[{\"layer_4\":{\"expert_1\":3,\"expert_3\":1}}]}}]}')
         return experts_load
+
+    def do_update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
+        logger.info(f" start update {self.num_expert_load_gather=}, {self.num_iterations}...")
+        self.num_expert_load_gather = num_expert_load_gather
+        self.num_iterations = num_iterations
+        logger.info(f" update {self.num_expert_load_gather=}, {self.num_iterations} success...")
+
 
     def shutdown(self):
         """

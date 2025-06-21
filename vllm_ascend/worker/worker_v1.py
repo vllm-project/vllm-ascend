@@ -214,6 +214,9 @@ class NPUWorker(WorkerBase):
         moe_load = self.model_runner.do_get_expert_load()
         return moe_load
 
+    def update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
+        self.model_runner.do_update_expert_load_statistical_period(num_expert_load_gather, num_iterations)
+
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
 
