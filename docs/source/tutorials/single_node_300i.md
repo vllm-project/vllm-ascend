@@ -145,12 +145,13 @@ Run the following script to execute offline inference on NPU:
    :substitutions:
 from vllm import LLM, SamplingParams
 import gc
-
+import os
 import torch
 
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import (destroy_distributed_environment,
                                              destroy_model_parallel)
+os.environ["VLLM_USE_V1"] = "1"
 
 def clean_up():
     destroy_model_parallel()
@@ -174,6 +175,7 @@ llm = LLM(
     max_num_seqs=4,
     trust_remote_code=True,
     tensor_parallel_size=1,
+    enforce_eager=True,
     dtype="float16", # IMPORTANT cause some ATB ops cannot support bf16 on 310P
     disable_custom_all_reduce=True, # IMPORTANT cause 310p needed
     compilation_config={"custom_ops":["+rms_norm", "+rotary_embedding"]}, # IMPORTANT cause 310p needed custom ops
@@ -198,12 +200,13 @@ clean_up()
    :substitutions:
 from vllm import LLM, SamplingParams
 import gc
-
+import os
 import torch
 
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import (destroy_distributed_environment,
                                              destroy_model_parallel)
+os.environ["VLLM_USE_V1"] = "1"
 
 def clean_up():
     destroy_model_parallel()
@@ -227,6 +230,7 @@ llm = LLM(
     max_num_seqs=4,
     trust_remote_code=True,
     tensor_parallel_size=2,
+    enforce_eager=True,
     dtype="float16", # IMPORTANT cause some ATB ops cannot support bf16 on 310P
     disable_custom_all_reduce=True, # IMPORTANT cause 310p needed
     compilation_config={"custom_ops":["+rms_norm", "+rotary_embedding"]}, # IMPORTANT cause 310p needed custom ops
