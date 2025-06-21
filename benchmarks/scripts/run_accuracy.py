@@ -27,7 +27,7 @@ import lm_eval
 import torch
 
 UNIMODAL_MODEL_NAME = ["Qwen/Qwen2.5-7B-Instruct", "Qwen/Qwen3-8B-Base"]
-UNIMODAL_TASK = ["ceval-valid", "gsm8k"]
+UNIMODAL_TASK = ["gsm8k"]
 MULTIMODAL_NAME = ["Qwen/Qwen2.5-VL-7B-Instruct"]
 MULTIMODAL_TASK = ["mmmu_val"]
 
