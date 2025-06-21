@@ -45,13 +45,6 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 
 Run the following script to start the vLLM server on NPU(Qwen3-0.6B:1 card, Qwen2.5-7B-Instruct:2 cards, Pangu-Pro-MoE-72B: 8 cards):
 
-One of the ways to download Pangu-Pro-MoE-72B:
-
-```bash
-git lfs install
-git clone https://gitcode.com/ascend-tribe/pangu-pro-moe-model.git
-```
-
 :::::{tab-set}
 ::::{tab-item} Qwen3-0.6B
 
@@ -98,6 +91,13 @@ python -m vllm.entrypoints.api_server \
 ::::
 
 ::::{tab-item} Pangu-Pro-MoE-72B
+
+One of the ways to download Pangu-Pro-MoE-72B:
+
+```bash
+git lfs install
+git clone https://gitcode.com/ascend-tribe/pangu-pro-moe-model.git
+```
 
 ```{code-block} bash
    :substitutions:
