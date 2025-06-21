@@ -42,6 +42,8 @@ class EplbUpdator:
         self.expert_map_initialized = False
         self.update_in_flight = False
 
+        self.gate_eplb = True
+
         self.reqs = []
         self.update_info_all = []
 
@@ -78,7 +80,10 @@ class EplbUpdator:
 
     def get_update_iteration(self):
         self.cur_iterations = self.cur_iterations + 1
-        return self.cur_iterations % self.num_iterations == 0
+        if not self.gate_eplb:
+            return self.cur_iterations % self.num_iterations == 0
+        else:
+            return return self.cur_iterations == self.num_iterations
 
     def get_init_expert_map(self):
         try:
@@ -92,7 +97,6 @@ class EplbUpdator:
         self.planner_block_queue.put(1)
 
     def forward_before(self):
-        self.get_init_expert_map()
 
         # Batch after eplb process being triggered, get update info provided by eplb process
         if self.update_in_flight and self.weight_update_counter == 0 and self.wait_worker_iterations == self.num_wait_worker_iterations:
@@ -159,6 +163,8 @@ class EplbUpdator:
 
     def warm_up_eplb(self):
 
+        self.get_init_expert_map()
+        
         self.compute_and_set_moe_load()
 
         src_tensor = torch.empty((1,), device=self.device)
