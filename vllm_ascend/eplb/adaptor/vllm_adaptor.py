@@ -14,15 +14,16 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-
+import os
+import json
 import torch
+import random
 import torch.distributed as dist
 import numpy as np
-import json
 
 from vllm_ascend.eplb.adaptor.abstract_adaptor import EplbAdaptor
 from vllm.logger import logger
-import random
+
 
 
 class VllmEplbAdaptor(EplbAdaptor):
@@ -30,12 +31,14 @@ class VllmEplbAdaptor(EplbAdaptor):
     def __init__(self, model, **args):
         super().__init__(**args)
         self.model = model
-        self.rank_id = torch.distributed.get_rank()
+        self.rank_id = dist.get_rank()
+        self.world_size = dist.get_world_size()
         self.param_dict = dict(self.model.named_parameters())
         self.num_dense_layers = self.model.config.first_k_dense_replace
         self.num_moe_layers = self.model.config.num_hidden_layers - self.num_dense_layers
         self.global_expert_num = self.model.config.n_routed_experts
 
+        
         # TODO: init self.expert_weight_names depending on different model types, only deepseek v3 w8a8 is supported here
         self.expert_weight_names = ["w13_weight", "w2_weight", "w13_weight_scale", "w13_weight_offset",
             "w2_weight_scale", "w2_weight_offset"]
@@ -149,10 +152,13 @@ class VllmEplbAdaptor(EplbAdaptor):
         return placement_global
 
     def get_init_expert_map_from_file(self, num_moe_layers, expert_map_path):
-        expert_map_tensor, layers_num, ranks_num = self._expert_file_to_tensor(expert_map_path)
-        expert_map_all = self.local2global(expert_map_tensor)
+        if os.path.exists(expert_map_path):
+            expert_map_tensor, layers_num, ranks_num = self._expert_file_to_tensor(expert_map_path)
+            expert_map_all = self.local2global(expert_map_tensor)
+        else:
+            expert_map_all = self.determine_expert_map_all()
         for layer_idx in range(num_moe_layers):
-            self.expert_map_per_layer_cpu[self.num_dense_layers + layer_idx] = \
+            self.expert_map_per_layer_cpu[layer_idx+3] = \
                 expert_map_all[layer_idx][self.rank_id]
         return expert_map_all
 
@@ -186,3 +192,54 @@ class VllmEplbAdaptor(EplbAdaptor):
     def do_update_log2phy_map(self, layer_id, updated_log2phy_map):
         if self.log2phy_map_per_layer[layer_id] is not None:
             self.log2phy_map_per_layer[layer_id].copy_(updated_log2phy_map[self.rank_id])
+
+    def local2global(self,
+        placement_local: torch.Tensor
+    ) -> torch.Tensor:
+
+        L, G, E_local = placement_local.shape
+        device = placement_local.device
+
+        max_id = torch.max(placement_local)
+        E_global = (max_id + 1).item() if max_id >= 0 else 0
+
+        if E_global == 0:
+            return torch.empty((L, G, 0), dtype=torch.long, device=device)
+
+        placement_global = torch.full((L, G, E_global),
+                                      fill_value=-1,
+                                      dtype=torch.long,
+                                      device=device)
+
+        valid = placement_local >= 0
+        l_idx, g_idx, slot_idx = valid.nonzero(as_tuple=True)
+        gid_idx = placement_local[l_idx, g_idx, slot_idx]
+
+        placement_global[l_idx, g_idx, gid_idx] = slot_idx
+
+        return placement_global
+
+    def determine_expert_map_all(self):
+
+        local_num_experts  = self.global_expert_num // self.world_size
+
+        expert_map_all = torch.full(
+            (self.num_moe_layers, self.world_size, self.global_expert_num),
+            -1,
+            dtype=torch.int32
+        )
+
+        for r in range(self.world_size):
+            if r < self.world_size - 1:
+                start = r * local_num_experts 
+                end   = (r + 1) * local_num_experts 
+                local_count = local_num_experts 
+            else:
+                start = r * local_num_experts 
+                end   = self.global_expert_num
+                local_count = self.global_expert_num - r * local_num_experts 
+
+            local_ids = torch.arange(local_count, dtype=torch.int32)
+            expert_map_all[:, r, start:end] = local_ids.unsqueeze(0).expand(self.num_moe_layers, -1)
+
+        return expert_map_all

@@ -83,7 +83,7 @@ class EplbUpdator:
         if not self.gate_eplb:
             return self.cur_iterations % self.num_iterations == 0
         else:
-            return return self.cur_iterations == self.num_iterations
+            return self.cur_iterations == self.num_iterations
 
     def get_init_expert_map(self):
         try:
