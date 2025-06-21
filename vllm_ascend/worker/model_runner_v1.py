@@ -74,9 +74,7 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
 from vllm_ascend.attention.mla_v1 import CommonAttentionMetadata
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               ProfileExecuteDuration, is_310p,
-                               vllm_version_is)
+from vllm_ascend.utils import ProfileExecuteDuration, vllm_version_is
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 
@@ -1913,8 +1911,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         """
         self.kv_cache_config = kv_cache_config
         import torch_npu
-        acl_format = ACL_FORMAT_FRACTAL_NZ if is_310p(
-        ) else ACL_FORMAT_FRACTAL_ND
         kv_caches: Dict[str, torch.Tensor] = {}
 
         self.input_batch = InputBatch(
@@ -1972,18 +1968,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             device=self.device)
                         kv_caches[layer_name] = (layer_kv_cache_nope,
                                                  layer_kv_cache_pe)
-                        kv_caches[layer_name] = (
-                            torch_npu.npu_format_cast(kv_caches[layer_name][0],
-                                                      acl_format),
-                            torch_npu.npu_format_cast(kv_caches[layer_name][1],
-                                                      acl_format),
-                        )
+                        torch_npu.npu_format_cast(kv_caches[layer_name][0], 2)
+                        torch_npu.npu_format_cast(kv_caches[layer_name][1], 2)
                     else:
                         kv_caches[layer_name] = torch.zeros(kv_cache_shape,
                                                             dtype=dtype,
                                                             device=self.device)
-                        kv_caches[layer_name] = \
-                            torch_npu.npu_format_cast(kv_caches[layer_name], acl_format)
+                        torch_npu.npu_format_cast(kv_caches[layer_name], 2)
                 else:
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.

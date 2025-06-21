@@ -22,7 +22,7 @@ import torch
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 
-from vllm_ascend.utils import enable_custom_op, is_310p
+from vllm_ascend.utils import enable_custom_op
 
 
 def custom_rotary_embedding_enabled(query, neox_style, head_size):
@@ -48,8 +48,7 @@ def rope_forward_oot(
     if is_neox_style_override is not None:
         neox_style = is_neox_style_override
     # adopt custom kernel path for rotary_embedding
-    if custom_rotary_embedding_enabled(query, neox_style,
-                                       self.head_size) and not is_310p():
+    if custom_rotary_embedding_enabled(query, neox_style, self.head_size):
         query, key = torch.ops._C.rotary_embedding(
             positions,
             query,
