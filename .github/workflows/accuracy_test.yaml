@@ -22,6 +22,9 @@
 name: Benchmarks / accuracy
 
 on:
+  schedule:
+    # Runs every 6 hours
+    - cron:  '0 */6 * * *'
   pull_request:
     types: [ labeled ]
   workflow_dispatch:
@@ -43,6 +46,7 @@ on:
         options:
           - main
           - v0.7.3-dev
+          - v0.9.1-dev
       models:
         description: 'model:'
         required: true
@@ -75,7 +79,7 @@ jobs:
       contains(github.event.pull_request.labels.*.name, 'vl-accuracy-test') ||
       contains(github.event.pull_request.labels.*.name, 'dense-accuracy-test')) &&
       contains(github.event.pull_request.labels.*.name, 'ready-for-test') ||
-      github.event_name == 'workflow_dispatch'
+      github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
       }}
     runs-on: >-
       ${{
@@ -94,6 +98,8 @@ jobs:
         #   - dense-accuracy-test: Qwen/Qwen2.5-7B-Instruct
         #   - vl-accuracy-test: Qwen/Qwen2.5-VL-7B-Instruct
         model_name: ${{ fromJSON(
+          (github.event_name == 'schedule' &&
+            '["Qwen/Qwen2.5-7B-Instruct","Qwen/Qwen2.5-VL-7B-Instruct","Qwen/Qwen3-8B-Base"]') ||
           (github.event.inputs.models == 'all' &&
             '["Qwen/Qwen2.5-7B-Instruct","Qwen/Qwen2.5-VL-7B-Instruct","Qwen/Qwen3-8B-Base"]') ||
           (github.event.inputs.models == 'Qwen/Qwen2.5-7B-Instruct' &&
@@ -103,9 +109,9 @@ jobs:
           (github.event.inputs.models == 'Qwen/Qwen3-8B-Base' &&
             '["Qwen/Qwen3-8B-Base"]') ||
           contains(github.event.pull_request.labels.*.name, 'accuracy-test') &&
-            '["Qwen/Qwen2.5-7B-Instruct","Qwen/Qwen2.5-VL-7B-Instruct"]' ||
+            '["Qwen/Qwen3-8B-Base","Qwen/Qwen2.5-VL-7B-Instruct"]' ||
           contains(github.event.pull_request.labels.*.name, 'dense-accuracy-test') &&
-            '["Qwen/Qwen2.5-7B-Instruct"]' ||
+            '["Qwen/Qwen3-8B-Base"]' ||
           contains(github.event.pull_request.labels.*.name, 'vl-accuracy-test') &&
             '["Qwen/Qwen2.5-VL-7B-Instruct"]'
          ) }}
@@ -181,7 +187,7 @@ jobs:
 
       - name: Install lm-eval, ray, and datasets
         run: |
-            pip install lm-eval
+            pip install lm-eval==0.4.8
 
       - name: Collect version info
         run: |
