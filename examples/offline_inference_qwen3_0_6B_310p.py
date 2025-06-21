@@ -17,12 +17,13 @@
 # Adapted from vllm-project/vllm/examples/offline_inference/basic.py
 #
 import gc
-
 import torch
 
 from vllm import LLM, SamplingParams
-from vllm.distributed.parallel_state import (destroy_distributed_environment,
-                                             destroy_model_parallel)
+from vllm.distributed.parallel_state import (
+    destroy_distributed_environment,
+    destroy_model_parallel,
+)
 
 def clean_up():
     destroy_model_parallel()
