@@ -122,12 +122,39 @@ class VllmEplbAdaptor(EplbAdaptor):
 
         return all_expert_maps
 
+    def local2global(self,
+        placement_local: torch.Tensor
+    ) -> torch.Tensor:
+
+        L, G, E_local = placement_local.shape
+        device = placement_local.device
+
+        max_id = torch.max(placement_local)
+        E_global = (max_id + 1).item() if max_id >= 0 else 0
+
+        if E_global == 0:
+            return torch.empty((L, G, 0), dtype=torch.long, device=device)
+
+        placement_global = torch.full((L, G, E_global),
+                                      fill_value=-1,
+                                      dtype=torch.long,
+                                      device=device)
+
+        valid = placement_local >= 0
+        l_idx, g_idx, slot_idx = valid.nonzero(as_tuple=True)
+        gid_idx = placement_local[l_idx, g_idx, slot_idx]
+
+        placement_global[l_idx, g_idx, gid_idx] = slot_idx
+
+        return placement_global
+
     def get_init_expert_map_from_file(self, num_moe_layers, expert_map_path):
         expert_map_tensor, layers_num, ranks_num = self._expert_file_to_tensor(expert_map_path)
+        expert_map_all = self.local2global(expert_map_tensor)
         for layer_idx in range(num_moe_layers):
-            self.expert_map_per_layer_cpu[layer_idx] = \
+            self.expert_map_per_layer_cpu[self.num_dense_layers + layer_idx] = \
                 expert_map_tensor[layer_idx][self.rank_id]
-        return expert_map_tensor
+        return expert_map_all
 
     def _expert_file_to_tensor(self, expert_map_path: str):
         with open(expert_map_path, "r") as f:
