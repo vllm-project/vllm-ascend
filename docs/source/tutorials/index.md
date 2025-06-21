@@ -8,4 +8,5 @@ single_npu_multimodal
 multi_npu
 multi_npu_quantization
 multi_node
+310p
 :::
