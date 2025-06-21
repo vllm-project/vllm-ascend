@@ -105,7 +105,7 @@ jobs:
           contains(github.event.pull_request.labels.*.name, 'accuracy-test') &&
             '["Qwen/Qwen2.5-7B-Instruct","Qwen/Qwen2.5-VL-7B-Instruct"]' ||
           contains(github.event.pull_request.labels.*.name, 'dense-accuracy-test') &&
-            '["Qwen/Qwen2.5-7B-Instruct"]' ||
+            '["Qwen/Qwen3-8B-Base"]' ||
           contains(github.event.pull_request.labels.*.name, 'vl-accuracy-test') &&
             '["Qwen/Qwen2.5-VL-7B-Instruct"]'
          ) }}
