@@ -38,8 +38,7 @@ Download the model:
 
 ```bash
 git lfs install
-# NOTE: update the link after pangu model repo is public
-git clone https://gitcode.com/xxx.git
+git clone https://gitcode.com/ascend-tribe/pangu-pro-moe-model.git
 ```
 
 ### Online Inference on Multi-NPU
