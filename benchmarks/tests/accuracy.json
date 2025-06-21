@@ -1,0 +1,28 @@
+{
+    "0":{
+        "Qwen/Qwen2.5-7B-Instruct" :{
+            "ceval-valid": 0.80,
+            "gsm8k": 0.72
+        },
+        "Qwen/Qwen3-8B-Base":{
+            "ceval-valid": 0.82,
+            "gsm8k": 0.83
+        },
+        "Qwen/Qwen2.5-VL-7B-Instruct":{
+            "mmmu_val": 0.51
+        }
+    },
+    "1":{
+        "Qwen/Qwen2.5-7B-Instruct" :{
+            "ceval-valid": 0.80,
+            "gsm8k": 0.72
+        },
+        "Qwen/Qwen3-8B-Base":{
+            "ceval-valid": 0.82,
+            "gsm8k": 0.83
+        },
+        "Qwen/Qwen2.5-VL-7B-Instruct":{
+            "mmmu_val": 0.52
+        }
+    }
+}
