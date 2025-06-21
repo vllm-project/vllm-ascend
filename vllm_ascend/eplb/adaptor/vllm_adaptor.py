@@ -18,6 +18,7 @@
 import torch
 import torch.distributed as dist
 import numpy as np
+import json
 
 from vllm_ascend.eplb.adaptor.abstract_adaptor import EplbAdaptor
 from vllm.logger import logger
@@ -126,7 +127,7 @@ class VllmEplbAdaptor(EplbAdaptor):
         for layer_idx in range(num_moe_layers):
             self.expert_map_per_layer_cpu[layer_idx] = \
                 expert_map_tensor[layer_idx][self.rank_id]
-    
+
     def _expert_file_to_tensor(self, expert_map_path: str):
         with open(expert_map_path, "r") as f:
             data = json.load(f)
