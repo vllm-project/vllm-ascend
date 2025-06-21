@@ -105,7 +105,7 @@ jobs:
           contains(github.event.pull_request.labels.*.name, 'accuracy-test') &&
             '["Qwen/Qwen2.5-7B-Instruct","Qwen/Qwen2.5-VL-7B-Instruct"]' ||
           contains(github.event.pull_request.labels.*.name, 'dense-accuracy-test') &&
-            '["Qwen/Qwen2.5-7B-Instruct"]' ||
+            '["Qwen/Qwen3-8B-Base"]' ||
           contains(github.event.pull_request.labels.*.name, 'vl-accuracy-test') &&
             '["Qwen/Qwen2.5-VL-7B-Instruct"]'
          ) }}
@@ -169,7 +169,8 @@ jobs:
         with:
           repository: vllm-project/vllm-ascend
           path: ./vllm-ascend
-          ref: ${{ env.GHA_VLLM_ASCEND_VERSION }}
+          # 69b817ed654b9dbff9e614c69752c2b76d9fe7d7 wrong
+          ref: ab5d110fcc35ca11330977450141b1d7176f21e7
 
       - name: Install vllm-project/vllm-ascend
         working-directory: ./vllm-ascend

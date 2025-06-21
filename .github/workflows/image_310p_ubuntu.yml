@@ -39,6 +39,7 @@ on:
 jobs:
 
   build:
+    if: false
     name: vllm-ascend image build
     runs-on: ubuntu-latest
 
