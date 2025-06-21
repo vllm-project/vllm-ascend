@@ -105,16 +105,25 @@ class VllmEplbAdaptor(EplbAdaptor):
         moe_load.scatter_add_(dim=1, index=ids2d, src=ones2d)
         return moe_load
 
-    def get_init_expert_map_from_file(self, num_moe_layers, expert_map_path):
-        if os.path.exists(expert_map_path):
-            expert_map_tensor, layers_num, ranks_num = self._expert_file_to_tensor(expert_map_path)
-            expert_map_all = self.local2global(expert_map_tensor)
-        else:
-            expert_map_all = self.determine_expert_map_all()
+    def get_init_expert_map(self, num_moe_layers):
+        expert_map = self.model.get_all_expert_map(num_moe_layers)
+        if dist.is_initialized():
+            world_size = dist.get_world_size()
+            rank = dist.get_rank()
+
+        gathered = torch.empty((world_size, *expert_map.shape),  # [W, L, E]
+            dtype=expert_map.dtype,
+            device=expert_map.device)
+
+        dist.all_gather_into_tensor(gathered, expert_map)
+        all_maps = gathered.permute(1, 0, 2)
+        all_expert_maps = all_maps.cpu()
+
         for layer_idx in range(num_moe_layers):
-            self.expert_map_per_layer_cpu[layer_idx+3] = \
-                expert_map_all[layer_idx][self.rank_id]
-        return expert_map_all
+            self.expert_map_per_layer_cpu[self.num_dense_layers + layer_idx] = \
+                all_expert_maps[layer_idx][self.rank_id]
+
+        return all_expert_maps
 
     def local2global(self,
         placement_local: torch.Tensor
