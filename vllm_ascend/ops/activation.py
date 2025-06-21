@@ -18,11 +18,16 @@
 import torch
 from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
 
+from vllm_ascend.utils import is_310p
+
 
 def silu_and_mul_forward_oot(self, x: torch.Tensor) -> torch.Tensor:
     import torch_npu
 
-    out = torch_npu.npu_swiglu(x)
+    if is_310p():
+        out = torch_npu.npu_swiglu(x.to(torch.float32)).to(torch.float16)
+    else:
+        out = torch_npu.npu_swiglu(x)
     return out
 
 

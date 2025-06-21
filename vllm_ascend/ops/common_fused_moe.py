@@ -21,7 +21,9 @@ import torch
 from vllm.model_executor.layers.fused_moe.layer import \
     UnquantizedFusedMoEMethod
 
-from vllm_ascend.ops.fused_moe import fused_experts, select_experts
+from vllm_ascend.ops.fused_moe import (fused_experts, fused_experts_310p,
+                                       select_experts)
+from vllm_ascend.utils import is_310p
 
 
 def forward_oot(
@@ -55,6 +57,19 @@ def forward_oot(
         scoring_func=scoring_func,
         e_score_correction_bias=e_score_correction_bias,
     )
+
+    if is_310p():
+        assert global_num_experts is not None
+        return fused_experts_310p(
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            top_k=top_k,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            apply_router_weight_on_input=apply_router_weight_on_input)
 
     return fused_experts(
         hidden_states=x,

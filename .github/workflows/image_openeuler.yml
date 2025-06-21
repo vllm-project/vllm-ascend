@@ -94,7 +94,7 @@ jobs:
         username: ${{ vars.QUAY_USERNAME }}
         password: ${{ secrets.QUAY_PASSWORD }}
 
-    - name: Build and push
+    - name: Build and push 910b
       uses: docker/build-push-action@v6
       with:
         platforms: >-

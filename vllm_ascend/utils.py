@@ -21,11 +21,12 @@ import atexit
 import math
 from contextlib import contextmanager, nullcontext
 from enum import Enum
+from functools import lru_cache
 from threading import Lock
 from typing import TYPE_CHECKING, List, Tuple
 
 import torch
-import torch_npu  # noqa: F401
+import torch_npu  # noqa: F401  # noqa: F401
 import torchair  # type: ignore[import]  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
@@ -56,6 +57,116 @@ MAX_CAPTURE_SIZE = 1920
 ASCEND_QUATIZATION_METHOD = "ascend"
 
 CUSTOM_OP_ENABLED = None
+
+SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
+
+ACL_FORMAT_FRACTAL_ND = 2
+ACL_FORMAT_FRACTAL_NZ = 29
+
+
+@lru_cache(maxsize=None)
+def _get_soc_version():
+    """Gets the SOC version and caches it."""
+    if not torch.npu.is_available():
+        return ""
+    device_count = torch.npu.device_count()
+    if device_count <= 0:
+        return ""
+    try:
+        return torch.npu.get_device_name(0)
+    except Exception:
+        return ""
+
+
+_SOC_VERSION = _get_soc_version()
+
+
+def is_310p():
+    return _SOC_VERSION in SOC_VERSION_INFERENCE_SERIES
+
+
+class NullHandle:
+
+    def __init__(self):
+        pass
+
+    def wait(self):
+        pass
+
+
+def _round_up(x: int, align: int):
+    if align == 0:
+        return -1
+    return (x + align - 1) // align * align
+
+
+def _custom_pad(x, pad_dims):
+    return torch.nn.functional.pad(x, pad_dims)
+
+
+def _custom_reshape(x, target_shape):
+    return x.reshape(target_shape)
+
+
+def _custom_transpose(x, dim1, dim2):
+    return x.transpose(dim1, dim2)
+
+
+def nd_to_nz_2d(in_tensor: torch.Tensor) -> torch.Tensor:
+    aux_dims = [0, 0, 0, 0]
+    aux_dims[0] = 1
+    aux_dims[1] = _round_up(in_tensor.size(0), 16)
+
+    pad_dims = [0, 0, 0, 0]
+    pad_dims[3] = _round_up(in_tensor.size(0), 16) - in_tensor.size(0)
+
+    aux_dims[2] = _round_up(in_tensor.size(1), 16) // 16
+    aux_dims[3] = 16
+    pad_dims[1] = _round_up(in_tensor.size(1), 16) - in_tensor.size(1)
+
+    return _custom_transpose(
+        _custom_reshape(_custom_pad(in_tensor, pad_dims), aux_dims), 1,
+        2).contiguous()
+
+
+def nd_to_nz_spec(mask_tensor: torch.Tensor) -> torch.Tensor:
+    num_tokens = mask_tensor.shape[0]
+    max_seq_len = mask_tensor.shape[1]
+
+    tokens_pad = (num_tokens + 15) // 16 * 16
+    max_seq_len_pad = (max_seq_len + 15) // 16 * 16
+
+    mask_tensor_pad = \
+        torch.zeros((1, tokens_pad, max_seq_len_pad), dtype=mask_tensor.dtype, device=mask_tensor.device)
+    mask_tensor_pad[0][:num_tokens, :max_seq_len] = mask_tensor
+    mask = mask_tensor_pad.reshape(
+        (1, tokens_pad, max_seq_len_pad // 16, 16)).permute(0, 2, 1, 3)
+    return mask
+
+
+def aligned_16(tensor: torch.Tensor):
+    """Aligned tensor for 310P"""
+
+    # Get the size of the current 0th dimension
+    n = tensor.size(0)
+
+    # Calculate the aligned size
+    n_aligned = ((n + 15) // 16) * 16
+
+    # If already aligned, return the original tensor
+    if n == n_aligned:
+        return tensor
+
+    # Create a new tensor with shape (n_aligned, H, W) and fill it with zeros
+    new_tensor = torch.zeros(n_aligned,
+                             *tensor.shape[1:],
+                             dtype=tensor.dtype,
+                             device=tensor.device)
+
+    # Copy the original tensor to the first N positions of the new tensor
+    new_tensor[:n] = tensor
+
+    return new_tensor
 
 
 def try_register_lib(lib_name: str, lib_info: str = ""):
