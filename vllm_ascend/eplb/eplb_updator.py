@@ -214,9 +214,20 @@ class EplbUpdator:
         return recovered
 
     def get_expert_load(self) -> str:
-        """todo 确认moe_load的值是什么类型"""
-        # return '{"a":"b"}' # mock
-        return self.shared_dict['moe_load']
+
+        # todo wjh 给到返回值
+        # return self.shared_dict['moe_load']
+        # mock json_str
+        experts_load = ('{\"expert_load\":['
+                        '{\"ip\":\"141.xxx.xxx.181\",'
+                        '\"node_0\":'
+                        '{\"card_0\":'
+                        '[{\"layer_4\":{\"expert_0\":3,\"expert_2\":1}},{\"layer_5\":{\"expert_0\":3,\"expert_2\":1}}],'
+                        '\"card_1\":[{\"layer_4\":{\"expert_1\":3,\"expert_3\":1},\"layer_5\":{\"expert_0\":3,\"'
+                        'expert_2\":1}}]}},{\"ip\":\"141.xxx.xxx.177\",\"node_0\":{\"card_0\":[{\"layer_4\":'
+                        '{\"expert_0\":3,\"expert_2\":1}},{\"layer_5\":{\"expert_0\":3,\"expert_2\":1}}],'
+                        '\"card_1\":[{\"layer_4\":{\"expert_1\":3,\"expert_3\":1}}]}}]}')
+        return experts_load
 
     def shutdown(self):
         """
