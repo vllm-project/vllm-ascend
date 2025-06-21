@@ -43,6 +43,7 @@ on:
       - '**/*.py'
       - '.github/workflows/vllm_ascend_test.yaml'
       - '!docs/**'
+      - '!examples/**'
       - 'pytest.ini'
       - '!benchmarks/**'
       - 'tools/mypy.sh'
