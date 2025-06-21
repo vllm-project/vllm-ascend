@@ -30,11 +30,16 @@ docker run --rm \
 Setup environment variables:
 
 ```bash
-# Load model from ModelScope to speed up download
-export VLLM_USE_MODELSCOPE=True
-
 # Set `max_split_size_mb` to reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
+```
+
+Download the model:
+
+```bash
+git lfs install
+# NOTE: update the link after pangu model repo is public
+git clone https://gitcode.com/xxx.git
 ```
 
 ### Online Inference on Multi-NPU
@@ -44,9 +49,6 @@ Run the following script to start the vLLM server on Multi-NPU:
 ```bash
 vllm serve /path/to/pangu-pro-moe-model \
 --tensor-parallel-size 4 \
---swap-space 16 \
---disable-log-stats \
---disable-log-requests \
 --trust-remote-code \
 --enforce-eager
 ```
@@ -57,7 +59,7 @@ Once your server is started, you can query the model with input prompts:
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
-        "model": "/root/.cache/pangu-pro-moe-model",
+        "model": "/path/to/pangu-pro-moe-model",
         "prompt": "The future of AI is",
         "max_tokens": 128,
         "temperature": 0
@@ -67,7 +69,7 @@ curl http://localhost:8000/v1/completions \
 If you run this successfully, you can see the info shown below:
 
 ```json
-{"id":"cmpl-013558085d774d66bf30c704decb762a","object":"text_completion","created":1750472788,"model":"/root/.cache/pangu-pro-moe-model","choices":[{"index":0,"text":" not just about creating smarter machines but about fostering collaboration between humans and AI systems. This partnership can lead to more efficient problem-solving, innovative solutions, and a better quality of life for people around the globe.\n\nHowever, achieving this future requires addressing several challenges. Ethical considerations, such as bias in AI algorithms and privacy concerns, must be prioritized. Additionally, ensuring that AI technologies are accessible to all and do not exacerbate existing inequalities is crucial.\n\nIn conclusion, AI stands at the forefront of technological advancement, with vast potential to transform industries and everyday life. By embracing its opportunities while responsibly managing its risks, we can harn","logprobs":null,"finish_reason":"length","stop_reason":null,"prompt_logprobs":null}],"usage":{"prompt_tokens":6,"total_tokens":134,"completion_tokens":128,"prompt_tokens_details":null},"kv_transfer_params":null}
+{"id":"cmpl-013558085d774d66bf30c704decb762a","object":"text_completion","created":1750472788,"model":"/path/to/pangu-pro-moe-model","choices":[{"index":0,"text":" not just about creating smarter machines but about fostering collaboration between humans and AI systems. This partnership can lead to more efficient problem-solving, innovative solutions, and a better quality of life for people around the globe.\n\nHowever, achieving this future requires addressing several challenges. Ethical considerations, such as bias in AI algorithms and privacy concerns, must be prioritized. Additionally, ensuring that AI technologies are accessible to all and do not exacerbate existing inequalities is crucial.\n\nIn conclusion, AI stands at the forefront of technological advancement, with vast potential to transform industries and everyday life. By embracing its opportunities while responsibly managing its risks, we can harn","logprobs":null,"finish_reason":"length","stop_reason":null,"prompt_logprobs":null}],"usage":{"prompt_tokens":6,"total_tokens":134,"completion_tokens":128,"prompt_tokens_details":null},"kv_transfer_params":null}
 ```
 
 ### Offline Inference on Multi-NPU
