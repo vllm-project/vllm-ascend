@@ -152,10 +152,13 @@ class VllmEplbAdaptor(EplbAdaptor):
         return placement_global
 
     def get_init_expert_map_from_file(self, num_moe_layers, expert_map_path):
-        expert_map_tensor, layers_num, ranks_num = self._expert_file_to_tensor(expert_map_path)
-        expert_map_all = self.local2global(expert_map_tensor)
+        if os.path.exists(expert_map_path):
+            expert_map_tensor, layers_num, ranks_num = self._expert_file_to_tensor(expert_map_path)
+            expert_map_all = self.local2global(expert_map_tensor)
+        else:
+            expert_map_all = self.determine_expert_map_all()
         for layer_idx in range(num_moe_layers):
-            self.expert_map_per_layer_cpu[self.num_dense_layers + layer_idx] = \
+            self.expert_map_per_layer_cpu[layer_idx+3] = \
                 expert_map_all[layer_idx][self.rank_id]
         return expert_map_all
 
