@@ -26,7 +26,7 @@ vllm serve model_path \
   "kv_parallel_size": 1,
   "kv_port": "20001",
   "engine_id": 0,
-  "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_connector_v1_a3"
+  "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
   '{"enable_graph_mode": "True"}'\
