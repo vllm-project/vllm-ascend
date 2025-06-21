@@ -140,6 +140,8 @@ Run the following script to execute offline inference on NPU:
 :::::{tab-set}
 ::::{tab-item} Qwen3-0.6B
 
+```{code-block} python
+   :substitutions:
 from vllm import LLM, SamplingParams
 import gc
 
@@ -185,10 +187,14 @@ for output in outputs:
 
 del llm
 clean_up()
+```
+
 ::::
 
 ::::{tab-item} Qwen2.5-7B-Instruct
 
+```{code-block} python
+   :substitutions:
 from vllm import LLM, SamplingParams
 import gc
 
@@ -234,10 +240,13 @@ for output in outputs:
 
 del llm
 clean_up()
+```
+
 ::::
 
 ::::{tab-item} Pangu-72B-MoE
-
+```{code-block} python
+   :substitutions:
 import gc
 import os
 import torch
@@ -298,6 +307,8 @@ if __name__ == "__main__":
 
     del llm
     clean_up()
+```
+
 ::::
 :::::
 
