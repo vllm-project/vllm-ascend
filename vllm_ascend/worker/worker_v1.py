@@ -77,9 +77,10 @@ class NPUWorker(WorkerBase):
 
         # NOTE(Yizhou): Since we do not set ASCEND_RT_VISIBLE_DEVICES in
         # vllm_ascend, we need to set the device id manually.
-        local_dp_rank = self.vllm_config.parallel_config.data_parallel_rank_local
-        world_size = self.vllm_config.parallel_config.world_size
-        self.local_rank_across_dp = local_dp_rank * world_size + self.local_rank
+        # local_dp_rank = self.vllm_config.parallel_config.data_parallel_rank_local
+        # world_size = self.vllm_config.parallel_config.world_size
+        # self.local_rank_across_dp = local_dp_rank * world_size + self.local_rank
+        # print(self.local_rank_across_dp, local_dp_rank, world_size, self.local_rank)
 
         # Try to import mindie_turbo to accelerate vLLM inference.
         try_register_lib(
@@ -119,7 +120,8 @@ class NPUWorker(WorkerBase):
 
     def init_device(self):
         if self.device_config.device.type == "npu":
-            self.device = torch.device(f"npu:{self.local_rank_across_dp}")
+            # self.device = torch.device(f"npu:{self.local_rank_across_dp}")
+            self.device = torch.device(f"npu:{self.local_rank}")
             NPUPlatform.set_device(self.device)
             NPUPlatform.empty_cache()
             self.init_npu_memory = NPUPlatform.mem_get_info()[0]

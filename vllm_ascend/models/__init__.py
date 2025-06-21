@@ -40,9 +40,14 @@ def register_model():
             "DeepseekV2ForCausalLM",
             "vllm_ascend.models.deepseek_v2:CustomDeepseekV2ForCausalLM")
 
-    ModelRegistry.register_model(
-        "DeepseekV3ForCausalLM",
-        "vllm_ascend.models.deepseek_v2:CustomDeepseekV3ForCausalLM")
+    if envs.VLLM_ASCEND_ENABLE_DBO:
+        ModelRegistry.register_model(
+            "DeepseekV3ForCausalLM",
+            "vllm_ascend.models.deepseek_dbo:CustomDeepseekDBOForCausalLM")
+    else:
+        ModelRegistry.register_model(
+            "DeepseekV3ForCausalLM",
+            "vllm_ascend.models.deepseek_v2:CustomDeepseekV3ForCausalLM")
 
     ModelRegistry.register_model(
         "Qwen3MoeForCausalLM",

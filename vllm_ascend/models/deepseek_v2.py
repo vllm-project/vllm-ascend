@@ -274,7 +274,7 @@ class CustomDeepseekV2MoE(nn.Module):
             router_logits=router_logits,
             is_prefill=is_prefill,
             top_k=CustomDeepseekV2MoE.top_k,
-            enable_force_load_balance=enable_force_load_balance,
+            enable_force_load_balance=True,
             **kwargs)
 
         if multistream:

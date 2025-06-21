@@ -89,11 +89,12 @@ def _init_data_parallel(self, vllm_config: VllmConfig):
     assert 0 <= local_dp_rank <= dp_rank < dp_size
 
     self.local_dp_rank = local_dp_rank
+    self.dp_rank = dp_rank
     self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
     self.current_wave = 0
 
 
 vllm.distributed.parallel_state.destroy_model_parallel = ascend_destroy_model_parallel
-DPEngineCoreProc._init_data_parallel = _init_data_parallel
+# DPEngineCoreProc._init_data_parallel = _init_data_parallel
 ParallelConfig.get_next_dp_init_port = parallel_config_get_dp_port
 ParallelConfig.stateless_init_dp_group = stateless_init_dp_group
