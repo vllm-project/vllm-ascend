@@ -153,7 +153,7 @@ class VllmEplbAdaptor(EplbAdaptor):
         expert_map_all = self.local2global(expert_map_tensor)
         for layer_idx in range(num_moe_layers):
             self.expert_map_per_layer_cpu[self.num_dense_layers + layer_idx] = \
-                expert_map_tensor[layer_idx][self.rank_id]
+                expert_map_all[layer_idx][self.rank_id]
         return expert_map_all
 
     def _expert_file_to_tensor(self, expert_map_path: str):
