@@ -58,7 +58,8 @@ def test_run_with_ascend_config():
             "use_cached_graph": True,
             "graph_batch_sizes": [1, 2, 4, 8],
             "graph_batch_sizes_init": False,
-            "enable_multistream_shared_expert": True,
+            "enable_multistream_moe": True,
+            "enable_multistream_mla": True,
         },
         "ascend_scheduler_config": {
             "enabled": True,
@@ -79,7 +80,8 @@ def test_run_with_ascend_config():
             1, 2, 4, 8
         ]
         assert not ascend_config.torchair_graph_config.graph_batch_sizes_init
-        assert ascend_config.torchair_graph_config.enable_multistream_shared_expert
+        assert ascend_config.torchair_graph_config.enable_multistream_mla
+        assert ascend_config.torchair_graph_config.enable_multistream_moe
         assert ascend_config.ascend_scheduler_config.enabled
         assert ascend_config.ascend_scheduler_config.enable_chunked_prefill
         assert ascend_config.expert_tensor_parallel_size == 1
