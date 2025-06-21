@@ -127,21 +127,23 @@ class VllmEplbAdaptor(EplbAdaptor):
         for layer_idx in range(num_moe_layers):
             self.expert_map_per_layer_cpu[layer_idx] = \
                 expert_map_tensor[layer_idx][self.rank_id]
+        return expert_map_tensor
 
     def _expert_file_to_tensor(self, expert_map_path: str):
         with open(expert_map_path, "r") as f:
             data = json.load(f)
-        layers_num = data["moe_layer_count"]
-        gpus_num = data["layer_list"][0]["device_count"]
+            layers_num = data["moe_layer_count"]
+            gpus_num = data["layer_list"][0]["device_count"]
 
-        tensor_data = []
-        for layer in data["layer_list"]:
-            device_data = []
-            for device in layer["device_list"]:
-                device_data.append(device["device_expert"])
-            tensor_data.append(device_data)
-        expert_map_tensor = torch.tensor(tensor_data, dtype=torch.int32)
-        return expert_map_tensor, layers_num, gpus_num
+            tensor_data = []
+            for layer in data["layer_list"]:
+                device_data = []
+                for device in layer["device_list"]:
+                    device_data.append(device["device_expert"])
+                tensor_data.append(device_data)
+            expert_map_tensor = torch.tensor(tensor_data, dtype=torch.int32)
+            return expert_map_tensor, layers_num, gpus_num
+        logger.error(f"failed to read expert_map_path: {expert_map_path}")
 
     def do_update_expert_map(self, layer_id, updated_expert_map):
         self.expert_map_per_layer[layer_id].copy_(updated_expert_map)
