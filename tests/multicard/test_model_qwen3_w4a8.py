@@ -57,7 +57,7 @@ def test_qwen3_model_with_w4a8_linear_method(model: str,
     )
     golden_outputs = [
         "Hello! My name is Qwen, and I'm a large language model developed",
-        "The future of AI is a topic of immense interest and debate, with a wide",
+        "The future of AI is a topic of great interest, discussion, and optimism.",
     ]
     assert len(vllm_outputs) == len(golden_outputs)
     for vllm_output, golden_output in zip(vllm_outputs, golden_outputs):
