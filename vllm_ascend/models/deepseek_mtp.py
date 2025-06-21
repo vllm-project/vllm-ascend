@@ -139,7 +139,7 @@ class CustomDeepSeekMultiTokenPredictor(DeepSeekMultiTokenPredictor):
     ) -> torch.Tensor:
         current_step_idx = (spec_step_idx % self.num_mtp_layers)
         step_kv_cache = kv_caches[
-            current_step_idx] if kv_caches is not None else None
+            61] if kv_caches is not None else None
         return self.layers_list[current_step_idx](
             input_ids,
             positions,
