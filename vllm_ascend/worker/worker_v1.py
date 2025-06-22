@@ -215,7 +215,6 @@ class NPUWorker(WorkerBase):
         return moe_load
 
     def update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
-        logger.info("lt - ascend begin update update_expert_load_statistical_period")
         self.model_runner.do_update_expert_load_statistical_period(num_expert_load_gather, num_iterations)
 
     def get_model(self) -> nn.Module:

@@ -244,7 +244,7 @@ class EplbUpdator:
                         '\"card_1\":[{\"layer_4\":{\"expert_1\":3,\"expert_3\":1}}]}}]}')
         return experts_load
 
-    def do_update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
+    def update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
         logger.info(f" start update {self.num_expert_load_gather=}, {self.num_iterations}...")
         self.num_expert_load_gather = num_expert_load_gather
         self.num_iterations = num_iterations
