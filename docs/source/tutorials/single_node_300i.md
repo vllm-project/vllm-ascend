@@ -43,7 +43,7 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 
 ### Online Inference on NPU
 
-Run the following script to start the vLLM server on NPU(Qwen3-0.6B:1 card, Qwen2.5-7B-Instruct:2 cards, Pangu-Pro-MoE-72B: 8 cards):
+Run the following script to start the vLLM server on NPU(Qwen3-0.6B:1 card, Qwen2.5-7B-Instruct:2 cards):
 
 :::::{tab-set}
 ::::{tab-item} Qwen3-0.6B
@@ -90,30 +90,6 @@ python -m vllm.entrypoints.api_server \
 ```
 ::::
 
-::::{tab-item} Pangu-Pro-MoE-72B
-
-```{code-block} bash
-   :substitutions:
-# Update the MODEL
-export MODEL="/path/to/pangu-pro-moe-model"
-export VLLM_USE_V1=1
-python -m vllm.entrypoints.api_server \
-    --model $MODEL \
-    --tensor-parallel-size 8 \
-    --max-num-batched-tokens 2048 \
-    --gpu-memory-utilization 0.5 \
-    --max-num-seqs 4 \
-    --enforce-eager \
-    --trust-remote-code \
-    --max-model-len 1024 \
-    --disable-custom-all-reduce \
-    --enable-expert-parallel \
-    --dtype float16 \
-    --port 8000 \
-    --compilation-config '{"custom_ops":["+rms_norm", "+rotary_embedding"]}' \
-    --additional-config '{"ascend_scheduler_config": {"enabled": true, "enable_chunked_prefill": false, "chunked_prefill_enabled": false}}'
-```
-::::
 :::::
 
 Once your server is started, you can query the model with input prompts
@@ -237,61 +213,6 @@ clean_up()
 
 ::::
 
-::::{tab-item} Pangu-72B-MoE
-```{code-block} python
-   :substitutions:
-import gc
-import os
-import torch
-from vllm import LLM, SamplingParams
-from vllm.distributed.parallel_state import (destroy_distributed_environment,
-                                             destroy_model_parallel)
-def clean_up():
-    destroy_model_parallel()
-    destroy_distributed_environment()
-    gc.collect()
-    torch.npu.empty_cache()
-os.environ["VLLM_USE_V1"] = "1"
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-if __name__ == "__main__":
-    # Update the model_path
-    model_path="/path/to/pangu-pro-moe-model"
-    prompts = [
-        "Hello, my name is",
-        "The future of AI is",
-    ]
-    sampling_params = SamplingParams(min_tokens=8, max_tokens=8, temperature=0.0)
-    llm = LLM(model=model_path,
-            tensor_parallel_size=8,
-            max_num_batched_tokens=2048,
-            gpu_memory_utilization=0.5,
-            max_num_seqs=4,
-            enforce_eager=True, # For 300I series, only eager mode is supported.
-            trust_remote_code=True,
-            max_model_len=1024,
-            disable_custom_all_reduce=True, # IMPORTANT cause 300I series needed custom ops
-            enable_expert_parallel=True,
-            dtype="float16", # IMPORTANT cause some ATB ops cannot support bf16 on 300I series
-            compilation_config={"custom_ops":["+rms_norm", "+rotary_embedding"]}, # IMPORTANT cause 300I series needed custom ops
-            additional_config = {
-                'ascend_scheduler_config': {
-                    'enabled': True,
-                    'enable_chunked_prefill' : False,
-                    'chunked_prefill_enabled': False
-                }
-            }
-    )
-    # Generate texts from the prompts.
-    outputs = llm.generate(prompts, sampling_params)
-    for output in outputs:
-        prompt = output.prompt
-        generated_text = output.outputs[0].text
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
-    del llm
-    clean_up()
-```
-
-::::
 :::::
 
 If you run this script successfully, you can see the info shown below:
