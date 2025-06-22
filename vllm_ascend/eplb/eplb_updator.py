@@ -70,7 +70,7 @@ class EplbUpdator:
             planner_q = self.planner_block_queue,
             block_update_q = self.block_update_queue,
             redundant_enable = self.redundant_enable, 
-            policy_type = 2,
+            policy_type = 6,
             enable_d2d = True
         )
 
