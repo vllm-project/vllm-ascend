@@ -92,13 +92,6 @@ python -m vllm.entrypoints.api_server \
 
 ::::{tab-item} Pangu-Pro-MoE-72B
 
-One of the ways to download Pangu-Pro-MoE-72B:
-
-```bash
-git lfs install
-git clone https://gitcode.com/ascend-tribe/pangu-pro-moe-model.git
-```
-
 ```{code-block} bash
    :substitutions:
 # Update the MODEL

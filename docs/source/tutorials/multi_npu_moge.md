@@ -34,13 +34,6 @@ Setup environment variables:
 export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 ```
 
-Download the model:
-
-```bash
-git lfs install
-git clone https://gitcode.com/ascend-tribe/pangu-pro-moe-model.git
-```
-
 ### Online Inference on Multi-NPU
 
 Run the following script to start the vLLM server on Multi-NPU:
