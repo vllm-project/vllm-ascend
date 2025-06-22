@@ -21,10 +21,12 @@ import torch
 from vllm.model_executor.layers.fused_moe.layer import \
     UnquantizedFusedMoEMethod
 
-from vllm_ascend.ops.fused_moe import (fused_experts, fused_experts_310p,
-                                       select_experts, select_gating_top_k_softmax_experts)
-from vllm_ascend.utils import is_310p
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ops.fused_moe import (fused_experts, fused_experts_310p,
+                                       select_experts,
+                                       select_gating_top_k_softmax_experts)
+from vllm_ascend.utils import is_310p
+
 SELECT_GATING_TOPK_SOTFMAX_EXPERTS: bool = envs_ascend.SELECT_GATING_TOPK_SOTFMAX_EXPERTS
 
 
@@ -46,13 +48,13 @@ def forward_oot(
     apply_router_weight_on_input: bool = False,
     activation: str = "silu",
 ) -> torch.Tensor:
-    
+
     if SELECT_GATING_TOPK_SOTFMAX_EXPERTS:
         topk_weights, topk_ids = select_gating_top_k_softmax_experts(
-                            hidden_states=x,
-                            router_logits=router_logits,
-                            top_k=top_k,
-                            renormalize=renormalize)
+            hidden_states=x,
+            router_logits=router_logits,
+            top_k=top_k,
+            renormalize=renormalize)
     else:
         topk_weights, topk_ids = select_experts(
             hidden_states=x,

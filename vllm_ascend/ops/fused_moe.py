@@ -45,6 +45,7 @@ from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
 SELECT_GATING_TOPK_SOTFMAX_EXPERTS: bool = envs_ascend.SELECT_GATING_TOPK_SOTFMAX_EXPERTS
 
+
 def process_topk_ids(topk_ids: torch.Tensor, expert_num: int, ep_size: int,
                      max_row_per_ep_rank: int, num_tokens: int,
                      top_k: int) -> tuple[torch.Tensor, torch.Tensor]:
@@ -813,11 +814,8 @@ def fused_experts(
 
 
 def select_gating_top_k_softmax_experts(
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    top_k: int,
-    renormalize: bool
-) -> tuple[torch.Tensor, torch.Tensor]:
+        hidden_states: torch.Tensor, router_logits: torch.Tensor, top_k: int,
+        renormalize: bool) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Select top-k experts based on router logits.
     only supports float16、bfloat16、float32
@@ -835,7 +833,8 @@ def select_gating_top_k_softmax_experts(
     Raises:
         ValueError: If an unsupported scoring function is provided.
     """
-    topk_weights, topk_ids, row_idx = torch_npu.npu_moe_gating_top_k_softmax(router_logits, None, k=top_k)
+    topk_weights, topk_ids, row_idx = torch_npu.npu_moe_gating_top_k_softmax(
+        router_logits, None, k=top_k)
 
     # # Required by npu_moe_init_routing
     # topk_weights = topk_weights.to(hidden_states.dtype)
@@ -845,6 +844,7 @@ def select_gating_top_k_softmax_experts(
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
 
     return topk_weights, topk_ids
+
 
 def native_grouped_topk(
     topk_weights: torch.Tensor,
@@ -1039,10 +1039,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 eps=float(1e-20))
         elif SELECT_GATING_TOPK_SOTFMAX_EXPERTS:
             topk_weights, topk_ids = select_gating_top_k_softmax_experts(
-                                        hidden_states=x,
-                                        router_logits=router_logits,
-                                        top_k=top_k,
-                                        renormalize=renormalize)
+                hidden_states=x,
+                router_logits=router_logits,
+                top_k=top_k,
+                renormalize=renormalize)
         else:
             topk_weights, topk_ids = select_experts(
                 hidden_states=x,
