@@ -307,61 +307,6 @@ class DynamicEplbV2(EplbPolicy):
 
         return layer_imbalance
 
-    def rebalance_experts(self, current_expert_table, expert_workload):
-
-        info = DynamicTable()
-        info.workload_table = np.array(expert_workload)
-        info.placement_table = np.array(current_expert_table)
-        layer_num, num_npus, experts_per_npu = info.workload_table.shape
-        expert_ids, counts = np.unique(info.placement_table[0], return_counts=True)
-        num_redundancy_expert = self.get_redundant_num(num_npus, counts)
-        num_original_expert = len(expert_ids)
-        layer_workloads = self.add_redundant(info.placement_table, info.workload_table, num_original_expert)
-        max_heat_per_layer_before = self.calculate_max_heat_per_layer(info.workload_table, layer_num)
-        npu_heat_all_origin = sum(max_heat_per_layer_before)
-
-        # 计算负载均衡，部署冗余专家
-        layer_num = layer_workloads.shape[0]
-        expert_num = layer_workloads.shape[1]
-        # 校验专家数量、卡数量、冗余专家数量不能超过卡数量
-        if num_original_expert != expert_num:
-            raise ValueError(f"原始专家数量 {num_original_expert} 必须等于 expert_num {expert_num}")
-
-        if num_npus <= 0:
-            raise ValueError("NPUs 数量必须大于 0")
-
-        if num_npus < num_redundancy_expert:
-            raise ValueError(f"NPUs 数量 {num_npus} 必须大于或等于冗余专家数量 {num_redundancy_expert}")
-
-        # 每个卡部署的专家数量 一个冗余专家
-        global_deployment = [[[] for _ in range(num_npus)] for _ in range(layer_num)]
-        # 遍历获得每一层的放置策略，考虑计算均衡
-        max_heat_per_layer_after = np.zeros([layer_num])
-        for layer in range(layer_num):
-            # 获取当前层专家ID和对应负载，负载需要进行正则化处理, 每个卡加一个冗余专家
-            weights = np.zeros((expert_num,), dtype='object')
-            for expert_id, workload_weight in enumerate(layer_workloads[layer]):
-                weights[expert_id] = (expert_id, workload_weight)
-
-            # 获取每一层全局计算均衡的放置策略
-            result, layer_deployment = self.original_compute_balanced_pack_redundancy(
-                weights, num_npus, num_redundancy_expert
-            )
-            global_deployment[layer] = layer_deployment
-            max_heat_per_layer_after[layer] = max(result, key=lambda x: x['total_weight'])['total_weight']
-
-        # 获取层优先级
-        layer_changed_ratio = []
-        for layer_idx in range(layer_num):
-            layer_changed_ratio.append(max_heat_per_layer_after[layer_idx] / max_heat_per_layer_before[layer_idx])
-
-        per_layer_priority = np.argsort(layer_changed_ratio)
-        npu_heat_all_after = sum(max_heat_per_layer_after)
-
-        change = 0
-
-        return change, per_layer_priority, np.array(global_deployment).tolist()
-
     @staticmethod
     def compute_redundant_assignments(base_experts, num_redundant_experts, num_experts):
         """
@@ -844,6 +789,25 @@ class DynamicEplbV2(EplbPolicy):
             global_deployment[layer], new_max_workload = self.exchange_experts(self, result, com_between_devices,
                                                                                num_node, num_npus, False, ave_workload,
                                                                                0.05, num_redundancy_expert)
+
+            # To guarantee there is no expert movement inside a NPU
+            start_physical_idx = 1 if num_redundancy_expert else 0
+            for rank in range(num_npus):
+                physical_expert = start_physical_idx
+                while physical_expert in range(start_physical_idx, experts_per_npu):
+                    # skip the expert which is moved into this rank
+                    if global_deployment[layer][rank][physical_expert] not in current_expert_table[layer, rank, :]:
+                        physical_expert += 1
+                        continue
+
+                    if global_deployment[layer][rank][physical_expert] != current_expert_table[layer][rank][physical_expert]:
+                        right_idx = np.where(current_expert_table[layer][rank] == global_deployment[layer][rank][physical_expert])[0][0]
+                        # exchange expert with the expert on the right physical index
+                        tempt = global_deployment[layer][rank][right_idx]
+                        global_deployment[layer][rank][right_idx] = global_deployment[layer][rank][physical_expert]
+                        global_deployment[layer][rank][physical_expert] = tempt
+                    else:
+                        physical_expert += 1
 
             for device_id in range(num_npus):
                 com_between_devices[device_id] = {int(key): int(value) for key, value in
