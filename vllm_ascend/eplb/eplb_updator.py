@@ -131,7 +131,7 @@ class EplbUpdator:
         self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
     def forward_end(self, dummy_run=False):
-        self.adaptor.get_rank_expert_workload(self.num_moe_layers)
+        self.adaptor.get_rank_expert_workload(self.num_moe_layers,dummy_run)
         if not self.update_in_flight and self.get_update_iteration():
             moe_load = self.compute_and_set_moe_load(dummy_run)
             self.wakeup_eplb_worker()
@@ -144,8 +144,8 @@ class EplbUpdator:
 
         self.eplb_loader.update_expert_map_and_weight(self.reqs, self.redundant_enable)
 
-    def compute_and_set_moe_load(self):
-        local_load = self.adaptor.get_rank_expert_workload(self.num_moe_layers)
+    def compute_and_set_moe_load(self,dummy_run=False):
+        local_load = self.adaptor.get_rank_expert_workload(self.num_moe_layers,dummy_run)
         self._gather_buffer = None
         if dist.is_initialized():
             self.world_size = dist.get_world_size()
