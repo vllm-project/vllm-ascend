@@ -16,6 +16,7 @@
 #
 import torch
 import torch.distributed as dist
+import vllm.envs as envs
 from multiprocessing import Queue, Manager
 
 from vllm.logger import logger
@@ -33,10 +34,16 @@ class EplbUpdator:
         self.num_moe_layers = self.adaptor.num_moe_layers
 
     def init_eplb(self, expert_map_path):
-
+        self.num_expert_load_gather = 10
         self.redundant_enable = (expert_map_path != None)
         self.num_iterations: torch.int64 = 130
         self.expert_map_path = expert_map_path
+
+        try:
+            if not envs.VLLM_ALLOW_EXPERT_LOAD_COLLECTING:
+                self.num_expert_load_gather = self.num_iterations
+        except Exception as e:
+                self.num_expert_load_gather = self.num_iterations
 
         self.weight_update_counter = 0
         self.expert_map_initialized = False
@@ -70,7 +77,7 @@ class EplbUpdator:
             planner_q = self.planner_block_queue,
             block_update_q = self.block_update_queue,
             redundant_enable = self.redundant_enable, 
-            policy_type = 2,
+            policy_type = 6,
             enable_d2d = True
         )
 
@@ -80,10 +87,9 @@ class EplbUpdator:
 
     def get_update_iteration(self):
         self.cur_iterations = self.cur_iterations + 1
-        if not self.gate_eplb:
-            return self.cur_iterations % self.num_iterations == 0
-        else:
-            return self.cur_iterations == self.num_iterations
+        load_gather_iteration = self.cur_iterations % self.num_expert_load_gather == 0 if not self.gate_eplb else self.cur_iterations == self.num_iterations 
+        upate_iteration = self.cur_iterations % self.num_iterations == 0 if not self.gate_eplb else self.cur_iterations == self.num_iterations 
+        return load_gather_iteration, upate_iteration
 
     def get_init_expert_map(self):
         try:
@@ -125,12 +131,15 @@ class EplbUpdator:
         self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
     def forward_end(self):
-        if not self.update_in_flight and self.get_update_iteration():
-            moe_load = self.compute_and_set_moe_load()
-            self.wakeup_eplb_worker()
-            self.update_in_flight = True
-            self.wait_worker_iterations = 0
-            self.weight_loading = False
+        if not self.update_in_flight:
+            load_gather_iteration, update_iteration = self.get_update_iteration()
+            if load_gather_iteration:
+                self.moe_load = self.compute_and_set_moe_load()
+            if update_iteration:
+                self.wakeup_eplb_worker()
+                self.update_in_flight = True
+                self.wait_worker_iterations = 0
+                self.weight_loading = False
 
         if self.update_in_flight:
             self.wait_worker_iterations = self.wait_worker_iterations + 1
@@ -220,9 +229,27 @@ class EplbUpdator:
         return recovered
 
     def get_expert_load(self) -> str:
-        """todo 确认moe_load的值是什么类型"""
-        # return '{"a":"b"}' # mock
-        return self.shared_dict['moe_load']
+
+        # todo wjh 给到返回值
+        # return self.shared_dict['moe_load']
+        # mock json_str
+        experts_load = ('{\"expert_load\":['
+                        '{\"ip\":\"141.xxx.xxx.181\",'
+                        '\"node_0\":'
+                        '{\"card_0\":'
+                        '[{\"layer_4\":{\"expert_0\":3,\"expert_2\":1}},{\"layer_5\":{\"expert_0\":3,\"expert_2\":1}}],'
+                        '\"card_1\":[{\"layer_4\":{\"expert_1\":3,\"expert_3\":1},\"layer_5\":{\"expert_0\":3,\"'
+                        'expert_2\":1}}]}},{\"ip\":\"141.xxx.xxx.177\",\"node_0\":{\"card_0\":[{\"layer_4\":'
+                        '{\"expert_0\":3,\"expert_2\":1}},{\"layer_5\":{\"expert_0\":3,\"expert_2\":1}}],'
+                        '\"card_1\":[{\"layer_4\":{\"expert_1\":3,\"expert_3\":1}}]}}]}')
+        return experts_load
+
+    def update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
+        logger.info(f" start update {self.num_expert_load_gather=}, {self.num_iterations}...")
+        self.num_expert_load_gather = num_expert_load_gather
+        self.num_iterations = num_iterations
+        logger.info(f" update {self.num_expert_load_gather=}, {self.num_iterations} success...")
+
 
     def shutdown(self):
         """
