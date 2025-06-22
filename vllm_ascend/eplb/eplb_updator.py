@@ -16,6 +16,7 @@
 #
 import torch
 import torch.distributed as dist
+import vllm.envs as envs
 from multiprocessing import Queue, Manager
 
 from vllm.logger import logger
@@ -33,10 +34,16 @@ class EplbUpdator:
         self.num_moe_layers = self.adaptor.num_moe_layers
 
     def init_eplb(self, expert_map_path):
-        self.num_expert_load_gather = 0
+        self.num_expert_load_gather = 10
         self.redundant_enable = (expert_map_path != None)
         self.num_iterations: torch.int64 = 130
         self.expert_map_path = expert_map_path
+
+        try:
+            if not envs.VLLM_ALLOW_EXPERT_LOAD_COLLECTING:
+                self.num_expert_load_gather = self.num_iterations
+        except Exception as e:
+                self.num_expert_load_gather = self.num_iterations
 
         self.weight_update_counter = 0
         self.expert_map_initialized = False
@@ -80,10 +87,9 @@ class EplbUpdator:
 
     def get_update_iteration(self):
         self.cur_iterations = self.cur_iterations + 1
-        if not self.gate_eplb:
-            return self.cur_iterations % self.num_iterations == 0
-        else:
-            return self.cur_iterations == self.num_iterations
+        load_gather_iteration = self.cur_iterations % self.num_expert_load_gather == 0 if not self.gate_eplb else self.cur_iterations == self.num_iterations 
+        upate_iteration = self.cur_iterations % self.num_iterations == 0 if not self.gate_eplb else self.cur_iterations == self.num_iterations 
+        return load_gather_iteration, upate_iteration
 
     def get_init_expert_map(self):
         try:
@@ -125,12 +131,15 @@ class EplbUpdator:
         self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
     def forward_end(self):
-        if not self.update_in_flight and self.get_update_iteration():
-            moe_load = self.compute_and_set_moe_load()
-            self.wakeup_eplb_worker()
-            self.update_in_flight = True
-            self.wait_worker_iterations = 0
-            self.weight_loading = False
+        if not self.update_in_flight:
+            load_gather_iteration, update_iteration = self.get_update_iteration()
+            if load_gather_iteration:
+                self.moe_load = self.compute_and_set_moe_load()
+            if update_iteration:
+                self.wakeup_eplb_worker()
+                self.update_in_flight = True
+                self.wait_worker_iterations = 0
+                self.weight_loading = False
 
         if self.update_in_flight:
             self.wait_worker_iterations = self.wait_worker_iterations + 1
