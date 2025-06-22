@@ -9,9 +9,6 @@ This is the 1st release candidate of v0.9.1 for vLLM Ascend. Please follow the [
 - Atlas 300I series is experimental supported in this release. [#1333](https://github.com/vllm-project/vllm-ascend/pull/1333) After careful consideration, this feature **will NOT be included in v0.9.1-dev branch** taking into account the v0.9.1 release quality and the feature rapid iteration to improve performance on Atlas 300I series. We will improve this from 0.9.2rc1 and later.
 - Support EAGLE-3 for speculative decoding. [#1032](https://github.com/vllm-project/vllm-ascend/pull/1032)
 
-### Model
-- MoGE model is now supported. You can try with Pangu Pro Moe-72B on Atlas A2 series and Atlas 300I series. Please follow the official [tutorials](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_npu_moge.html) and [300I series tutorials](https://vllm-ascend.readthedocs.io/en/latest/tutorials/single_node_300i.html). [#1204](https://github.com/vllm-project/vllm-ascend/pull/1204)
-
 ### Core
 - Ascend PyTorch adapter (torch_npu) has been upgraded to `2.5.1.post1.dev20250528`. Don’t forget to update it in your environment. [#1235](https://github.com/vllm-project/vllm-ascend/pull/1235)
 - Support Atlas 300I series container image. You can get it from [quay.io](https://quay.io/repository/vllm/vllm-ascend)
