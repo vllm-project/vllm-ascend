@@ -1,4 +1,4 @@
-name: 'image / openEuler'
+name: 'image / openEuler / 310p'
 # This is a docker build check and publish job:
 # 1. PR Triggered docker image build check
 #   - is for image build check
