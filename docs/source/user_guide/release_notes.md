@@ -10,7 +10,7 @@ This is the 1st release candidate of v0.9.1 for vLLM Ascend. Please follow the [
 - Support EAGLE-3 for speculative decoding. [#1032](https://github.com/vllm-project/vllm-ascend/pull/1032)
 
 ### Model
-- MoGE model is now supported. You can try it with Pangu Pro Moe-72B with Atlas A2 series and Atlas 300I series have been well tested. Please follow the official [tutorials](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_npu_moge.html) and [300I series tutorials](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_npu_300i.html). [#1204](https://github.com/vllm-project/vllm-ascend/pull/1204)
+- MoGE model is now supported. You can try with Pangu Pro Moe-72B on Atlas A2 series and Atlas 300I series. Please follow the official [tutorials](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_npu_moge.html) and [300I series tutorials](https://vllm-ascend.readthedocs.io/en/latest/tutorials/single_node_300i.html). [#1204](https://github.com/vllm-project/vllm-ascend/pull/1204)
 
 ### Core
 - Ascend PyTorch adapter (torch_npu) has been upgraded to `2.5.1.post1.dev20250528`. Don’t forget to update it in your environment. [#1235](https://github.com/vllm-project/vllm-ascend/pull/1235)
