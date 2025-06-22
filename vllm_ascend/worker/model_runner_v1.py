@@ -1544,7 +1544,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         inputs_embeds=inputs_embeds)
 
                 if not is_compile and not is_profile_run and self.dynamic_eplb:
-                    self.eplb_updator.forward_end()
+                    dummy_run = True
+                    self.eplb_updator.forward_end(dummy_run)
                 return hidden_states
 
     def profile_run(self) -> None:

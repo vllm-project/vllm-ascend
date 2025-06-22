@@ -130,16 +130,14 @@ class EplbUpdator:
         self.reqs = []
         self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
-    def forward_end(self):
-        if not self.update_in_flight:
-            load_gather_iteration, update_iteration = self.get_update_iteration()
-            if load_gather_iteration:
-                self.moe_load = self.compute_and_set_moe_load()
-            if update_iteration:
-                self.wakeup_eplb_worker()
-                self.update_in_flight = True
-                self.wait_worker_iterations = 0
-                self.weight_loading = False
+    def forward_end(self, dummy_run=False):
+        self.adaptor.get_rank_expert_workload(self.num_moe_layers)
+        if not self.update_in_flight and self.get_update_iteration():
+            moe_load = self.compute_and_set_moe_load(dummy_run)
+            self.wakeup_eplb_worker()
+            self.update_in_flight = True
+            self.wait_worker_iterations = 0
+            self.weight_loading = False
 
         if self.update_in_flight:
             self.wait_worker_iterations = self.wait_worker_iterations + 1
@@ -148,7 +146,6 @@ class EplbUpdator:
 
     def compute_and_set_moe_load(self):
         local_load = self.adaptor.get_rank_expert_workload(self.num_moe_layers)
-
         self._gather_buffer = None
         if dist.is_initialized():
             self.world_size = dist.get_world_size()
@@ -161,7 +158,7 @@ class EplbUpdator:
 
             dist.all_gather_into_tensor(self._gather_buffer, local_load)
 
-            moe_load = self._gather_buffer.permute(1, 0, 2).contiguous()
+            moe_load = self._gather_buffer.permute(1, 0, 2)
             self.shared_dict["moe_load"] = moe_load.cpu()
             logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
         else:
