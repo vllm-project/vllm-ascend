@@ -130,7 +130,7 @@ class EplbUpdator:
         self.reqs = []
         self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
-def forward_end(self,dummy_run=False):
+    def forward_end(self,dummy_run=False):
         self.adaptor.get_rank_expert_workload(self.num_moe_layers,dummy_run)
         if not self.update_in_flight:
             load_gather_iteration, update_iteration = self.get_update_iteration()
