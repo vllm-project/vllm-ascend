@@ -259,8 +259,7 @@ jobs:
           # TODO: switch hf to modelscope
           VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
             pytest -sv tests/e2e/singlecard/test_ilama_lora.py
-          # TODO(sss): guided decoding doesn't work, fix it later
-          # pytest -sv tests/e2e/singlecard/test_guided_decoding.py
+          pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv tests/e2e/singlecard/test_camem.py
           pytest -sv tests/e2e/singlecard/ \
           --ignore=tests/e2e/singlecard/test_offline_inference.py \
@@ -278,8 +277,7 @@ jobs:
           # TODO: switch hf to modelscope
           VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
             pytest -sv tests/e2e/singlecard/test_ilama_lora.py
-          # guided decoding doesn't work, fix it later
-          # pytest -sv tests/e2e/singlecard/test_guided_decoding.py
+          pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv tests/e2e/singlecard/test_camem.py
           pytest -sv tests/e2e/singlecard/test_prompt_embedding.py
           pytest -sv tests/e2e/singlecard/ \
