@@ -394,11 +394,18 @@ class FusedMoEState(Enum):
     AllGather = 0
     All2All = 1
     MC2 = 2
+    AllGatherEP = 3
 
 
 # TODO(zzzzwwjj): add soc_version to choose branch
-def get_fused_moe_state(ep_size: int, with_prefill: bool):
-    if ep_size == 1:
+def get_fused_moe_state(ep_size: int, with_prefill: bool,
+                        is_deepseek_v3_r1: bool):
+    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
+    # only supports deepseek v3/r1
+    if (envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
+            and is_deepseek_v3_r1):
+        return FusedMoEState.AllGatherEP
+    elif ep_size == 1:
         return FusedMoEState.AllGather
     # NOTE: mc2 need ep_size >= 16 & all2all can't use in torchair graph.
     elif ep_size < 16 or with_prefill:
