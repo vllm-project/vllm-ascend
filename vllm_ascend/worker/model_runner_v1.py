@@ -207,7 +207,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if self.speculative_config.method == "ngram":
                     self.drafter = NgramProposer(self.vllm_config)
                 elif self.speculative_config.method in ["eagle", "eagle3"]:
-                    self.use_eagle = True
                     self.drafter = EagleProposer(self.vllm_config, self.device,
                                                  self)  # type: ignore
                     if self.speculative_config.method == "eagle3":
@@ -981,7 +980,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             attn_state = AscendAttentionState.DecodeOnly
         # Speculative decoding.
         elif np.all(num_valid_tokens == 1):
-            if self.use_eagle:
+            if isinstance(self.drafter, EagleProposer):
                 attn_state = AscendAttentionState.ChunkedPrefill
             elif isinstance(self.drafter, MtpProposer):
                 attn_state = AscendAttentionState.SpecDecoding
@@ -1441,7 +1440,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             logits = self.model.compute_logits(hidden_states[sample_indices],
                                                None)
-            if self.use_eagle:
+            if isinstance(self.drafter, EagleProposer):
                 attn_metadata = self.get_eagle_atten_dict(scheduler_output)
             # Apply structured output bitmasks if present
             if scheduler_output.grammar_bitmask is not None:
