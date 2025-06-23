@@ -129,7 +129,6 @@ class AscendScheduler(Scheduler):
                 num_new_local_computed_tokens = 0
                 num_computed_tokens = request.num_computed_tokens
 
-
             # P/D: loading remote KV, do not allocate for new work.
             if load_kv_async:
                 assert num_external_computed_tokens > 0
@@ -420,7 +419,6 @@ class AscendScheduler(Scheduler):
 
         self.finished_req_ids = set()  # type: ignore
         return scheduler_output
-
 
     def _check_watermark_for_prefill(self,
                                      request,
