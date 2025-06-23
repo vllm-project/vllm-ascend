@@ -130,22 +130,22 @@ class EplbUpdator:
         self.reqs = []
         self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
-def forward_end(self,dummy_run=False):
-        self.adaptor.get_rank_expert_workload(self.num_moe_layers,dummy_run)
-        if not self.update_in_flight:
-            load_gather_iteration, update_iteration = self.get_update_iteration()
-            if load_gather_iteration:
-                moe_load = self.compute_and_set_moe_load(dummy_run)
-            if update_iteration:
-                self.wakeup_eplb_worker()
-                self.update_in_flight = True
-                self.wait_worker_iterations = 0
-                self.weight_loading = False
+    def forward_end(self,dummy_run=False):
+            self.adaptor.get_rank_expert_workload(self.num_moe_layers,dummy_run)
+            if not self.update_in_flight:
+                load_gather_iteration, update_iteration = self.get_update_iteration()
+                if load_gather_iteration:
+                    moe_load = self.compute_and_set_moe_load(dummy_run)
+                if update_iteration:
+                    self.wakeup_eplb_worker()
+                    self.update_in_flight = True
+                    self.wait_worker_iterations = 0
+                    self.weight_loading = False
 
-        if self.update_in_flight:
-            self.wait_worker_iterations = self.wait_worker_iterations + 1
+            if self.update_in_flight:
+                self.wait_worker_iterations = self.wait_worker_iterations + 1
 
-        self.eplb_loader.update_expert_map_and_weight(self.reqs, self.redundant_enable)
+            self.eplb_loader.update_expert_map_and_weight(self.reqs, self.redundant_enable)
 
     def compute_and_set_moe_load(self,dummy_run=False):
         local_load = self.adaptor.get_rank_expert_workload(self.num_moe_layers,dummy_run)
