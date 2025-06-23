@@ -425,6 +425,40 @@ class AscendScheduler(Scheduler):
         self.finished_req_ids = set()  # type: ignore
         return scheduler_output
 
+    def update_waiting_for_remote_kv(self, request: Request) -> bool:
+        """
+        P/D: check if the request_id is finished_recving.
+
+        The finished_recving_kv_req_ids list is populated
+        on the previous steps()'s update_from_output based
+        on the worker side connector.
+
+        When the kv transfer is ready, we cache the blocks
+        and the request state will be moved back to WAITING from
+        WAITING_FOR_REMOTE_KV.
+        """
+        if request.request_id not in self.finished_recving_kv_req_ids:
+            return False
+        assert len(self.kv_cache_config.kv_cache_groups
+                   ) == 1, "KV connector only supports one KV cache group now"
+        # Now that the blocks are ready, actually cache them.
+        # In order to make decode node always do the decode step, we transfer every block as long as it contains the
+        # data computed by prefill node.
+        num_computed_tokens = request.num_tokens
+        if num_computed_tokens == request.num_tokens:
+            num_computed_tokens -= 1
+        self.kv_cache_manager.cache_blocks(
+            request,
+            num_computed_tokens,
+        )
+
+        # Update the request state for scheduling.
+        request.num_computed_tokens = num_computed_tokens
+
+        # Return that we are ready.
+        self.finished_recving_kv_req_ids.remove(request.request_id)
+        return True
+
     def _check_watermark_for_prefill(self,
                                      request,
                                      num_new_tokens,
