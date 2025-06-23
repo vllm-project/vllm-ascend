@@ -2122,22 +2122,22 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                             num_kv_heads, nope_dim)
                         rope_cache_shape = (num_blocks, block_size,
                                             num_kv_heads, rope_dim)
-                        rope_cache = torch.zeros(nope_allocate_shape_alignment,
+                        nope_cache = torch.zeros(nope_allocate_shape_alignment,
                                                  dtype=dtype,
                                                  device=self.device)
-                        nope_cache = torch.zeros(rope_allocate_shape_alignment,
+                        rope_cache = torch.zeros(rope_allocate_shape_alignment,
                                                  dtype=dtype,
                                                  device=self.device)
-                        rope_cache = align_memory(
+                        nope_cache = align_memory(
                             nope_cache, alignment)[:nope_allocate_shape].view(
                                 nope_cache_shape)
-                        nope_cache = align_memory(
+                        rope_cache = align_memory(
                             rope_cache, alignment)[:rope_allocate_shape].view(
                                 rope_cache_shape)
-                        rope_cache = torch_npu.npu_format_cast(
-                            rope_cache, acl_format)
                         nope_cache = torch_npu.npu_format_cast(
                             nope_cache, acl_format)
+                        rope_cache = torch_npu.npu_format_cast(
+                            rope_cache, acl_format)
                         kv_caches[layer_name] = (nope_cache, rope_cache)
                     else:
                         num_caches = kv_cache_shape[0]
