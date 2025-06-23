@@ -37,7 +37,8 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
-                              get_tp_group, tensor_model_parallel_all_reduce)
+                              get_tp_group, tensor_model_parallel_all_reduce,
+                              tensor_model_parallel_all_gather)
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -76,6 +77,10 @@ from vllm_ascend.utils import (dispose_tensor, npu_stream_switch,
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
 
+IS_FC3=False
+import os
+if os.getenv('IS_FC3') == "1":
+    IS_FC3=True
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
 
@@ -150,12 +155,14 @@ class CustomDeepseekV2MLP(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+
         if not force_replicate:
             self.gate_up_proj = MergedColumnParallelLinear(
                 hidden_size, [intermediate_size] * 2,
                 bias=False,
                 quant_config=quant_config,
-                prefix=f"{prefix}.gate_up_proj")
+                prefix=f"{prefix}.gate_up_proj",
+                is_fc3 = IS_FC3)
             self.down_proj = RowParallelLinear(intermediate_size,
                                                hidden_size,
                                                bias=False,
@@ -316,7 +323,6 @@ class CustomDeepseekV2MoE(nn.Module):
         old_hidden_states = hidden_states
         use_separated_shared_experts = (self.shared_experts is not None
                                         and not self.enable_multistream_moe)
-
         if self.tp_size > 1:
             if (VLLM_ENABLE_MC2
                     and not is_prefill) or not (self.torchair_graph_enabled or
@@ -330,6 +336,13 @@ class CustomDeepseekV2MoE(nn.Module):
                 hidden_states = chunk_hidden_states[self.tp_rank]
 
         # router_logits: (num_tokens, n_experts)
+        # if IS_FC3 and self.tp_size > 1:
+        #     import torchair as tng
+        #     with tng.scope.npu_stream_switch('21'):
+        #         hidden_states = tng.scope.npu_wait_tensor(hidden_states,hidden_states)
+        #         router_logits, _ = self.gate(hidden_states)
+        # else:
+        #     router_logits, _ = self.gate(hidden_states)
         router_logits, _ = self.gate(hidden_states)
 
         experts_hidden_states = self.experts(
@@ -340,6 +353,7 @@ class CustomDeepseekV2MoE(nn.Module):
             enable_force_load_balance=enable_force_load_balance,
             shared_experts=(self.shared_experts
                             if not use_separated_shared_experts else None),
+            is_fc3=IS_FC3
         )
 
         if not isinstance(experts_hidden_states, tuple):
@@ -349,6 +363,8 @@ class CustomDeepseekV2MoE(nn.Module):
                 experts_hidden_states[0] * self.routed_scaling_factor +
                 experts_hidden_states[1])
 
+        if IS_FC3:
+            hidden_states = tensor_model_parallel_all_gather(hidden_states,0)
         if self.tp_size > 1:
             if (VLLM_ENABLE_MC2
                     and not is_prefill) or not (self.torchair_graph_enabled or
@@ -362,10 +378,20 @@ class CustomDeepseekV2MoE(nn.Module):
                 hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
         if use_separated_shared_experts:
-            hidden_states = hidden_states + self.shared_experts(
-                old_hidden_states)
-
-        return hidden_states.view(num_tokens, hidden_size)
+            # if IS_FC3 and self.tp_size > 1:
+            #     import torchair as tng
+            #     with tng.scope.npu_stream_switch('fc1'):
+            #         hidden_states = tng.scope.npu_wait_tensor(hidden_states,old_hidden_states)
+            #         old_hidden_states = self.shared_experts(old_hidden_states)
+            # else:
+            
+            old_hidden_states = self.shared_experts(old_hidden_states)
+            hidden_states = hidden_states + old_hidden_states
+        if IS_FC3:
+            output = hidden_states.view(num_tokens * self.tp_size, hidden_size)
+        else:
+            output = hidden_states.view(num_tokens, hidden_size)
+        return output
 
 
 class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
@@ -446,7 +472,8 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                                         self.hidden_size,
                                         bias=False,
                                         quant_config=quant_config,
-                                        prefix=f"{prefix}.o_proj")
+                                        prefix=f"{prefix}.o_proj",
+                                        is_fc3=IS_FC3)
 
         if rope_scaling:
             rope_scaling["rope_type"] = 'deepseek_yarn'
@@ -649,8 +676,11 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 residual *= 1. / self.routed_scaling_factor
 
         # Fully Connected
+
         hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+            hidden_states, residual,is_fc3=IS_FC3)
+        if IS_FC3 and get_tensor_model_parallel_world_size()>1:
+            residual = tensor_model_parallel_all_gather(residual, dim=0)
 
         if isinstance(self.mlp, CustomDeepseekV2MoE):
             hidden_states = self.mlp(hidden_states, attn_metadata)
