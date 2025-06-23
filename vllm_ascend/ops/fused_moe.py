@@ -923,7 +923,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias,
             )
-
+ 
         topk_weights = topk_weights.to(x.dtype)
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
@@ -1111,13 +1111,15 @@ class AscendFusedMoE(FusedMoE):
         self.ep_group = get_ep_group()
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
+
     def forward(self,
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
                 is_prefill: bool,
                 enable_force_load_balance: bool = False,
                 top_k: Optional[int] = None,
-                shared_experts: Optional[Any] = None):
+                shared_experts: Optional[Any] = None,
+                is_fc3=False):
         assert self.quant_method is not None
 
         if top_k:
@@ -1146,6 +1148,7 @@ class AscendFusedMoE(FusedMoE):
                         hidden_states, router_logits)
 
         # Matrix multiply.
+
         e_hidden_states = self.quant_method.apply(
             layer=self,
             x=hidden_states,
@@ -1165,6 +1168,7 @@ class AscendFusedMoE(FusedMoE):
             log2phy=self.log2phy,
             global_redundant_expert_num=self.global_redundant_expert_num,
             shared_experts=shared_experts,
+            is_fc3=is_fc3
         )
 
         if shared_experts is not None:
