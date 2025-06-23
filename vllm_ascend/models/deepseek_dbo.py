@@ -641,7 +641,7 @@ class CustomDeepseekDBODecoderLayer(DeepseekV2DecoderLayer):
 
             if self.mlp.tp_size > 1:
                 num_token, _ = hidden_states[i].shape
-                padded_num_tokens = (self.mlp.tp_size - num_token %
+                padded_num_tokens = (self.mlp.tp_size - num_tokens[i] %
                                      self.mlp.tp_size) % self.mlp.tp_size
                 if padded_num_tokens > 0:
                     hidden_states[i] = nn.functional.pad(
@@ -851,7 +851,8 @@ class CustomDeepseekDBOModel(nn.Module):
                              if VLLM_ASCEND_ENABLE_DBO and self.can_run_ms()
                              else self.end_layer - self.start_layer)
 
-        for i in range(self.start_layer, self.start_layer + num_normal_layers):
+        moe_start_layer = self.start_layer + num_normal_layers
+        for i in range(self.start_layer, min(moe_start_layer, self.end_layer)):
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions, hidden_states, residual,
@@ -859,8 +860,7 @@ class CustomDeepseekDBOModel(nn.Module):
                           self.start_layer] if kv_caches is not None else None,
                 attn_metadata)
 
-        moe_start_layer = self.start_layer + num_normal_layers
-        if moe_start_layer != self.end_layer:
+        if moe_start_layer < self.end_layer:
             # if we enable multistream/dbo, process sparse layers here
             hidden_states, residual = self._forward_ms_layers(
                 positions=positions,

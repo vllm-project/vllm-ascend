@@ -3,7 +3,7 @@
 ## Version Specific FAQs
 
 - [[v0.7.3.post1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1007)
-- [[v0.9.0rc2] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1115)
+- [[v0.9.1rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1351)
 
 ## General FAQs
 
@@ -86,7 +86,7 @@ Currently, w8a8 quantization is already supported by vllm-ascend originally on v
 
 Please following the [quantization inferencing tutorail](https://vllm-ascend.readthedocs.io/en/main/tutorials/multi_npu_quantization.html) and replace model to DeepSeek.
 
-### 12. There is not output in log when loading models using vllm-ascend, How to solve it?
+### 12. There is no output in log when loading models using vllm-ascend, How to solve it?
 
 If you're using vllm 0.7.3 version, this is a known progress bar display issue in VLLM, which has been resolved in [this PR](https://github.com/vllm-project/vllm/pull/12428), please cherry-pick it locally by yourself. Otherwise, please fill up an issue.
 
