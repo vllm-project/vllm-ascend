@@ -74,7 +74,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import CommonAttentionMetadata
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
-from vllm_ascend.utils import ProfileExecuteDuration
+from vllm_ascend.utils import ProfileExecuteDuration, vllm_version_is
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
@@ -138,7 +138,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.lora_config = vllm_config.lora_config
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
-        self.chunked_prefill_enabled = vllm_config.scheduler_config.chunked_prefill_enabled
+        ascend_config = get_ascend_config()
+        if ascend_config.ascend_scheduler_config.enabled:
+            self.chunked_prefill_enabled = self.scheduler_config.chunked_prefill_enabled
+        else:
+            self.chunked_prefill_enabled = True
         self.device = device
 
         self.is_multimodal_model = self.model_config.is_multimodal_model
@@ -348,15 +352,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.init_torchair_graph_batch_sizes()
 
         if len(self.torchair_graph_batch_sizes) == 0:
-            #If MC2 is enabled, torchair_graph_batch_size should pad to tp_size
-            if envs_ascend.VLLM_ENABLE_MC2:
-                self.torchair_graph_batch_sizes = [
-                    self.scheduler_config.max_num_seqs
-                ]
-            else:
-                self.torchair_graph_batch_sizes = [
-                    1, self.scheduler_config.max_num_seqs
-                ]
+            # TODO(zzzzwwjj): check torchair_graph_batch_sizes init code
+            self.torchair_graph_batch_sizes = [
+                self.scheduler_config.max_num_seqs
+            ]
 
         torch._dynamo.cache_size.config.cache_size_limit += len(
             self.torchair_graph_batch_sizes)
@@ -371,7 +370,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.dynamic_eplb = ascend_config.dynamic_eplb
         if self.dynamic_eplb == True:
             self.eplb_adaptor = None
-            self.eplb_updator = EplbUpdator(ascend_config.expert_map_path != None)
+            self.is_eplb_warmuped = False
+            self.eplb_updator = EplbUpdator(ascend_config.expert_map_path)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -431,19 +431,33 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 generator.manual_seed(sampling_params.seed)
             else:
                 generator = None
-
-            self.requests[req_id] = CachedRequestState(
-                req_id=req_id,
-                prompt_token_ids=new_req_data.prompt_token_ids,
-                mm_inputs=new_req_data.mm_inputs,
-                mm_positions=new_req_data.mm_positions,
-                sampling_params=sampling_params,
-                generator=generator,
-                block_ids=new_req_data.block_ids,
-                num_computed_tokens=new_req_data.num_computed_tokens,
-                output_token_ids=[],
-                lora_request=new_req_data.lora_request,
-            )
+            if vllm_version_is("0.9.1"):
+                self.requests[req_id] = CachedRequestState(
+                    req_id=req_id,
+                    prompt_token_ids=new_req_data.prompt_token_ids,
+                    mm_inputs=new_req_data.mm_inputs,
+                    mm_positions=new_req_data.mm_positions,
+                    sampling_params=sampling_params,
+                    generator=generator,
+                    block_ids=new_req_data.block_ids,
+                    num_computed_tokens=new_req_data.num_computed_tokens,
+                    output_token_ids=[],
+                    lora_request=new_req_data.lora_request,
+                )
+            else:
+                self.requests[req_id] = CachedRequestState(
+                    req_id=req_id,
+                    prompt_token_ids=new_req_data.prompt_token_ids,
+                    mm_inputs=new_req_data.mm_inputs,
+                    mm_positions=new_req_data.mm_positions,
+                    sampling_params=sampling_params,
+                    pooling_params=None,
+                    generator=generator,
+                    block_ids=new_req_data.block_ids,
+                    num_computed_tokens=new_req_data.num_computed_tokens,
+                    output_token_ids=[],
+                    lora_request=new_req_data.lora_request,
+                )
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
@@ -575,10 +589,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.refresh_sampling_metadata()
 
     def _get_forward_metadata_across_dp(
-            self, batch_size: int, with_prefill: bool) -> tuple[int, bool]:
-        forward_metadata = torch.tensor([batch_size, with_prefill],
-                                        device="cpu",
-                                        dtype=torch.int32)
+            self, total_num_scheduled_tokens: int,
+            with_prefill: bool) -> tuple[int, bool]:
+        forward_metadata = torch.tensor(
+            [total_num_scheduled_tokens, with_prefill],
+            device="cpu",
+            dtype=torch.int32)
         dist.all_reduce(forward_metadata,
                         op=ReduceOp.MAX,
                         group=get_dp_group().cpu_group)
@@ -907,11 +923,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.dp_size > 1:
             max_num_tokens, with_prefill = self._get_forward_metadata_across_dp(
                 total_num_scheduled_tokens, with_prefill)
+            extra_builder_kwargs['max_num_tokens_across_dp'] = max_num_tokens
             extra_builder_kwargs['with_prefill_across_dp'] = with_prefill
 
         # Add graph_pad_size here
-        if envs_ascend.VLLM_ENABLE_MC2 or (self.torchair_graph_enabled
-                                           and not with_prefill):
+        if self.torchair_graph_enabled and not with_prefill:
             if self.dp_size > 1:
                 padded_batch_size = self.select_torchair_padded_batch_size(
                     max_num_tokens)
@@ -990,8 +1006,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         else:
             positions = self.positions[:num_input_tokens]
 
-        if (envs_ascend.VLLM_ENABLE_MC2
-                or self.torchair_graph_enabled) and not with_prefill:
+        if self.torchair_graph_enabled and not with_prefill:
             input_ids = self.input_ids[:padded_batch_size]
             positions = self.positions[:padded_batch_size]
 
@@ -1274,6 +1289,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             # TODO(woosuk): The following loop can be slow since it iterates over
             # the requests one by one. Optimize.
+            discard_sampled_tokens_req_indices = []
             for i, req_id in enumerate(self.input_batch.req_ids):
                 req_state = self.requests[req_id]
                 seq_len = (req_state.num_computed_tokens +
@@ -1284,6 +1300,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     generator = self.input_batch.generators.get(i)
                     if generator is not None:
                         generator.set_offset(generator.get_offset() - 4)
+                    discard_sampled_tokens_req_indices.append(i)
 
             # NOTE: NPU -> CPU Sync happens here.
             # Move as many CPU operations as possible before this sync point.
@@ -1304,6 +1321,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     self.input_batch.vocab_size,
                 )
 
+            for i in discard_sampled_tokens_req_indices:
+                valid_sampled_token_ids[i].clear()
+
             spec_token_ids = self._get_spec_token_ids(
                 valid_sampled_token_ids,
                 sampling_metadata,
@@ -1314,15 +1334,25 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 hidden_states,
                 attn_metadata,
             )
-
-            model_runner_output = ModelRunnerOutput(
-                req_ids=self.input_batch.req_ids,
-                req_id_to_index=self.input_batch.req_id_to_index,
-                sampled_token_ids=valid_sampled_token_ids,
-                spec_token_ids=spec_token_ids,
-                logprobs=logprobs_lists,
-                prompt_logprobs_dict={},
-            )
+            if vllm_version_is("0.9.1"):
+                model_runner_output = ModelRunnerOutput(
+                    req_ids=self.input_batch.req_ids,
+                    req_id_to_index=self.input_batch.req_id_to_index,
+                    sampled_token_ids=valid_sampled_token_ids,
+                    spec_token_ids=spec_token_ids,
+                    logprobs=logprobs_lists,
+                    prompt_logprobs_dict={},
+                )
+            else:
+                model_runner_output = ModelRunnerOutput(
+                    req_ids=self.input_batch.req_ids,
+                    req_id_to_index=self.input_batch.req_id_to_index,
+                    sampled_token_ids=valid_sampled_token_ids,
+                    spec_token_ids=spec_token_ids,
+                    logprobs=logprobs_lists,
+                    prompt_logprobs_dict={},
+                    pooler_output=[],
+                )
 
         durations = ProfileExecuteDuration().pop_captured_sync()
         if durations:
@@ -1431,6 +1461,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         num_tokens: int,
         is_compile: bool = False,
         with_prefill: bool = True,
+        is_profile_run: bool = False,
     ) -> torch.Tensor:
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
@@ -1445,6 +1476,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
+
+        if not is_compile and not is_profile_run and self.dynamic_eplb:
+            self.eplb_updator.forward_before()
+
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
             model = self.model
@@ -1511,12 +1546,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=inputs_embeds)
 
-                #EPLB
-                if self.dynamic_eplb == True:
-                    self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
-                    self.eplb_updator.set_adaptor(self.eplb_adaptor)
-                    self.eplb_updator.warm_up_eplb()
-
+                if not is_compile and not is_profile_run and self.dynamic_eplb:
+                    dummy_run = True
+                    self.eplb_updator.forward_end(dummy_run)
                 return hidden_states
 
     def profile_run(self) -> None:
@@ -1545,7 +1577,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # TODO: call maybe_profile_with_lora()
 
         # Trigger compilation for general shape.
-        hidden_states = self._dummy_run(self.max_num_tokens)
+        hidden_states = self._dummy_run(num_tokens = self.max_num_tokens, is_profile_run=True)
 
         if get_pp_group().is_last_rank:
             hidden_states = hidden_states[logit_indices]
@@ -1557,6 +1589,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         del hidden_states, logits
         self.encoder_cache.clear()
         gc.collect()
+
+    def do_get_expert_load(self) -> str:
+        return self.eplb_updator.get_expert_load()
+
+    def do_update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
+        return self.eplb_updator.update_expert_load_statistical_period(num_expert_load_gather, num_iterations)
+
+    def eplb_warmup(self):
+        #EPLB
+        if self.dynamic_eplb and not self.is_eplb_warmuped:
+            self.is_eplb_warmuped = True
+            self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
+            self.eplb_updator.set_adaptor(self.eplb_adaptor)
+            self.eplb_updator.warm_up_eplb()
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
@@ -1903,20 +1949,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return spec_token_ids
 
     def init_torchair_graph_batch_sizes(self):
+        start_graph_batch_size = 4
         tp_size = get_tensor_model_parallel_world_size()
-        batch_size_step = 8
-        largest_batch_size = 1
 
-        if envs_ascend.VLLM_ENABLE_MC2:
-            batch_size_step = max(batch_size_step, tp_size)
-            largest_batch_size = batch_size_step
-        while (largest_batch_size < 8):
-            self.torchair_graph_batch_sizes.append(largest_batch_size)
-            largest_batch_size *= 2
+        # NOTE: When use all2all | mc2, We need to slice the `num_tokens` dimension into `tp_size` blocks
+        start_graph_batch_size = max(start_graph_batch_size, tp_size)
 
-        while (largest_batch_size <= self.scheduler_config.max_num_seqs):
-            self.torchair_graph_batch_sizes.append(largest_batch_size)
-            largest_batch_size += batch_size_step
+        while (start_graph_batch_size <= self.scheduler_config.max_num_seqs):
+            self.torchair_graph_batch_sizes.append(start_graph_batch_size)
+            start_graph_batch_size *= 2
 
     def select_torchair_padded_batch_size(self, batch_size: int):
         selected_batch_size = self.max_num_reqs

@@ -44,9 +44,9 @@ for the target model outputs.
 
 import pytest
 
-from tests.long_term.spec_decode.e2e.conftest import \
+from tests.e2e.long_term.spec_decode.e2e.conftest import \
     run_equality_correctness_test
-from tests.long_term.spec_decode.utils import maybe_enable_chunked_prefill
+from tests.e2e.long_term.spec_decode.utils import maybe_enable_chunked_prefill
 
 
 @pytest.mark.parametrize(

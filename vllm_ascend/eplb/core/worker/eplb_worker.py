@@ -32,12 +32,14 @@ from vllm_ascend.eplb.tool.eplb_utils import ExpertMapUtils
 
 class EplbWorker:
 
-    def __init__(self, shared_dict, policy_type, enable_d2d: bool = True):
+    def __init__(self, shared_dict, policy_type, enable_d2d: bool = True, redundant_enable=0):
         self.policy_type = policy_type
         self.policy = PolicyFactory.generate_policy(policy_type, DynamicConfig())
         self.shared_dict = shared_dict
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
+        self.redundant_enable = redundant_enable
+        self.rank_id  = dist.get_rank()
 
     def do_update(self):
         # put data in to queue
@@ -69,19 +71,26 @@ class EplbWorker:
 
         logger.debug(f"[EPLB Process  new_map differs, performing D2D")
 
-        update_info = self.compose_expert_update_info_greedy(new_expert_maps, self.old_expert_maps)\
-            if self.policy_type <= 1 else self.compose_expert_update_info_bipartite(new_expert_maps, self.old_expert_maps)
-
+        update_info = self.compose_expert_update_info_bipartite(new_expert_maps, self.old_expert_maps)\
+            if self.policy_type <= 2 else self.compose_expert_update_info_greedy(new_expert_maps, self.old_expert_maps)
         self.old_expert_maps = new_expert_maps
         logger.info("EPLB Process compute complete")
 
-        return update_info
+        packed_update_info = self.pack_update_info(update_info)
+
+        return packed_update_info
 
     def check_expert_placement(self, old_placement, new_placement):
         num_layers = old_placement.shape[0]
         num_ranks = old_placement.shape[1]
 
         for layer_id in range(num_layers):
+            # check if any logical expert is not placed on any rank
+            if torch.unique(new_placement[layer_id]).numel() < torch.unique(old_placement[layer_id]).numel():
+                logger.error(f"There exists expert not placed on any rank in layer {layer_id}")
+                new_placement[layer_id] = old_placement[layer_id]
+                continue
+
             for rank_id in range(num_ranks):
                 new_placement_check = new_placement[layer_id][rank_id]
                 old_placement_check = old_placement[layer_id][rank_id]
@@ -322,6 +331,43 @@ class EplbWorker:
 
         return placement_global
 
+    def pack_update_info(self, update_info_generator):
+        """
+        Pack a list of update info tuples for efficient IPC.
+        """
+        send_all = []
+        recv_all = []
+        maps = []
+        log2phy_all = []
+        layer_ids = []
+
+        for send_info, recv_info, new_expert_map, layer_id in update_info_generator:
+
+            send_all.append(send_info)
+            recv_all.append(recv_info)
+
+            maps.append(new_expert_map[self.rank_id])
+
+            if self.redundant_enable is not None:
+                log2phy_map = ExpertMapUtils.generate_log2phy_map(new_expert_map)
+                log2phy_all.append(log2phy_map)
+
+            layer_ids.append(layer_id)
+
+        # 把 list of Tensor 堆成一个大 Tensor
+        stacked_maps      = torch.stack(maps,      dim=0)
+        layer_id_tensor   = torch.as_tensor(layer_ids, dtype=torch.int64)
+        stacked_maps.share_memory_()
+        layer_id_tensor.share_memory_()
+
+        if self.redundant_enable:
+            stacked_log2phy = torch.stack(log2phy_all, dim=0)
+            stacked_log2phy.share_memory_()
+        else:
+            stacked_log2phy = None
+
+        return send_all, recv_all, stacked_maps, stacked_log2phy, layer_id_tensor
+
 class EplbProcess:
     def __init__(self, shared_dict, planner_q, block_update_q, redundant_enable, policy_type: int = 0, enable_d2d: bool = True):
         """
@@ -338,7 +384,7 @@ class EplbProcess:
         self.redundant_enable = redundant_enable
 
         # Create EplbWorker instance
-        self.worker = EplbWorker(self.shared_dict, self.policy_type, self.enable_d2d)
+        self.worker = EplbWorker(self.shared_dict, self.policy_type, self.enable_d2d, self.redundant_enable)
 
 
     def worker_process(self, planner_q, block_update_q):
@@ -350,17 +396,12 @@ class EplbProcess:
 
                 planner_q.get()
 
-                update_info_generator = self.worker.do_update()
-                update_info_list = []
-
-                for (send_info , recv_info , new_expert_map, layer_id) in update_info_generator:
-                    log2phy_map = ExpertMapUtils.generate_log2phy_map(new_expert_map) if self.redundant_enable else None
-                    update_info_list.append((send_info , recv_info , new_expert_map, log2phy_map, layer_id))
+                packed_update_info = self.worker.do_update()
 
                 while True:
                     if not block_update_q.empty():
                         continue
-                    block_update_q.put(update_info_list)
+                    block_update_q.put(packed_update_info)
                     break
 
             except Exception as e:

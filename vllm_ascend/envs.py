@@ -50,18 +50,10 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value is None, which means the system default C compiler will be used.
     "C_COMPILER":
     lambda: os.getenv("C_COMPILER", None),
-    # Whether to enable MC2 for DeepSeek. If not set, the default value is False.
-    # MC2 is a fusion operator provided by Ascend to speed up computing and communication.
-    # Find more detail here: https://www.hiascend.com/document/detail/zh/canncommercial/81RC1/developmentguide/opdevg/ascendcbestP/atlas_ascendc_best_practices_10_0043.html
-    "VLLM_ENABLE_MC2":
-    lambda: bool(int(os.getenv("VLLM_ENABLE_MC2", '0'))),
     # Whether to enable the topk optimization. It's disabled by default for experimental support
     # We'll make it enabled by default in the future.
     "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE", '0'))),
-    # Whether to use LCCL communication. If not set, the default value is False.
-    "USING_LCCL_COM":
-    lambda: bool(int(os.getenv("USING_LCCL_COM", '0'))),
     # The version of the Ascend chip. If not set, the default value is
     # ASCEND910B1. It's used for package building. Please make sure that the
     # version is correct.
@@ -119,15 +111,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     #   1: enable moe_all2all_buffer.
     "MOE_ALL2ALL_BUFFER":
     lambda: bool(int(os.getenv("MOE_ALL2ALL_BUFFER", '0'))),
-    # VLLM_ASCEND_ACL_OP_INIT_MODE:
-    #   0: default, normal init.
-    #   1: delay init until launch aclops.
-    #   2: forbid aclops init and launch.
-    # Find more details at https://gitee.com/ascend/pytorch/pulls/18094
-    # We set this var default to `1` in vllm-ascend to avoid segment fault when
-    # enable `pin_memory` while creating a tensor using `torch.tensor`.
-    "VLLM_ASCEND_ACL_OP_INIT_MODE":
-    lambda: os.getenv("VLLM_ASCEND_ACL_OP_INIT_MODE", '0'),
     # Some models are optimized by vllm ascend. While in some case, e.g. rlhf
     # training, the optimized model may not be suitable. In this case, set this
     # value to False to disable the optimized model.
