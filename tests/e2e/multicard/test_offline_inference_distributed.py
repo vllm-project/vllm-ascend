@@ -25,6 +25,7 @@ from unittest.mock import patch
 
 from modelscope import snapshot_download  # type: ignore
 from vllm import SamplingParams
+from vllm.model_executor.models.registry import ModelRegistry
 
 from tests.conftest import VllmRunner
 
@@ -94,6 +95,32 @@ def test_models_distributed_DeepSeek_dbo():
             tensor_parallel_size=4,
             distributed_executor_backend="mp",
     ) as vllm_model:
+        model_arch = 'DeepseekV2ForCausalLM'
+        registed_models = ModelRegistry.models
+        assert registed_models[
+            model_arch].module_name == "vllm_ascend.models.deepseek_dbo"
+        assert registed_models[
+            model_arch].class_name == "CustomDeepseekDBOForCausalLM"
+        vllm_model.generate(example_prompts, sampling_params)
+
+
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DBO": "1"})
+def test_models_distributed_DeepSeekV3_dbo():
+    example_prompts = ["The president of the United States is"] * 41
+    dtype = "half"
+    sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
+    with VllmRunner(
+            "vllm-ascend/DeepSeek-V3-Pruning",
+            dtype=dtype,
+            tensor_parallel_size=4,
+            distributed_executor_backend="mp",
+    ) as vllm_model:
+        model_arch = 'DeepseekV3ForCausalLM'
+        registed_models = ModelRegistry.models
+        assert registed_models[
+            model_arch].module_name == "vllm_ascend.models.deepseek_dbo"
+        assert registed_models[
+            model_arch].class_name == "CustomDeepseekDBOForCausalLM"
         vllm_model.generate(example_prompts, sampling_params)
 
 
