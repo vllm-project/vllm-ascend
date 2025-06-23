@@ -36,7 +36,8 @@ from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.cache import concat_and_cache_mla
-from vllm_ascend.utils import enable_custom_op
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16,
+                               enable_custom_op, is_310p, nd_to_nz_2d)
 from vllm_ascend.worker.model_runner import (
     ModelInputForNPUBuilder, ModelInputForNPUWithSamplingMetadata)
 
@@ -170,7 +171,11 @@ class AscendAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        if is_310p():
+            return (2, num_blocks, num_kv_heads * head_size // 16, block_size,
+                    16)
+        else:
+            return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def swap_blocks(
@@ -654,6 +659,11 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
                 # normal mask
                 self.attn_mask = AscendMetadataBuilder._attn_mask_builder.get_attn_mask(  # type: ignore
                     max_prefill_seq_len, dtype, device)
+                if is_310p():
+                    mask_nz = nd_to_nz_2d(self.attn_mask)
+                    mask_nz = torch_npu.npu_format_cast(
+                        mask_nz.contiguous(), ACL_FORMAT_FRACTAL_NZ)
+                    self.attn_mask = mask_nz
             elif self.num_decode_tokens == 0 and not self.input_builder.chunked_prefill_enabled:
                 # compress mask for prefix cache
                 self.compress_mask = AscendMetadataBuilder._attn_mask_builder.get_attn_mask(  # type: ignore
@@ -868,6 +878,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         self.seq_lens_tensor_cpu = torch.from_numpy(
                             np.array(attn_metadata.prefill_metadata.seq_lens).
                             astype(np.int32))
+                        if is_310p():
+                            # align q k v output tensors
+                            query = aligned_16(query)
+                            key = aligned_16(key)
+                            value = aligned_16(value)
+                            output = aligned_16(output)
+
+                            # do reformat in case of broadcasted tensors
+                            mask = mask.repeat(
+                                self.seq_lens_tensor_cpu.size(0), 1, 1, 1)
+                            mask = torch_npu.npu_format_cast(
+                                mask.contiguous(), ACL_FORMAT_FRACTAL_NZ)
                         torch_npu._npu_flash_attention(
                             query=query,
                             key=key,
@@ -878,6 +900,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             num_heads=self.num_heads,
                             num_kv_heads=self.num_kv_heads,
                             out=output)
+                        output = output[:num_tokens, :, :]
                 # Prefix cache only and cache hit
                 elif attn_metadata.num_decode_tokens == 0 and not attn_metadata.chunked_prefill_enabled:
                     assert kv_cache is not None
@@ -935,6 +958,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.seq_lens_tensor_cpu = torch.from_numpy(
                     np.array(attn_metadata.decode_metadata.seq_lens).astype(
                         np.int32))
+                if is_310p():
+                    # # seq_lens_tensor needs to be transferred to the device for 310P
+                    self.seq_lens_tensor_cpu = self.seq_lens_tensor_cpu.to(
+                        device=self.key_cache.device)
                 block_tables = attn_metadata.decode_metadata.block_tables
                 torch_npu._npu_paged_attention(
                     query=query,

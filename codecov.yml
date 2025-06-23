@@ -15,28 +15,16 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import torch
-from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
-
-from vllm_ascend.utils import is_310p
-
-
-def silu_and_mul_forward_oot(self, x: torch.Tensor) -> torch.Tensor:
-    import torch_npu
-
-    if is_310p():
-        out = torch_npu.npu_swiglu(x.to(torch.float32)).to(torch.float16)
-    else:
-        out = torch_npu.npu_swiglu(x)
-    return out
-
-
-def quick_gelu_forward_oot(self, x: torch.tensor) -> torch.Tensor:
-    import torch_npu
-
-    out = torch_npu.npu_fast_gelu(x)
-    return out
-
-
-QuickGELU.forward_oot = quick_gelu_forward_oot
-SiluAndMul.forward_oot = silu_and_mul_forward_oot
+coverage:
+  status:
+    # non-voting, new code must be fully tested
+    patch:
+      default:
+        target: 100%
+        # non-voting
+        informational: true
+    # non-voting
+    project:
+      default:
+        # non-voting
+        informational: true

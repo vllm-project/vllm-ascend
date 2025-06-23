@@ -18,8 +18,22 @@
 name: 'test'
 
 on:
-  schedule:
-    - cron: '0 23 * * *'
+  push:
+    # Enable merged test per commit
+    branches:
+      - 'main'
+    paths:
+      - '*.txt'
+      - '**/*.py'
+      - '.github/workflows/vllm_ascend_test.yaml'
+      - '!docs/**'
+      - 'pytest.ini'
+      - '!benchmarks/**'
+      - 'tools/mypy.sh'
+      - 'mypy.ini'
+      - '.github/workflows/*.ya?ml'
+      - '.github/workflows/actionlint.*'
+      - '.github/workflows/matchers/actionlint.json'
   pull_request:
     branches:
       - 'main'
@@ -52,6 +66,8 @@ concurrency:
 
 jobs:
   lint:
+    # Only trigger lint on pull request
+    if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -117,7 +133,8 @@ jobs:
   ut:
     needs: [lint]
     name: unit test
-    if: ${{ needs.lint.result == 'success' }}
+    # only trigger e2e test on [pull request after lint passed] and [merged commit]
+    if: ${{ needs.lint.result == 'success' || github.event_name == 'push' }}
     runs-on: ubuntu-latest
     container:
       image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
@@ -131,7 +148,7 @@ jobs:
       - name: Install packages
         run: |
           apt-get update -y
-          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev
+          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v4
@@ -163,11 +180,22 @@ jobs:
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         run: |
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
-          pytest -sv tests/ut
+          pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut
+
+      - name: Upload coverage to Codecov
+        if: ${{ matrix.vllm_version == 'main' }}
+        uses: codecov/codecov-action@v5
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        with:
+          flags: unittests
+          name: vllm-ascend
+          verbose: true
 
   e2e:
     needs: [lint]
-    if: ${{ needs.lint.result == 'success' }}
+    # only trigger e2e test on pull request after lint passed
+    if: ${{ needs.lint.result == 'success' && github.event_name == 'pull_request' }}
     strategy:
       max-parallel: 2
       matrix:
@@ -231,8 +259,7 @@ jobs:
           # TODO: switch hf to modelscope
           VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
             pytest -sv tests/e2e/singlecard/test_ilama_lora.py
-          # TODO(sss): guided decoding doesn't work, fix it later
-          # pytest -sv tests/e2e/singlecard/test_guided_decoding.py
+          pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv tests/e2e/singlecard/test_camem.py
           pytest -sv tests/e2e/singlecard/ \
           --ignore=tests/e2e/singlecard/test_offline_inference.py \
@@ -250,8 +277,7 @@ jobs:
           # TODO: switch hf to modelscope
           VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
             pytest -sv tests/e2e/singlecard/test_ilama_lora.py
-          # guided decoding doesn't work, fix it later
-          # pytest -sv tests/e2e/singlecard/test_guided_decoding.py
+          pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv tests/e2e/singlecard/test_camem.py
           pytest -sv tests/e2e/singlecard/test_prompt_embedding.py
           pytest -sv tests/e2e/singlecard/ \
@@ -335,6 +361,8 @@ jobs:
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_topk
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_dbo
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeekV3_dbo
           pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_ilama_lora_tp2.py --ignore=tests/e2e/multicard/test_offline_inference_distributed.py
 
       - name: Run vllm-project/vllm-ascend test on V0 engine
