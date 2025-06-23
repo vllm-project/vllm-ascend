@@ -1,4 +1,3 @@
-#
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -76,7 +75,7 @@ class EplbUpdator:
             shared_dict = self.shared_dict,
             planner_q = self.planner_block_queue,
             block_update_q = self.block_update_queue,
-            redundant_enable = self.redundant_enable, 
+            redundant_enable = self.redundant_enable,
             policy_type = 6,
             enable_d2d = True
         )
@@ -104,7 +103,6 @@ class EplbUpdator:
         self.planner_block_queue.put(1)
 
     def forward_before(self):
-
         # Batch after eplb process being triggered, get update info provided by eplb process
         if self.update_in_flight and self.weight_update_counter == 0 and self.wait_worker_iterations == self.num_wait_worker_iterations:
             self.wait_worker_iterations = 0
