@@ -80,6 +80,41 @@ pip install -r requirements-dev.txt
 pytest tests/
 ```
 
+
+### Run doctest
+
+vllm-ascend provides a `vllm-ascend/tests/e2e/run_doctests.sh` command to run all doctests in the doc files.
+The doctest is a good way to make sure the docs are up to date and the examples are executable, you can run it locally as follows:
+
+```{code-block} bash
+   :substitutions:
+
+# Update DEVICE according to your device (/dev/davinci[0-7])
+export DEVICE=/dev/davinci0
+# Update the vllm-ascend image
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+docker run --rm \
+--name vllm-ascend \
+--device $DEVICE \
+--device /dev/davinci_manager \
+--device /dev/devmm_svm \
+--device /dev/hisi_hdc \
+-v /usr/local/dcmi:/usr/local/dcmi \
+-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+-v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+-v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+-v /etc/ascend_install.info:/etc/ascend_install.info \
+-v /root/.cache:/root/.cache \
+-p 8000:8000 \
+-it $IMAGE bash
+
+# Run doctest
+/vllm-workspace/vllm-ascend/tests/e2e/run_doctests.sh
+```
+
+This will reproduce the same environment as the CI: [vllm_ascend_doctest.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_doctest.yaml).
+
+
 ## DCO and Signed-off-by
 
 When contributing changes to this project, you must agree to the DCO. Commits must include a `Signed-off-by:` header which certifies agreement with the terms of the DCO.

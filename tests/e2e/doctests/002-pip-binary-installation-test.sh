@@ -18,13 +18,33 @@
 #
 trap clean_venv EXIT
 
+function install_system_packages() {
+    if command -v apt-get >/dev/null; then
+        sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+        apt-get update -y && apt-get install -y gcc g++ cmake libnuma-dev wget git curl jq
+    elif command -v yum >/dev/null; then
+        yum update -y && yum install -y gcc g++ cmake numactl-devel wget git curl jq
+    else
+        echo "Unknown package manager. Please install curl manually."
+    fi
+}
+
+function config_pip_mirror() {
+    pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+}
+
 function install_binary_test() {
 
+    install_system_packages
+    config_pip_mirror
     create_vllm_venv
 
     PIP_VLLM_VERSION=$(get_version pip_vllm_version)
     PIP_VLLM_ASCEND_VERSION=$(get_version pip_vllm_ascend_version)
     _info "====> Install vllm==${PIP_VLLM_VERSION} and vllm-ascend ${PIP_VLLM_ASCEND_VERSION}"
+
+    # Setup extra-index-url for x86 & torch_npu dev version
+    pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
 
     pip install vllm=="$(get_version pip_vllm_version)"
     pip install vllm-ascend=="$(get_version pip_vllm_ascend_version)"
