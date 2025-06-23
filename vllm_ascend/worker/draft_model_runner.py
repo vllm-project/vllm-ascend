@@ -51,12 +51,6 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
     """
 
     def __init__(self, model_runner: ModelRunnerBase):
-        if hasattr(
-                model_runner,
-                "return_hidden_states") and model_runner.return_hidden_states:
-            raise ValueError(
-                "return_hidden_states is not supported for TP1DraftModelRunner."
-            )
         super().__init__(model_runner)
 
         self.indices_of_seq_with_bonus_tokens = None
@@ -211,6 +205,9 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             if self.prompt_adapter_config is not None:
                 raise ValueError("TP1DraftModelRunner has no support for "
                                  "prompt_adapter_config")
+            if model_input.inputs_embeds is not None:
+                raise ValueError("TP1DraftModelRunner has no support for "
+                                 "inputs_embeds")
             if model_input.multi_modal_kwargs:
                 raise ValueError(
                     "TP1DraftModelRunner has no support for multi_modal_kwargs"
@@ -272,6 +269,7 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
 
                 hidden_states = model_executable(
                     input_ids=model_input.input_tokens,
+                    inputs_embeds=None,
                     positions=model_input.input_positions,
                     intermediate_tensors=intermediate_tensors,
                     **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
@@ -292,6 +290,9 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 sampling_metadata=model_input.sampling_metadata,
             )
             outputs.append(output)
+
+            if self.return_hidden_states and is_fallback:
+                output.hidden_states = hidden_states
 
             if model_input.attn_metadata.num_prefills == 0 \
                 and self.indices_of_seq_with_bonus_tokens is not None:
