@@ -43,6 +43,7 @@ def wrapper_rmsnorm_forward_oot(func):
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
+        is_fc3=False
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         if not self.ignore_anti:
             if residual is not None:
@@ -66,10 +67,11 @@ def wrapper_rmsnorm_forward_oot(func):
             )
             return out
 
-        if residual is not None:
-            x, residual = func(self, x, residual)
-            return x.add_(self.bias), residual
 
+        if residual is not None:
+
+            x, residual = func(self, x, residual,is_fc3=is_fc3)
+            return x.add_(self.bias), residual
         return func(self, x).add_(self.bias)
 
     return _rmsnorm_forward_oot
