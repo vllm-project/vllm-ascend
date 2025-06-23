@@ -156,7 +156,7 @@ class CustomDeepseekDBOMoE(nn.Module):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=False,
+                reduce_results=True if not ENABLE_MOE_ALLTOALLV else False,
                 prefix=f"{prefix}.shared_experts",
             )
         CustomDeepseekDBOMoE.top_k = config.num_experts_per_tok
@@ -263,27 +263,27 @@ class CustomDeepseekDBOMoE(nn.Module):
             attn_metadata = get_forward_context().attn_metadata
         # when profile runs, force experts to load balanced tokens
         # to avoid high memory consumption on a single rank.
-        # TODO: need a better flag to indicate whether in profile run or not.
-        if attn_metadata is None:
-            # for profile run
-            self.is_prefill = True
-            self.enable_force_load_balance = True
-        else:
-            self.is_prefill = attn_metadata.num_prefills > 0
-            self.enable_force_load_balance = False
-        self.enable_force_load_balance = True
+            # TODO: need a better flag to indicate whether in profile run or not.
+            if attn_metadata is None:
+                # for profile run
+                self.is_prefill = True
+                self.enable_force_load_balance = True
+            else:
+                is_prefill = attn_metadata.num_prefills > 0
+                self.enable_force_load_balance = False
+                if hasattr(attn_metadata, 'with_prefill_across_dp'):
+                    self.is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
+
+        # TODO: Remove this when finished debugging.
+        self.enable_force_load_balance = True # For Debugging Only.
         num_tokens, hidden_dim = hidden_states.shape
 
         if self.tp_size > 1:
             # pass
             num_tokens, hidden_size = hidden_states.shape
             if num_tokens < self.tp_size:
-                target_size = self.tp_size
-                new_hidden_states = torch.empty([target_size, hidden_size],
-                                                dtype=hidden_states.dtype,
-                                                device=hidden_states.device)
-                new_hidden_states[:num_tokens] = hidden_states
-                hidden_states = new_hidden_states
+                hidden_states = nn.functional.pad(
+                    hidden_states, (0, 0, 0, self.tp_size - num_tokens))
             chunk_hidden_states = torch.tensor_split(hidden_states,
                                                      self.tp_size,
                                                      dim=0)
@@ -313,7 +313,7 @@ class CustomDeepseekDBOMoE(nn.Module):
                 eps=float(1e-20))
         else:
             topk_weights, topk_ids = select_experts(
-                hidden_states=hidden_states,
+                hidden_states=local_hidden_states,
                 router_logits=router_logits,
                 top_k=self.config.num_experts_per_tok,
                 use_grouped_topk=True,
@@ -366,7 +366,7 @@ class CustomDeepseekDBOMoE(nn.Module):
     ):
         token_dispatcher = self.experts.token_dispatchers[microbatch_id]
         token_dispatcher.combine_alltoall()
-        final_hidden_states = token_dispatcher.unpermute2()
+        final_hidden_states = token_dispatcher.unpermute2() * self.routed_scaling_factor
 
         if self.tp_size > 1:
             final_hidden_states = gather_from_sequence_parallel_region(final_hidden_states, self.tp_group, chunked_hidden_states_sizes)
@@ -1081,6 +1081,7 @@ class CustomDeepseekDBOModel(nn.Module):
                 ["hidden_states", "residual"], config.hidden_size))
 
         # tbo related members
+        self.cnt = 0
         if VLLM_ASCEND_ENABLE_DBO:
             self.use_mla = model_config.use_mla
             self.multistream_config = MultiStreamConfig()
@@ -1121,6 +1122,9 @@ class CustomDeepseekDBOModel(nn.Module):
         num_normal_layers = (self.first_k_dense_replace
                              if VLLM_ASCEND_ENABLE_DBO and self.can_run_ms()
                              else self.end_layer - self.start_layer)
+        # if self.can_run_ms():
+        #     self.cnt += 1
+        #     print(self.cnt)
 
         moe_start_layer = self.start_layer + num_normal_layers
         for i in range(self.start_layer, min(moe_start_layer, self.end_layer)):
@@ -1190,6 +1194,7 @@ class CustomDeepseekDBOModel(nn.Module):
             if ENABLE_MOE_ALLTOALLV:
                 # ms_layer_forward_func = layer._forward_ms_layer_alltoallv
                 ms_layer_forward_func = layer._forward_ms_layer_alltoallv_finegrained
+            # print("get_called......")
             hidden_states, residual = ms_layer_forward_func(
                 positions=positions,
                 hidden_states=hidden_states,
