@@ -23,7 +23,6 @@ from vllm.distributed.kv_events import KVEventBatch
 from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.utils import cdiv
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutputs
