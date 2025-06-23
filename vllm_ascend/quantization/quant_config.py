@@ -23,12 +23,13 @@ from types import MappingProxyType
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
 import torch
-from vllm.distributed import get_tensor_model_parallel_rank
+from vllm.distributed import get_tensor_model_parallel_rank,get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
-                                                  FusedMoeWeightScaleSupported)
+                                                  FusedMoeWeightScaleSupported)                                                
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                RowParallelLinear,
-                                               UnquantizedLinearMethod)
+                                               UnquantizedLinearMethod,
+                                               MergedColumnParallelLinear)
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
@@ -203,10 +204,14 @@ class AscendLinearMethod(LinearMethodBase):
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: Optional[torch.Tensor] = None,
+        is_fc3: bool=False
     ) -> torch.Tensor:
         if isinstance(layer, RowParallelLinear):
             tp_rank = get_tensor_model_parallel_rank()
             return self.quant_method.apply(layer, x, bias, tp_rank)
+        elif isinstance(layer, MergedColumnParallelLinear):
+            is_tp = True if get_tensor_model_parallel_world_size() > 1 else False
+            return self.quant_method.apply(layer, x, bias, is_fc3=(is_fc3 and is_tp))
         return self.quant_method.apply(layer, x, bias)
 
 
