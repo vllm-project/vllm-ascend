@@ -20,8 +20,7 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch_npu
-from vllm.distributed import GroupCoordinator
-
+from vllm.distributed import GroupCoordinator,get_tensor_model_parallel_world_size,tensor_model_parallel_all_gather
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group
@@ -30,7 +29,6 @@ from vllm_ascend.utils import (dispose_tensor, npu_stream_switch,
                                npu_wait_tensor)
 
 VLLM_ENABLE_MC2: bool = envs_ascend.VLLM_ENABLE_MC2
-
 
 def apply_mlp(hidden_states: torch.Tensor,
               w1: torch.Tensor,
@@ -459,11 +457,9 @@ def fused_experts(hidden_states: torch.Tensor,
         final_hidden_states = final_hidden_states.view(original_shape)
     return final_hidden_states
 
-
 class AscendW8A8DynamicLinearMethod:
     """Linear method for Ascend W8A8_DYNAMIC.
     """
-
     def __init__(self):
         self.transpose_weight = True
 
@@ -499,6 +495,7 @@ class AscendW8A8DynamicLinearMethod:
         x: Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]],
         bias: Optional[torch.Tensor] = None,
         tp_rank: Optional[int] = 0,
+        is_fc3:bool=False
     ) -> torch.Tensor:
         config = getattr(layer, "_ascend_quant_config", {})
         if not isinstance(x, tuple):
@@ -510,6 +507,10 @@ class AscendW8A8DynamicLinearMethod:
                 f"for pre-quantized input, got config [{config}]")
             output_dtype = config["output_dtype"]
             quantized_x, dynamic_scale = x
+        is_tp = True if get_tensor_model_parallel_world_size() > 1 else False
+        if is_fc3 and is_tp:
+            quantized_x = tensor_model_parallel_all_gather(quantized_x,0)
+            dynamic_scale = tensor_model_parallel_all_gather(dynamic_scale)
         pertoken_scale = (dynamic_scale
                           if config.get("pertoken_scale", True) else None)
 
@@ -652,6 +653,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 e_score_correction_bias=e_score_correction_bias,
             )
 
+        
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
