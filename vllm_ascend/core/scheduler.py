@@ -443,7 +443,7 @@ class AscendScheduler(Scheduler):
         if request.request_id not in self.finished_recving_kv_req_ids:
             return False
         assert len(self.kv_cache_config.kv_cache_groups
-                ) == 1, "KV connector only supports one KV cache group now"
+                   ) == 1, "KV connector only supports one KV cache group now"
         # Now that the blocks are ready, actually cache them.
         # In order to make decode node always do the decode step, we transfer every block as long as it contains the
         # data computed by prefill node.
