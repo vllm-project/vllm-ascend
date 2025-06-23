@@ -125,4 +125,4 @@ And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tenso
 ```
 
 ### 17. Failed to reinstall vllm-ascend from source after uninstalling vllm-ascend?
-You may encounter the problem of C compilation failure when reinstalling vllm-ascend from source using pip. If the installation fails, it is recommended to use `python setup.py develop` to install, or use `python setup.py clean` to clear the cache.
+You may encounter the problem of C compilation failure when reinstalling vllm-ascend from source using pip. If the installation fails, it is recommended to use `python setup.py install` to install, or use `python setup.py clean` to clear the cache.
