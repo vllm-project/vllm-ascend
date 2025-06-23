@@ -116,21 +116,22 @@ Once it's done, you can start to set up `vllm` and `vllm-ascend`.
 :selected:
 :sync: pip
 
-First install system dependencies:
+First install system dependencies and config pip mirror:
 
 ```bash
-apt update  -y
-apt install -y gcc g++ cmake libnuma-dev wget git
+# Using apt-get with mirror
+sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+apt-get update -y && apt-get install -y gcc g++ cmake libnuma-dev wget git curl jq
+# Or using yum
+# yum update -y && yum install -y gcc g++ cmake numactl-devel wget git curl jq
+# Config pip mirror
+pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 ```
 
 **[Optional]** Then config the extra-index of `pip` if you are working on a x86 machine or using torch-npu dev version:
 
 ```bash
-# For x86 machine
-pip config set global.extra-index-url https://download.pytorch.org/whl/cpu/
-# For torch-npu dev version
-pip config set global.extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
-# For x86 torch-npu dev version
+# For torch-npu dev version or x86 machine
 pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
 ```
 
