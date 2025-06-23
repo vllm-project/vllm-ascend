@@ -501,3 +501,42 @@ class AscendScheduler(Scheduler):
 
         return super().update_from_output(scheduler_output,
                                           model_runner_output)
+
+
+    def _update_waiting_for_remote_kv(self, request: Request) -> bool:
+        """
+        KV Connector: check if the request_id is finished_recving.
+
+        The finished_recving_kv_req_ids list is populated
+        on the previous steps()'s update_from_output based
+        on the worker side connector.
+
+        When the kv transfer is ready, we cache the blocks
+        and the request state will be moved back to WAITING from
+        WAITING_FOR_REMOTE_KV.
+        """
+        assert self.connector is not None
+        if request.request_id not in self.finished_recving_kv_req_ids:
+            return False
+
+        # Now that the blocks are ready, actually cache them.
+        (block_ids, ) = self.kv_cache_manager.get_block_ids(request.request_id)
+        num_computed_tokens = len(block_ids) * self.block_size
+        # Handle the case where num request tokens less then one block.
+        num_computed_tokens = min(num_computed_tokens, request.num_tokens)
+        if num_computed_tokens == request.num_tokens:
+            num_computed_tokens -= 1
+
+        # This will cache the blocks if caching is enabled.
+        # Note: vllm fix this in main branch, but still have issue on v0.9.1, so we just adopt the 
+        # change on 0.9.1 and without cherry-pick this back to main branch on vllm-ascend
+        if self.kv_cache_manager.enable_caching:
+            self.kv_cache_manager.cache_blocks(request, num_computed_tokens)
+
+        # Update the request state for scheduling.
+        request.num_computed_tokens = num_computed_tokens
+
+        # Return that we are ready.
+        self.finished_recving_kv_req_ids.remove(request.request_id)
+        return True
+
