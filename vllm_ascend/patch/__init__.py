@@ -24,16 +24,9 @@
 #           each worker's `__init__` function.
 #
 # Then in each kind of patch, there are three folders:
-# - patch_0_8_5: contains the patches applied when vllm version is 0.8.5.
+# - patch_0_9_1: contains the patches applied when vllm version is 0.9.1.
 # - patch_main: contains the patches applied when vllm version is main branch.
-# - patch_common: contains the patches applied in both 0.8.5 and main branch.
-#
-# In the future, with the vllm version upgrade, the new patch folder such as
-# patch_0_8_5, patch_0_8_6, etc. will be added to manage the patch for different
-# vllm version. And the patch_common will contain the patches applied in all the
-# vllm version.
-# Once the vllm version is too old that vllm-ascend will not support, the related
-# patch folder will be removed as well.
+# - patch_common: contains the patches applied in both 0.9.1 and main branch.
 #
 # Once a new patch is added in vllm-ascend, please add the patch description into this file as well.
 # ----------------------------------------------------------------------------------
@@ -51,56 +44,31 @@
 #       platform owned `CoordinatorGroup` to make sure all the CoordinateGroup can be properly destroyed
 #    How：
 #       Call `vllm_ascend.distributed.parallel_state method `destroy_platform_model_parallel` to destroy all the `CoordinateGroup`
-#    Related PR (if no, explain why): no related PR, we want add this ability into vllm
+#    Related PR (if no, explain why):
 #    Future Plan:
 #       Remove those patch when vllm merged them
-#   2. `vllm.distributed.stateless_init_torch_distributed_process_group()`
+#   2. `vllm.config.ParallelConfig.get_next_dp_init_port`
 #    Why:
-#       The stateless process group can not be initialized except from gloo and nccl backend, vllm-ascend
-#       needs to initialize its own stateless process group for communication, so we add the platform related
-#       call to the `stateless_init_torch_distributed_process_group`, to enable other platform which may support
-#       stateless process group initialize method
+#       vllm doesn't support get port from environment.
 #    How：
-#       rewrite stateless_init_torch_distributed_process_group to judge if there is a stateless process group initialize
-#       method and call platform method `platform_register_backend` to initialize them
-#    Related PR (if no, explain why): no related PR, we want add this ability into vllm
+#       Add the logic to get port from environment.
+#    Related PR (if no, explain why):
+#       Need a PR to vllm to support get port from environment.
 #    Future Plan:
 #       Remove those patch when vllm merged them
-#   3. `ParallelConfig.get_next_dp_init_port`
-#    Why:
-#       We want to get dp port from env variable, so the multi-node inference can be properly initialized and run.
-#    How：
-#       Get the dp port from env variable enable multi-mode dp inference
-#    Related PR (if no, explain why): no related PR, we want add this ability into vllm
-#    Future Plan:
-#       Its a workaround in vllm-ascend to enable multi-node dp inference, maybe removed if vllm have better plan
-#       on multi-node dp inference implementation
-#   4. `ParallelConfig.stateless_init_dp_group`
+#   3. `vllm.config.ParallelConfig.ParallelConfig.stateless_init_dp_group`
 #    Why:
 #       vLLM use gloo backend by default to initialize stateless dp process gourp, but we want to use hccl here to
 #       get better performance
 #    How：
-#       adopt nccl backend to init process group
-#    Related PR (if no, explain why): no related PR, we want add this ability into vllm
+#       adopt nccl backend to init process group.(Now we still use gloo, it's just a placeholder, we'll use nccl in the future)
+#    Related PR (if no, explain why):
+#       Need a PR to vllm to support more backend.
 #    Future Plan:
-#       Remove those patch when vllm merged them
-#
+#       Remove those patch when vllm support more backend.
 #
 # * Worker Patch:
 # ===============
-# ** File: worker/patch_common/patch_metrics.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.spec_decode.metrics.AsyncMetricsCollector.maybe_collect_rejsample_metrics`
-#    Why:
-#       There are cuda hard code (current_platform.is_cuda_alike()) in
-#       `AsyncMetricsCollector.maybe_collect_rejsample_metrics`
-#    How：
-#       Change to use `current_platform.Event` to determine whether to return None
-#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
-#       https://github.com/vllm-project/vllm/pull/14411
-#    Future Plan:
-#       Revert it when the related pr is merged in vllm.
-#
 # ** File: worker/patch_common/patch_minicpm.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.model_executor.models.minicpm.MiniCPMAttention.forward`
@@ -110,7 +78,7 @@
 #       However float32 is not supported in cann rope op, thus we keep this patch
 #    How：
 #       Removed the dtype convert operations in forward
-#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
+#    Related PR (if no, explain why):
 #       NO, only for npu due to rope op.
 #    Future Plan:
 #       Keep this patch in vllm-ascend.
@@ -126,26 +94,14 @@
 #       - support attention metadata register to the set supported spec decode
 #       - offer a api in platform to determine whether spec decode is supported,
 #         and deprecate is_cuda_alike in it.
-#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
+#    Related PR (if no, explain why):
 #       - https://github.com/vllm-project/vllm/pull/15195
 #       - https://github.com/vllm-project/vllm-ascend/pull/395
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm and vllm-ascend.
 #
-#   2. `vllm.spec_decode.multi_step_worker.MultiStepWorker.set_include_gpu_probs_tensor` and
-#       `vllm.spec_decode.multi_step_worker.MultiStepWorker.set_should_modify_greedy_probs_inplace`
-#    Why:
-#       vLLM `Remove Sampler from Model Code` so vllm-ascend needs adapt to this change.
-#    How：
-#       Use vLLM 0.8.4 method to patch it.
-#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
-#       - https://github.com/vllm-project/vllm/pull/15195
-#       - https://github.com/vllm-project/vllm-ascend/pull/395
-#    Future Plan:
-#       Remove it when we identify the reasons clearly.
-#
 # ** File: worker/patch_common/patch_spec_decode_worker.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.spec_decode.spec_decode_worker.SpecDecodeWorker.create_worker`
 #    Why:
 #       We need to use the patched `TP1DraftModelRunner` in `SpecDecodeWorker.create_worker`.
@@ -153,9 +109,73 @@
 #           `FlashAttentionMetadata`
 #    How：
 #       ditto
-#    Related PR (if no, explain why): 1. refused by vllm. 2. vllm doesn't support 3. prepare to submit....
+#    Related PR (if no, explain why):
 #       - https://github.com/vllm-project/vllm/pull/15195
 #       - https://github.com/vllm-project/vllm-ascend/pull/395
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm and vllm-ascend.
 #
+# ** File: worker/patch_common/patch_eagle.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.spec_decode.eagle.prepare_inputs`
+#    Why:
+#       We need to use the patched `prepare_input_kernel` in `eagle.prepare_inputs`.
+#       The mainly reason to overwrite `prepare_input_kernel` is this is a triton
+#       kernel, ascend is now not support triton kernel.
+#    How：
+#       Re-implementation the `prepare_input_kernel` triton kernel by pytorch
+#    Related PR (if no, explain why):
+#       - Ascend doesn't support triton
+#    Future Plan:
+#       Revert it when the ascend support triton kernel.
+#
+# ** File: worker/patch_common/patch_sampler.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.sample.sampler.Sampler.apply_top_k_top_p`
+#    Why:
+#       We need to use the patched `apply_top_k_top_p` in `sample`.
+#       The mainly reason to overwrite `apply_top_k_top_p` is
+#       to improve performance.
+#    How：
+#       Re-implementation the `apply_top_k_top_p` function by pytorch
+#    Related PR (if no, explain why):
+#       - https://github.com/vllm-project/vllm-ascend/pull/970
+#    Future Plan:
+#       Revert it when the ascend scatter performance improves.
+#
+#   2. `vllm.v1.sample.sampler.Sampler.apply_min_p`
+#    Why:
+#       We need to use the patched `apply_min_p` in `sample`.
+#       The mainly reason to overwrite `apply_min_p` is
+#       to improve performance.
+#    How：
+#       Re-implementation the `apply_min_p` function by pytorch
+#    Related PR (if no, explain why):
+#       - https://github.com/vllm-project/vllm-ascend/pull/970
+#    Future Plan:
+#       Revert it when the ascend indexput performance improves.
+#
+# ** File: worker/patch_common/patch_distributed.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.distributed.parallel_state.GroupCoordinator`
+#    Why:
+#       vllm doesn't support all_to_all for GroupCoordinator.
+#    How：
+#       Add all_to_all implementation for GroupCoordinator.
+#    Related PR (if no, explain why):
+#       Need a PR to vllm to support all_to_all for GroupCoordinator.
+#    Future Plan:
+#       Remove this patch when vllm merged them.
+#
+# ** File: worker/patch_common/patch_utils.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.utils.direct_register_custom_op`
+#    Why:
+#       pytorch 2.7.o is not compatible with pytorch 2.5.1. While vllm is based on pytorch 2.7.0, but vllm ascend
+#       is based on pytorch 2.5.1, so we need to use this patch to make vllm compatible with pytorch 2.5.1.
+#    How：
+#       patch __annotations__ check to make it compatible with pytorch 2.5.1.
+#    Related PR (if no, explain why):
+#       This is the problem in vllm-ascend
+#    Future Plan:
+#       Remove this patch once pytorch 2.7.0 is supported for vllm ascend.

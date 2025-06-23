@@ -38,7 +38,7 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
 - Software:
   * Python >= 3.9, < 3.12
   * CANN >= 8.1.RC1
-  * PyTorch >= 2.5.1, torch-npu >= 2.5.1
+  * PyTorch >= 2.5.1, torch-npu >= 2.5.1.post1.dev20250619
   * vLLM (the same version as vllm-ascend)
 
 ## Getting Started
@@ -63,7 +63,7 @@ Below is maintained branches:
 
 | Branch     | Status       | Note                                 |
 |------------|--------------|--------------------------------------|
-| main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.8.x branch   |
+| main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.9.x branch   |
 | v0.7.1-dev | Unmaintained | Only doc fixed is allowed |
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version |
 

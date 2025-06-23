@@ -14,7 +14,7 @@ _err() { _red "Error: $*" && exit 1; }
 
 CURL_TIMEOUT=1
 CURL_COOLDOWN=5
-CURL_MAX_TRIES=120
+CURL_MAX_TRIES=180
 
 function wait_url_ready() {
   local serve_name="$1"
@@ -31,7 +31,7 @@ function wait_url_ready() {
       break
     fi
     if [ "$i" -gt "$CURL_MAX_TRIES" ]; then
-      _info "===> \$CURL_MAX_TRIES exceeded waiting for ${serve_name} to be ready"
+      _info "===> ${CURL_MAX_TRIES}s exceeded waiting for ${serve_name} to be ready"
       return 1
     fi
     sleep "$CURL_COOLDOWN"
@@ -45,7 +45,30 @@ function wait_for_exit() {
     _info "===> Wait for ${VLLM_PID} to exit."
     sleep 1
   done
-  _info "===> Wait for ${VLLM_PID} to exit."
+  _info "===> Process ${VLLM_PID} has exited."
+}
+
+VENV_PATH=/tmp/vllm_venv
+
+function clean_venv() {
+  if [[ -n "$VENV_PATH" && -d "$VENV_PATH" ]]; then
+    _info "Cleaning up default virtual env path: ${VENV_PATH}"
+    deactivate || true
+    rm -rf "$VENV_PATH"
+  fi
+}
+
+function create_vllm_venv() {
+  # make a clean env path
+  clean_venv
+  _info "Creating vllm virtual environment at ${VENV_PATH}"
+  python3 -m venv ${VENV_PATH}
+  source ${VENV_PATH}/bin/activate
+}
+
+function get_version() {
+  local VERSION_NAME="$1"
+  python3 "${SCRIPT_DIR}/../../docs/source/conf.py" | jq .${VERSION_NAME} | tr -d '"'
 }
 
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)

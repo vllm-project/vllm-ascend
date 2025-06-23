@@ -17,12 +17,14 @@
 # Adapted from vllm-project/vllm/blob/main/tests/conftest.py
 #
 
+import contextlib
 import gc
 from typing import List, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 import pytest
 import torch
+from huggingface_hub import snapshot_download
 from PIL import Image
 from vllm import LLM, SamplingParams
 from vllm.config import TaskOption
@@ -52,11 +54,17 @@ PromptAudioInput = _PromptMultiModalInput[Tuple[np.ndarray, int]]
 PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 
 
-def cleanup_dist_env_and_memory():
+def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     destroy_model_parallel()
     destroy_distributed_environment()
+    with contextlib.suppress(AssertionError):
+        torch.distributed.destroy_process_group()
+    if shutdown_ray:
+        import ray  # Lazy import Ray
+        ray.shutdown()
     gc.collect()
     torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
 
 
 class VllmRunner:
@@ -76,7 +84,8 @@ class VllmRunner:
         block_size: int = 16,
         enable_chunked_prefill: bool = False,
         swap_space: int = 4,
-        enforce_eager: Optional[bool] = False,
+        enforce_eager: Optional[bool] = True,
+        quantization: Optional[str] = None,
         **kwargs,
     ) -> None:
         self.model = LLM(
@@ -93,6 +102,7 @@ class VllmRunner:
             max_model_len=max_model_len,
             block_size=block_size,
             enable_chunked_prefill=enable_chunked_prefill,
+            quantization=quantization,
             **kwargs,
         )
 
@@ -349,3 +359,8 @@ def vllm_runner():
 @pytest.fixture(params=list(PROMPT_TEMPLATES.keys()))
 def prompt_template(request):
     return PROMPT_TEMPLATES[request.param]
+
+
+@pytest.fixture(scope="session")
+def ilama_lora_files():
+    return snapshot_download(repo_id="jeeejeee/ilama-text2sql-spider")

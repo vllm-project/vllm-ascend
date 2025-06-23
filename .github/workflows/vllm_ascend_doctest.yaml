@@ -30,8 +30,8 @@ on:
       - 'tests/e2e/common.sh'
       - 'tests/e2e/run_doctests.sh'
   schedule:
-    # Runs every 4 hours
-    - cron:  '0 */4 * * *'
+    # Runs every 12 hours
+    - cron:  '0 */12 * * *'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -46,7 +46,7 @@ jobs:
       # Each version should be tested
       fail-fast: false
       matrix:
-        vllm_verison: [main, v0.7.3-dev, main-openeuler, v0.7.3-dev-openeuler]
+        vllm_verison: [v0.9.1-dev, v0.9.1-dev-openeuler, main, main-openeuler]
     name: vLLM Ascend test
     runs-on: linux-arm64-npu-1
     container:
@@ -65,34 +65,17 @@ jobs:
           cd /vllm-workspace/vllm
           git --no-pager log -1 || true
 
-      - name: Config OS mirrors - Ubuntu
-        if: ${{ !endsWith(matrix.vllm_verison, '-openeuler') }}
-        run: |
-          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
-          apt-get update -y
-          apt install git curl -y
-
-      - name: Config OS mirrors - openEuler
-        if: ${{ endsWith(matrix.vllm_verison, '-openeuler') }}
-        run: |
-          yum update -y
-          yum install git curl -y
-
-      - name: Config pip mirrors
-        run: |
-          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
 
       - name: Run vllm-ascend/tests/e2e/run_doctests.sh
         run: |
           # PWD: /__w/vllm-ascend/vllm-ascend
-          # Address old branch like v0.7.3:
-          if [ ! -d /vllm-workspace/vllm-ascend/tests/e2e ]; then
-            echo "Warning: the doctest path doesn't exists, copy now"
-            cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
-          fi
+          # Make sure e2e tests are latest
+          echo "Replacing /vllm-workspace/vllm-ascend/tests/e2e ..."
+          rm -rf /vllm-workspace/vllm-ascend/tests/e2e
+          mkdir -p /vllm-workspace/vllm-ascend/tests
+          cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
 
           # Simulate container to enter directory
           cd /workspace

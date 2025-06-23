@@ -22,9 +22,13 @@ Following is the Release Compatibility Matrix for vLLM Ascend Plugin:
 
 | vLLM Ascend | vLLM         | Python           | Stable CANN | PyTorch/torch_npu  | MindIE Turbo |
 |-------------|--------------|------------------|-------------|--------------------|--------------|
+| v0.9.1rc1   | v0.9.1       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1.post1.dev20250528      |              |
+| v0.9.0rc2   | v0.9.0       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1      |              |
+| v0.9.0rc1   | v0.9.0       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1      |              |
 | v0.8.5rc1   | v0.8.5.post1 | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1      |              |
 | v0.8.4rc2   | v0.8.4       | >= 3.9, < 3.12   | 8.0.0       | 2.5.1 / 2.5.1      |              |
-| v0.7.3      | v0.7.3       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1      |              |
+| v0.7.3.post1| v0.7.3       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1      |   2.0rc1     |
+| v0.7.3      | v0.7.3       | >= 3.9, < 3.12   | 8.1.RC1     | 2.5.1 / 2.5.1      |   2.0rc1     |
 
 ## Release cadence
 
@@ -32,6 +36,10 @@ Following is the Release Compatibility Matrix for vLLM Ascend Plugin:
 
 | Date       | Event                                     |
 |------------|-------------------------------------------|
+| 2025.06.22 | Release candidates, v0.9.1rc1             |
+| 2025.06.10 | Release candidates, v0.9.0rc2             |
+| 2025.06.09 | Release candidates, v0.9.0rc1             |
+| 2025.05.29 | v0.7.x post release, v0.7.3.post1         |
 | 2025.05.08 | v0.7.x Final release, v0.7.3              |
 | 2025.05.06 | Release candidates, v0.8.5rc1             |
 | 2025.04.28 | Release candidates, v0.8.4rc2             |
@@ -66,7 +74,8 @@ Usually, each minor version of vLLM (such as 0.7) will correspond to a vLLM Asce
 
 | Branch     | Status       | Note                                 |
 |------------|--------------|--------------------------------------|
-| main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.8.x branch   |
+| main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.9.x branch   |
+| v0.9.1-dev | Maintained   | CI commitment for vLLM 0.9.0 and 0.9.1 version |
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version |
 | v0.7.1-dev | Unmaintained | Replaced by v0.7.3-dev               |
 

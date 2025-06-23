@@ -32,13 +32,16 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
                                            compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
-from vllm.config import get_current_vllm_config
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.cache import concat_and_cache_mla
-from vllm_ascend.platform import CUSTOM_OP_ENABLED
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16,
+                               enable_custom_op, is_310p, nd_to_nz_2d)
 from vllm_ascend.worker.model_runner import (
     ModelInputForNPUBuilder, ModelInputForNPUWithSamplingMetadata)
+
+_ALLOWED_NUM_QUERIES_PER_KV = [32, 64, 128]
 
 
 def generate_attn_mask(max_seq_len: int, dtype=torch.float16, mask_value=None):
@@ -168,7 +171,11 @@ class AscendAttentionBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        if is_310p():
+            return (2, num_blocks, num_kv_heads * head_size // 16, block_size,
+                    16)
+        else:
+            return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
     def swap_blocks(
@@ -460,7 +467,7 @@ class AscendMetadata(AttentionMetadata):
         for i in range(num_queries):
             self.seq_lens[i] += 1
         self.max_decode_seq_len = max(self.seq_lens)
-        if CUSTOM_OP_ENABLED:
+        if enable_custom_op():
             #advance a step on NPU for existing inputs for a multi-step runner if custom ops is enabled
             torch.ops._C.advance_step_flashattn_ascendc(
                 num_seqs=num_seqs,
@@ -652,6 +659,11 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
                 # normal mask
                 self.attn_mask = AscendMetadataBuilder._attn_mask_builder.get_attn_mask(  # type: ignore
                     max_prefill_seq_len, dtype, device)
+                if is_310p():
+                    mask_nz = nd_to_nz_2d(self.attn_mask)
+                    mask_nz = torch_npu.npu_format_cast(
+                        mask_nz.contiguous(), ACL_FORMAT_FRACTAL_NZ)
+                    self.attn_mask = mask_nz
             elif self.num_decode_tokens == 0 and not self.input_builder.chunked_prefill_enabled:
                 # compress mask for prefix cache
                 self.compress_mask = AscendMetadataBuilder._attn_mask_builder.get_attn_mask(  # type: ignore
@@ -720,6 +732,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
     ) -> None:
         self.num_heads = num_heads
@@ -865,6 +878,18 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         self.seq_lens_tensor_cpu = torch.from_numpy(
                             np.array(attn_metadata.prefill_metadata.seq_lens).
                             astype(np.int32))
+                        if is_310p():
+                            # align q k v output tensors
+                            query = aligned_16(query)
+                            key = aligned_16(key)
+                            value = aligned_16(value)
+                            output = aligned_16(output)
+
+                            # do reformat in case of broadcasted tensors
+                            mask = mask.repeat(
+                                self.seq_lens_tensor_cpu.size(0), 1, 1, 1)
+                            mask = torch_npu.npu_format_cast(
+                                mask.contiguous(), ACL_FORMAT_FRACTAL_NZ)
                         torch_npu._npu_flash_attention(
                             query=query,
                             key=key,
@@ -875,6 +900,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             num_heads=self.num_heads,
                             num_kv_heads=self.num_kv_heads,
                             out=output)
+                        output = output[:num_tokens, :, :]
                 # Prefix cache only and cache hit
                 elif attn_metadata.num_decode_tokens == 0 and not attn_metadata.chunked_prefill_enabled:
                     assert kv_cache is not None
@@ -932,6 +958,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 self.seq_lens_tensor_cpu = torch.from_numpy(
                     np.array(attn_metadata.decode_metadata.seq_lens).astype(
                         np.int32))
+                if is_310p():
+                    # # seq_lens_tensor needs to be transferred to the device for 310P
+                    self.seq_lens_tensor_cpu = self.seq_lens_tensor_cpu.to(
+                        device=self.key_cache.device)
                 block_tables = attn_metadata.decode_metadata.block_tables
                 torch_npu._npu_paged_attention(
                     query=query,
@@ -961,6 +991,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
         **extra_impl_args,
     ) -> None:
         self.num_heads = num_heads
@@ -1000,11 +1031,17 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
         self.w_kc = None
         self.w_vc = None
 
-        self.enable_graph_mode = False
-        additional_config = get_current_vllm_config().additional_config
-        if additional_config:
-            self.enable_graph_mode = additional_config.get(
-                "enable_graph_mode", False)
+        ascend_config = get_ascend_config()
+        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+
+        # TODO: support numHeads / numKvHeads < 16 in MLA kernel
+        if self.torchair_graph_enabled:
+            assert self.num_queries_per_kv in _ALLOWED_NUM_QUERIES_PER_KV, \
+                ("The allowed number of queries per kv when enabling both MLA and Graph mode"
+                " only support {32, 64, 128}, Thus this is not supported for DeepSeek-V2-Lite,"
+                " as it only has 16 attention heads. And if you're using DeepSeek-V3 or DeepSeek-R1,"
+                " please make sure after the tensor parallel split, num_heads / num_kv_heads in "
+                "{32, 64, 128}.")
 
     def exec_kv(
         self,
@@ -1177,7 +1214,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                                                        self.num_heads, -1)
 
         # TODO: Replace the env with more flexible expressions
-        if self.enable_graph_mode:
+        if self.torchair_graph_enabled:
             if len(kv_cache) > 0 and kv_cache[0].numel(
             ) > 0 and attn_metadata.num_prefills > 0:
                 slots = attn_metadata.slot_mapping
@@ -1228,7 +1265,7 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
                 )
         elif attn_metadata.decode_metadata:
             assert kv_cache is not None
-            if self.enable_graph_mode:
+            if self.torchair_graph_enabled:
                 # shape of query for npu graph mode should be:
                 # [bs, num_heads_per_rank, seq_len, dim]
                 q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1)
