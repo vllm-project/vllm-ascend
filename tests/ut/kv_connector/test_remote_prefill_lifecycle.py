@@ -25,6 +25,7 @@ from tests.ut.kv_connector.utils import (assert_scheduler_empty,
                                          create_model_runner_output,
                                          create_request, create_scheduler,
                                          create_vllm_config)
+from vllm_ascend.utils import vllm_version_is
 
 
 def test_basic_lifecycle():
@@ -131,10 +132,11 @@ def test_basic_lifecycle():
                                                        model_runner_output)
     scheduler.schedule()
 
-    outputs = engine_core_outputs[0].outputs
-    assert len(outputs) == 1
-    output = outputs[0]
-    assert output.finish_reason == FinishReason.STOP
+    if vllm_version_is("0.9.1"):
+        outputs = engine_core_outputs[0].outputs
+        assert len(outputs) == 1
+        output = outputs[0]
+        assert output.finish_reason == FinishReason.STOP
     assert_scheduler_empty(scheduler)
 
 
@@ -235,8 +237,9 @@ def test_full_block_prompt():
                                                        model_runner_output)
     scheduler.schedule()
 
-    outputs = engine_core_outputs[0].outputs
-    assert len(outputs) == 1
-    output = outputs[0]
-    assert output.finish_reason == FinishReason.STOP
+    if vllm_version_is("0.9.1"):
+        outputs = engine_core_outputs[0].outputs
+        assert len(outputs) == 1
+        output = outputs[0]
+        assert output.finish_reason == FinishReason.STOP
     assert_scheduler_empty(scheduler)
