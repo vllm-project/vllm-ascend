@@ -19,8 +19,9 @@ from typing import List, Optional
 
 import torch
 import vllm
+from vllm.distributed import divide
 from vllm.distributed.parallel_state import GroupCoordinator
-
+from typing import Any, Deque, Dict, Optional, Sequence, Tuple
 
 class GroupCoordinatorPatch(GroupCoordinator):
 
@@ -46,4 +47,32 @@ class GroupCoordinatorPatch(GroupCoordinator):
                                                    gather_sizes)
 
 
+def split_tensor_along_first_dim(
+    tensor: torch.Tensor,
+    num_partitions: int,
+    contiguous_split_chunks: bool = False,
+) -> Sequence[torch.Tensor]:
+    """ Split a tensor along its last dimension.
+
+        Arguments:
+            tensor: input tensor.
+            num_partitions: number of partitions to split the tensor
+            contiguous_split_chunks: If True, make each chunk contiguous
+                                     in memory.
+
+        Returns:
+            A list of Tensors
+    """
+    # Get the size and dimension.
+    first_dim = 0
+    first_dim_size = divide(tensor.size()[first_dim], num_partitions)
+    # Split.
+    tensor_list = torch.split(tensor, first_dim_size, dim=first_dim)
+    # NOTE: torch.split does not create contiguous tensors by default.
+    if contiguous_split_chunks:
+        return tuple(chunk.contiguous() for chunk in tensor_list)
+
+    return tensor_list
+
 vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch  # Note: check the GroupCoordinator with online serving
+vllm.distributed.split_tensor_along_first_dim = split_tensor_along_first_dim
