@@ -65,7 +65,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enabled": false, "enable_multistream_shared_expert": false}, "ascend_scheduler_config":{"enabled":"true", "enable_chunked_prefill":"false"}}'
+  '{"torchair_graph_config": {"enabled":false, "enable_multistream_shared_expert":false}, "ascend_scheduler_config":{"enabled":true, "enable_chunked_prefill":false}}'
 ```
 
 * Run prefill server P2 on second node
@@ -106,7 +106,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enabled": "false", "enable_multistream_shared_expert": "false"},  "ascend_scheduler_config":{"enabled":"true", "enable_chunked_prefill":"false"}}' 
+  '{"torchair_graph_config": {"enabled":false, "enable_multistream_shared_expert":false},  "ascend_scheduler_config":{"enabled":true, "enable_chunked_prefill":false}}' 
 ```
 
 * Run decode server d1 on third node
@@ -146,7 +146,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enabled": false, "enable_multistream_shared_expert": false},  "ascend_scheduler_config":{"enabled":"true", "enable_chunked_prefill":"false"}}'
+  '{"torchair_graph_config": {"enabled":false, "enable_multistream_shared_expert":false},  "ascend_scheduler_config":{"enabled":true, "enable_chunked_prefill":false}}'
 ```
 
 * Run decode server d2 on last node
@@ -187,7 +187,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enabled": "false", "enable_multistream_shared_expert": "false"},  "ascend_scheduler_config":{"enabled":"true", "enable_chunked_prefill":"false"}}' 
+  '{"torchair_graph_config": {"enabled":false, "enable_multistream_shared_expert":false},  "ascend_scheduler_config":{"enabled":true, "enable_chunked_prefill":false}}' 
 ```
 
 * Run proxy server on the first node
