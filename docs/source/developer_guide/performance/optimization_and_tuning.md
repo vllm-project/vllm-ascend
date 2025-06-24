@@ -49,7 +49,7 @@ apt update && apt install wget gcc g++ libnuma-dev git vim -y
 
 #### 1.1. Install optimized `python`
 
-Python supports **LTO** and **PGO** optimization starting from version `3.6` and above, which can be enabled at compile time. And we have offered compilation optimized `python` packages direcctly to users for the sake of convenience. You can also reproduce the `python` build follow this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html) according to your specific scenarios.
+Python supports **LTO** and **PGO** optimization starting from version `3.6` and above, which can be enabled at compile time. And we have offered compilation optimized `python` packages directly to users for the sake of convenience. You can also reproduce the `python` build follow this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html) according to your specific scenarios.
 
 ```bash
 mkdir -p /workspace/tmp
@@ -141,7 +141,7 @@ export CPU_AFFINITY_CONF=1
 
 #### 4.1. HCCL Optimization
 
-There are some performance tuning features in HCCL, which are controled by environment variables.
+There are some performance tuning features in HCCL, which are controlled by environment variables.
 
 You can configure HCCL to use "AIV" mode to optimize performance by setting the environment variable shown below. In "AIV" mode, the communication is scheduled by AI vector core directly with ROCE, instead of being scheduled by AI cpu.
 
