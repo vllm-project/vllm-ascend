@@ -794,26 +794,26 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 dst_start = mrope_pos_ptr
                 dst_end = mrope_pos_ptr + completion_part_len
 
-            if vllm_version_is("0.9.1"):
-                self.mrope_positions_cpu[:, dst_start:dst_end] = \
+                if vllm_version_is("0.9.1"):
+                    self.mrope_positions_cpu[:, dst_start:dst_end] = \
+                        MRotaryEmbedding.get_next_input_positions_tensor(
+                            req.mrope_position_delta,
+                            context_len=num_computed_tokens +
+                            prompt_part_len,
+                            seq_len=num_computed_tokens +
+                            prompt_part_len +
+                            completion_part_len,
+                        )
+                else:
                     MRotaryEmbedding.get_next_input_positions_tensor(
-                        req.mrope_position_delta,
-                        context_len=num_computed_tokens +
-                        prompt_part_len,
-                        seq_len=num_computed_tokens +
-                        prompt_part_len +
-                        completion_part_len,
+                        out=self.mrope_positions_np,
+                        out_offset=dst_start,
+                        mrope_position_delta=req.mrope_position_delta,
+                        context_len=num_computed_tokens + prompt_part_len,
+                        num_new_tokens=completion_part_len,
                     )
-            else:
-                MRotaryEmbedding.get_next_input_positions_tensor(
-                    out=self.mrope_positions_np,
-                    out_offset=dst_start,
-                    mrope_position_delta=req.mrope_position_delta,
-                    context_len=num_computed_tokens + prompt_part_len,
-                    num_new_tokens=completion_part_len,
-                )
 
-            mrope_pos_ptr += completion_part_len
+                mrope_pos_ptr += completion_part_len
 
     def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
