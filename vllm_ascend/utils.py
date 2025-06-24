@@ -287,7 +287,8 @@ class FusedMoEState(Enum):
 
 # TODO(zzzzwwjj): add soc_version to choose branch
 def get_fused_moe_state(ep_size: int, with_prefill: bool):
-    if envs.VLLM_ALL2ALL_BACKEND == "npu_all2all":
+    import vllm.envs as vllm_envs
+    if vllm_envs.VLLM_ALL2ALL_BACKEND == "npu_all2all":
         return FusedMoEState.All2All
     if ep_size == 1:
         return FusedMoEState.AllGather
