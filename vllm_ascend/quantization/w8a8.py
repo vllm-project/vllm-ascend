@@ -20,9 +20,9 @@ from typing import Any, Callable, Dict, Optional
 import torch
 import torch_npu
 from vllm.attention.backends.abstract import AttentionType
+from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p
 
 

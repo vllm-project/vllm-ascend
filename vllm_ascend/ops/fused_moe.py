@@ -26,7 +26,8 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import (GroupCoordinator, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.distributed.parallel_state import get_dp_group, get_tp_group
+from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
+                                             get_tp_group)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import \
     FusedMoEConfig  # isort: skip
@@ -41,7 +42,6 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.communication_op import \
     data_parallel_reduce_scatter
-from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
                                get_all_reduce_merge_state, get_fused_moe_state,
@@ -124,6 +124,7 @@ def fused_experts_with_mc2(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     top_k: int,
+    moe_parallel_config: FusedMoEParallelConfig,
     expert_map: torch.Tensor = None,
     moe_all_to_all_group_name: Optional[str] = None,
     shared_experts: Optional[Any] = None
@@ -142,22 +143,20 @@ def fused_experts_with_mc2(
     rank = torch.distributed.get_rank()
 
     quant_mode = 0
-    ep_group = get_ep_group().device_group
-    local_rank = torch.distributed.get_rank(group=ep_group)
-    all_to_all_group_size = torch.distributed.get_world_size(ep_group)
+    ep_rank_id = moe_parallel_config.ep_rank
+    ep_world_size = moe_parallel_config.ep_size
 
-    tp_size = get_etp_group().world_size
-    tp_rank = rank % tp_size
+    tp_world_size = moe_parallel_config.tp_size
+    tp_rank = rank % tp_world_size
 
     stage1_kwargs = {
         "scales": None,
         "quant_mode": quant_mode,
         "group_ep": moe_all_to_all_group_name,
-        "ep_world_size": all_to_all_group_size,
-        "ep_rank_id": local_rank,
-        # "group_tp": self.moe_rs_group_name,
+        "ep_world_size": ep_world_size,
+        "ep_rank_id": ep_rank_id,
         "group_tp": moe_all_to_all_group_name,
-        "tp_world_size": tp_size,
+        "tp_world_size": tp_world_size,
         "tp_rank_id": tp_rank,
     }
     kwargs_mc2.update(stage1_kwargs)
@@ -217,12 +216,12 @@ def fused_experts_with_mc2(
     stage3_kwargs = {
         "ep_send_counts": ep_recv_counts,
         "group_ep": moe_all_to_all_group_name,
-        "ep_world_size": all_to_all_group_size,
-        "ep_rank_id": local_rank,
+        "ep_world_size": ep_world_size,
+        "ep_rank_id": ep_rank_id,
         "tp_send_counts": tp_recv_counts,
         # "group_tp": self.moe_rs_group_name,
         "group_tp": moe_all_to_all_group_name,
-        "tp_world_size": tp_size,
+        "tp_world_size": tp_world_size,
         "tp_rank_id": tp_rank,
     }
     kwargs_mc2.update(stage3_kwargs)
@@ -560,6 +559,7 @@ def fused_experts_moge(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
+    moe_parallel_config: FusedMoEParallelConfig,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     top_k: int,
@@ -581,7 +581,7 @@ def fused_experts_moge(
     Returns:
         hidden_states: Hidden states after routing.
     """
-    ep_size = get_ep_group().world_size
+    ep_size = moe_parallel_config.ep_size
     local_num_experts = global_num_experts // ep_size
     local_num_group = top_k // ep_size
 
@@ -982,7 +982,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         vllm_config = get_current_vllm_config()
 
         self.ep_group = get_ep_group()
-        self.ep_size = self.ep_group.world_size
+        self.ep_size = self.moe.moe_parallel_config.ep_size
         self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
         self.local_batch_size = self.global_batch_size // self.ep_size
         self.max_model_len = vllm_config.model_config.max_model_len
@@ -1074,13 +1074,14 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
-        fused_moe_state = get_fused_moe_state(self.ep_group.world_size,
-                                              is_prefill, is_deepseek_v3_r1)
+        fused_moe_state = get_fused_moe_state(self.ep_size, is_prefill,
+                                              is_deepseek_v3_r1)
         if fused_moe_state == FusedMoEState.MC2:
             return fused_experts_with_mc2(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
+                moe_parallel_config=self.moe.moe_parallel_config,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 top_k=top_k,
