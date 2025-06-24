@@ -29,6 +29,17 @@ from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
                                get_fused_moe_state, npu_stream_switch,
                                npu_wait_tensor)
 
+out_tensor1 = None
+out_tensor2 = None
+
+
+def all_gather_experts(input_tensor: torch.Tensor) -> torch.Tensor:
+    ep_world_size = get_ep_group().world_size
+    tensor_list = [torch.empty_like(input_tensor, device=input_tensor.device, dtype=input_tensor.dtype) for _ in range(ep_world_size)]
+    dist.all_gather(tensor_list, input_tensor)
+    output_tensor = torch.stack(tensor_list, dim=0)
+    return output_tensor
+
 
 def apply_mlp(hidden_states: torch.Tensor,
               w1: torch.Tensor,
@@ -216,6 +227,82 @@ def fused_experts_with_mc2(
             npu_wait_tensor(shared_act[0], down_out_list)
             shared_output, _ = shared_experts.down_proj(shared_act)
         return hidden_states, shared_output
+
+
+def fused_experts_with_lcal_all2all(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    top_k: int,
+    expert_map: torch.Tensor = None,
+    ep_group: GroupCoordinator = None,
+    log2phy: torch.Tensor = None,
+    global_redundant_expert_num: int = 0,
+):
+    if log2phy:
+        topk_ids = log2phy[topk_ids]
+    original_shape = hidden_states.shape
+    if len(original_shape) == 3:
+        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+    device = hidden_states.device
+    global_num_experts = len(expert_map) + global_redundant_expert_num
+    local_num_experts = global_num_experts // ep_group.world_size
+    dtype = hidden_states.dtype
+    global out_tensor1, out_tensor2
+    if out_tensor1 is None:
+        out_tensor1 = torch.empty(40960, 4096, dtype=torch.float16, device=device)
+        out_tensor2 = torch.empty(40960, 7168, dtype=torch.float16, device=device)
+    hidden_states, expanded_row_idx, expert_tokens_count, expert_tokens_before_capacity, dynamic_scale = torch_npu.npu_moe_init_routing_quantv2(
+            hidden_states,
+            expert_idx=topk_ids.to(torch.int32),
+            active_num=0,
+            expert_capacity=0,
+            expert_num=256,
+            drop_pad_mode=0,
+            expert_tokens_count_or_cumsum_flag=2, # 表示输出的值为各个专家处理的token数量。
+            expert_tokens_before_capacity_flag=False,
+            quant_mode=1  # 1 表示动态quant场景
+    )
+    # 两次 alltoall 共用同一份 AllGather 得到的 global_tokens_per_expert_matrix
+    global_tokens_per_expert_matrix = all_gather_experts(expert_tokens_count)  # expert_per_token_matrix [ep, 256]
+    quant_type = 3  # atb::infer::LinearParallelParam::QuantType::QUANT_TYPE_PER_TOKEN == 3
+    world_size = ep_group.world_size
+    m_p = 40960
+    maxOutputSize = torch.zeros(m_p, dtype=torch.int32, device=device)
+    torch_npu.atb._npu_alltoallv_all_gather_gmm(hidden_states, w1,
+                                global_tokens_per_expert_matrix, maxOutputSize, out_tensor1,
+                                deqScaleOpt=w1_scale, dequantPerTokenScaleOpt=dynamic_scale, 
+                                transWeight=False, rank=ep_group.rank, rankSize=world_size, commDomain="0", quantType=quant_type,
+                                outDataType=torch.float16, localExpertNums=local_num_experts, epSize=world_size, tpSize=1)
+    hidden_states, dynamic_scale = torch_npu.npu_dequant_swiglu_quant(
+                    x=out_tensor1, # 支持输入 FP16、BF16、INT32
+                    bias=None,
+                    quant_scale=None,
+                    quant_offset=None,
+                    group_index=None,
+                    activate_left=True,
+                    quant_mode=1)  # 1 动态量化
+    maxOutputSize = torch.zeros(m_p, dtype=torch.int32, device=device)
+    torch_npu.atb._npu_gmm_reduce_scatter_alltoallv(hidden_states, w2,
+                            global_tokens_per_expert_matrix, maxOutputSize, out_tensor2,
+                            deqScaleOpt=w2_scale, dequantPerTokenScaleOpt=dynamic_scale, 
+                            transWeight=False, rank=ep_group.rank, rankSize=world_size, commDomain="0", quantType=quant_type,
+                            outDataType=torch.float16, localExpertNums=local_num_experts, epSize=world_size, tpSize=1)
+    hidden_states = out_tensor2.to(dtype)
+    hidden_states = torch_npu.npu_moe_token_unpermute(hidden_states, expanded_row_idx, probs=topk_weights)
+    if len(hidden_states) == 3:
+        hidden_states = hidden_states.view(original_shape)
+    return hidden_states
+    
+    
+def scale_from_float_to_int64(scale):
+    import numpy as np
+    scale = torch.from_numpy(np.frombuffer(scale.cpu().to(torch.float32).numpy().tobytes(), dtype=np.int32).astype(np.int64)).to(scale.device)
+    return scale
 
 
 # currently expert parallelism implemented with all2all
@@ -697,7 +784,7 @@ class AscendW8A8DynamicFusedMoEMethod:
             # according to tp_size before they are feed into fused_moe module.
             # Therefore, all2all is needed no matter how dp/tp is set so as to
             # dispatch/combine tokens.
-            return fused_experts_with_all2all(
+            return fused_experts_with_lcal_all2all(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w1_scale=layer.w13_weight_scale,
@@ -718,6 +805,8 @@ class AscendW8A8DynamicFusedMoEMethod:
                 1, 2).contiguous()
             layer.w2_weight.data = layer.w2_weight.data.transpose(
                 1, 2).contiguous()
+        layer.w13_weight_scale.data = scale_from_float_to_int64(layer.w13_weight_scale.data)
+        layer.w2_weight_scale.data = scale_from_float_to_int64(layer.w2_weight_scale.data)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
             layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(
