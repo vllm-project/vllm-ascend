@@ -21,10 +21,7 @@ import torch
 import vllm
 import vllm.distributed
 import vllm.envs as envs
-from torch.distributed import ProcessGroup
 from vllm.config import ParallelConfig
-from vllm.distributed.utils import \
-    stateless_init_torch_distributed_process_group
 
 from vllm_ascend.utils import NullHandle, is_310p
 
@@ -65,25 +62,8 @@ def parallel_config_get_dp_port(self) -> int:
     return port
 
 
-def stateless_init_dp_group(self) -> "ProcessGroup":
-    # TODO(Yizhou): Currently we have to set the backend to gloo
-    # because in vllm.config.ParallelConfig.has_unfinished_dp the
-    # device is set to cpu. We need to fix this in the future.
-    # We need to compare the performance of gloo and hccl and then
-    # decide which one to use.
-    dp_group = stateless_init_torch_distributed_process_group(
-        self.data_parallel_master_ip,
-        self.get_next_dp_init_port(),
-        self.data_parallel_rank,
-        self.data_parallel_size,
-        backend="gloo")
-
-    return dp_group
-
-
 vllm.distributed.parallel_state.destroy_model_parallel = ascend_destroy_model_parallel
 ParallelConfig.get_next_dp_init_port = parallel_config_get_dp_port
-ParallelConfig.stateless_init_dp_group = stateless_init_dp_group
 
 
 def communication_adaptation_310p():
