@@ -8,7 +8,6 @@ export VLLM_VERSION=0.9.1
 export VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE=1
 
 nohup python -m vllm.entrypoints.openai.api_server --model=/mnt/deepseek/DeepSeek-R1-W8A8-VLLM \
-    --load-format=prefetch_auto \
     --served-model-name auto \
     --quantization ascend \
     --trust-remote-code \
