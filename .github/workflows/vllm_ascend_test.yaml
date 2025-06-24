@@ -177,6 +177,7 @@ jobs:
         env:
           VLLM_USE_V1: 1
           VLLM_WORKER_MULTIPROC_METHOD: spawn
+          VLLM_USE_MODELSCOPE: True
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
             VLLM_USE_MODELSCOPE=True pytest -sv tests/singlecard/test_offline_inference.py
@@ -211,6 +212,7 @@ jobs:
         if: ${{ github.event_name == 'schedule' }}
         env:
           VLLM_USE_V1: 0
+          VLLM_USE_MODELSCOPE: True
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
             VLLM_USE_MODELSCOPE=True  pytest -sv tests/singlecard/test_offline_inference.py
