@@ -14,7 +14,9 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+
 import torch
+from typing import Dict, List
 import torch.distributed as dist
 import vllm.envs as envs
 from multiprocessing import Queue, Manager
@@ -22,6 +24,7 @@ from multiprocessing import Queue, Manager
 from vllm.logger import logger
 from vllm_ascend.eplb.core.worker.eplb_worker import EplbProcess
 from vllm_ascend.eplb.core.loader.device_transfer_loader import D2DExpertWeightLoader
+from vllm_ascend.eplb.tool.eplb_utils import ExpertMapUtils
 
 class EplbUpdator:
 
@@ -32,6 +35,7 @@ class EplbUpdator:
         self.adaptor = adaptor
         self.eplb_loader = D2DExpertWeightLoader(eplb_adaptor=self.adaptor)
         self.num_moe_layers = self.adaptor.num_moe_layers
+        self.global_expert_num = self.adaptor.global_expert_num
 
     def init_eplb(self, expert_map_path):
         self.num_expert_load_gather = 10
@@ -69,7 +73,9 @@ class EplbUpdator:
             # 热度负载信息 [num_layers, world_size, num_experts]
             "moe_load": None,
             # 所有的专家表[num_layers, world_size, num_experts]
-            "expert_maps": None
+            "expert_maps": None,
+            # 热度负载信息 [num_layers, world_size, local_num_experts]
+            "load_info": None,
         })
 
         self.eplb = EplbProcess(
@@ -125,10 +131,10 @@ class EplbUpdator:
                 self.weight_update_counter = 0
                 self.update_in_flight = False
                 self.update_info_all = []
-
         # set asynchronous stream for d2d expert weight update
         self.reqs = []
         self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
+
 
     def forward_end(self,dummy_run=False):
         self.adaptor.collect_topk_ids(dummy_run)
@@ -149,6 +155,7 @@ class EplbUpdator:
 
     def compute_and_set_moe_load(self,dummy_run=False):
         local_load = self.adaptor.get_rank_expert_workload()
+
         self._gather_buffer = None
         if dist.is_initialized():
             self.world_size = dist.get_world_size()
@@ -229,27 +236,30 @@ class EplbUpdator:
         return recovered
 
     def get_expert_load(self) -> str:
+        
+        load_info = self.shared_dict["load_info"]  # Tensor [L, W, local_experts_num]  
+        L, W, _ = load_info.shape
 
-        # todo wjh 给到返回值
-        # return self.shared_dict['moe_load']
-        # mock json_str
-        experts_load = ('{\"expert_load\":['
-                        '{\"ip\":\"141.xxx.xxx.181\",'
-                        '\"node_0\":'
-                        '{\"card_0\":'
-                        '[{\"layer_4\":{\"expert_0\":3,\"expert_2\":1}},{\"layer_5\":{\"expert_0\":3,\"expert_2\":1}}],'
-                        '\"card_1\":[{\"layer_4\":{\"expert_1\":3,\"expert_3\":1},\"layer_5\":{\"expert_0\":3,\"'
-                        'expert_2\":1}}]}},{\"ip\":\"141.xxx.xxx.177\",\"node_0\":{\"card_0\":[{\"layer_4\":'
-                        '{\"expert_0\":3,\"expert_2\":1}},{\"layer_5\":{\"expert_0\":3,\"expert_2\":1}}],'
-                        '\"card_1\":[{\"layer_4\":{\"expert_1\":3,\"expert_3\":1}}]}}]}')
-        return experts_load
+        expert_load: Dict[str, List[dict]] = {}
+        for c in range(W):
+            layers: List[dict] = []
+            for l in range(L):
+                counts_1d = load_info[l, c]         
+        
+                layer_val = {
+                    f"expert_{e}": int(v)            
+                    for e, v in enumerate(counts_1d.tolist())
+                }
+                layers.append({f"layer_{l}": layer_val})
+            expert_load[f"card_{c}"] = layers
+
+        return {"expert_load": expert_load}
 
     def update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
         logger.info(f" start update {self.num_expert_load_gather=}, {self.num_iterations}...")
         self.num_expert_load_gather = num_expert_load_gather
         self.num_iterations = num_iterations
         logger.info(f" update {self.num_expert_load_gather=}, {self.num_iterations} success...")
-
 
     def shutdown(self):
         """

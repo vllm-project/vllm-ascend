@@ -90,8 +90,16 @@ class VllmEplbAdaptor(EplbAdaptor):
         self.all_topk_ids.append(self.model.get_all_topk_ids(self.num_moe_layers))
 
     def get_rank_expert_workload(self) -> torch.Tensor:
-
         device = self.all_topk_ids[0][0].device
+        if not hasattr(self, "moe_load"):
+            self.moe_load = torch.zeros(
+                (self.num_moe_layers), self.global_expert_num,
+                dtype=torch.int64,
+                device=self.all_topk_ids[0][0].device,
+            )
+        else:
+            self.moe_load.zero_()   
+            # pass       
         flat_list_per_layer = [[] for _ in range(self.num_moe_layers)]  
 
         for period_data in self.all_topk_ids:     
@@ -108,12 +116,11 @@ class VllmEplbAdaptor(EplbAdaptor):
         index_2d = index_2d.masked_select(mask).reshape(self.num_moe_layers, -1)
         src_2d   = torch.ones_like(index_2d, dtype=torch.int64)
 
-        moe_load = torch.zeros((self.num_moe_layers),  self.global_expert_num,
-                            dtype=torch.int64, device=device)
-        moe_load.scatter_add_(dim=1, index=index_2d, src=src_2d)
+        self.moe_load.scatter_add_(dim=1, index=index_2d, src=src_2d)
 
-        self.all_topk_ids = []
-        return moe_load
+        if self.all_topk_ids:                     
+            self.all_topk_ids[:] = self.all_topk_ids[-1:]
+        return self.moe_load
 
     def get_init_expert_map(self, num_moe_layers):
         expert_map = self.model.get_all_expert_map(num_moe_layers)
@@ -134,32 +141,6 @@ class VllmEplbAdaptor(EplbAdaptor):
                 all_expert_maps[layer_idx][self.rank_id]
 
         return all_expert_maps
-
-    def local2global(self,
-        placement_local: torch.Tensor
-    ) -> torch.Tensor:
-
-        L, G, E_local = placement_local.shape
-        device = placement_local.device
-
-        max_id = torch.max(placement_local)
-        E_global = (max_id + 1).item() if max_id >= 0 else 0
-
-        if E_global == 0:
-            return torch.empty((L, G, 0), dtype=torch.long, device=device)
-
-        placement_global = torch.full((L, G, E_global),
-                                      fill_value=-1,
-                                      dtype=torch.long,
-                                      device=device)
-
-        valid = placement_local >= 0
-        l_idx, g_idx, slot_idx = valid.nonzero(as_tuple=True)
-        gid_idx = placement_local[l_idx, g_idx, slot_idx]
-
-        placement_global[l_idx, g_idx, gid_idx] = slot_idx
-
-        return placement_global
 
     def get_init_expert_map_from_file(self, num_moe_layers, expert_map_path):
 
