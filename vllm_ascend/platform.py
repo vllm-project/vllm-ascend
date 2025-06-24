@@ -171,6 +171,11 @@ class NPUPlatform(Platform):
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(
                 ["vllm.unified_ascend_attention_with_output"])
+            if os.getenv("ASCEND_LAUNCH_BLOCKING", '0') == '1':
+                logger.info(
+                    "ACL Graph mode does not allow to synchronize captured-stream, "
+                    "forcing asynchronize mode.")
+                os.environ["ASCEND_LAUNCH_BLOCKING"] = "0"
             update_aclgraph_sizes(vllm_config)
 
         if parallel_config and parallel_config.worker_cls == "auto":
@@ -187,15 +192,6 @@ class NPUPlatform(Platform):
             else:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
 
-        if cache_config:
-            if cache_config.block_size is None:
-                cache_config.block_size = 128
-            if cache_config.enable_prefix_caching and cache_config.block_size != 128:
-                logger.warning(
-                    "If prefix caching is enabled, block size must be set to 128."
-                )
-                cache_config.block_size = 128
-
         if envs.VLLM_USE_V1:
             # Activate custom ops for v1.
             compilation_config.custom_ops = ["all"]
@@ -209,6 +205,16 @@ class NPUPlatform(Platform):
                     vllm_config.scheduler_config,
                     ascend_config.ascend_scheduler_config)
                 vllm_config.scheduler_config = ascend_scheduler_config
+
+        if cache_config:
+            if cache_config.block_size is None:
+                cache_config.block_size = 128
+            if cache_config.enable_prefix_caching and not vllm_config.scheduler_config.enable_chunked_prefill \
+                    and not envs.VLLM_USE_V1 and cache_config.block_size != 128:
+                logger.warning(
+                    "If prefix caching is enabled, block size must be set to 128."
+                )
+                cache_config.block_size = 128
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
