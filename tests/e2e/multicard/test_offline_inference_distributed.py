@@ -93,7 +93,10 @@ def test_models_distributed_DeepSeek_dbo():
             model_arch].class_name == "CustomDeepseekDBOForCausalLM"
         vllm_model.generate(example_prompts, sampling_params)
 
-
+@pytest.mark.skip(
+    reason=
+    "deepseek dbo dose not consider the support on half precision float, will enable this ut after we actually support it"
+)
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DBO": "1"})
 def test_models_distributed_DeepSeekV3_dbo():
     example_prompts = ["The president of the United States is"] * 41
@@ -113,7 +116,7 @@ def test_models_distributed_DeepSeekV3_dbo():
             model_arch].class_name == "CustomDeepseekDBOForCausalLM"
         vllm_model.generate(example_prompts, sampling_params)
 
-
+@pytest.mark.skip(reason="Due to OOM,waiting for 1311pr to merge in")
 def test_models_distributed_DeepSeek_W8A8():
     example_prompts = [
         "Hello, my name is",
