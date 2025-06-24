@@ -71,7 +71,7 @@ from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (dispose_tensor, npu_stream_switch,
                                npu_wait_tensor)
-
+import vllm_ascend.envs as envs_ascend
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
 
@@ -288,6 +288,7 @@ class CustomDeepseekV2MoE(nn.Module):
         self.ep_group = get_ep_group()
 
         self.params_dtype = torch.get_default_dtype()
+        self.rm_router_logits = envs_ascend.VLLM_ASCEND_RM_ROUTER_LOGITS
 
     def forward(
             self,
@@ -309,7 +310,9 @@ class CustomDeepseekV2MoE(nn.Module):
                 is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
 
         # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
+        router_logits = None
+        if not self.rm_router_logits:
+            router_logits, _ = self.gate(hidden_states)
 
         experts_hidden_states = self.experts(
             hidden_states=hidden_states,
@@ -318,6 +321,7 @@ class CustomDeepseekV2MoE(nn.Module):
             top_k=CustomDeepseekV2MoE.top_k,
             enable_force_load_balance=enable_force_load_balance,
             shared_experts=self.shared_experts,
+            gate=self.gate
         )
 
         hidden_states = (

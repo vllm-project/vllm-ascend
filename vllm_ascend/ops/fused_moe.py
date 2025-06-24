@@ -1137,6 +1137,7 @@ class AscendFusedMoE(FusedMoE):
         self.activation = activation
         self.log2phy = None
         self.global_redundant_expert_num = 0
+        self.rm_router_logits = envs_ascend.VLLM_ASCEND_RM_ROUTER_LOGITS
 
         ascend_config = get_ascend_config()
         expert_map_path = ascend_config.expert_map_path
@@ -1211,7 +1212,8 @@ class AscendFusedMoE(FusedMoE):
                 is_prefill: bool,
                 enable_force_load_balance: bool = False,
                 top_k: Optional[int] = None,
-                shared_experts: Optional[Any] = None):
+                shared_experts: Optional[Any] = None,
+                gate=None):
         assert self.quant_method is not None
 
         if top_k:
@@ -1255,11 +1257,15 @@ class AscendFusedMoE(FusedMoE):
                         hidden_states = nn.functional.pad(
                             hidden_states,
                             (0, 0, 0, max_num_tokens_across_dp - num_tokens))
-                        router_logits = nn.functional.pad(
-                            router_logits,
-                            (0, 0, 0, max_num_tokens_across_dp - num_tokens))
+                        if not self.rm_router_logits:
+                            router_logits = nn.functional.pad(
+                                router_logits,
+                                (0, 0, 0, max_num_tokens_across_dp - num_tokens))
             hidden_states = get_dp_group().all_gather(hidden_states, 0)
-            router_logits = get_dp_group().all_gather(router_logits, 0)
+            if self.rm_router_logits:
+                router_logits, _ = gate(hidden_states)
+            else:
+                router_logits = get_dp_group().all_gather(router_logits, 0)
 
         # Matrix multiply.
         e_hidden_states = self.quant_method.apply(

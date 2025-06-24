@@ -121,6 +121,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value to False to disable the optimized model.
     "USE_OPTIMIZED_MODEL":
     lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
+    # Remove the two communications of get_dp_group().all_gather and change it to one, and do gate after the communication
+    "VLLM_ASCEND_RM_ROUTER_LOGITS": lambda: int(os.getenv("VLLM_ASCEND_RM_ROUTER_LOGITS", 0)),
 }
 
 # end-env-vars-definition
