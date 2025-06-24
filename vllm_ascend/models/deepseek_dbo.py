@@ -274,8 +274,6 @@ class CustomDeepseekDBOMoE(nn.Module):
                 if hasattr(attn_metadata, 'with_prefill_across_dp'):
                     self.is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
 
-        # TODO: Remove this when finished debugging.
-        self.enable_force_load_balance = True # For Debugging Only.
         num_tokens, hidden_dim = hidden_states.shape
 
         if self.tp_size > 1:
