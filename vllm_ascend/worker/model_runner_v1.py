@@ -813,7 +813,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_new_tokens=completion_part_len,
                 )
 
-                mrope_pos_ptr += completion_part_len
+            mrope_pos_ptr += completion_part_len
 
     def _execute_mm_encoder(self, scheduler_output: "SchedulerOutput"):
         scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
