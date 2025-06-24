@@ -73,7 +73,7 @@ ACCURACY_FLAG = {}
 
 def run_accuracy_unimodal(queue, model, dataset):
     try:
-        model_args = f"pretrained={model},max_model_len=4096,dtype=auto,tensor_parallel_size=2,gpu_memory_utilization=0.6"
+        model_args = f"pretrained={model},max_model_len=4096,dtype=auto,tensor_parallel_size=2,gpu_memory_utilization=0.85"
         results = lm_eval.simple_evaluate(
             model="vllm",
             model_args=model_args,
@@ -97,7 +97,7 @@ def run_accuracy_unimodal(queue, model, dataset):
 
 def run_accuracy_multimodal(queue, model, dataset):
     try:
-        model_args = f"pretrained={model},max_model_len=8192,dtype=auto,tensor_parallel_size=4,max_images=2"
+        model_args = f"pretrained={model},max_model_len=8192,dtype=auto,tensor_parallel_size=4,max_images=2,gpu_memory_utilization=0.95"
         results = lm_eval.simple_evaluate(
             model="vllm-vlm",
             model_args=model_args,
