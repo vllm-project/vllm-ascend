@@ -209,7 +209,7 @@ class NPUWorker(WorkerBase):
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
-    def get_expert_load(self) -> str:
+    def get_expert_load(self) -> torch.Tensor:
         """ todo 一共几个worker"""
         moe_load = self.model_runner.do_get_expert_load()
         return moe_load
