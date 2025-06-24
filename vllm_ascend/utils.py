@@ -287,9 +287,6 @@ class FusedMoEState(Enum):
 
 # TODO(zzzzwwjj): add soc_version to choose branch
 def get_fused_moe_state(ep_size: int, with_prefill: bool):
-    import vllm.envs as vllm_envs
-    if vllm_envs.VLLM_ALL2ALL_BACKEND == "npu_all2all":
-        return FusedMoEState.All2All
     if ep_size == 1:
         return FusedMoEState.AllGather
     # NOTE: mc2 need ep_size >= 16 & all2all can't use in torchair graph.
