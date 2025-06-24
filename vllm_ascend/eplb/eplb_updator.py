@@ -57,7 +57,7 @@ class EplbUpdator:
         self.cur_iterations: torch.int64 = 0
 
         self.wait_worker_iterations: torch.int64 = 0
-        self.num_wait_worker_iterations: torch.int64 = 10
+        self.num_wait_worker_iterations: torch.int64 = 20
 
         self.planner_block_queue = Queue()
         self.block_update_queue = Queue(maxsize=1)
@@ -131,11 +131,11 @@ class EplbUpdator:
         self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
     def forward_end(self,dummy_run=False):
-        self.adaptor.get_rank_expert_workload(self.num_moe_layers,dummy_run)
+        self.adaptor.collect_topk_ids(dummy_run)
         if not self.update_in_flight:
             load_gather_iteration, update_iteration = self.get_update_iteration()
             if load_gather_iteration:
-                moe_load = self.compute_and_set_moe_load(dummy_run)
+                moe_load = self.compute_and_set_moe_load()
             if update_iteration:
                 self.wakeup_eplb_worker()
                 self.update_in_flight = True
@@ -148,7 +148,7 @@ class EplbUpdator:
         self.eplb_loader.update_expert_map_and_weight(self.reqs, self.redundant_enable)
 
     def compute_and_set_moe_load(self,dummy_run=False):
-        local_load = self.adaptor.get_rank_expert_workload(self.num_moe_layers,dummy_run)
+        local_load = self.adaptor.get_rank_expert_workload()
         self._gather_buffer = None
         if dist.is_initialized():
             self.world_size = dist.get_world_size()
@@ -173,7 +173,7 @@ class EplbUpdator:
     def warm_up_eplb(self):
 
         self.get_init_expert_map()
-        
+        self.adaptor.collect_topk_ids(dummy_run=False)
         self.compute_and_set_moe_load()
 
         src_tensor = torch.empty((1,), device=self.device)
