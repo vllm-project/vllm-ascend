@@ -47,16 +47,7 @@
 #    Related PR (if no, explain why):
 #    Future Plan:
 #       Remove those patch when vllm merged them
-#   2. `vllm.v1.engine.core.DPEngineCoreProc._init_data_parallel`
-#    Why:
-#       There is some bug for ASCEND_RT_VISIBLE_DEVICES usage.
-#    How：
-#       The ASCEND_RT_VISIBLE_DEVICES related code is dropped.
-#    Related PR (if no, explain why):
-#       No, this is a bug for vllm ascend
-#    Future Plan:
-#       Remove this patch once ASCEND_RT_VISIBLE_DEVICES bug is fixed.
-#   3. `vllm.config.ParallelConfig.get_next_dp_init_port`
+#   2. `vllm.config.ParallelConfig.get_next_dp_init_port`
 #    Why:
 #       vllm doesn't support get port from environment.
 #    How：
@@ -65,16 +56,6 @@
 #       Need a PR to vllm to support get port from environment.
 #    Future Plan:
 #       Remove those patch when vllm merged them
-#   4. `vllm.config.ParallelConfig.ParallelConfig.stateless_init_dp_group`
-#    Why:
-#       vLLM use gloo backend by default to initialize stateless dp process gourp, but we want to use hccl here to
-#       get better performance
-#    How：
-#       adopt nccl backend to init process group.(Now we still use gloo, it's just a placeholder, we'll use nccl in the future)
-#    Related PR (if no, explain why):
-#       Need a PR to vllm to support more backend.
-#    Future Plan:
-#       Remove those patch when vllm support more backend.
 #
 # * Worker Patch:
 # ===============
@@ -108,18 +89,6 @@
 #       - https://github.com/vllm-project/vllm-ascend/pull/395
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm and vllm-ascend.
-#
-#   2. `vllm.spec_decode.multi_step_worker.MultiStepWorker.set_include_gpu_probs_tensor` and
-#       `vllm.spec_decode.multi_step_worker.MultiStepWorker.set_should_modify_greedy_probs_inplace`
-#    Why:
-#       vLLM `Remove Sampler from Model Code` so vllm-ascend needs adapt to this change.
-#    How：
-#       Use vLLM 0.8.4 method to patch it.
-#    Related PR (if no, explain why):
-#       - https://github.com/vllm-project/vllm/pull/15195
-#       - https://github.com/vllm-project/vllm-ascend/pull/395
-#    Future Plan:
-#       Remove it when we identify the reasons clearly.
 #
 # ** File: worker/patch_common/patch_spec_decode_worker.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

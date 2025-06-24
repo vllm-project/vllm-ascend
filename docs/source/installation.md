@@ -9,11 +9,11 @@ This document describes how to install vllm-ascend manually.
 - A hardware with Ascend NPU. It's usually the Atlas 800 A2 series.
 - Software:
 
-    | Software  | Supported version | Note                                   |
-    |-----------|-------------------|----------------------------------------| 
-    | CANN      | >= 8.1.RC1        | Required for vllm-ascend and torch-npu |
-    | torch-npu | >= 2.5.1          | Required for vllm-ascend               |
-    | torch     | >= 2.5.1          | Required for torch-npu and vllm        |
+    | Software      | Supported version                | Note                                      |
+    |---------------|----------------------------------|-------------------------------------------|
+    | CANN          | >= 8.1.RC1                       | Required for vllm-ascend and torch-npu    |
+    | torch-npu     | >= 2.5.1.post1.dev20250619       | Required for vllm-ascend                  |
+    | torch         | >= 2.5.1                         | Required for torch-npu and vllm           |
 
 You have 2 way to install:
 - **Using pip**: first prepare env manually or via CANN image, then install `vllm-ascend` using pip.
@@ -116,17 +116,23 @@ Once it's done, you can start to set up `vllm` and `vllm-ascend`.
 :selected:
 :sync: pip
 
-First install system dependencies:
+First install system dependencies and config pip mirror:
 
 ```bash
-apt update  -y
-apt install -y gcc g++ cmake libnuma-dev wget git
+# Using apt-get with mirror
+sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+apt-get update -y && apt-get install -y gcc g++ cmake libnuma-dev wget git curl jq
+# Or using yum
+# yum update -y && yum install -y gcc g++ cmake numactl-devel wget git curl jq
+# Config pip mirror
+pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 ```
 
-**[Optional]** Config the extra-index of `pip` if you are working on a **x86** machine, so that the torch with cpu could be found:
+**[Optional]** Then config the extra-index of `pip` if you are working on a x86 machine or using torch-npu dev version:
 
 ```bash
-pip config set global.extra-index-url https://download.pytorch.org/whl/cpu/
+# For torch-npu dev version or x86 machine
+pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
 ```
 
 Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
@@ -245,7 +251,8 @@ for output in outputs:
 Then run:
 
 ```bash
-# export VLLM_USE_MODELSCOPE=true to speed up download if huggingface is not reachable.
+# Try `export VLLM_USE_MODELSCOPE=true` and `pip install modelscope`
+# to speed up download if huggingface is not reachable.
 python example.py
 ```
 

@@ -22,11 +22,12 @@ import torch
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 
-from vllm_ascend.platform import CUSTOM_OP_ENABLED
+from vllm_ascend.utils import enable_custom_op, is_310p
 
 
 def custom_rotary_embedding_enabled(query, neox_style, head_size):
-    return query.dtype == torch.float16 and neox_style and head_size % 32 == 0 and CUSTOM_OP_ENABLED
+    return query.dtype == torch.float16 and neox_style and head_size % 32 == 0 and enable_custom_op(
+    )
 
 
 def rope_forward_oot(
@@ -47,7 +48,8 @@ def rope_forward_oot(
     if is_neox_style_override is not None:
         neox_style = is_neox_style_override
     # adopt custom kernel path for rotary_embedding
-    if custom_rotary_embedding_enabled(query, neox_style, self.head_size):
+    if custom_rotary_embedding_enabled(query, neox_style,
+                                       self.head_size) and not is_310p():
         query, key = torch.ops._C.rotary_embedding(
             positions,
             query,
@@ -218,7 +220,9 @@ def _set_cos_sin_cache(self, seq_len, device, dtype):
     inv_freq = freq_inter * (1 - inv_freq_mask) + freq_extra * inv_freq_mask
     self.register_buffer("inv_freq", inv_freq, persistent=False)
 
-    t = torch.arange(seq_len, device=device, dtype=torch.float32)
+    t = torch.arange(seq_len * self.scaling_factor,
+                     device=device,
+                     dtype=torch.float32)
 
     freqs = torch.outer(t, inv_freq)
     cos_cached = torch.cat([freqs, freqs], dim=-1).cos() * self.mscale

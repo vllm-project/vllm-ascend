@@ -48,6 +48,7 @@ user_guide/supported_models
 user_guide/env_vars
 user_guide/additional_config
 user_guide/graph_mode.md
+user_guide/quantization.md
 user_guide/release_notes
 :::
 
@@ -66,11 +67,5 @@ developer_guide/evaluation/index
 :maxdepth: 1
 community/governance
 community/contributors
-:::
-
-% User stories about vLLM Ascend project
-:::{toctree}
-:caption: User Story
-:maxdepth: 1
-user_stories/index
+community/user_stories/index
 :::
