@@ -44,6 +44,7 @@ from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
 
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
 
+
 def process_topk_ids(topk_ids: torch.Tensor, expert_num: int, ep_size: int,
                      max_row_per_ep_rank: int, num_tokens: int,
                      top_k: int) -> tuple[torch.Tensor, torch.Tensor]:
