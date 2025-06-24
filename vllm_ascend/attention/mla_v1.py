@@ -15,7 +15,6 @@ from vllm.utils import cdiv, round_down
 
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention import _ALLOWED_NUM_QUERIES_PER_KV
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
@@ -572,15 +571,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         if speculative_config is not None:
             self.spec_token_num = speculative_config.num_speculative_tokens
             assert self.spec_token_num > 0
-
-        # TODO: support numHeads / numKvHeads < 16 in MLA kernel
-        if self.torchair_graph_enabled:
-            assert self.num_queries_per_kv in _ALLOWED_NUM_QUERIES_PER_KV, \
-                ("The allowed number of queries per kv when enabling both MLA and Graph mode"
-                " only support {32, 64, 128}, Thus this is not supported for DeepSeek-V2-Lite,"
-                " as it only has 16 attention heads. And if you're using DeepSeek-V3 or DeepSeek-R1,"
-                " please make sure after the tensor parallel split, num_heads / num_kv_heads in "
-                "{32, 64, 128}.")
 
     def _v_up_proj_and_o_proj(self, x):
         # Convert from (B, N, L) to (N, B, L)
