@@ -1,4 +1,3 @@
-export VLLM_ENABLE_MC2=0
 export VLLM_USE_V1=1
 export TASK_QUEUE_ENABLE=1
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
