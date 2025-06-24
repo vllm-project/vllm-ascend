@@ -142,4 +142,5 @@ class AscendQwen3MoeSparseMoeBlock(nn.Module):
         return hidden_states
 
 
-vllm.model_executor.models.qwen3_moe.Qwen3MoeSparseMoeBlock = AscendQwen3MoeSparseMoeBlock
+if envs.VLLM_ALL2ALL_BACKEND == "npu_all2all":
+    vllm.model_executor.models.qwen3_moe.Qwen3MoeSparseMoeBlock = AscendQwen3MoeSparseMoeBlock
