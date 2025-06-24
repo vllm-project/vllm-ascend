@@ -37,12 +37,16 @@ from vllm.model_executor.layers.quantization.base_config import \
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
+from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
+    MoEAlltoAllSeqOverLapDispatcher, MoeDispatcherConfig)
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
                                get_fused_moe_state, npu_stream_switch,
                                npu_wait_tensor)
 
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
+ENABLE_MOE_ALLTOALLV: bool = envs_ascend.ENABLE_MOE_ALLTOALLV
+VLLM_ASCEND_ENABLE_DBO: bool = envs_ascend.VLLM_ASCEND_ENABLE_DBO
 
 
 def process_topk_ids(topk_ids: torch.Tensor, expert_num: int, ep_size: int,
@@ -420,6 +424,24 @@ def fused_experts_with_all2all(
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
     return final_hidden_states
+
+
+def fused_experts_with_all2allv(token_dispatcher, probs, routing_map, hidden_states: torch.Tensor,
+                                w1: torch.Tensor,
+                                w2: torch.Tensor):
+    # Enable moe alltoallv, it's a balanced policy for precision and efficiency.
+    (share_experts_output, dispatched_input, tokens_per_expert) = token_dispatcher.token_permutation(
+        hidden_states, probs, routing_map
+    )
+    hidden_states_wrapper = [dispatched_input]
+    del dispatched_input
+
+    expert_output = apply_mlp(hidden_states_wrapper,
+                              w1,
+                              w2,
+                              tokens_per_expert)
+    output, mlp_bias = token_dispatcher.token_unpermutation(expert_output)
+    return output
 
 
 # currently expert parallelism implemented with all2all
@@ -933,6 +955,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
+        use_alltoallv = 'token_dispatcher' in kwargs and kwargs.get('token_dispatcher') is not None
+
         fused_moe_state = get_fused_moe_state(self.ep_group.world_size,
                                               is_prefill)
         if fused_moe_state == FusedMoEState.MC2:
@@ -966,6 +990,14 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 global_batch_size=self.global_batch_size,
                 expert_map=expert_map,
                 ep_group=get_ep_group())
+        elif use_alltoallv and is_prefill:
+            token_dispatcher = kwargs.get('token_dispatcher')
+            return fused_experts_with_all2allv(token_dispatcher=token_dispatcher,
+                                               probs=topk_weights,
+                                               routing_map=topk_ids,
+                                               hidden_states=x,
+                                               w1=layer.w13_weight,
+                                               w2=layer.w2_weight)
         else:
             return fused_experts_with_all2all(hidden_states=x,
                                               w1=layer.w13_weight,
@@ -1112,6 +1144,21 @@ class AscendFusedMoE(FusedMoE):
         # NOTE: self.tp_group is not expert_tp_group
         self.tp_group = get_tp_group().device_group
         self.quant_method.create_weights(layer=self, **moe_quant_params)
+        self.token_dispatcher = None
+        if ENABLE_MOE_ALLTOALLV and isinstance(self.quant_method, AscendUnquantizedFusedMoEMethod):
+            moe_dispatcher_config = (MoeDispatcherConfig()
+                                     .set_num_moe_experts(self.global_num_experts)
+                                     .set_num_local_experts(self.local_num_experts)
+                                     .set_moe_router_topk(top_k)
+                                     .set_group_topk(topk_group)
+                                     .set_num_groups(num_expert_group)
+                                     .set_expert_bias(e_score_correction_bias)
+                                     .set_scaling_factor(1.0)
+                                     .build())
+            self.token_dispatcher = MoEAlltoAllSeqOverLapDispatcher(moe_dispatcher_config)
+
+            if VLLM_ASCEND_ENABLE_DBO:
+                self.token_dispatchers = [MoEAlltoAllSeqOverLapDispatcher(moe_dispatcher_config), self.token_dispatcher]
 
     def forward(self,
                 hidden_states: torch.Tensor,
@@ -1188,6 +1235,7 @@ class AscendFusedMoE(FusedMoE):
             global_redundant_expert_num=self.global_redundant_expert_num,
             shared_experts=shared_experts if self.torchair_graph_enabled
             and self.enable_multistream_moe and not is_prefill else None,
+            token_dispatcher=self.token_dispatcher,
         )
 
         if shared_experts:
