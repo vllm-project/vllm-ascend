@@ -64,6 +64,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix)
 from vllm.sequence import IntermediateTensors
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
@@ -71,6 +72,8 @@ from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (dispose_tensor, npu_stream_switch,
                                npu_wait_tensor)
+
+VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE: bool = envs_ascend.VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE
 
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
@@ -224,7 +227,6 @@ class CustomDeepseekV2MoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.routed_scaling_factor = config.routed_scaling_factor
         self.n_shared_experts = config.n_shared_experts
-        self.routed_scaling_factor = config.routed_scaling_factor
         if self.tp_size > config.n_routed_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
@@ -263,9 +265,12 @@ class CustomDeepseekV2MoE(nn.Module):
             topk_group=config.topk_group,
             prefix=f"{prefix}.experts",
             scoring_func=config.scoring_func,
-            e_score_correction_bias=self.gate.e_score_correction_bias)
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            routed_scaling_factor=self.routed_scaling_factor)
 
         if config.n_shared_experts is not None:
+            self.all_reduce_merge = VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE
+            reduce_results = not self.all_reduce_merge
             intermediate_size = (config.moe_intermediate_size *
                                  config.n_shared_experts)
             self.shared_experts = CustomDeepseekV2MLP(
@@ -273,7 +278,7 @@ class CustomDeepseekV2MoE(nn.Module):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=True,
+                reduce_results=reduce_results,
                 force_replicate=self.enable_multistream_moe,
                 prefix=f"{prefix}.shared_experts",
             )
@@ -320,9 +325,7 @@ class CustomDeepseekV2MoE(nn.Module):
             shared_experts=self.shared_experts,
         )
 
-        hidden_states = (
-            experts_hidden_states[0] * self.routed_scaling_factor +
-            experts_hidden_states[1])
+        hidden_states = experts_hidden_states
 
         return hidden_states
 
