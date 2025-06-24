@@ -64,6 +64,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix)
 from vllm.sequence import IntermediateTensors
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
@@ -71,7 +72,7 @@ from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (dispose_tensor, npu_stream_switch,
                                npu_wait_tensor)
-import vllm_ascend.envs as envs_ascend
+
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
 
@@ -321,8 +322,7 @@ class CustomDeepseekV2MoE(nn.Module):
             top_k=CustomDeepseekV2MoE.top_k,
             enable_force_load_balance=enable_force_load_balance,
             shared_experts=self.shared_experts,
-            gate=self.gate
-        )
+            gate=self.gate)
 
         hidden_states = (
             experts_hidden_states[0] * self.routed_scaling_factor +
