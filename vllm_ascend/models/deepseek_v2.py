@@ -73,8 +73,6 @@ from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (dispose_tensor, npu_stream_switch,
                                npu_wait_tensor)
 
-VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE: bool = envs_ascend.VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE
-
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
 
@@ -269,7 +267,7 @@ class CustomDeepseekV2MoE(nn.Module):
             routed_scaling_factor=self.routed_scaling_factor)
 
         if config.n_shared_experts is not None:
-            self.all_reduce_merge = VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE
+            self.all_reduce_merge = envs_ascend.VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE
             reduce_results = not self.all_reduce_merge
             intermediate_size = (config.moe_intermediate_size *
                                  config.n_shared_experts)

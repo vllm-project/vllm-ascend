@@ -43,8 +43,6 @@ from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
                                npu_wait_tensor)
 
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
-VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE: bool = envs_ascend.VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE
-
 
 def process_topk_ids(topk_ids: torch.Tensor, expert_num: int, ep_size: int,
                      max_row_per_ep_rank: int, num_tokens: int,
@@ -1140,7 +1138,7 @@ class AscendFusedMoE(FusedMoE):
         self.routed_scaling_factor = routed_scaling_factor
         self.log2phy = None
         self.global_redundant_expert_num = 0
-        self.all_reduce_merge = VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE
+        self.all_reduce_merge = envs_ascend.VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE
 
         ascend_config = get_ascend_config()
         expert_map_path = ascend_config.expert_map_path
