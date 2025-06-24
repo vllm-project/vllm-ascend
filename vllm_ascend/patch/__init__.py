@@ -56,16 +56,6 @@
 #       Need a PR to vllm to support get port from environment.
 #    Future Plan:
 #       Remove those patch when vllm merged them
-#   3. `vllm.config.ParallelConfig.ParallelConfig.stateless_init_dp_group`
-#    Why:
-#       vLLM use gloo backend by default to initialize stateless dp process gourp, but we want to use hccl here to
-#       get better performance
-#    How：
-#       adopt nccl backend to init process group.(Now we still use gloo, it's just a placeholder, we'll use nccl in the future)
-#    Related PR (if no, explain why):
-#       Need a PR to vllm to support more backend.
-#    Future Plan:
-#       Remove those patch when vllm support more backend.
 #
 # * Worker Patch:
 # ===============
