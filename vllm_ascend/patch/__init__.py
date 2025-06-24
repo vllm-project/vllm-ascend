@@ -105,20 +105,6 @@
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm and vllm-ascend.
 #
-# ** File: worker/patch_common/patch_eagle.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.spec_decode.eagle.prepare_inputs`
-#    Why:
-#       We need to use the patched `prepare_input_kernel` in `eagle.prepare_inputs`.
-#       The mainly reason to overwrite `prepare_input_kernel` is this is a triton
-#       kernel, ascend is now not support triton kernel.
-#    How：
-#       Re-implementation the `prepare_input_kernel` triton kernel by pytorch
-#    Related PR (if no, explain why):
-#       - Ascend doesn't support triton
-#    Future Plan:
-#       Revert it when the ascend support triton kernel.
-#
 # ** File: worker/patch_common/patch_sampler.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.sample.sampler.Sampler.apply_top_k_top_p`
