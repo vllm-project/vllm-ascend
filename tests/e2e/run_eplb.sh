@@ -11,7 +11,7 @@ export VLLM_VERSION=0.9.1
 # FIXME: unset HCCL_OP_EXPANSION_MODE to avoid the torch_air bug
 unset HCCL_OP_EXPANSION_MODE
 
-MODEL_NAME="vllm-ascend/DeepSeek-R1-fa3-pruning"
+MODEL_NAME="vllm-ascend/DeepSeek-V3-Pruning"
 TP_SIZE=4
 DP_SIZE=4
 REGISTER_PORT=10102
