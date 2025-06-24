@@ -155,6 +155,7 @@ class AscendAttentionMetadataBuilder:
               num_actual_tokens,
               max_query_len,
               common_prefix_len,
+              max_num_tokens_across_dp: int = 0,
               with_prefill_across_dp: bool = False):
 
         block_table = self.runner.input_batch.block_table[0].get_device_tensor(
