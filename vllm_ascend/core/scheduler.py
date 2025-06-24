@@ -23,7 +23,6 @@ from vllm.distributed.kv_events import KVEventBatch
 from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.utils import cdiv
-from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutputs
@@ -87,14 +86,11 @@ class AscendScheduler(Scheduler):
                 self.waiting.popleft()
                 skipped_waiting_requests.appendleft(request)
 
-            num_prealloc_computed_tokens = 0
             # P/D: skip request if still waiting for remote kvs.
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 is_ready = self._update_waiting_for_remote_kv(request)
                 if is_ready:
                     request.status = RequestStatus.WAITING
-                    num_prealloc_computed_tokens = (
-                        request.num_computed_tokens)
                 else:
                     skip_cur_request()
                     continue
@@ -112,8 +108,8 @@ class AscendScheduler(Scheduler):
             load_kv_async = False
 
             # Get already-cached tokens.
-            if num_prealloc_computed_tokens == 0:
-                new_computed_blocks, num_native_computed_tokens = \
+            if request.num_computed_tokens == 0:
+                new_computed_blocks, num_new_local_computed_tokens = \
                     self.kv_cache_manager.get_computed_blocks(
                         request)
 
@@ -121,18 +117,17 @@ class AscendScheduler(Scheduler):
                 if self.connector is not None:
                     num_external_computed_tokens, load_kv_async = (
                         self.connector.get_num_new_matched_tokens(
-                            request, num_native_computed_tokens))
+                            request, num_new_local_computed_tokens))
 
                 # Total computed tokens (local + external).
-                num_computed_tokens = (num_native_computed_tokens +
+                num_computed_tokens = (num_new_local_computed_tokens +
                                        num_external_computed_tokens)
             else:
                 # P/D: skip checking prefix cache if loaded from remote kvs.
-                new_computed_blocks = KVCacheBlocks.create_empty()
-                num_native_computed_tokens = 0
-
-                # Total computed tokens (allocated in prior step).
-                num_computed_tokens = num_prealloc_computed_tokens
+                new_computed_blocks = (
+                    self.kv_cache_manager.create_empty_block_list())
+                num_new_local_computed_tokens = 0
+                num_computed_tokens = request.num_computed_tokens
 
             # P/D: loading remote KV, do not allocate for new work.
             if load_kv_async:
@@ -142,9 +137,6 @@ class AscendScheduler(Scheduler):
             # Number of tokens to be scheduled.
             else:
                 prompt_limit = self._get_prompt_limit(request)
-                # Get already-cached tokens.
-                computed_blocks, num_computed_tokens = (
-                    self.kv_cache_manager.get_computed_blocks(request))
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed
                 # requests, which have output tokens.
@@ -172,7 +164,7 @@ class AscendScheduler(Scheduler):
                     skip_cur_request()
                     continue
                 assert num_new_tokens > 0
-                blocks = computed_blocks.blocks[0]
+                blocks = new_computed_blocks.blocks[0]
 
             watermark = getattr(self.scheduler_config, "watermark", 0.01)
             if not self._check_watermark_for_prefill(request, num_new_tokens,
@@ -184,8 +176,8 @@ class AscendScheduler(Scheduler):
             new_blocks = self.kv_cache_manager.allocate_slots(
                 request,
                 num_new_tokens + num_external_computed_tokens,
-                num_native_computed_tokens,
-                new_computed_blocks=computed_blocks,
+                num_new_local_computed_tokens,
+                new_computed_blocks=new_computed_blocks,
                 num_lookahead_tokens=self.num_lookahead_tokens,
                 delay_cache_blocks=load_kv_async)
             if new_blocks is None:
@@ -195,8 +187,7 @@ class AscendScheduler(Scheduler):
             # KVConnector: update internal state after allocation.
             # This information is used to determine if a load is
             # needed for this request.
-            if num_external_computed_tokens:
-                assert self.connector is not None
+            if self.connector is not None:
                 self.connector.update_state_after_alloc(
                     request,
                     new_computed_blocks + new_blocks,
@@ -210,6 +201,7 @@ class AscendScheduler(Scheduler):
                 skipped_waiting_requests.appendleft(request)
                 request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                 continue
+
             self.running.append(request)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.SCHEDULED,
@@ -509,3 +501,40 @@ class AscendScheduler(Scheduler):
 
         return super().update_from_output(scheduler_output,
                                           model_runner_output)
+
+    def _update_waiting_for_remote_kv(self, request: Request) -> bool:
+        """
+        KV Connector: check if the request_id is finished_recving.
+
+        The finished_recving_kv_req_ids list is populated
+        on the previous steps()'s update_from_output based
+        on the worker side connector.
+
+        When the kv transfer is ready, we cache the blocks
+        and the request state will be moved back to WAITING from
+        WAITING_FOR_REMOTE_KV.
+        """
+        assert self.connector is not None
+        if request.request_id not in self.finished_recving_kv_req_ids:
+            return False
+
+        # Now that the blocks are ready, actually cache them.
+        (block_ids, ) = self.kv_cache_manager.get_block_ids(request.request_id)
+        num_computed_tokens = len(block_ids) * self.block_size
+        # Handle the case where num request tokens less then one block.
+        num_computed_tokens = min(num_computed_tokens, request.num_tokens)
+        if num_computed_tokens == request.num_tokens:
+            num_computed_tokens -= 1
+
+        # This will cache the blocks if caching is enabled.
+        # Note: vllm fix this in main branch, but still have issue on v0.9.1, so we just adopt the
+        # change on 0.9.1 and without cherry-pick this back to main branch on vllm-ascend
+        if self.kv_cache_manager.enable_caching:
+            self.kv_cache_manager.cache_blocks(request, num_computed_tokens)
+
+        # Update the request state for scheduling.
+        request.num_computed_tokens = num_computed_tokens
+
+        # Return that we are ready.
+        self.finished_recving_kv_req_ids.remove(request.request_id)
+        return True

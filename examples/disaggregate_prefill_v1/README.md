@@ -30,15 +30,14 @@ Execution Sequence
 
 * Run prefill server P1 on first node
 ```shell
-export HCCL_IF_IP=`hostname -I|awk -F " " '{print$1}'`
-export GLOO_SOCKET_IFNAME="eth0"
+export HCCL_IF_IP=172.19.32.175  # node ip
+export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
 export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1/ranktable.json
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
-export VLLM_VERSION=0.9.1
 vllm serve /data01/deepseek_r1_w8a8_zhw \
   --host 0.0.0.0 \
   --port 20002 \
@@ -66,12 +65,12 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enabled": false, "enable_multistream_shared_expert": false}, "expert_tensor_parallel_size": 1}'
+  '{"torchair_graph_config": {"enabled": false, "enable_multistream_shared_expert": false}, "ascend_scheduler_config":{"enabled":"true", "enable_chunked_prefill":"false"}}'
 ```
 
 * Run prefill server P2 on second node
 ```shell
-export HCCL_IF_IP=`hostname -I|awk -F " " '{print$1}'`
+export HCCL_IF_IP=172.19.241.49
 export GLOO_SOCKET_IFNAME="eth0"
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
@@ -79,7 +78,6 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/example
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
-export VLLM_VERSION=0.9.1
 vllm serve /data01/deepseek_r1_w8a8_zhw \
   --host 0.0.0.0 \
   --port 20002 \
@@ -99,7 +97,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   --enforce-eager \
   --gpu-memory-utilization 0.9  \
   --kv-transfer-config  \
-  '{"kv_connector": "LLMDataDistCMgrConnector",
+  '{"kv_connector": "LLMDataDistCMgrConnector", \
   "kv_buffer_device": "npu",
   "kv_role": "kv_producer",
   "kv_parallel_size": 1,
@@ -108,12 +106,12 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enabled": false, "enable_multistream_shared_expert": false}, "expert_tensor_parallel_size": 1}' 
+  '{"torchair_graph_config": {"enabled": "false", "enable_multistream_shared_expert": "false"},  "ascend_scheduler_config":{"enabled":"true", "enable_chunked_prefill":"false"}}' 
 ```
 
 * Run decode server d1 on third node
 ```shell
-export HCCL_IF_IP=`hostname -I|awk -F " " '{print$1}'`
+export HCCL_IF_IP=172.19.123.51
 export GLOO_SOCKET_IFNAME="eth0"
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
@@ -121,7 +119,6 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/example
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
-export VLLM_VERSION=0.9.1
 vllm serve /data01/deepseek_r1_w8a8_zhw \
   --host 0.0.0.0 \
   --port 20002 \
@@ -149,12 +146,12 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enabled": false, "enable_multistream_shared_expert": false}, "expert_tensor_parallel_size": 1}'
+  '{"torchair_graph_config": {"enabled": false, "enable_multistream_shared_expert": false},  "ascend_scheduler_config":{"enabled":"true", "enable_chunked_prefill":"false"}}'
 ```
 
 * Run decode server d2 on last node
 ```shell
-export HCCL_IF_IP=`hostname -I|awk -F " " '{print$1}'`
+export HCCL_IF_IP=172.19.190.36
 export GLOO_SOCKET_IFNAME="eth0"
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
@@ -162,7 +159,6 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/example
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
-export VLLM_VERSION=0.9.1
 vllm serve /data01/deepseek_r1_w8a8_zhw \
   --host 0.0.0.0 \
   --port 20002 \
@@ -191,7 +187,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enabled": false, "enable_multistream_shared_expert": false}, "expert_tensor_parallel_size": 1}' 
+  '{"torchair_graph_config": {"enabled": "false", "enable_multistream_shared_expert": "false"},  "ascend_scheduler_config":{"enabled":"true", "enable_chunked_prefill":"false"}}' 
 ```
 
 * Run proxy server on the first node

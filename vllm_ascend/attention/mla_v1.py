@@ -13,6 +13,7 @@ from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.utils import cdiv, round_down
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention import _ALLOWED_NUM_QUERIES_PER_KV
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
@@ -933,18 +934,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         q_pe: torch.Tensor,
         k_nope: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
+        kv_c_and_k_pe_cache: Tuple[torch.Tensor],
         attn_metadata: AscendMLAMetadata,
     ) -> torch.Tensor:
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
-
-        q = torch.cat([q_nope, q_pe], dim=-1)
-        num_tokens = q.size(0)
-        attn_output = torch.empty(
-            [num_tokens, self.num_heads, self.kv_lora_rank],
-            dtype=q.dtype,
-            device=q.device)
+        num_tokens = q_nope.size(0)
         if self.running_in_graph:
             # TorchAir's shape is [bs, num_heads_per_rank, q_seq_len, dim]
             if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
@@ -1003,16 +998,35 @@ class AscendMLAImpl(MLAAttentionImpl):
                 actual_seq_lengths_kv=decode_meta.seq_lens_list,
             )
         else:
-            torch_npu._npu_paged_attention_mla(
-                query=q,
-                key_cache=kv_c_and_k_pe_cache,
-                num_kv_heads=self.num_kv_heads,
-                num_heads=self.num_heads,
-                scale_value=self.scale,
-                block_table=attn_metadata.decode.block_table,  # type:ignore
-                context_lens=attn_metadata.decode.seq_lens,  # type:ignore
-                mla_vheadsize=self.kv_lora_rank,
-                out=attn_output)
+            # The MLA_PA path will be used as default path in the future, `_npu_paged_attention_mla` will
+            # be removed after the torch_npu contains `torch_npu.atb.npu_multi_head_latent_attention` become
+            # public available
+            assert len(kv_c_and_k_pe_cache) > 1
+            if envs.VLLM_ASCEND_MLA_PA:
+                attn_output = torch_npu.atb.npu_multi_head_latent_attention(
+                    q_nope, q_pe, kv_c_and_k_pe_cache[0],
+                    kv_c_and_k_pe_cache[1], attn_metadata.decode.block_table,
+                    attn_metadata.decode.seq_lens, self.num_heads, self.scale,
+                    self.num_kv_heads)
+            else:
+                q = torch.cat([q_nope, q_pe], dim=-1)
+                attn_output = torch.empty(
+                    [num_tokens, self.num_heads, self.kv_lora_rank],
+                    dtype=q.dtype,
+                    device=q.device)
+                k_cache = torch.cat(
+                    [kv_c_and_k_pe_cache[0], kv_c_and_k_pe_cache[1]], dim=-1)
+                torch_npu._npu_paged_attention_mla(
+                    query=q,
+                    key_cache=k_cache,
+                    num_kv_heads=self.num_kv_heads,
+                    num_heads=self.num_heads,
+                    scale_value=self.scale,
+                    block_table=attn_metadata.decode.
+                    block_table,  # type:ignore
+                    context_lens=attn_metadata.decode.seq_lens,  # type:ignore
+                    mla_vheadsize=self.kv_lora_rank,
+                    out=attn_output)
         current_ms_metadata = get_multistream_comm_context()
         if current_ms_metadata is None:
             return self._v_up_proj_and_o_proj(attn_output)
@@ -1076,7 +1090,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             decode_k_nope = None
             assert attn_metadata.decode is not None
             if self.running_in_graph:
-                seq_len = self.rotary_emb.max_position_embeddings
+                seq_len = self.rotary_emb.max_position_embeddings * self.rotary_emb.scaling_factor
                 cos = self.rotary_emb.cos_cached[:seq_len].to(
                     dtype=decode_hs_or_q_c.dtype)
                 sin = self.rotary_emb.sin_cached[:seq_len].to(
@@ -1121,7 +1135,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             prefill_q_nope = prefill_q[..., :self.qk_nope_head_dim]
             if self.torchair_graph_enabled:
                 num_tokens = prefill_hs_or_q_c.shape[0]
-                seq_len = self.rotary_emb.max_position_embeddings
+                seq_len = self.rotary_emb.max_position_embeddings * self.rotary_emb.scaling_factor
                 cos = self.rotary_emb.cos_cached[:seq_len].to(
                     dtype=prefill_q_pe.dtype)
                 sin = self.rotary_emb.sin_cached[:seq_len].to(
@@ -1193,10 +1207,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                                             decode_k_nope, decode_k_pe,
                                             kv_cache, attn_metadata)
             else:
-                combined_cache = torch.cat([kv_cache[0], kv_cache[1]], dim=-1)
-                output_decode = self._forward_decode(
-                    decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe,
-                    combined_cache, attn_metadata)
+                output_decode = self._forward_decode(decode_ql_nope,
+                                                     decode_q_pe,
+                                                     decode_k_nope,
+                                                     decode_k_pe, kv_cache,
+                                                     attn_metadata)
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
                 with torch.npu.stream(current_ms_metadata.comm_stream):
