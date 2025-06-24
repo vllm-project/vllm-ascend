@@ -66,6 +66,7 @@ function run_prefill_instance() {
   --served-model-name Deepseek \
   --max-model-len 2000 \
   --trust-remote-code \
+  --enforce-eager \
   --kv-transfer-config "$KV_CONFIG"
 }
 
@@ -119,6 +120,7 @@ function run_decode_instance() {
     --max-num-batched-tokens 2000 \
     --trust-remote-code \
     --gpu-memory-utilization 0.9 \
+    --enforce-eager \
     --kv-transfer-config "$KV_CONFIG"
 }
 
