@@ -39,6 +39,8 @@ class AscendConfig:
         self.expert_map_path = additional_config.get("expert_map_path", None)
         self.chunked_prefill_for_mla = additional_config.get(
             "chunked_prefill_for_mla", False)
+        self.enable_weight_nz_layout = additional_config.get(
+            "enable_weight_nz_layout", False)
 
 
 class TorchairGraphConfig:
