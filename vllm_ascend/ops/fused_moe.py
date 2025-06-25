@@ -1150,6 +1150,7 @@ class AscendFusedMoE(FusedMoE):
 
         num_tokens, hidden_size = hidden_states.shape
 
+        forward_context = get_forward_context()
         fused_moe_state = get_forward_context().fused_moe_state
         # For w8a8 dynamic we can do npu_dynamic_quant and gate in parallel.
         quantized_x_for_share, dynamic_scale_for_share = None, None
@@ -1169,31 +1170,27 @@ class AscendFusedMoE(FusedMoE):
             if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
                 shared_hidden_states = shared_experts(hidden_states)
 
-        attn_metadata = get_forward_context().attn_metadata
-        mc2_mask = attn_metadata.decode.mc2_mask if attn_metadata is not None and attn_metadata.decode is not None else None
-
+        mc2_mask = None
         tp_size = get_tensor_model_parallel_world_size()
-        if tp_size > 1 and fused_moe_state != FusedMoEState.AllGather:
-            if num_tokens < tp_size:
+        if fused_moe_state != FusedMoEState.AllGather:
+            if num_tokens < forward_context.padded_num_tokens:
                 hidden_states = nn.functional.pad(
-                    hidden_states, (0, 0, 0, tp_size - num_tokens))
+                    hidden_states, (0, 0, 0, forward_context.padded_num_tokens - num_tokens))
                 router_logits = nn.functional.pad(
-                    router_logits, (0, 0, 0, tp_size - num_tokens))
-                if mc2_mask is not None:
-                    mc2_mask = nn.functional.pad(mc2_mask,
-                                                 (0, tp_size - num_tokens))
-            chunk_hidden_states = torch.tensor_split(hidden_states,
-                                                     tp_size,
-                                                     dim=0)
-            chunk_router_logits = torch.tensor_split(router_logits,
-                                                     tp_size,
-                                                     dim=0)
-            tp_rank = get_tensor_model_parallel_rank()
-            hidden_states = chunk_hidden_states[tp_rank]
-            router_logits = chunk_router_logits[tp_rank]
-
-            if mc2_mask is not None:
-                chunk_mc2_mask = torch.tensor_split(mc2_mask, tp_size, dim=0)
+                    router_logits, (0, 0, 0, forward_context.padded_num_tokens - num_tokens))
+            if tp_size > 1:
+                chunk_hidden_states = torch.tensor_split(hidden_states,
+                                                        tp_size,
+                                                        dim=0)
+                chunk_router_logits = torch.tensor_split(router_logits,
+                                                        tp_size,
+                                                        dim=0)
+                chunk_mc2_mask = torch.tensor_split(forward_context.mc2_mask,
+                                            tp_size,
+                                            dim=0)
+                tp_rank = get_tensor_model_parallel_rank()
+                hidden_states = chunk_hidden_states[tp_rank]
+                router_logits = chunk_router_logits[tp_rank]
                 mc2_mask = chunk_mc2_mask[tp_rank]
 
         if self.dp_size > 1 and fused_moe_state == FusedMoEState.AllGather:
@@ -1245,7 +1242,7 @@ class AscendFusedMoE(FusedMoE):
             dist.all_gather(list(chunk_hidden_states), e_hidden_states,
                             self.tp_group)
             final_hidden_states = torch.cat(chunk_hidden_states, dim=0)
-            if num_tokens < tp_size:
+            if num_tokens < forward_context.padded_num_tokens:
                 final_hidden_states = final_hidden_states[:num_tokens]
             dispose_tensor(e_hidden_states)
         elif self.dp_size > 1 and fused_moe_state == FusedMoEState.AllGather:

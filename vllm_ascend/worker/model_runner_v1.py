@@ -35,7 +35,6 @@ import torch._dynamo.cache_size
 import torch.distributed as dist
 import torch.nn as nn
 import torchair
-from torch.distributed import ReduceOp
 from torchair import patch_for_hcom
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
@@ -608,24 +607,42 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.refresh_sampling_metadata()
 
     def _get_forward_metadata_across_dp(
-            self, num_tokens: int, with_prefill: bool, enable_dbo: bool
-    ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
+            self, maybe_padded_num_tokens: int, num_tokens: int,
+            with_prefill: bool, enable_dbo: bool
+        ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
         if self.dp_size == 1:
-            return num_tokens, None, with_prefill, enable_dbo
+            return maybe_padded_num_tokens, None, with_prefill, enable_dbo
 
-        forward_metadata = torch.tensor(
-            [num_tokens, with_prefill, not enable_dbo],
-            device="cpu",
-            dtype=torch.int32)
-        dist.all_reduce(forward_metadata,
-                        op=ReduceOp.MAX,
-                        group=get_dp_group().cpu_group)
-        num_tokens_across_dp = torch.tensor([forward_metadata[0]] *
-                                            self.dp_size,
-                                            device="cpu",
-                                            dtype=torch.int32)
-        return forward_metadata[0].item(), num_tokens_across_dp, bool(
-            forward_metadata[1]), not bool(forward_metadata[2])
+        num_tokens_across_dp = [0] * self.dp_size * 2
+        num_tokens_across_dp[self.dp_rank] = maybe_padded_num_tokens
+        num_tokens_across_dp[self.dp_size + self.dp_rank] = num_tokens
+        forward_metadata = torch.tensor(num_tokens_across_dp +
+                                        [with_prefill, not enable_dbo],
+                                        device="cpu",
+                                        dtype=torch.int32)
+        dist.all_reduce(forward_metadata, group=get_dp_group().cpu_group)
+        with_prefill = bool(forward_metadata[-2])
+
+        # NOTE: when with_prefill is false before all_reduce and true after all_reduce, we need to revert pad.
+        if with_prefill:
+            num_tokens_across_dp = forward_metadata[self.dp_size:self.dp_size *
+                                                    2]
+            maybe_padded_num_tokens = num_tokens
+        else:
+            num_tokens_across_dp = forward_metadata[:self.dp_size]
+
+        # NOTE: when in torchair_graph_mode, we need to pad local_num_tokens to
+        # `max_num_tokens_across_dp`, in other situation it is not necessary.
+        if self.torchair_graph_enabled and not with_prefill:
+            maybe_padded_num_tokens = torch.max(num_tokens_across_dp).item()
+            num_tokens_across_dp = torch.tensor([maybe_padded_num_tokens] *
+                                                self.dp_size,
+                                                device="cpu",
+                                                dtype=torch.int32)
+
+        return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, not bool(
+            forward_metadata[-1])
+
 
     def _check_dbo_is_valid(self, query_lens: torch.Tensor,
                             attn_state: AscendAttentionState,
@@ -984,15 +1001,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         enable_dbo = self._check_dbo_is_valid(self.query_lens.tolist(),
                                               attn_state,
                                               total_num_scheduled_tokens)
-        num_tokens_across_dp = None
-
-        padded_num_tokens = total_num_scheduled_tokens
+        
+        maybe_padded_num_tokens = total_num_scheduled_tokens
         if self.torchair_graph_enabled and not with_prefill:
-            padded_num_tokens = self.select_torchair_padded_batch_size(
+            maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
                 total_num_scheduled_tokens)
-        (padded_num_tokens_across_dp, num_tokens_across_dp, with_prefill,
-         enable_dbo) = self._get_forward_metadata_across_dp(
-             padded_num_tokens, with_prefill, enable_dbo)
+        (padded_num_tokens_across_dp, num_tokens_across_dp,
+         with_prefill, enable_dbo) = self._get_forward_metadata_across_dp(
+             maybe_padded_num_tokens, total_num_scheduled_tokens, with_prefill,
+             enable_dbo)
         extra_builder_kwargs['enable_dbo_across_dp'] = enable_dbo
 
         # TODO(zzzzwwjj): this code need to refactor afterwards.
@@ -1000,9 +1017,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Add num_token_pad_size and num_reqs_pad_size here for torchair graph mode
         if self.torchair_graph_enabled and not with_prefill:
             num_token_pad_size = padded_num_tokens_across_dp - total_num_scheduled_tokens
-            num_reqs_pad_size = (
-                padded_num_tokens_across_dp // self.decode_token_per_req -
-                num_reqs)
+            num_reqs_pad_size = (padded_num_tokens_across_dp //
+                                 self.decode_token_per_req - num_reqs)
             assert num_token_pad_size >= 0 and num_reqs_pad_size >= 0
 
             extra_builder_kwargs['num_token_pad_size'] = num_token_pad_size
@@ -1575,8 +1591,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         is_torchair_compile: bool = False,
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
     ) -> torch.Tensor:
+        maybe_padded_num_tokens = num_tokens
         if self.torchair_graph_enabled and not with_prefill:
-            num_tokens = self.select_torchair_padded_batch_size(num_tokens)
+            maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
+                num_tokens)
 
         # For kv producer, with prefill always true
         if self.is_kv_producer:
@@ -1584,7 +1602,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Padding for DP
         (num_tokens, num_tokens_across_dp, with_prefill,
          enable_dbo) = self._get_forward_metadata_across_dp(
-             num_tokens, with_prefill, False)
+             maybe_padded_num_tokens, num_tokens, with_prefill, False)
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
@@ -1655,7 +1673,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_tokens=num_tokens,
                     num_tokens_across_dp=num_tokens_across_dp,
                     with_prefill=with_prefill,
-                    in_profile_run=self.in_profile_run):
+                    in_profile_run=self.in_profile_run,
+                    num_actual_tokens=0,
+                ):
                 model_kwargs = {}
                 if self.torchair_graph_enabled and not with_prefill:
                     # Only mark static while compiling
@@ -1669,7 +1689,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         torch._dynamo.mark_static(attn_metadata.decode.sin)
                         torch._dynamo.mark_static(attn_metadata.decode.cos)
                         torch._dynamo.mark_static(
-                            attn_metadata.decode.mc2_mask)
+                            get_forward_context().mc2_mask)
                         torch._dynamo.mark_static(attn_metadata.slot_mapping)
                         for kv in self.kv_caches:
                             assert isinstance(

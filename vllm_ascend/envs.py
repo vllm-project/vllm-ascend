@@ -136,7 +136,13 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to enable mla_pa for deepseek mla decode, this flag will be removed after its available torch_npu is public accessible
     # and the mla_pa will be the default path of deepseek decode path.
     "VLLM_ASCEND_MLA_PA":
-    lambda: int(os.getenv("VLLM_ASCEND_MLA_PA", 0))
+    lambda: int(os.getenv("VLLM_ASCEND_MLA_PA", 0)),
+    # ENABLE chunk mc2
+    "VLLM_ASCEND_ENABLE_CHUNK_MC2":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CHUNK_MC2", "0"))),
+    # Batch MC2 in prefill: The number of tokens in each batch
+    "VLLM_ASCEND_FUSED_MOE_MC2_CHUNK_SIZE":
+    lambda: int(os.getenv("VLLM_ASCEND_FUSED_MOE_MC2_CHUNK_SIZE", "128")),
 }
 
 # end-env-vars-definition
