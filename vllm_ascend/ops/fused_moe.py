@@ -118,10 +118,12 @@ def fused_experts_with_mc2(
     top_k: int,
     expert_map: torch.Tensor = None,
     moe_all_to_all_group_name: Optional[str] = None,
-    shared_experts: Optional[Any] = None
+    shared_experts: Optional[Any] = None,
+    global_bs: int = 1,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-    vllm_config = get_current_vllm_config()
-    global_bs = vllm_config.scheduler_config.max_num_seqs * torch.distributed.get_world_size(ep_group)
+    ep_group = get_ep_group().device_group
+
+    global_bs = global_bs * torch.distributed.get_world_size(ep_group)
     moe_expert_num = len(expert_map)
     kwargs_mc2 = {
         "x": hidden_states,
@@ -135,7 +137,7 @@ def fused_experts_with_mc2(
     rank = torch.distributed.get_rank()
 
     quant_mode = 0
-    ep_group = get_ep_group().device_group
+
     local_rank = torch.distributed.get_rank(group=ep_group)
     all_to_all_group_size = torch.distributed.get_world_size(ep_group)
 
@@ -947,7 +949,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 top_k=top_k,
                 expert_map=expert_map,
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name,
-                shared_experts=shared_experts)
+                shared_experts=shared_expert,
+                global_bs=self.global_batch_size)
         elif fused_moe_state == FusedMoEState.AllGather:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
