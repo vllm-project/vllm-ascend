@@ -56,10 +56,10 @@ user_guide/release_notes
 :::{toctree}
 :caption: Developer Guide
 :maxdepth: 1
-developer_guide/contributing
-developer_guide/testing
-developer_guide/versioning_policy
+developer_guide/contribution/index
+developer_guide/feature_guide/index
 developer_guide/evaluation/index
+developer_guide/performance/index
 :::
 
 % How to involve vLLM Ascend
@@ -68,5 +68,6 @@ developer_guide/evaluation/index
 :maxdepth: 1
 community/governance
 community/contributors
+community/versioning_policy
 community/user_stories/index
 :::
