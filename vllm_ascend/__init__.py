@@ -29,3 +29,7 @@ def register_model():
 
     from .models import register_model
     register_model()
+
+
+def register_ops():
+    import vllm_ascend.ops  # noqa: F401
