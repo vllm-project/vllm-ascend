@@ -41,7 +41,6 @@ def test_qwen3_model_with_w4a8_linear_method(model: str,
     sampling_params = SamplingParams(
         max_tokens=max_tokens,
         temperature=0.0,
-        ignore_eos=False,
     )
     llm = LLM(
         model=model,
