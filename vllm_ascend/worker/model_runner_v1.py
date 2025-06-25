@@ -145,6 +145,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.device = device
+        self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
         self.sampler = Sampler()
         # Multi-modal data support
