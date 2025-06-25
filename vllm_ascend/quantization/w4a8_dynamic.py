@@ -19,7 +19,6 @@ from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 import torch
-import torch.distributed as dist
 import torch_npu
 from vllm.config import get_current_vllm_config
 
