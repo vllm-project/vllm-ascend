@@ -22,223 +22,12 @@ import torch
 import torch.distributed as dist
 import torch_npu
 from vllm.config import get_current_vllm_config
-from vllm.distributed import GroupCoordinator
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import select_experts
-from vllm_ascend.utils import dispose_tensor
-
-
-def apply_mlp(hidden_states: torch.Tensor,
-              w1: torch.Tensor,
-              w1_scale: torch.Tensor,
-              w2: torch.Tensor,
-              w2_scale: torch.Tensor,
-              w1_scale_bias: torch.Tensor,
-              w2_scale_bias: torch.Tensor,
-              group_list: torch.Tensor,
-              dynamic_scale: torch.Tensor = None,
-              group_list_type: int = 1) -> torch.Tensor:
-    """
-    apply MLP: gate_up_proj -> swiglu -> down_proj
-
-    Args:
-        hidden_states: input hidden states with shape (num_tokens, hidden_size).
-        w1: expert weights1 with shape
-            (num_experts, hidden_size, intermediate_size * 2)
-        w1_scale: weights1 scale with shape (num_experts, intermediate_size * 2)
-        w2: expert weights2 with shape
-            (num_experts, intermediate_size, hidden_size)
-        w2_scale: weights2 scale with shape (num_experts, hidden_size)
-        group_list: number of tokens for each expert, follow cumsum mode, and
-            with shape (num_experts).
-        transpose_weight:
-            w1: (num_experts, intermediate_size * 2, hidden_size) ->
-                    (num_experts, hidden_size, intermediate_size * 2)
-            w2: (num_experts, hidden_size, intermediate_size) ->
-                    (num_experts, intermediate_size, hidden_size)
-
-    Returns:
-        hidden_states: output hidden states after MLP.
-    """
-
-    if dynamic_scale is None:
-        unquantized_hidden_states = hidden_states
-        hidden_states, pertoken_scale = torch_npu.npu_dynamic_quant(
-            hidden_states)
-        # Dispose the original unquantized hidden states
-        # to save npu memory because they're no longer used.
-        dispose_tensor(unquantized_hidden_states)
-    else:
-        pertoken_scale = dynamic_scale
-
-    # gmm1: gate_up_proj
-    group_list_type = 1
-    group_list = torch.cat([group_list[:1], torch.diff(group_list, dim=0)])
-
-    hidden_states = torch_npu.npu_grouped_matmul(
-        x=[hidden_states],
-        weight=[w1],
-        scale=[w1_scale],
-        bias=[w1_scale_bias],
-        per_token_scale=[pertoken_scale],
-        split_item=2,
-        group_list_type=group_list_type,
-        group_type=0,
-        group_list=group_list,
-        output_dtype=torch.bfloat16)[0]
-
-    # act_fn: swiglu
-    hidden_states = torch_npu.npu_swiglu(hidden_states)
-    hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(
-        hidden_states)
-
-    # gmm2: down_proj
-    hidden_states = torch_npu.npu_grouped_matmul(
-        x=[hidden_states],
-        weight=[w2],
-        scale=[w2_scale],
-        bias=[w2_scale_bias],
-        per_token_scale=[swiglu_out_scale],
-        split_item=2,
-        group_list_type=group_list_type,
-        group_type=0,
-        group_list=group_list,
-        output_dtype=torch.bfloat16)[0]
-    return hidden_states
-
-
-# currently expert parallelism implemented with all2all
-# is under-optimized.
-def fused_experts_with_all2all(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2: torch.Tensor,
-    w2_scale: torch.Tensor,
-    w1_scale_bias: torch.Tensor,
-    w2_scale_bias: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    top_k: int,
-    expert_map: torch.Tensor = None,
-    ep_group: GroupCoordinator = None,
-    log2phy: torch.Tensor = None,
-    global_redundant_expert_num: int = 0,
-):
-    if log2phy:
-        topk_ids = log2phy[topk_ids]
-    original_shape = hidden_states.shape
-    if len(original_shape) == 3:
-        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-
-    num_tokens, _ = hidden_states.shape
-    num_experts = w1.shape[0]
-    device = hidden_states.device
-
-    if expert_map is not None:
-        global_num_experts = len(expert_map) + global_redundant_expert_num
-        local_num_experts = global_num_experts // ep_group.world_size
-        row_idx_len = num_tokens * top_k
-        row_idx = (torch.arange(0,
-                                row_idx_len,
-                                dtype=torch.int32,
-                                device=device).view(top_k, -1).permute(
-                                    1, 0).contiguous())
-        hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
-            hidden_states,
-            row_idx=row_idx,
-            expert_idx=topk_ids,
-            active_num=num_tokens)
-
-        global_expert_tokens = torch.bincount(expanded_expert_idx,
-                                              minlength=global_num_experts)
-        scatter_sizes = global_expert_tokens.view(ep_group.world_size,
-                                                  -1).sum(-1)
-
-        gather_sizes = torch.empty_like(scatter_sizes)
-        dist.all_to_all_single(gather_sizes,
-                               scatter_sizes,
-                               group=ep_group.device_group)
-        scatter_size_list = scatter_sizes.cpu().tolist()
-        gather_size_list = gather_sizes.cpu().tolist()
-
-        expanded_expert_idx = expanded_expert_idx % local_num_experts
-        hidden_states = ep_group.all_to_all(hidden_states, 0, 0,
-                                            scatter_size_list,
-                                            gather_size_list)
-        local_expert_idx = ep_group.all_to_all(expanded_expert_idx, 0, 0,
-                                               scatter_size_list,
-                                               gather_size_list)
-
-        sorted_local_expert_idx, sorted_idx = torch.sort(local_expert_idx)
-
-        expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
-            sorted_local_expert_idx, local_num_experts).to(torch.int64)
-
-        hidden_states = hidden_states[sorted_idx]
-        group_list_type = 0
-    else:
-        row_idx_len = num_tokens * top_k
-        row_idx = torch.arange(0,
-                               row_idx_len,
-                               dtype=torch.int32,
-                               device=topk_weights.device).view(
-                                   top_k, -1).permute(1, 0).contiguous()
-        hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
-            hidden_states,
-            row_idx=row_idx,
-            expert_idx=topk_ids,
-            active_num=num_tokens)
-
-        expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
-            expanded_expert_idx, num_experts)
-        expert_tokens = expert_tokens.to(torch.int64)
-        group_list_type = 0
-
-    # `hidden_states` will be disposed in the `apply_mlp` function
-    hidden_states = apply_mlp(hidden_states,
-                              w1,
-                              w1_scale,
-                              w2,
-                              w2_scale,
-                              w1_scale_bias,
-                              w2_scale_bias,
-                              expert_tokens,
-                              group_list_type=group_list_type)
-
-    if expert_map is not None:
-        resorted_idx = torch.argsort(sorted_idx)
-        hidden_states = hidden_states[resorted_idx]
-        hidden_states = ep_group.all_to_all(hidden_states, 0, 0,
-                                            gather_size_list,
-                                            scatter_size_list)
-
-        final_hidden_states = torch_npu.npu_moe_finalize_routing(
-            hidden_states,
-            skip1=None,
-            skip2=None,
-            bias=None,
-            scales=topk_weights,
-            expanded_src_to_dst_row=expanded_row_idx,
-            export_for_source_row=topk_ids,
-        )
-    else:
-        # TODO: Reorder device memory 2 times here, replace the current
-        # implementation here when suitable operators become available.
-        final_hidden_states = torch_npu.npu_moe_finalize_routing(
-            hidden_states,
-            skip1=None,
-            skip2=None,
-            bias=None,
-            scales=topk_weights,
-            expanded_src_to_dst_row=expanded_row_idx,
-            export_for_source_row=topk_ids,
-        )
-    if len(original_shape) == 3:
-        final_hidden_states = final_hidden_states.view(original_shape)
-    return final_hidden_states
+from vllm_ascend.quantization.w8a8_dynamic import fused_experts_with_mc2, fused_experts_with_all2all
+from vllm_ascend.utils import (FusedMoEState, get_fused_moe_state)
 
 
 class AscendW4A8DynamicLinearMethod:
@@ -484,26 +273,46 @@ class AscendW4A8DynamicFusedMoEMethod:
 
         topk_weights = topk_weights.to(x.dtype)
 
-        # The current implementation of deepseek moe splits hidden_states
-        # according to tp_size before they are feed into fused_moe module.
-        # Therefore, all2all is needed no matter how dp/tp is set so as to
-        # dispatch/combine tokens.
-        return fused_experts_with_all2all(
-            hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
-            w1_scale=layer.w13_weight_scale_second,
-            w2_scale=layer.w2_weight_scale_second,
-            w1_scale_bias=layer.w13_scale_bias,
-            w2_scale_bias=layer.w2_scale_bias,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            top_k=top_k,
-            expert_map=expert_map,
-            ep_group=self.ep_group,
-            log2phy=log2phy,
-            global_redundant_expert_num=global_redundant_expert_num,
-        )
+        fused_moe_state = get_fused_moe_state(self.ep_group.world_size,
+                                              is_prefill)
+        if fused_moe_state == FusedMoEState.MC2:
+            return fused_experts_with_mc2(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                w1_scale=layer.w13_weight_scale_second,
+                w2_scale=layer.w2_weight_scale_second,
+                w1_scale_bias=layer.w13_scale_bias,
+                w2_scale_bias=layer.w2_scale_bias,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                top_k=top_k,
+                expert_map=expert_map,
+                moe_all_to_all_group_name=self.moe_all_to_all_group_name,
+                log2phy=log2phy,
+                global_redundant_expert_num=global_redundant_expert_num,
+                shared_experts=shared_experts)
+        else:
+            # The current implementation of deepseek moe splits hidden_states
+            # according to tp_size before they are feed into fused_moe module.
+            # Therefore, all2all is needed no matter how dp/tp is set so as to
+            # dispatch/combine tokens.
+            return fused_experts_with_all2all(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                w1_scale=layer.w13_weight_scale_second,
+                w2_scale=layer.w2_weight_scale_second,
+                w1_scale_bias=layer.w13_scale_bias,
+                w2_scale_bias=layer.w2_scale_bias,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                top_k=top_k,
+                expert_map=expert_map,
+                ep_group=self.ep_group,
+                log2phy=log2phy,
+                global_redundant_expert_num=global_redundant_expert_num,
+            )
 
     def process_scale(self, weight: torch.Tensor, scale, per_group_scale):
         group_num, k, n = weight.shape
