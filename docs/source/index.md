@@ -57,6 +57,7 @@ user_guide/release_notes
 :caption: Developer Guide
 :maxdepth: 1
 developer_guide/contributing
+developer_guide/testing
 developer_guide/versioning_policy
 developer_guide/evaluation/index
 :::

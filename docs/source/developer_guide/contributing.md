@@ -4,7 +4,7 @@
 It's recommended to set up a local development environment to build and test
 before you submit a PR.
 
-### Prepare environment and build
+### Setup development environment
 
 Theoretically, the vllm-ascend build is only supported on Linux because
 `vllm-ascend` dependency `torch_npu` only supports Linux.
@@ -48,72 +48,11 @@ bash format.sh
 git commit -sm "your commit info"
 ```
 
-### Testing
+🎉 Congratulations! You have completed the development environment setup.
 
-Although vllm-ascend CI provide integration test on [Ascend](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test.yaml), you can run it
-locally. The simplest way to run these integration tests locally is through a container:
+### Test locally
 
-```bash
-# Under Ascend NPU environment
-git clone https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-
-export IMAGE=vllm-ascend-dev-image
-export CONTAINER_NAME=vllm-ascend-dev
-export DEVICE=/dev/davinci1
-
-# The first build will take about 10 mins (10MB/s) to download the base image and packages
-docker build -t $IMAGE -f ./Dockerfile .
-# You can also specify the mirror repo via setting VLLM_REPO to speedup
-# docker build -t $IMAGE -f ./Dockerfile . --build-arg VLLM_REPO=https://gitee.com/mirrors/vllm
-
-docker run --rm --name $CONTAINER_NAME --network host --device $DEVICE \
-           --device /dev/davinci_manager --device /dev/devmm_svm \
-           --device /dev/hisi_hdc -v /usr/local/dcmi:/usr/local/dcmi \
-           -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-           -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-           -ti $IMAGE bash
-
-cd vllm-ascend
-pip install -r requirements-dev.txt
-
-pytest tests/
-```
-
-
-### Run doctest
-
-vllm-ascend provides a `vllm-ascend/tests/e2e/run_doctests.sh` command to run all doctests in the doc files.
-The doctest is a good way to make sure the docs are up to date and the examples are executable, you can run it locally as follows:
-
-```{code-block} bash
-   :substitutions:
-
-# Update DEVICE according to your device (/dev/davinci[0-7])
-export DEVICE=/dev/davinci0
-# Update the vllm-ascend image
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
-docker run --rm \
---name vllm-ascend \
---device $DEVICE \
---device /dev/davinci_manager \
---device /dev/devmm_svm \
---device /dev/hisi_hdc \
--v /usr/local/dcmi:/usr/local/dcmi \
--v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
--v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
--v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
--v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--p 8000:8000 \
--it $IMAGE bash
-
-# Run doctest
-/vllm-workspace/vllm-ascend/tests/e2e/run_doctests.sh
-```
-
-This will reproduce the same environment as the CI: [vllm_ascend_doctest.yaml](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_doctest.yaml).
-
+You can refer to [Testing](./testing.md) doc to help you setup testing environment and running tests locally.
 
 ## DCO and Signed-off-by
 
