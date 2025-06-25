@@ -1225,9 +1225,14 @@ class AscendFusedMoE(FusedMoE):
 
         fused_moe_state = get_fused_moe_state(self.moe_parallel_config.ep_size,
                                               is_prefill, is_deepseek_v3_r1)
-        if shared_experts:
-            if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
-                shared_hidden_states = shared_experts(hidden_states)
+        use_separated_shared_experts = (
+            shared_experts is not None
+            and not (self.enable_multistream_moe
+                     and fused_moe_state == FusedMoEState.MC2))
+
+        if use_separated_shared_experts:
+            shared_hidden_states = shared_experts(
+                hidden_states)  # type: ignore
 
         tp_size = get_tensor_model_parallel_world_size()
         if (tp_size > 1 and fused_moe_state != FusedMoEState.AllGather
@@ -1282,23 +1287,30 @@ class AscendFusedMoE(FusedMoE):
             enable_force_load_balance=enable_force_load_balance,
             log2phy=self.log2phy,
             global_redundant_expert_num=self.global_redundant_expert_num,
-            shared_experts=shared_experts if self.torchair_graph_enabled
-            and self.enable_multistream_moe and not is_prefill else None,
+            shared_experts=(shared_experts
+                            if use_separated_shared_experts else None),
         )
-
-        if shared_experts:
-            if isinstance(e_hidden_states, tuple):
-                e_hidden_states, shared_hidden_states = e_hidden_states
 
         if (tp_size > 1 and fused_moe_state != FusedMoEState.AllGather
                 and fused_moe_state != FusedMoEState.AllGatherEP
                 and not replace_allreduce):
-            dist.all_gather(list(chunk_hidden_states), e_hidden_states,
-                            self.tp_group)
-            final_hidden_states = torch.cat(chunk_hidden_states, dim=0)
-            if num_tokens < tp_size:
-                final_hidden_states = final_hidden_states[:num_tokens]
-            dispose_tensor(e_hidden_states)
+
+            def gather_sequences_tp(shard: torch.Tensor) -> torch.Tensor:
+                dist.all_gather(list(chunk_hidden_states), shard,
+                                self.tp_group)
+                dispose_tensor(shard)
+                gathered = torch.cat(chunk_hidden_states, dim=0)
+                if num_tokens < tp_size:
+                    gathered = gathered[:num_tokens]
+                return gathered
+
+            if isinstance(e_hidden_states, tuple):
+                e_hidden_states, shared_hidden_states = e_hidden_states
+                final_hidden_states = (
+                    gather_sequences_tp(e_hidden_states),
+                    gather_sequences_tp(shared_hidden_states))
+            else:
+                final_hidden_states = gather_sequences_tp(e_hidden_states)
         elif self.dp_size > 1 and fused_moe_state == FusedMoEState.AllGather:
             final_hidden_states = dist._functional_collectives.reduce_scatter_tensor(
                 e_hidden_states,
@@ -1315,7 +1327,7 @@ class AscendFusedMoE(FusedMoE):
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 
-        if shared_experts:
+        if use_separated_shared_experts:
             return final_hidden_states, shared_hidden_states
         else:
             return final_hidden_states
