@@ -10,8 +10,6 @@ export MODEL_ARGS='pretrained=Qwen/Qwen2.5-7B-Instruct,max_model_len=4096,dtype=
 lm_eval --model vllm --model_args $MODEL_ARGS --tasks ceval-valid,gsm8k \ 
 --apply_chat_template --fewshot_as_multiturn --num_fewshot 5 --batch_size 1
 ```
-  </div>
-  <div>&nbsp;</div>
   
 | Task                  | Filter | n-shot | Metric   | Value   | Stderr |
 |-----------------------|-------:|-------:|----------|--------:|-------:|
