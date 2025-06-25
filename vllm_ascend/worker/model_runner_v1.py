@@ -1010,43 +1010,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.uses_mrope:
             positions = self.mrope_positions[:, :num_input_tokens]
 
-        # prepare the MRoPE for mllm if using multimodal
-        num_input_tokens = total_num_scheduled_tokens
-        # _prepare_inputs may reorder the batch, so we must gather multi
-        # modal outputs after that to ensure the correct order
-        if self.is_multimodal_model:
-            # Run the multimodal encoder if any.
-            self._execute_mm_encoder(scheduler_output)
-            mm_embeds = self._gather_mm_embeddings(scheduler_output)
-        else:
-            mm_embeds = []
-
-        if self.is_multimodal_model:
-            # NOTE(woosuk): To unify token ids and soft tokens (vision
-            # embeddings), we always use embeddings (rather than token ids)
-            # as input to the multimodal model, even when the input is text.
-            input_ids = self.input_ids[:num_input_tokens]
-            if mm_embeds:
-                inputs_embeds = self.model.get_input_embeddings(
-                    input_ids, mm_embeds)
-            else:
-                inputs_embeds = self.model.get_input_embeddings(input_ids)
-            # TODO(woosuk): Avoid the copy. Optimize.
-            self.inputs_embeds[:num_input_tokens].copy_(inputs_embeds)
-            inputs_embeds = self.inputs_embeds[:num_input_tokens]
-            input_ids = None
-        else:
-            # For text-only models, we use token ids as input.
-            # While it is possible to use embeddings as input just like the
-            # multimodal models, it is not desirable for performance since
-            # then the embedding layer is not included in the CUDA graph.
-            input_ids = self.input_ids[:num_input_tokens]
-            inputs_embeds = None
-        if self.uses_mrope:
-            positions = self.mrope_positions[:, :num_input_tokens]
-        else:
-            positions = self.positions[:num_input_tokens]
-
         if self.torchair_graph_enabled and not with_prefill:
             input_ids = self.input_ids[:padded_batch_size]
             positions = self.positions[:padded_batch_size]

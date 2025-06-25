@@ -314,7 +314,7 @@ class CustomDeepseekV2MoE(nn.Module):
                 is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
         # If this node is kv_consumer, we force the moe always runs in decode path to make sure
         # the behaviour aligned between dummy_run and normal model_execute.
-        if self.kv_consumer is not None:
+        if self.kv_consumer:
             is_prefill = False
             enable_force_load_balance = False
 

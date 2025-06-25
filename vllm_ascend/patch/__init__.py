@@ -121,18 +121,6 @@
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm and vllm-ascend.
 #
-#   2. `vllm.spec_decode.multi_step_worker.MultiStepWorker.set_include_gpu_probs_tensor` and
-#       `vllm.spec_decode.multi_step_worker.MultiStepWorker.set_should_modify_greedy_probs_inplace`
-#    Why:
-#       vLLM `Remove Sampler from Model Code` so vllm-ascend needs adapt to this change.
-#    How：
-#       Use vLLM 0.8.4 method to patch it.
-#    Related PR (if no, explain why):
-#       - https://github.com/vllm-project/vllm/pull/15195
-#       - https://github.com/vllm-project/vllm-ascend/pull/395
-#    Future Plan:
-#       Remove it when we identify the reasons clearly.
-#
 # ** File: worker/patch_common/patch_spec_decode_worker.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.spec_decode.spec_decode_worker.SpecDecodeWorker.create_worker`

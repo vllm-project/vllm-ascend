@@ -121,7 +121,10 @@ def fused_experts_with_mc2(
     if log2phy:
         topk_ids = log2phy[topk_ids]
     global_bs = 0
-    moe_expert_num = len(expert_map) + global_redundant_expert_num
+    if (expert_map is not None):
+        moe_expert_num = len(expert_map) + global_redundant_expert_num
+    else:
+        moe_expert_num = global_redundant_expert_num
     # hidden_states = hidden_states.bfloat16()
     kwargs_mc2 = {
         "x": hidden_states,
@@ -490,6 +493,10 @@ class AscendW8A8DynamicLinearMethod:
                                                    1,
                                                    dtype=params_dtype)
         return params_dict
+
+    def get_pergroup_param(self, input_size: int, output_size: int,
+                           params_dtype: torch.dtype) -> Dict[str, Any]:
+        return {}
 
     @staticmethod
     def apply(
