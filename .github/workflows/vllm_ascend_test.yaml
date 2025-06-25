@@ -43,6 +43,7 @@ on:
       - '**/*.py'
       - '.github/workflows/vllm_ascend_test.yaml'
       - '!docs/**'
+      - '!examples/**'
       - 'pytest.ini'
       - '!benchmarks/**'
       - 'tools/mypy.sh'
@@ -357,13 +358,17 @@ jobs:
             pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
           # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py will raise error.
           # To avoid oom, we need to run the test in a single process.
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_topk
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_dbo
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeekV3_dbo
-          pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_ilama_lora_tp2.py --ignore=tests/e2e/multicard/test_offline_inference_distributed.py
+          pytest -sv tests/e2e/multicard/test_data_parallel.py
+          pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_ilama_lora_tp2.py \
+            --ignore=tests/e2e/multicard/test_offline_inference_distributed.py \
+            --ignore=tests/e2e/multicard/test_data_parallel.py
 
       - name: Run vllm-project/vllm-ascend test on V0 engine
         if: ${{ github.event_name == 'schedule' }}
@@ -380,4 +385,7 @@ jobs:
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_topk
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
-          pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_ilama_lora_tp2.py --ignore=tests/e2e/multicard/test_offline_inference_distributed.py
+          pytest -sv tests/e2e/multicard/test_data_parallel.py
+          pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_ilama_lora_tp2.py \
+            --ignore=tests/e2e/multicard/test_offline_inference_distributed.py \
+            --ignore=tests/e2e/multicard/test_data_parallel.py
