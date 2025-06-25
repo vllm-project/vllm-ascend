@@ -1024,7 +1024,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if self.torchair_graph_enabled:
                     model_kwargs["kv_caches"] = self.kv_caches
                     model_kwargs["attn_metadata"] = attn_metadata
-                if envs_ascend.VLLM_ASCEND_ENABLE_DBO and and  with_prefill:
+                if envs_ascend.VLLM_ASCEND_ENABLE_DBO and with_prefill:
                     model_kwargs["graph_enable"] = False
                 if self.torchair_graph_enabled and not with_prefill:
                     compiled_model = self._get_torchair_lazy_compiled_model(
@@ -1034,8 +1034,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         positions=positions,
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=inputs_embeds,
-                        **model_kwargs,
-                    )
+                        **model_kwargs
+                        )
                 else:
                     assert self.model is not None
                     hidden_states = self.model(
@@ -1043,8 +1043,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         positions=positions,
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=inputs_embeds,
-                        **model_kwargs,
-                    )
+                        **model_kwargs
+                        )
 
         self.maybe_wait_for_kv_save()
         finished_sending, finished_recving = self.get_finished_kv_transfer(
@@ -1572,6 +1572,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         num_tokens)
                     model_kwargs["kv_caches"] = self.kv_caches
                     model_kwargs["attn_metadata"] = attn_metadata
+                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+                        model_kwargs["graph_enable"] = True                   
                     hidden_states = compiled_model(
                         input_ids=input_ids,
                         positions=positions,
@@ -1581,7 +1583,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     )
                 else:
                     if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
-                        model_kwargs["graph_enable"] = graph_enable
+                        model_kwargs["graph_enable"] = False
                     hidden_states = model(
                         input_ids=input_ids,
                         positions=positions,

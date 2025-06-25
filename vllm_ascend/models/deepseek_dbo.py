@@ -107,7 +107,7 @@ class CustomDeepseekDBOMLP(CustomDeepseekV2MLP):
         current_ms_metadata = get_multistream_comm_context()
         assert current_ms_metadata is not None
         gate_up, _ = self.gate_up_proj(x)
-        if self.is_dynamic_quant
+        if self.is_dynamic_quant:
             x, dynamic_scale = self.act_fn(gate_up)
             x = torch_npu.npu_quant_matmul(
                 x,
@@ -205,7 +205,7 @@ class CustomDeepseekDBOMoE(nn.Module):
             self,
             hidden_states: torch.Tensor,
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
-        if attn_metadata is None:
+        if attn_metadata is Noness:
             attn_metadata = get_forward_context().attn_metadata
         # when profile runs, force experts to load balanced tokens
         # to avoid high memory consumption on a single rank.
