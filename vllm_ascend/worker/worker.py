@@ -50,7 +50,7 @@ from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import try_register_lib
+from vllm_ascend.utils import init_ascend_soc_version, try_register_lib
 from vllm_ascend.worker.model_runner import NPUModelRunner
 from vllm_ascend.worker.pooling_model_runner import NPUPoolingModelRunner
 
@@ -217,6 +217,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
+        init_ascend_soc_version()
         # Initialize the distributed environment.
         self._init_worker_distributed_environment(self.vllm_config, self.rank,
                                                   self.distributed_init_method,

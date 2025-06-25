@@ -35,7 +35,7 @@ from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
                          get_current_vllm_config)
-from vllm.distributed import (get_dp_group, get_ep_group, get_pp_group,
+from vllm.distributed import (get_dp_group, get_pp_group,
                               get_tensor_model_parallel_world_size,
                               get_tp_group)
 from vllm.forward_context import get_forward_context
@@ -284,7 +284,6 @@ class CustomDeepseekV2MoE(nn.Module):
 
         self.tp_group = get_tp_group().device_group
         self.tp_rank = get_tp_group().rank_in_group
-        self.ep_group = get_ep_group()
         self.kv_consumer = None
         transfer_config = get_current_vllm_config().kv_transfer_config
         if transfer_config is not None:

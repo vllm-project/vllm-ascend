@@ -25,6 +25,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, List, Tuple
 
 import torch
+import torch_npu
 import torchair  # type: ignore[import]  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
@@ -277,19 +278,27 @@ def npu_wait_tensor(self: torch.Tensor,
     return _npu_wait_tensor(self, dependency) if enabled else self
 
 
-# TODO(zzzzwwjj): move this into forward_context
-class FusedMoEState(Enum):
-    AllGather = 0
-    All2All = 1
-    MC2 = 2
+class AscendSocVersion(Enum):
+    A2 = 0
+    A3 = 1
+    MAX = 2
 
 
-# TODO(zzzzwwjj): add soc_version to choose branch
-def get_fused_moe_state(ep_size: int, with_prefill: bool):
-    if ep_size == 1:
-        return FusedMoEState.AllGather
-    # NOTE: mc2 need ep_size >= 16 & all2all can't use in torchair graph.
-    elif ep_size < 16 or with_prefill:
-        return FusedMoEState.All2All
+_ascend_soc_version = None
+
+
+def init_ascend_soc_version():
+    soc_version = torch_npu.npu.get_soc_version()
+    global _ascend_soc_version
+    if 220 <= soc_version <= 225:
+        _ascend_soc_version = AscendSocVersion.A2
+    elif 250 <= soc_version <= 255:
+        _ascend_soc_version = AscendSocVersion.A3
     else:
-        return FusedMoEState.MC2
+        _ascend_soc_version = AscendSocVersion.MAX
+
+
+def get_ascend_soc_version():
+    global _ascend_soc_version
+    assert _ascend_soc_version is not None
+    return _ascend_soc_version

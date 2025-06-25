@@ -15,6 +15,7 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm/tests/kernels/test_moe.py
 
+import math
 import os
 from typing import Any, Callable, List, Optional, Tuple, Union
 
@@ -37,9 +38,11 @@ from vllm.model_executor.layers.quantization.base_config import \
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
-from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
-                               npu_stream_switch, npu_wait_tensor)
+from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
+                               get_ascend_soc_version, npu_stream_switch,
+                               npu_wait_tensor)
 
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
 
@@ -117,9 +120,24 @@ def fused_experts_with_mc2(
     top_k: int,
     expert_map: torch.Tensor = None,
     moe_all_to_all_group_name: Optional[str] = None,
-    shared_experts: Optional[Any] = None
+    shared_experts: Optional[Any] = None,
+    is_torchair: bool = False,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-    global_bs = 0
+    quant_mode = 0
+    ep_group = get_ep_group()
+    ep_rank_id = ep_group.rank_in_group
+    ep_world_size = ep_group.world_size
+    tp_world_size = get_tp_group().world_size
+
+    # NOTE: `global_bs` should be equal to `max_num_tokens_across_dp` * `ep_world_size`,
+    # and `max_num_tokens_across_dp` has been split into `tp_world_size` parts before.
+    global_bs = math.ceil(get_forward_context().max_tokens_across_dp /
+                          tp_world_size) * ep_world_size
+
+    # NOTE: Currently, when in A3 or in torchair graph, we need to pass in some extra param into dispatch & combine
+    need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A3
+                       or is_torchair)
+
     moe_expert_num = len(expert_map)
     kwargs_mc2 = {
         "x": hidden_states,
@@ -130,23 +148,20 @@ def fused_experts_with_mc2(
         "global_bs": global_bs,
     }
 
-    quant_mode = 0
-    ep_group = get_ep_group().device_group
-    assert torch.distributed.get_world_size() == ep_group.world_size
-    local_rank = torch.distributed.get_rank(group=ep_group)
-    all_to_all_group_size = torch.distributed.get_world_size(ep_group)
-
     stage1_kwargs = {
         "scales": None,
         "quant_mode": quant_mode,
         "group_ep": moe_all_to_all_group_name,
-        "ep_world_size": all_to_all_group_size,
-        "ep_rank_id": local_rank,
-        # "group_tp": self.moe_rs_group_name,
-        "group_tp": moe_all_to_all_group_name,
-        "tp_world_size": 1,
-        "tp_rank_id": 0,
+        "ep_world_size": ep_world_size,
+        "ep_rank_id": ep_rank_id,
     }
+    if need_extra_args:
+        stage1_kwargs.update({
+            "group_tp": moe_all_to_all_group_name,
+            "tp_world_size": 1,
+            "tp_rank_id": 0,
+        })
+
     kwargs_mc2.update(stage1_kwargs)
 
     output = torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
@@ -205,14 +220,16 @@ def fused_experts_with_mc2(
     stage3_kwargs = {
         "ep_send_counts": ep_recv_counts,
         "group_ep": moe_all_to_all_group_name,
-        "ep_world_size": all_to_all_group_size,
-        "ep_rank_id": local_rank,
-        "tp_send_counts": tp_recv_counts,
-        # "group_tp": self.moe_rs_group_name,
-        "group_tp": moe_all_to_all_group_name,
-        "tp_world_size": 1,
-        "tp_rank_id": 0,
+        "ep_world_size": ep_world_size,
+        "ep_rank_id": ep_rank_id,
     }
+    if need_extra_args:
+        stage3_kwargs.update({
+            "tp_send_counts": tp_recv_counts,
+            "group_tp": moe_all_to_all_group_name,
+            "tp_world_size": 1,
+            "tp_rank_id": 0,
+        })
     kwargs_mc2.update(stage3_kwargs)
 
     hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
@@ -842,17 +859,14 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         super().__init__(moe=moe)
         vllm_config = get_current_vllm_config()
 
-        self.ep_group = get_ep_group()
-        self.ep_size = self.ep_group.world_size
         self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
-        self.local_batch_size = self.global_batch_size // self.ep_size
         self.max_model_len = vllm_config.model_config.max_model_len
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
 
         try:
-            device_group = self.ep_group.device_group
+            device_group = get_ep_group().device_group
             # TODO: Try local_rank = ep_group.rank_in_group
             local_rank = torch.distributed.get_rank(group=device_group)
             backend = device_group._get_backend(torch.device("npu"))
@@ -939,7 +953,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 top_k=top_k,
                 expert_map=expert_map,
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name,
-                shared_experts=shared_experts)
+                shared_experts=shared_experts,
+                is_torchair=self.torchair_graph_enabled)
         elif fused_moe_state == FusedMoEState.AllGather:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
@@ -1049,17 +1064,15 @@ class AscendFusedMoE(FusedMoE):
             self.local_num_experts, self.expert_map = \
                                 expert_load_balancer.get_rank_placement_map(
                                                 self.moe_instance_id,
-                                                get_ep_group().rank_in_group)
+                                                self.ep_rank)
             self.log2phy = expert_load_balancer.get_rank_log2phy_map(
-                self.moe_instance_id,
-                get_ep_group().rank_in_group)
+                self.moe_instance_id, self.ep_rank)
             self.global_redundant_expert_num = \
                         expert_load_balancer.get_global_redundant_expert_num()
         else:
             # Create a tensor of size num_experts filled with -1
             self.local_num_experts, self.expert_map = determine_expert_map(
-                self.ep_size,
-                get_ep_group().rank_in_group, self.global_num_experts)
+                self.ep_size, self.ep_rank, self.global_num_experts)
 
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_multistream_moe = \
@@ -1102,7 +1115,6 @@ class AscendFusedMoE(FusedMoE):
                 in ("GPTQMarlinMoEMethod", "CompressedTensorsWNA16MoEMethod")):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
-        self.ep_group = get_ep_group()
         # NOTE: self.tp_group is not expert_tp_group
         self.tp_group = get_tp_group().device_group
         self.quant_method.create_weights(layer=self, **moe_quant_params)
@@ -1148,7 +1160,7 @@ class AscendFusedMoE(FusedMoE):
             # NOTE: When in torchair graph, it has been padded in model_runner_v1
             if not self.torchair_graph_enabled or is_prefill:
                 max_num_tokens_across_dp = get_forward_context(
-                ).dp_metadata.max_tokens_across_dp_cpu
+                ).max_tokens_across_dp
                 if num_tokens < max_num_tokens_across_dp:
                     hidden_states = nn.functional.pad(
                         hidden_states,

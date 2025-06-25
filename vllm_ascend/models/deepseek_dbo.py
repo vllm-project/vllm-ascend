@@ -627,7 +627,7 @@ class CustomDeepseekDBODecoderLayer(DeepseekV2DecoderLayer):
             if self.dp_size > 1:
                 if attn_metadata[i] is not None:
                     max_num_tokens_across_dp = get_forward_context(
-                    ).dp_metadata.max_tokens_across_dp_cpu
+                    ).max_tokens_across_dp
                     if num_tokens[i] < max_num_tokens_across_dp:
                         hidden_states[i] = nn.functional.pad(
                             hidden_states[i],
