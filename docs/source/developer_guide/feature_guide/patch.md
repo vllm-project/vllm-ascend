@@ -48,7 +48,7 @@ Before writing a patch, following the principle above, we should patch the least
 
 1. Decide which version of vLLM we should patch. For example, after analysis, here we want to patch both 0.9.1 and main of vLLM.
 2. Decide which process we should patch. For example, here `distributed` belongs to the vLLM main process, so we should patch `platform`.
-3. Create the patch file in the write folder. The file should be named as `patch_{module_name}.py`. The example here is `vllm_ascend/patch/platform/patch_common/patch_distributed.py`.
+3. Create the patch file in the right folder. The file should be named as `patch_{module_name}.py`. The example here is `vllm_ascend/patch/platform/patch_common/patch_distributed.py`.
 4. Write your patch code in the new file. Here is an example:
     ```python
     import vllm
