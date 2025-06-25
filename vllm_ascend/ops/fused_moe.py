@@ -1097,7 +1097,6 @@ class AscendFusedMoE(FusedMoE):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
-        routed_scaling_factor: float = 1.0,
     ):
         # TODO: This could not initialize FusedMoE baseclass,
         # fixme and make __init__() of AscendFusedMoE more clear
@@ -1136,7 +1135,6 @@ class AscendFusedMoE(FusedMoE):
         self.e_score_correction_bias = e_score_correction_bias
         self.expert_map = None
         self.activation = activation
-        self.routed_scaling_factor = routed_scaling_factor
         self.log2phy = None
         self.global_redundant_expert_num = 0
         self.all_reduce_merge = envs_ascend.VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE
@@ -1227,12 +1225,14 @@ class AscendFusedMoE(FusedMoE):
 
         fused_moe_state = get_fused_moe_state(self.moe_parallel_config.ep_size,
                                               is_prefill, is_deepseek_v3_r1)
+        self.fused_moe_state = fused_moe_state
         if shared_experts:
             if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
                 # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
                 shared_hidden_states = shared_experts(hidden_states)
 
         tp_size = get_tensor_model_parallel_world_size()
+        self.tp_size = tp_size
         if (tp_size > 1 and fused_moe_state != FusedMoEState.AllGather
                 and fused_moe_state != FusedMoEState.AllGatherEP):
             if num_tokens < tp_size:
@@ -1311,19 +1311,16 @@ class AscendFusedMoE(FusedMoE):
         else:
             final_hidden_states = e_hidden_states
 
-        if tp_size > 1 and (fused_moe_state == FusedMoEState.AllGather
-                            or fused_moe_state == FusedMoEState.AllGatherEP):
-            if self.all_reduce_merge:
-                # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
-                final_hidden_states = final_hidden_states * self.routed_scaling_factor + shared_hidden_states
-                final_hidden_states = tensor_model_parallel_all_reduce(
-                    final_hidden_states)
-            else:
-                final_hidden_states = tensor_model_parallel_all_reduce(
-                    final_hidden_states)
-                final_hidden_states = final_hidden_states * self.routed_scaling_factor + shared_hidden_states
+        if tp_size > 1 and not self.all_reduce_merge and (
+                fused_moe_state == FusedMoEState.AllGather
+                or fused_moe_state == FusedMoEState.AllGatherEP):
+            final_hidden_states = tensor_model_parallel_all_reduce(
+                final_hidden_states)
 
-        return final_hidden_states
+        if shared_experts:
+            return final_hidden_states, shared_hidden_states
+        else:
+            return final_hidden_states
 
     # ----------------------------------------- TBO-related --------------------------------------------
 
