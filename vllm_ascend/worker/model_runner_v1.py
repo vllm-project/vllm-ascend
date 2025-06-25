@@ -1743,7 +1743,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         hidden_states, _ = hidden_states
                     else:
                         hidden_states = hidden_states
-                    if self.use_spec_decode and \
+                    if self.speculative_config and \
                         self.speculative_config.method in ('eagle', 'eagle3'):
                         assert isinstance(self.drafter, EagleProposer)
                         self.drafter.dummy_run(num_tokens)
