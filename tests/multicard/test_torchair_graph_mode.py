@@ -110,3 +110,19 @@ def test_e2e_deepseekv3_with_torchair_ms_mla(monkeypatch: pytest.MonkeyPatch):
             },
         }
         _deepseek_torchair_test_fixture(additional_config)
+
+
+@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
+                    reason="torchair graph is not supported on v0")
+def test_e2e_deepseekv3_with_torchair_ms_moe(monkeypatch: pytest.MonkeyPatch):
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_MODELSCOPE", "True")
+        m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
+        additional_config = {
+            "torchair_graph_config": {
+                "enabled": True,
+                "enable_multistream_moe": True,
+            },
+        }
+        _deepseek_torchair_test_fixture(additional_config)
