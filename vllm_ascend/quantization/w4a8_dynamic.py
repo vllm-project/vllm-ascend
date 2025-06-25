@@ -272,27 +272,46 @@ class AscendW4A8DynamicFusedMoEMethod:
 
         topk_weights = topk_weights.to(x.dtype)
 
-        # The current implementation of deepseek moe splits hidden_states
-        # according to tp_size before they are feed into fused_moe module.
-        # Therefore, all2all is needed no matter how dp/tp is set so as to
-        # dispatch/combine tokens.
-        return fused_experts_with_all2all(
-            hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
-            w1_scale=layer.w13_weight_scale_second,
-            w2_scale=layer.w2_weight_scale_second,
-            w1_scale_bias=layer.w13_scale_bias,
-            w2_scale_bias=layer.w2_scale_bias,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            top_k=top_k,
-            expert_map=expert_map,
-            ep_group=self.ep_group,
-            log2phy=log2phy,
-            global_redundant_expert_num=global_redundant_expert_num,
-        )
-
+        fused_moe_state = get_fused_moe_state(self.ep_group.world_size,
+                                              is_prefill)
+        if fused_moe_state == FusedMoEState.MC2:
+            return fused_experts_with_mc2(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                w1_scale=layer.w13_weight_scale_second,
+                w2_scale=layer.w2_weight_scale_second,
+                w1_scale_bias=layer.w13_scale_bias,
+                w2_scale_bias=layer.w2_scale_bias,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                top_k=top_k,
+                expert_map=expert_map,
+                moe_all_to_all_group_name=self.moe_all_to_all_group_name,
+                log2phy=log2phy,
+                global_redundant_expert_num=global_redundant_expert_num,
+                shared_experts=shared_experts)
+        else:
+            # The current implementation of deepseek moe splits hidden_states
+            # according to tp_size before they are feed into fused_moe module.
+            # Therefore, all2all is needed no matter how dp/tp is set so as to
+            # dispatch/combine tokens.
+            return fused_experts_with_all2all(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                w1_scale=layer.w13_weight_scale_second,
+                w2_scale=layer.w2_weight_scale_second,
+                w1_scale_bias=layer.w13_scale_bias,
+                w2_scale_bias=layer.w2_scale_bias,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                top_k=top_k,
+                expert_map=expert_map,
+                ep_group=self.ep_group,
+                log2phy=log2phy,
+                global_redundant_expert_num=global_redundant_expert_num,
+            )
     def process_scale(self, weight: torch.Tensor, scale, per_group_scale):
         group_num, k, n = weight.shape
         per_group_scale = per_group_scale.reshape(group_num, -1, n)
