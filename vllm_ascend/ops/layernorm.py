@@ -23,27 +23,28 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm_ascend.utils import is_310p
 
 
-def forward_oot(
-    self,
-    x: torch.Tensor,
-    residual: Optional[torch.Tensor] = None,
-) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-    import torch_npu
+@RMSNorm.register_oot
+class AscendRMSNorm(RMSNorm):
 
-    if residual is not None:
-        if is_310p():
-            orig_dtype = residual.dtype
-            x = x + residual.to(x.dtype)
-            residual = x.to(orig_dtype)
-            x, _ = torch_npu.npu_rms_norm(x, self.weight,
-                                          self.variance_epsilon)
-        else:
-            x, _, residual = torch_npu.npu_add_rms_norm(
-                x, residual, self.weight, self.variance_epsilon)
-        return x, residual
+    def forward_oot(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        import torch_npu
 
-    x, residual = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)
-    return x
+        if residual is not None:
+            if is_310p():
+                orig_dtype = residual.dtype
+                x = x + residual.to(x.dtype)
+                residual = x.to(orig_dtype)
+                x, _ = torch_npu.npu_rms_norm(x, self.weight,
+                                              self.variance_epsilon)
+            else:
+                x, _, residual = torch_npu.npu_add_rms_norm(
+                    x, residual, self.weight, self.variance_epsilon)
+            return x, residual
 
-
-RMSNorm.forward_oot = forward_oot
+        x, residual = torch_npu.npu_rms_norm(x, self.weight,
+                                             self.variance_epsilon)
+        return x

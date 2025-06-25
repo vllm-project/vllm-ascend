@@ -939,7 +939,7 @@ def select_experts(
     return topk_weights, topk_ids
 
 
-class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
+class AscendDSUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def __init__(self, moe: FusedMoEConfig = None):
 
@@ -1190,7 +1190,7 @@ class AscendFusedMoE(FusedMoE):
             quant_config=quant_config)
 
         if quant_config is None:
-            self.quant_method = AscendUnquantizedFusedMoEMethod(moe)
+            self.quant_method = AscendDSUnquantizedFusedMoEMethod(moe)
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix)
 
