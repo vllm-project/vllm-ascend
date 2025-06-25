@@ -70,8 +70,8 @@ from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
-                               npu_stream_switch, npu_wait_tensor)
+from vllm_ascend.utils import (dispose_tensor, npu_stream_switch,
+                               npu_wait_tensor)
 
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
@@ -322,19 +322,16 @@ class CustomDeepseekV2MoE(nn.Module):
             shared_experts=self.shared_experts,
         )
 
-        if self.experts.tp_size > 1 and (
-                self.experts.fused_moe_state == FusedMoEState.AllGather
-                or self.experts.fused_moe_state == FusedMoEState.AllGatherEP):
-            if self.all_reduce_merge:
-                # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
-                hidden_states = (
-                    experts_hidden_states[0] * self.routed_scaling_factor +
-                    experts_hidden_states[1])
-                hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-            else:
-                hidden_states = (
-                    experts_hidden_states[0] * self.routed_scaling_factor +
-                    experts_hidden_states[1])
+        if self.all_reduce_merge:
+            # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
+            hidden_states = (
+                experts_hidden_states[0] * self.routed_scaling_factor +
+                experts_hidden_states[1])
+            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+        else:
+            hidden_states = (
+                experts_hidden_states[0] * self.routed_scaling_factor +
+                experts_hidden_states[1])
 
         return hidden_states
 

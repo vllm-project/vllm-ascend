@@ -1225,14 +1225,12 @@ class AscendFusedMoE(FusedMoE):
 
         fused_moe_state = get_fused_moe_state(self.moe_parallel_config.ep_size,
                                               is_prefill, is_deepseek_v3_r1)
-        self.fused_moe_state = fused_moe_state
         if shared_experts:
             if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
                 # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
                 shared_hidden_states = shared_experts(hidden_states)
 
         tp_size = get_tensor_model_parallel_world_size()
-        self.tp_size = tp_size
         if (tp_size > 1 and fused_moe_state != FusedMoEState.AllGather
                 and fused_moe_state != FusedMoEState.AllGatherEP):
             if num_tokens < tp_size:
