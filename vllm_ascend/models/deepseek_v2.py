@@ -327,10 +327,10 @@ class CustomDeepseekV2MoE(nn.Module):
                 or self.experts.fused_moe_state == FusedMoEState.AllGatherEP):
             if self.all_reduce_merge:
                 # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
-                final_hidden_states = final_hidden_states * self.routed_scaling_factor + experts_hidden_states[
-                    1]
-                final_hidden_states = tensor_model_parallel_all_reduce(
-                    final_hidden_states)
+                hidden_states = (
+                    experts_hidden_states[0] * self.routed_scaling_factor +
+                    experts_hidden_states[1])
+                hidden_states = tensor_model_parallel_all_reduce(hidden_states)
             else:
                 hidden_states = (
                     experts_hidden_states[0] * self.routed_scaling_factor +
