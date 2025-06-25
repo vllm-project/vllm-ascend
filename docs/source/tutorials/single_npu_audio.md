@@ -1,4 +1,4 @@
-# Single NPU (Qwen2-Audio 7B with Eager Mode)
+# Single NPU (Qwen2-Audio 7B)
 
 ## Run vllm-ascend on Single NPU
 
@@ -29,6 +29,9 @@ docker run --rm \
 Setup environment variables:
 
 ```bash
+# Use vllm v1 engine
+export VLLM_USE_V1=1
+
 # Load model from ModelScope to speed up download
 export VLLM_USE_MODELSCOPE=True
 
