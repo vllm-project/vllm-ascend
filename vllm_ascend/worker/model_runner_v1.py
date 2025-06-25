@@ -1024,6 +1024,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if self.torchair_graph_enabled:
                     model_kwargs["kv_caches"] = self.kv_caches
                     model_kwargs["attn_metadata"] = attn_metadata
+                if envs_ascend.VLLM_ASCEND_ENABLE_DBO and and  with_prefill:
+                    model_kwargs["graph_enable"] = False
                 if self.torchair_graph_enabled and not with_prefill:
                     compiled_model = self._get_torchair_lazy_compiled_model(
                         padded_batch_size)
@@ -1548,6 +1550,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             with set_forward_context(None,
                                      self.vllm_config,
                                      num_tokens=num_tokens):
+                model_kwargs = {}
                 if self.torchair_graph_enabled and not with_prefill:
                     attn_metadata = self.attn_metadata_builder.build_dummy(
                         num_reqs=num_tokens, num_actual_tokens=1)
@@ -1567,20 +1570,24 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             torch._dynamo.mark_static(kv[1])
                     compiled_model = self._get_torchair_lazy_compiled_model(
                         num_tokens)
+                    model_kwargs["kv_caches"] = self.kv_caches
+                    model_kwargs["attn_metadata"] = attn_metadata
                     hidden_states = compiled_model(
                         input_ids=input_ids,
                         positions=positions,
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=None,
-                        kv_caches=self.kv_caches,
-                        attn_metadata=attn_metadata,
+                        **model_kwargs,
                     )
                 else:
+                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+                        model_kwargs["graph_enable"] = graph_enable
                     hidden_states = model(
                         input_ids=input_ids,
                         positions=positions,
                         intermediate_tensors=intermediate_tensors,
-                        inputs_embeds=inputs_embeds)
+                        inputs_embeds=inputs_embeds,
+                        **model_kwargs)
                 return hidden_states
 
     def profile_run(self) -> None:
