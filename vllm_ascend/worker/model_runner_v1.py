@@ -1477,7 +1477,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         with ProfileExecuteDuration().capture_async("post process"):
 
-            if getattr(self.input_batch, "pooling_params", None):
+            if self.input_batch.pooling_params:
                 return self._pool(hidden_states, num_scheduled_tokens,
                                   num_scheduled_tokens_np)
             logits = self.model.compute_logits(hidden_states[sample_indices],
