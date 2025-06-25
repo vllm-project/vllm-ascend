@@ -126,3 +126,40 @@ And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tenso
 
 ### 17. Failed to reinstall vllm-ascend from source after uninstalling vllm-ascend?
 You may encounter the problem of C compilation failure when reinstalling vllm-ascend from source using pip. If the installation fails, it is recommended to use `python setup.py install` to install, or use `python setup.py clean` to clear the cache.
+
+### 18. How to generate determinitic results when using vllm-ascend?
+There are several factors that affect output certainty:
+
+1. Sampler Method: using **Greedy sample** by setting `temperature=0` in `SamplingParams`, e.g.:
+
+```python
+from vllm import LLM, SamplingParams
+
+prompts = [
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+]
+
+# Create a sampling params object.
+sampling_params = SamplingParams(temperature=0)
+# Create an LLM.
+llm = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
+
+# Generate texts from the prompts.
+outputs = llm.generate(prompts, sampling_params)
+for output in outputs:
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+```
+
+2. Set the following enveriments parameters:
+
+```bash
+export LCCL_DETERMINISTIC = 1
+export HCCL_DETERMINISTIC = 1
+export ATB_MATMUL_SHUFFLE_K_ENABLE = 0
+export ATB_LLM_LCOC_ENABLE = 0
+```
