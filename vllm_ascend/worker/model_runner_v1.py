@@ -1433,8 +1433,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 return EMPTY_MODEL_RUNNER_OUTPUT
             (attn_metadata, hidden_states, spec_decode_metadata, positions,
              num_scheduled_tokens, sample_indices,
-             aux_hidden_states) = (self._process_reqs(scheduler_output,
-                                                      intermediate_tensors))
+             aux_hidden_states) = (self._prepare_inputs(
+                 scheduler_output, intermediate_tensors))
 
         with ProfileExecuteDuration().capture_async("post process"):
 
