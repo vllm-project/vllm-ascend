@@ -1231,15 +1231,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
 
-        if self.dynamic_eplb:
-            self.eplb_updator.forward_before()
-
         with ProfileExecuteDuration().capture_async(
                 "prepare input and forward"):
             self._update_states(scheduler_output)
             if not scheduler_output.total_num_scheduled_tokens:
                 # Return empty ModelRunnerOuptut if there's no work to do.
                 return EMPTY_MODEL_RUNNER_OUTPUT
+
+            if self.dynamic_eplb:
+                self.eplb_updator.forward_before()
+              
             (attn_metadata, hidden_states, spec_decode_metadata, positions,
              num_scheduled_tokens,
              sample_indices) = (self._process_reqs(scheduler_output,
