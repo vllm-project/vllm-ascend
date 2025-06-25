@@ -47,6 +47,32 @@ def test_models_distributed_QwQ():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+def test_models_distributed_DeepSeek_multistream_moe():
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    dtype = "half"
+    max_tokens = 5
+    with VllmRunner(
+            "vllm-ascend/DeepSeek-V3-Pruning",
+            dtype=dtype,
+            tensor_parallel_size=2,
+            distributed_executor_backend="mp",
+            additional_config={
+                "torchair_graph_config": {
+                    "enabled": True,
+                    "enable_multistream_moe": True,
+                },
+                "ascend_scheduler_config": {
+                    "enabled": True,
+                },
+                "refresh": True,
+            },
+            enforce_eager=False,
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
 def test_models_distributed_DeepSeek():
     example_prompts = [
         "Hello, my name is",

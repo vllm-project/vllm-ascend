@@ -47,7 +47,7 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 请查看[快速开始](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html)和[安装指南](https://vllm-ascend.readthedocs.io/en/latest/installation.html)了解更多.
 
 ## 贡献
-请参考 [CONTRIBUTING]((https://vllm-ascend.readthedocs.io/en/main/developer_guide/contributing.html)) 文档了解更多关于开发环境搭建、功能测试以及 PR 提交规范的信息。
+请参考 [CONTRIBUTING]((https://vllm-ascend.readthedocs.io/en/latest/developer_guide/contribution/index.html)) 文档了解更多关于开发环境搭建、功能测试以及 PR 提交规范的信息。
 
 我们欢迎并重视任何形式的贡献与合作：
 - 请通过[Issue](https://github.com/vllm-project/vllm-ascend/issues)来告知我们您遇到的任何Bug。
@@ -67,7 +67,7 @@ vllm-ascend有主干分支和开发分支。
 | v0.7.1-dev | Unmaintained | 只允许文档修复 |
 | v0.7.3-dev | Maintained | 基于vLLM v0.7.3版本CI看护 |
 
-请参阅[版本策略](https://vllm-ascend.readthedocs.io/en/main/developer_guide/versioning_policy.html)了解更多详细信息。
+请参阅[版本策略](https://vllm-ascend.readthedocs.io/en/latest/community/versioning_policy.html)了解更多详细信息。
 
 ## 社区例会
 
