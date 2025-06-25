@@ -252,22 +252,20 @@ def fused_experts_with_mc2(
 
 # currently expert parallelism implemented with all2all
 # is under-optimized.
-def fused_experts_with_all2all(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2: torch.Tensor,
-    w2_scale: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    top_k: int,
-    expert_map: torch.Tensor = None,
-    ep_group: GroupCoordinator = None,
-    log2phy: torch.Tensor = None,
-    global_redundant_expert_num: int = 0,
-    w1_scale_bias: torch.Tensor = None,
-    w2_scale_bias: torch.Tensor = None
-):
+def fused_experts_with_all2all(hidden_states: torch.Tensor,
+                               w1: torch.Tensor,
+                               w1_scale: torch.Tensor,
+                               w2: torch.Tensor,
+                               w2_scale: torch.Tensor,
+                               topk_weights: torch.Tensor,
+                               topk_ids: torch.Tensor,
+                               top_k: int,
+                               expert_map: torch.Tensor = None,
+                               ep_group: GroupCoordinator = None,
+                               log2phy: torch.Tensor = None,
+                               global_redundant_expert_num: int = 0,
+                               w1_scale_bias: torch.Tensor = None,
+                               w2_scale_bias: torch.Tensor = None):
     if log2phy:
         topk_ids = log2phy[topk_ids]
     original_shape = hidden_states.shape
@@ -339,16 +337,15 @@ def fused_experts_with_all2all(
         group_list_type = 0
 
     # `hidden_states` will be disposed in the `apply_mlp` function
-    hidden_states = apply_mlp(
-        hidden_states,
-        w1,
-        w1_scale,  #17
-        w2,
-        w2_scale,
-        expert_tokens,  #16
-        group_list_type=group_list_type,
-        w1_scale_bias=w1_scale_bias,
-        w2_scale_bias=w2_scale_bias)
+    hidden_states = apply_mlp(hidden_states,
+                              w1,
+                              w1_scale,
+                              w2,
+                              w2_scale,
+                              expert_tokens,
+                              group_list_type=group_list_type,
+                              w1_scale_bias=w1_scale_bias,
+                              w2_scale_bias=w2_scale_bias)
 
     if expert_map is not None:
         resorted_idx = torch.argsort(sorted_idx)
