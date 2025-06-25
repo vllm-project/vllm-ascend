@@ -1260,7 +1260,8 @@ class AscendFusedMoE(FusedMoE):
                         if not self.rm_router_logits:
                             router_logits = nn.functional.pad(
                                 router_logits,
-                                (0, 0, 0, max_num_tokens_across_dp - num_tokens))
+                                (0, 0, 0,
+                                 max_num_tokens_across_dp - num_tokens))
             hidden_states = get_dp_group().all_gather(hidden_states, 0)
             if self.rm_router_logits:
                 router_logits, _ = gate(hidden_states)
