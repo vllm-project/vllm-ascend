@@ -29,6 +29,9 @@ docker run --rm \
 Setup environment variables:
 
 ```bash
+# Use vllm v1 engine
+export VLLM_USE_V1=1
+
 # Load model from ModelScope to speed up download
 export VLLM_USE_MODELSCOPE=True
 
@@ -53,11 +56,11 @@ from qwen_vl_utils import process_vision_info
 
 MODEL_PATH = "Qwen/Qwen2.5-VL-7B-Instruct"
 
-# NOTE: you can add `enforce_eager=True` param to use eager mode
 llm = LLM(
     model=MODEL_PATH,
     max_model_len=16384,
     limit_mm_per_prompt={"image": 10},
+    enforce_eager=True,
 )
 
 sampling_params = SamplingParams(
@@ -146,12 +149,11 @@ docker run --rm \
 vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
 --dtype bfloat16 \
 --max_model_len 16384 \
---max-num-batched-tokens 16384
+--max-num-batched-tokens 16384 \
+--enforce-eager
 ```
 
 :::{note}
-Add `--enforce-eager` option to use eager mode.
-
 Add `--max_model_len` option to avoid ValueError that the Qwen2.5-VL-7B-Instruct model's max seq len (128000) is larger than the maximum number of tokens that can be stored in KV cache. This will differ with different NPU series base on the HBM size. Please modify the value according to a suitable value for your NPU series.
 :::
 
