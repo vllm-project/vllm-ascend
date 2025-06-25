@@ -21,12 +21,13 @@ import pytest
 from tests.conftest import VllmRunner
 
 
-@pytest.mark.skip(reason="Due to OOM,waiting for 1311pr to merge in")
 @pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
                     reason="w4a8_dynamic is not supported on v0")
 def test_deepseek_W4A8(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
+        m.setenv("VLLM_ASCEND_MLA_PA", "1")
+        m.setenv("VLLM_USE_MODELSCOPE", "True")
 
         prompts = [
             "Hello, my name is",
