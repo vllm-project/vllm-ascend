@@ -1888,7 +1888,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     self.input_batch.logits_processing_needs_token_ids = True
             except ImportError:
                 pass
-            if hasattr(self, "drafter"):
+            if self.drafter:
                 logger.info("Loading drafter model...")
                 if self.use_aux_hidden_state_outputs:
                     self.drafter.load_model(self.model)
