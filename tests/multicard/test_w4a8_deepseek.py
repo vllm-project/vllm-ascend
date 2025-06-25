@@ -27,6 +27,7 @@ def test_deepseek_W4A8(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
         m.setenv("VLLM_ASCEND_MLA_PA", "1")
+        m.setenv("VLLM_USE_MODELSCOPE", "True")
 
         prompts = [
             "Hello, my name is",
