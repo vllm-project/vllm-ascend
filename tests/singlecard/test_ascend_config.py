@@ -42,7 +42,6 @@ def test_run_without_ascend_config():
         assert ascend_config.torchair_graph_config.graph_batch_sizes == []
         assert not ascend_config.torchair_graph_config.graph_batch_sizes_init
         assert not ascend_config.ascend_scheduler_config.enabled
-        assert ascend_config.expert_tensor_parallel_size == 0
 
 
 @_clean_up_ascend_config
@@ -65,7 +64,6 @@ def test_run_with_ascend_config():
             "enabled": True,
             "enable_chunked_prefill": True,
         },
-        "expert_tensor_parallel_size": 1
     }
 
     # check passed with eager mode
@@ -84,7 +82,6 @@ def test_run_with_ascend_config():
         assert ascend_config.torchair_graph_config.enable_multistream_moe
         assert ascend_config.ascend_scheduler_config.enabled
         assert ascend_config.ascend_scheduler_config.enable_chunked_prefill
-        assert ascend_config.expert_tensor_parallel_size == 1
 
 
 @_clean_up_ascend_config

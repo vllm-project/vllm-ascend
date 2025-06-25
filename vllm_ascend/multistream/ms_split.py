@@ -225,8 +225,6 @@ def model_input_split_v1_mla_attn(
         attn_mask=attn_mask_pre,
         prefill=prefill_pre,
         decode=decode_pre,
-        max_num_tokens_across_dp=attn_metadata.max_num_tokens_across_dp,
-        with_prefill_across_dp=attn_metadata.with_prefill_across_dp,
         enable_dbo_across_dp=attn_metadata.enable_dbo_across_dp,
     )
     attention_metadata_post = _metadata_cls(
@@ -244,8 +242,6 @@ def model_input_split_v1_mla_attn(
         attn_state=attn_state_post,
         prefill=prefill_post,
         decode=decode_post,
-        max_num_tokens_across_dp=attn_metadata.max_num_tokens_across_dp,
-        with_prefill_across_dp=attn_metadata.with_prefill_across_dp,
         enable_dbo_across_dp=attn_metadata.enable_dbo_across_dp,
     )
     return [attention_metadata_pre, attention_metadata_post]

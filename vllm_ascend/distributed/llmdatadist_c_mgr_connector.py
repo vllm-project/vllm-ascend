@@ -7,7 +7,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
-import llm_datadist  # type: ignore[import-not-found]
+import llm_datadist  # type: ignore
 import msgspec
 import torch
 import zmq

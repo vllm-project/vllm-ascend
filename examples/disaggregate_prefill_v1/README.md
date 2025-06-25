@@ -47,6 +47,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   --data-parallel-address 172.19.32.175 \
   --data-parallel-rpc-port 13356 \
   --tensor-parallel-size 8 \
+  --enable-expert-parallel \
   --no-enable-prefix-caching \
   --seed 1024 \
   --served-model-name deepseek \
@@ -88,6 +89,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   --data-parallel-address 172.19.32.175 \
   --data-parallel-rpc-port 13356 \
   --tensor-parallel-size 8 \
+  --enable-expert-parallel \
   --no-enable-prefix-caching \
   --seed 1024 \
   --served-model-name deepseek \
@@ -128,6 +130,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   --data-parallel-address 172.19.123.51 \
   --data-parallel-rpc-port 13356 \
   --tensor-parallel-size 8 \
+  --enable-expert-parallel \
   --no-enable-prefix-caching \
   --seed 1024 \
   --served-model-name deepseek \
@@ -169,6 +172,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   --data-parallel-address 172.19.123.51 \
   --data-parallel-rpc-port 13356 \
   --tensor-parallel-size 8 \
+  --enable-expert-parallel \
   --no-enable-prefix-caching \
   --seed 1024 \
   --served-model-name deepseek \

@@ -180,20 +180,18 @@ class CustomDeepseekDBOMoE(nn.Module):
             self,
             hidden_states: torch.Tensor,
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
+        forward_context = get_forward_context()
         if attn_metadata is None:
-            attn_metadata = get_forward_context().attn_metadata
+            attn_metadata = forward_context.attn_metadata
         # when profile runs, force experts to load balanced tokens
         # to avoid high memory consumption on a single rank.
-        # TODO: need a better flag to indicate whether in profile run or not.
-        if attn_metadata is None:
-            # for profile run
-            is_prefill = True
-            enable_force_load_balance = True
-        else:
-            is_prefill = attn_metadata.num_prefills > 0
-            enable_force_load_balance = False
-            if hasattr(attn_metadata, 'with_prefill_across_dp'):
-                is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
+        enable_force_load_balance = forward_context.in_profile_run
+
+        is_prefill = forward_context.with_prefill
+        # If this node is kv_consumer, we force the moe always runs in decode path to make sure
+        # the behaviour aligned between dummy_run and normal model_execute.
+        if self.kv_consumer:
+            is_prefill = False
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
@@ -628,8 +626,8 @@ class CustomDeepseekDBODecoderLayer(DeepseekV2DecoderLayer):
 
             if self.dp_size > 1:
                 if attn_metadata[i] is not None:
-                    max_num_tokens_across_dp = attn_metadata[
-                        i].max_num_tokens_across_dp
+                    max_num_tokens_across_dp = get_forward_context(
+                    ).dp_metadata.max_tokens_across_dp_cpu
                     if num_tokens[i] < max_num_tokens_across_dp:
                         hidden_states[i] = nn.functional.pad(
                             hidden_states[i],

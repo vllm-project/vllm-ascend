@@ -35,10 +35,9 @@ from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
                          get_current_vllm_config)
-from vllm.distributed import (get_pp_group,
+from vllm.distributed import (get_dp_group, get_ep_group, get_pp_group,
                               get_tensor_model_parallel_world_size,
                               get_tp_group)
-from vllm.distributed.parallel_state import get_dp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -66,7 +65,6 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
@@ -298,25 +296,19 @@ class CustomDeepseekV2MoE(nn.Module):
             self,
             hidden_states: torch.Tensor,
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
+        forward_context = get_forward_context()
         if attn_metadata is None:
-            attn_metadata = get_forward_context().attn_metadata
+            attn_metadata = forward_context.attn_metadata
+
         # when profile runs, force experts to load balanced tokens
         # to avoid high memory consumption on a single rank.
-        # TODO: need a better flag to indicate whether in profile run or not.
-        if attn_metadata is None:
-            # for profile run
-            is_prefill = True
-            enable_force_load_balance = True
-        else:
-            is_prefill = attn_metadata.num_prefills > 0
-            enable_force_load_balance = False
-            if hasattr(attn_metadata, 'with_prefill_across_dp'):
-                is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
+        enable_force_load_balance = forward_context.in_profile_run
+
+        is_prefill = forward_context.with_prefill
         # If this node is kv_consumer, we force the moe always runs in decode path to make sure
         # the behaviour aligned between dummy_run and normal model_execute.
         if self.kv_consumer:
             is_prefill = False
-            enable_force_load_balance = False
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)

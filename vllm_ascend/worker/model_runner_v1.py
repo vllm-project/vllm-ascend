@@ -43,7 +43,7 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import get_dp_group, get_pp_group
-from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.forward_context import get_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -74,6 +74,7 @@ from vllm.v1.worker.utils import (gather_mm_placeholders,
                                   scatter_mm_placeholders)
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import CommonAttentionMetadata
@@ -368,6 +369,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 
+        # NOTE: we need to use `in_profile_run` to determine whether `enable_force_load_balance` is True
+        self.in_profile_run = False
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
         output.
@@ -570,17 +574,24 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.refresh_sampling_metadata()
 
     def _get_forward_metadata_across_dp(
-            self, total_num_scheduled_tokens: int, with_prefill: bool,
-            enable_dbo: bool) -> tuple[int, bool, bool]:
+            self, num_tokens: int, with_prefill: bool, enable_dbo: bool
+    ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
+        if self.dp_size == 1:
+            return num_tokens, None, with_prefill, enable_dbo
+
         forward_metadata = torch.tensor(
-            [total_num_scheduled_tokens, with_prefill, not enable_dbo],
+            [num_tokens, with_prefill, not enable_dbo],
             device="cpu",
             dtype=torch.int32)
         dist.all_reduce(forward_metadata,
                         op=ReduceOp.MAX,
                         group=get_dp_group().cpu_group)
-        return int(forward_metadata[0]), bool(
-            forward_metadata[1] > 0), not bool(forward_metadata[2] > 0)
+        num_tokens_across_dp = torch.tensor([forward_metadata[0]] *
+                                            self.dp_size,
+                                            device="cpu",
+                                            dtype=torch.int32)
+        return forward_metadata[0].item(), num_tokens_across_dp, bool(
+            forward_metadata[1]), not bool(forward_metadata[2])
 
     def _check_dbo_is_valid(self, query_lens: torch.Tensor,
                             attn_state: AscendAttentionState,
@@ -926,23 +937,21 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         enable_dbo = self._check_dbo_is_valid(self.query_lens.tolist(),
                                               attn_state,
                                               total_num_scheduled_tokens)
+        num_tokens_across_dp = None
 
-        if self.dp_size > 1:
-            max_num_tokens, with_prefill, enable_dbo = self._get_forward_metadata_across_dp(
-                total_num_scheduled_tokens, with_prefill, enable_dbo)
-            extra_builder_kwargs['max_num_tokens_across_dp'] = max_num_tokens
-            extra_builder_kwargs['with_prefill_across_dp'] = with_prefill
+        padded_num_tokens = total_num_scheduled_tokens
+        if self.torchair_graph_enabled and not with_prefill:
+            padded_num_tokens = self.select_torchair_padded_batch_size(
+                total_num_scheduled_tokens)
+        (padded_num_tokens_across_dp, num_tokens_across_dp, with_prefill,
+         enable_dbo) = self._get_forward_metadata_across_dp(
+             padded_num_tokens, with_prefill, enable_dbo)
         extra_builder_kwargs['enable_dbo_across_dp'] = enable_dbo
 
+        # TODO(zzzzwwjj): this code need to refactor afterwards.
         # Add graph_pad_size here
         if self.torchair_graph_enabled and not with_prefill:
-            if self.dp_size > 1:
-                padded_batch_size = self.select_torchair_padded_batch_size(
-                    max_num_tokens)
-            else:
-                padded_batch_size = self.select_torchair_padded_batch_size(
-                    total_num_scheduled_tokens)
-            graph_pad_size = padded_batch_size - total_num_scheduled_tokens
+            graph_pad_size = padded_num_tokens_across_dp - total_num_scheduled_tokens
 
             extra_builder_kwargs['graph_pad_size'] = graph_pad_size
 
@@ -1011,13 +1020,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             positions = self.mrope_positions[:, :num_input_tokens]
 
         if self.torchair_graph_enabled and not with_prefill:
-            input_ids = self.input_ids[:padded_batch_size]
-            positions = self.positions[:padded_batch_size]
+            input_ids = self.input_ids[:padded_num_tokens_across_dp]
+            positions = self.positions[:padded_num_tokens_across_dp]
 
         # Run forward pass
-        with set_forward_context(attn_metadata,
-                                 self.vllm_config,
-                                 num_tokens=num_input_tokens):
+        # TODO(zzzzwwjj): check param `num_tokens_across_dp` later.
+        with set_ascend_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                num_tokens=padded_num_tokens_across_dp,
+                num_tokens_across_dp=num_tokens_across_dp,
+                with_prefill=with_prefill):
             with ProfileExecuteDuration().capture_async("forward"):
                 self.maybe_setup_kv_connector(scheduler_output)
                 model_kwargs = {}
@@ -1026,7 +1039,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     model_kwargs["attn_metadata"] = attn_metadata
                 if self.torchair_graph_enabled and not with_prefill:
                     compiled_model = self._get_torchair_lazy_compiled_model(
-                        padded_batch_size)
+                        padded_num_tokens_across_dp)
                     hidden_states = compiled_model(
                         input_ids=input_ids,
                         positions=positions,
@@ -1372,7 +1385,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def kv_connector_no_forward(
             self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
-        with set_forward_context(None, self.vllm_config):
+        # TODO(zzzzwwjj): Check whether `set_ascend_forward_context` has influence with kv_connector or not.
+        with set_ascend_forward_context(None, self.vllm_config):
             self.maybe_setup_kv_connector(scheduler_output)
             finsihed_sending, finished_recving = (
                 self.get_finished_kv_transfer(scheduler_output))
@@ -1500,15 +1514,23 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def _dummy_run(
         self,
         num_tokens: int,
-        is_compile: bool = False,
-        with_prefill: bool = True,
+        skip_attn: bool = True,
+        with_prefill: bool = False,
+        is_torchair_compile: bool = False,
     ) -> torch.Tensor:
+        if self.torchair_graph_enabled and not with_prefill:
+            num_tokens = self.select_torchair_padded_batch_size(num_tokens)
+        # Padding for DP
+        (num_tokens, num_tokens_across_dp, with_prefill,
+         enable_dbo) = self._get_forward_metadata_across_dp(
+             num_tokens, with_prefill, False)
+
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
         assert num_tokens <= self.scheduler_config.max_num_batched_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
-        num_reqs = max_num_reqs if num_tokens >= max_num_reqs else num_tokens
+        num_reqs = min(num_tokens, max_num_reqs)
         min_tokens_per_req = num_tokens // num_reqs
         num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
         num_scheduled_tokens_list[-1] += num_tokens % num_reqs
@@ -1516,6 +1538,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
+
+        # NOTE: If torchair graph mode and not with_prefill,
+        # we can't skip_attn, it will cause graph recompile.
+        if self.torchair_graph_enabled and not with_prefill:
+            attn_metadata = self.attn_metadata_builder.build_torchair_graph_dummy(
+                num_reqs=num_tokens, num_actual_tokens=1)
+        elif skip_attn:
+            attn_metadata = None
+        else:
+            # TODO(zzzzwwjj): when aclgraph and full graph mode, we need build attn_metadata
+            attn_metadata = None
+
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
             model = self.model
@@ -1545,14 +1579,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     for k, v in self.intermediate_tensors.items()
                 })
 
-            with set_forward_context(None,
-                                     self.vllm_config,
-                                     num_tokens=num_tokens):
+            with set_ascend_forward_context(
+                    attn_metadata,
+                    self.vllm_config,
+                    num_tokens=num_tokens,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                    with_prefill=with_prefill,
+                    in_profile_run=self.in_profile_run):
                 if self.torchair_graph_enabled and not with_prefill:
-                    attn_metadata = self.attn_metadata_builder.build_dummy(
-                        num_reqs=num_tokens, num_actual_tokens=1)
                     # Only mark static while compiling
-                    if is_compile:
+                    if is_torchair_compile:
                         torch._dynamo.mark_static(input_ids)
                         torch._dynamo.mark_static(positions)
                         torch._dynamo.mark_static(
@@ -1583,6 +1619,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         inputs_embeds=inputs_embeds)
                 return hidden_states
 
+    @contextmanager
+    def set_in_profile_run(self):
+        self.in_profile_run = True
+        try:
+            yield
+        finally:
+            self.in_profile_run = False
+
     def profile_run(self) -> None:
         # FIXME Profile with multimodal encoder & encoder cache.
         # current _profile_multimodal() using PyTorch SDPA backend method not
@@ -1609,7 +1653,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # TODO: call maybe_profile_with_lora()
 
         # Trigger compilation for general shape.
-        hidden_states = self._dummy_run(self.max_num_tokens)
+        with self.set_in_profile_run():
+            hidden_states = self._dummy_run(self.max_num_tokens,
+                                            with_prefill=True)
 
         if get_pp_group().is_last_rank:
             hidden_states = hidden_states[logit_indices]
@@ -1866,18 +1912,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     reversed(torchair_graph_batch_sizes)):
                 for _ in range(self.vllm_config.compilation_config.
                                cudagraph_num_of_warmups):
-                    self._dummy_run(num_tokens,
-                                    is_compile=True,
-                                    with_prefill=False)
-                self._dummy_run(num_tokens,
-                                is_compile=True,
-                                with_prefill=False)
+                    # NOTE: when in torchair graph and not with_prefill,
+                    # we don't need to set `skip_attn=False`
+                    self._dummy_run(num_tokens, is_torchair_compile=True)
+                self._dummy_run(num_tokens, is_torchair_compile=True)
                 logger.info("Batchsize %d is compiled successfully: %d/%d.",
                             num_tokens, idx + 1, graph_num)
         elif self.use_aclgraph:
             # Trigger ACL graph capture for specific shapes.
             # Capture the large shapes first so that the smaller shapes
             # can reuse the memory pool allocated for the large shapes.
+            # TODO(zzzzwwjj): Check dummy_run with ACL Graph and full graph mode
             with graph_capture(device=self.device):
                 for num_tokens in reversed(self.aclgraph_batch_sizes):
                     for _ in range(self.vllm_config.compilation_config.

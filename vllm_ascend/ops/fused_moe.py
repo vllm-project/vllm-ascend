@@ -26,7 +26,8 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import (GroupCoordinator, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.distributed.parallel_state import get_dp_group, get_tp_group
+from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
+                                             get_tp_group)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, FusedMoEParallelConfig, MoEConfig, UnquantizedFusedMoEMethod,
@@ -36,11 +37,9 @@ from vllm.model_executor.layers.quantization.base_config import \
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
-                               get_fused_moe_state, npu_stream_switch,
-                               npu_wait_tensor)
+                               npu_stream_switch, npu_wait_tensor)
 
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
 
@@ -131,15 +130,11 @@ def fused_experts_with_mc2(
         "global_bs": global_bs,
     }
 
-    rank = torch.distributed.get_rank()
-
     quant_mode = 0
     ep_group = get_ep_group().device_group
+    assert torch.distributed.get_world_size() == ep_group.world_size
     local_rank = torch.distributed.get_rank(group=ep_group)
     all_to_all_group_size = torch.distributed.get_world_size(ep_group)
-
-    tp_size = get_etp_group().world_size
-    tp_rank = rank % tp_size
 
     stage1_kwargs = {
         "scales": None,
@@ -149,8 +144,8 @@ def fused_experts_with_mc2(
         "ep_rank_id": local_rank,
         # "group_tp": self.moe_rs_group_name,
         "group_tp": moe_all_to_all_group_name,
-        "tp_world_size": tp_size,
-        "tp_rank_id": tp_rank,
+        "tp_world_size": 1,
+        "tp_rank_id": 0,
     }
     kwargs_mc2.update(stage1_kwargs)
 
@@ -215,8 +210,8 @@ def fused_experts_with_mc2(
         "tp_send_counts": tp_recv_counts,
         # "group_tp": self.moe_rs_group_name,
         "group_tp": moe_all_to_all_group_name,
-        "tp_world_size": tp_size,
-        "tp_rank_id": tp_rank,
+        "tp_world_size": 1,
+        "tp_rank_id": 0,
     }
     kwargs_mc2.update(stage3_kwargs)
 
@@ -933,8 +928,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
-        fused_moe_state = get_fused_moe_state(self.ep_group.world_size,
-                                              is_prefill)
+        fused_moe_state = get_forward_context().fused_moe_state
         if fused_moe_state == FusedMoEState.MC2:
             return fused_experts_with_mc2(
                 hidden_states=x,
@@ -1129,8 +1123,7 @@ class AscendFusedMoE(FusedMoE):
 
         num_tokens, hidden_size = hidden_states.shape
 
-        fused_moe_state = get_fused_moe_state(self.moe_parallel_config.ep_size,
-                                              is_prefill)
+        fused_moe_state = get_forward_context().fused_moe_state
         if shared_experts:
             if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
                 shared_hidden_states = shared_experts(hidden_states)
@@ -1154,16 +1147,15 @@ class AscendFusedMoE(FusedMoE):
         if self.dp_size > 1 and fused_moe_state == FusedMoEState.AllGather:
             # NOTE: When in torchair graph, it has been padded in model_runner_v1
             if not self.torchair_graph_enabled or is_prefill:
-                attn_metadata = get_forward_context().attn_metadata
-                if attn_metadata is not None:
-                    max_num_tokens_across_dp = attn_metadata.max_num_tokens_across_dp
-                    if num_tokens < max_num_tokens_across_dp:
-                        hidden_states = nn.functional.pad(
-                            hidden_states,
-                            (0, 0, 0, max_num_tokens_across_dp - num_tokens))
-                        router_logits = nn.functional.pad(
-                            router_logits,
-                            (0, 0, 0, max_num_tokens_across_dp - num_tokens))
+                max_num_tokens_across_dp = get_forward_context(
+                ).dp_metadata.max_tokens_across_dp_cpu
+                if num_tokens < max_num_tokens_across_dp:
+                    hidden_states = nn.functional.pad(
+                        hidden_states,
+                        (0, 0, 0, max_num_tokens_across_dp - num_tokens))
+                    router_logits = nn.functional.pad(
+                        router_logits,
+                        (0, 0, 0, max_num_tokens_across_dp - num_tokens))
             hidden_states = get_dp_group().all_gather(hidden_states, 0)
             router_logits = get_dp_group().all_gather(router_logits, 0)
 

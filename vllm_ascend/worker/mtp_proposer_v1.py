@@ -2,12 +2,12 @@ import torch
 from vllm.attention.layer import Attention
 from vllm.config import (VllmConfig, get_layers_from_vllm_config,
                          set_current_vllm_config)
-from vllm.forward_context import set_forward_context
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading, set_default_torch_dtype)
 from vllm.v1.sample.metadata import SamplingMetadata
 
+from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.mla_v1 import CommonAttentionMetadata
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
 
@@ -161,7 +161,7 @@ class MtpProposer:
             common_attn_metadata=common_attn_metadata,
         )
 
-        with set_forward_context(attn_metadata, self.vllm_config):
+        with set_ascend_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=target_positions,

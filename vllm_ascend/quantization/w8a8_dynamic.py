@@ -20,14 +20,13 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch_npu
-from vllm.distributed import GroupCoordinator
+from vllm.distributed import GroupCoordinator, get_ep_group
+from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import select_experts
 from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
-                               get_fused_moe_state, npu_stream_switch,
-                               npu_wait_tensor)
+                               npu_stream_switch, npu_wait_tensor)
 
 
 def apply_mlp(hidden_states: torch.Tensor,
@@ -665,8 +664,7 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         topk_weights = topk_weights.to(x.dtype)
 
-        fused_moe_state = get_fused_moe_state(self.ep_group.world_size,
-                                              is_prefill)
+        fused_moe_state = get_forward_context().fused_moe_state
         if fused_moe_state == FusedMoEState.MC2:
             return fused_experts_with_mc2(
                 hidden_states=x,
