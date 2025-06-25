@@ -313,6 +313,7 @@ class AscendW4A8DynamicFusedMoEMethod:
                 log2phy=log2phy,
                 global_redundant_expert_num=global_redundant_expert_num,
             )
+
     def process_scale(self, weight: torch.Tensor, scale, per_group_scale):
         group_num, k, n = weight.shape
         per_group_scale = per_group_scale.reshape(group_num, -1, n)
