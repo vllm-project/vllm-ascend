@@ -99,3 +99,19 @@ def test_e2e_deepseekv3_with_torchair_ms_mla():
         },
     }
     _deepseek_torchair_test_fixture(additional_config)
+
+
+@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
+                    reason="torchair graph is not supported on v0")
+def test_e2e_deepseekv3_with_torchair_ms_moe():
+    additional_config = {
+        "torchair_graph_config": {
+            "enabled": True,
+            "enable_multistream_moe": True,
+        },
+        "ascend_scheduler_config": {
+            "enabled": True,
+        },
+        "refresh": True,
+    }
+    _deepseek_torchair_test_fixture(additional_config)
