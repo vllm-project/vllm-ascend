@@ -26,12 +26,10 @@ from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
-                              init_distributed_environment,
-                              set_custom_all_reduce)
+                              init_distributed_environment)
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -93,7 +91,6 @@ class NPUWorker(WorkerBase):
         self.profiler = self._init_profiler()
 
     def sleep(self, level: int = 1) -> None:
-        NPUPlatform.set_device(self.device)
         free_bytes_before_sleep = NPUPlatform.mem_get_info()[0]
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
@@ -116,22 +113,18 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def init_device(self):
-        if self.device_config.device.type == "npu":
-            self.device = torch.device(f"npu:{self.local_rank}")
-            NPUPlatform.set_device(self.device)
-            NPUPlatform.empty_cache()
-            self.init_npu_memory = NPUPlatform.mem_get_info()[0]
-        else:
-            info = f"Not support device type: {self.device_config.device}"
-            logger.error(info)
-            raise RuntimeError(info)
+        device = torch.device(f"npu:{self.local_rank}")
+        NPUPlatform.set_device(device)
+        NPUPlatform.empty_cache()
+        self.init_npu_memory = NPUPlatform.mem_get_info()[0]
+
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
         # Set random seed.
-        set_random_seed(self.model_config.seed)
+        NPUPlatform.seed_everything(self.model_config.seed)
 
         # Init ModelRunner here, so that we have access to self.device.
-        self.model_runner = NPUModelRunner(self.vllm_config, self.device)
+        self.model_runner = NPUModelRunner(self.vllm_config, device)
 
     def determine_available_memory(self) -> int:
         # Profile the memory usage of the model and get the maximum number of
@@ -205,7 +198,7 @@ class NPUWorker(WorkerBase):
             self.model_runner.capture_model()
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
-        set_random_seed(self.model_config.seed)
+        NPUPlatform.seed_everything(self.model_config.seed)
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
@@ -261,8 +254,6 @@ class NPUWorker(WorkerBase):
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
         parallel_config = self.vllm_config.parallel_config
-        set_custom_all_reduce(
-            not self.parallel_config.disable_custom_all_reduce)
         init_distributed_environment(self.parallel_config.world_size,
                                      self.rank, self.distributed_init_method,
                                      self.local_rank, "hccl")
