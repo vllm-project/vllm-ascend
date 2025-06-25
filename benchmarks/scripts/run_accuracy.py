@@ -138,8 +138,6 @@ def generate_md(model_name, tasks_list, args, datasets):
 ```bash
 {run_cmd}
 ```
-  </div>
-  <div>&nbsp;</div>
   """
 
     header = (

@@ -380,7 +380,7 @@ jobs:
             const pr = await github.rest.pulls.create({
               owner: 'vllm-project',
               repo: 'vllm-ascend',
-              head: `${{ github.actor }}:${{ env.BRANCH_NAME }}`,
+              head: `vllm-ascend-ci:${{ env.BRANCH_NAME }}`,
               base: '${{ github.event.inputs.vllm-ascend-version }}',
               title: `[Doc] Update accuracy reports for ${{ github.event.inputs.vllm-ascend-version }}`,
               body: `The accuracy results running on NPU Altlas A2 have changed, updating reports for:
