@@ -355,6 +355,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        layer_idx=-1,
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = hidden_size
@@ -374,6 +375,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         self.scaling = self.qk_head_dim**-0.5
         self.rope_theta = rope_theta
         self.max_position_embeddings = max_position_embeddings
+        self.layer_idx = layer_idx
 
         if self.q_lora_rank is not None:
             self.q_a_proj = ReplicatedLinear(self.hidden_size,
@@ -508,10 +510,15 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
             kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+            # Modified for ascend-prefill
+            if self.layer_idx == 3 and hidden_states.shape[0] % 8 == 0:
+                output_shape = (hidden_states.shape[0] // 8, hidden_states.shape[1])
+            else:
+                output_shape = hidden_states.shape
             return self.mla_attn(hidden_states_or_q_c,
                                  kv_c_normed,
                                  k_pe,
-                                 output_shape=hidden_states.shape)
+                                 output_shape=output_shape)
 
 
 class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
@@ -534,6 +541,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         # with the layer's index.
         layer_idx = int(prefix.split(sep='.')[-1])
         self.layer_idx = layer_idx
+        self.prefix=prefix
         # TODO: enable mla in vllm-ascend
         if model_config.use_mla:
             attn_cls = CustomDeepseekV2MLAAttention
@@ -555,6 +563,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
+            layer_idx=self.layer_idx
         )
 
         if (config.n_routed_experts is not None
@@ -618,6 +627,10 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 residual *= 1. / self.routed_scaling_factor
 
         # Fully Connected
+        # Modified for ascend-prefill
+        if self.layer_idx == 3 and residual.shape[0] != hidden_states.shape[0]:
+            tp_rank = get_tensor_model_parallel_rank()
+            residual = residual[tp_rank * hidden_states.shape[0]:(tp_rank+1) * hidden_states.shape[0]]
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
 
@@ -718,6 +731,10 @@ class CustomDeepseekV2Model(nn.Module):
                 "hidden_states": hidden_states,
                 "residual": residual
             })
+
+        # Modified 最后一层要做个allgateher
+        hidden_states = tensor_model_parallel_all_gather(hidden_states,0)
+        residual = tensor_model_parallel_all_gather(residual,0)
 
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states

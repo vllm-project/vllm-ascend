@@ -19,6 +19,9 @@ from typing import Any, Dict, Optional
 
 import torch
 import torch_npu
+from vllm.distributed import get_tensor_model_parallel_rank
+import torch.distributed as dist
+from vllm.distributed.parallel_state import get_tp_group
 
 
 def quant_per_tensor(in_tensor: torch.Tensor, input_scale: torch.Tensor,
@@ -88,6 +91,9 @@ class AscendW8A8LinearMethod:
         bias: Optional[torch.Tensor] = None,
         tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:
+        
+        module_name = layer.prefix.split(".")[-1]
+        layer_idx = int(layer.prefix.split(".")[2])
         original_dtype = x.dtype
         if original_dtype != torch.int8:
             x = quant_per_tensor(
@@ -96,15 +102,55 @@ class AscendW8A8LinearMethod:
                 layer.aclnn_input_offset,
             )
         quant_bias = layer.quant_bias if tp_rank == 0 else None
-        return torch_npu.npu_quant_matmul(
-            x,
-            layer.weight,
-            layer.deq_scale,
-            bias=quant_bias,
-            output_dtype=original_dtype,
-        )
+        if layer_idx > 3 and module_name == "q_b_proj":
+            output = torch.empty(x.shape[0] * 8 ,layer.weight.shape[1], dtype=original_dtype, device=device)
+            current_rank = torch.npu.current_device()
+            tp_rank = get_tensor_model_parallel_rank()
+            commDomain = str(current_rank // 8)  + "3"
+            torch_npu.atb._npu_all_gather_matmul(x,
+                                                layer.weight,output,
+                                                biasOpt=layer.quant_bias, 
+                                                deqScale=layer.deq_scale,
+                                                rank=tp_rank,
+                                                rankSize=8,
+                                                commDomain=commDomain,
+                                                # bf16数据类型
+                                                outdata_type=27)
+            return output
+        elif layer_idx > 2 and module_name == "o_proj" and x.shape[0] % 8 == 0:
+          output = torch.empty(x.shape[0] // 8 ,layer.weight.shape[1], dtype=original_dtype,device=device)
+            current_rank = torch.npu.current_device()
+            tp_rank = get_tensor_model_parallel_rank()
+            commDomain = str(current_rank // 8) + "4"
+            if tp_rank != 0:
+                quant_bias = torch.zeros_like(layer.quant_bias,dtype=layer.quant_bias.dtype, device=layer.quant_bias.device)
+            torch_npu.atb._npu_matmul_reduce_scatter(x,
+                                                     layer.weight,
+                                                     output,
+                                                     quant_bias,
+                                                     layer.deq_scale,
+                                                     rank=tp_rank,
+                                                     rankSize=8,
+                                                     commDomain=commDomain,
+                                                     outdata_type=27)
+            return output
+        else:
+          res =  torch_npu.npu_quant_matmul(
+                x,
+                layer.weight,
+                layer.deq_scale,
+                bias=quant_bias,
+                output_dtype=original_dtype,
+            )
+            # 第四层要做 allgather
+            if layer_idx >=4 and module_name == "kv_a_proj_with_mqa":
+                res = get_tp_group().all_gather(res, 0)
+                # log("resssss_in_moe_4")
+                # log(res.shape)
+            return res
 
     def process_weights_after_loading(self, layer):
+        module_name = layer.prefix.split(".")[-1]
         expanding_factor = layer.weight.data.shape[1]
         layer.aclnn_input_scale = 1 / torch.nn.Parameter(
             layer.input_scale.data.repeat(expanding_factor),
@@ -112,8 +158,54 @@ class AscendW8A8LinearMethod:
         layer.aclnn_input_offset = torch.nn.Parameter(
             layer.input_offset.data.repeat(expanding_factor),
             requires_grad=False).to(layer.aclnn_input_scale.dtype)
+        # Modified
+        if module_name == "q_b_proj":
+            temp_weight = layer.weight.data
+            temp_weight = temp_weight.view(-1, 192, temp_weight.shape[-1])
+            weight_1 = temp_weight[..., -64:: 2, :].contiguous()
+            weight_2 = temp_weight[..., -64 + 1:: 2, :].contiguous()
+            temp_weight[..., -64:, :] = torch.cat([weight_1, weight_2], dim=-2)
+            layer.weight.data = temp_weight.view(layer.weight.shape) 
+            deq_scale = layer.deq_scale.data 
+            weight_scale = deq_scale.view(-1, 192, 1)
+            weight_1 = weight_scale[..., -64:: 2, :].contiguous()
+            weight_2 = weight_scale[..., -64 + 1:: 2, :].contiguous()
+            weight_scale[..., -64:, :] = torch.cat([weight_1, weight_2], dim=-2)
+            layer.deq_scale.data  = weight_scale.view(layer.deq_scale.shape).flatten()
+
+            weight_offset = layer.quant_bias.data
+            weight_offset = weight_offset.view(-1, 192, 1)
+            weight_1 = weight_offset[..., -64:: 2, :].contiguous()
+            weight_2 = weight_offset[..., -64 + 1:: 2, :].contiguous()
+            weight_offset[..., -64:, :] = torch.cat([weight_1, weight_2], dim=-2)
+            layer.quant_bias.data = weight_offset.view(layer.quant_bias.shape).flatten()
+        
+        # Modified
+        if module_name == "kv_a_proj_with_mqa":
+            temp_weight = layer.weight.data
+            temp_weight = temp_weight.view(-1, temp_weight.shape[-1])
+            weight_1 = temp_weight[-64:: 2, :].contiguous()
+            weight_2 = temp_weight[-64 + 1:: 2, :].contiguous()
+            temp_weight[-64:, :] = torch.cat([weight_1, weight_2], dim=0)
+            layer.weight.data = temp_weight.view(layer.weight.shape)
+            deq_scale = layer.deq_scale.data 
+            weight_scale = deq_scale.view(-1, 1)
+            weight_1 = weight_scale[-64:: 2, :].contiguous()
+            weight_2 = weight_scale[-64 + 1:: 2, :].contiguous()
+            weight_scale[-64:, :] = torch.cat([weight_1, weight_2], dim=0)
+            layer.deq_scale.data  = weight_scale.view(layer.deq_scale.shape).flatten()
+
+            weight_offset = layer.quant_bias.data
+            weight_offset = weight_offset.view(-1, 1)
+            weight_1 = weight_offset[-64:: 2, :].contiguous()
+            weight_2 = weight_offset[-64 + 1:: 2, :].contiguous()
+            weight_offset[-64:, :] = torch.cat([weight_1, weight_2], dim=0)
+            layer.quant_bias.data = weight_offset.view(layer.quant_bias.shape).flatten()
         if self.transpose_weight:
             layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, 29)
+        if module_name == "o_proj" or module_name == "q_b_proj":
+            pass
+        else:
+          layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, 29)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)

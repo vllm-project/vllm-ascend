@@ -120,7 +120,7 @@ class NPUWorker(WorkerBase):
 
     def init_device(self):
         if self.device_config.device.type == "npu":
-            self.device = torch.device(f"npu:{self.local_rank}")
+            self.device = torch.device(f"npu:{self.local_rank_across_dp}")
             NPUPlatform.set_device(self.device)
             NPUPlatform.empty_cache()
             self.init_npu_memory = NPUPlatform.mem_get_info()[0]

@@ -90,12 +90,6 @@ def native_rope_deepseek_forward(self,
     # calculation method which is also more compute friendly to the ascend machine
     # https://huggingface.co/deepseek-ai/DeepSeek-V3-0324/blob/main/modeling_deepseek.py
     neox_style = True
-    if self.is_neox_style is False:
-        b, h_q, d = query.shape
-        query = query.view(b, h_q, d // 2, 2).transpose(3,
-                                                        2).reshape(b, h_q, d)
-        b, h_k, d = key.shape
-        key = key.view(b, h_k, d // 2, 2).transpose(3, 2).reshape(b, h_k, d)
     q_pe, k_pe = rope_forward_oot(self, positions, query, key, offsets,
                                   neox_style)
     return q_pe, k_pe
