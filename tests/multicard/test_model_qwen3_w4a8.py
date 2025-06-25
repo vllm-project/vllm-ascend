@@ -22,7 +22,6 @@ Run `pytest tests/multicard/test_model_qwen3_w4a8.py`.
 import os
 
 import pytest
-from modelscope import snapshot_download  # type: ignore
 from vllm import LLM, SamplingParams
 
 MODELS = ["vllm-ascend/Qwen3-8B-W4A8"]
@@ -41,10 +40,11 @@ def test_qwen3_model_with_w4a8_linear_method(model: str,
     messages = [[{"role": "user", "content": prompt}] for prompt in PROMPTS]
     sampling_params = SamplingParams(
         max_tokens=max_tokens,
+        temperature=0.0,
         ignore_eos=False,
     )
     llm = LLM(
-        model=snapshot_download(model),
+        model=model,
         max_model_len=1024,
         tensor_parallel_size=2,
         enforce_eager=True,
@@ -57,7 +57,7 @@ def test_qwen3_model_with_w4a8_linear_method(model: str,
     )
     golden_outputs = [
         "Hello! My name is Qwen, and I'm a large language model developed",
-        "The future of AI is a topic of great interest, discussion, and optimism.",
+        "The future of AI is a topic of great interest and debate, with many possibilities",
     ]
     assert len(vllm_outputs) == len(golden_outputs)
     for vllm_output, golden_output in zip(vllm_outputs, golden_outputs):
