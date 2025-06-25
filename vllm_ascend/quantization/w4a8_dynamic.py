@@ -19,16 +19,14 @@ from typing import Any, Callable, Dict, Optional
 
 import numpy as np
 import torch
-import torch.distributed as dist
 import torch_npu
 from vllm.config import get_current_vllm_config
-from vllm.distributed import GroupCoordinator, get_ep_group
+from vllm.distributed import get_ep_group
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe import select_experts
 from vllm_ascend.quantization.w8a8_dynamic import (fused_experts_with_all2all,
                                                    fused_experts_with_mc2)
-from vllm_ascend.utils import FusedMoEState, get_fused_moe_state
 
 
 class AscendW4A8DynamicLinearMethod:
