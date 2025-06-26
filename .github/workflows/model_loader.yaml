@@ -57,6 +57,7 @@ jobs:
           apt-get update -y
           apt install git -y
           git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
+          git config --global --add safe.directory /__w/vllm-ascend/vllm-ascend
  
       - name: Install dependencies
         run: |
