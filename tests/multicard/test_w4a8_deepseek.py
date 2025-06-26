@@ -17,7 +17,7 @@
 import os
 
 import pytest
-from modelscope import snapshot_download  #type: ignore[import-untyped]
+from modelscope import snapshot_download  # type: ignore[import-untyped]
 
 from tests.conftest import VllmRunner
 
