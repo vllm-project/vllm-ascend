@@ -1,5 +1,5 @@
 #!/bin/bash
-
+set -e
 
 check_npus() {
   # shellcheck disable=SC2155

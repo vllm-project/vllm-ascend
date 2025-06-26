@@ -145,8 +145,8 @@ jobs:
       - name: Install elastic_tool
         if: github.event_name != 'pull_request'
         run: |
-          pip install escli-tool==0.2.2
-          
+          pip install escli-tool==0.2.3
+
       - name: Collect pr info from vllm-project/vllm-ascend
         if: github.event_name != 'pull_request'
         run: |
@@ -176,7 +176,7 @@ jobs:
             commit_time=$(git show -s --format=%cd $commit_hash --date=iso-strict)
             commit_time_no_tz=${commit_time::19}
             pip install -e .
-            
+
             echo "------------------------"
             echo "commit_id: $commit_id"
             echo "commit_title: $commit_title"
@@ -184,9 +184,12 @@ jobs:
             echo "vllm branch: ${{ matrix.vllm_branch }}"
             echo "vllm-ascend branch: ${{ matrix.vllm_ascend_branch }}"
             echo "------------------------"
-            
+
             cd /github/home
-            bash benchmarks/scripts/run-performance-benchmarks.sh
+            ERROR_MSG=""
+            if ! bash benchmarks/scripts/run-performance-benchmarks.sh; then
+              ERROR_MSG="Benchmark failed to run"
+            fi
             # send the result to es
             escli add --vllm_branch ${{ matrix.vllm_branch }} \
             --vllm_ascend_branch ${{ matrix.vllm_ascend_branch }} \
@@ -194,6 +197,7 @@ jobs:
             --commit_title "$commit_title" \
             --created_at "$commit_time_no_tz" \
             --res_dir ./benchmarks/results \
+            --error $ERROR_MSG \
             --extra_feat '{"VLLM_USE_V1": "${{ matrix.vllm_use_v1 }}"}'
             rm -rf ./benchmarks/results
             cd -
