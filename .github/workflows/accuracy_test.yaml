@@ -160,7 +160,7 @@ jobs:
           repository: vllm-project/vllm
           path: ./vllm-empty
           # Please also update this when bump matched version
-          ref: ${{ github.event.inputs.vllm-version || 'v0.9.1' }}
+          ref: ${{ github.event.inputs.vllm-version || 'main' }}
 
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
