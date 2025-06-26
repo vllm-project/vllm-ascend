@@ -57,8 +57,11 @@ def set_ascend_forward_context(
 
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1:
-            forward_context.max_tokens_across_dp = forward_context.dp_metadata.max_tokens_across_dp_cpu.item(
-            )
+            if forward_context.dp_metadata is not None:
+                forward_context.max_tokens_across_dp = forward_context.dp_metadata.max_tokens_across_dp_cpu.item(
+                )
+            else:
+                forward_context.max_tokens_across_dp = None
         else:
             forward_context.max_tokens_across_dp = num_tokens
 
