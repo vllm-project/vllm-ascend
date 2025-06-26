@@ -29,6 +29,7 @@ from vllm_ascend.quantization.w8a8_dynamic import (fused_experts_with_all2all,
                                                    fused_experts_with_mc2)
 from vllm_ascend.utils import FusedMoEState, get_fused_moe_state
 
+
 class AscendW4A8DynamicLinearMethod:
     """Linear method for Ascend W4A8_DYNAMIC
     """
