@@ -3,7 +3,8 @@ import subprocess
 import tempfile
 from argparse import ArgumentParser
 from pathlib import Path
-from modelscope.hub.snapshot_download import snapshot_download
+
+from modelscope import snapshot_download
 
 
 def load_models_from_json(file):
@@ -33,7 +34,8 @@ def main(origin_config: str, new_config: str):
 
 
 if __name__ == "__main__":
-    parser = ArgumentParser(description="Download new models from models_config.json")
+    parser = ArgumentParser(
+        description="Download new models from models_config.json")
     parser.add_argument(
         "--base-config",
         type=str,
@@ -47,4 +49,4 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    main(args.config_file, args.config_file_new)
+    main(args.base_config, args.new_config)
