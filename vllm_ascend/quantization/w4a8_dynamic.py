@@ -22,12 +22,13 @@ import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_ep_group
+from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.ops.fused_moe import select_experts
 from vllm_ascend.quantization.w8a8_dynamic import (fused_experts_with_all2all,
                                                    fused_experts_with_mc2)
-from vllm_ascend.utils import FusedMoEState, get_fused_moe_state
 
 
 class AscendW4A8DynamicLinearMethod:
@@ -273,8 +274,7 @@ class AscendW4A8DynamicFusedMoEMethod:
 
         topk_weights = topk_weights.to(x.dtype)
 
-        fused_moe_state = get_fused_moe_state(self.ep_group.world_size,
-                                              is_prefill)
+        fused_moe_state = get_forward_context().fused_moe_state
         if fused_moe_state == FusedMoEState.MC2:
             return fused_experts_with_mc2(
                 hidden_states=x,
@@ -291,7 +291,8 @@ class AscendW4A8DynamicFusedMoEMethod:
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name,
                 log2phy=log2phy,
                 global_redundant_expert_num=global_redundant_expert_num,
-                shared_experts=shared_experts)
+                shared_experts=shared_experts,
+                is_torchair=self.torchair_graph_enabled)
         else:
             # The current implementation of deepseek moe splits hidden_states
             # according to tp_size before they are feed into fused_moe module.
