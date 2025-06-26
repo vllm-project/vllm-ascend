@@ -27,9 +27,9 @@ from vllm.forward_context import get_forward_context
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.ops.fused_moe import select_experts
-from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
-                               get_ascend_soc_version, npu_stream_switch,
-                               npu_wait_tensor)
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
+                               dispose_tensor, get_ascend_soc_version,
+                               npu_stream_switch, npu_wait_tensor)
 
 
 def apply_mlp(hidden_states: torch.Tensor,
@@ -477,6 +477,8 @@ class AscendW8A8DynamicLinearMethod:
 
     def __init__(self):
         self.transpose_weight = True
+        ascend_config = get_ascend_config()
+        self.enable_weight_nz_layout = ascend_config.enable_weight_nz_layout
 
     @staticmethod
     def get_weight(input_size: int, output_size: int,
@@ -542,8 +544,10 @@ class AscendW8A8DynamicLinearMethod:
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
             layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        # cast quantized weight tensors in NZ format (29) for higher inference speed
-        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, 29)
+        if self.enable_weight_nz_layout:
+            # cast quantized weight tensors in NZ layout for higher inference speed
+            layer.weight.data = torch_npu.npu_format_cast(
+                layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
         layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
         layer.weight_offset.data = layer.weight_offset.data.flatten()
@@ -560,6 +564,7 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+        self.enable_weight_nz_layout = ascend_config.enable_weight_nz_layout
 
         try:
             device_group = self.ep_group.device_group
@@ -728,6 +733,12 @@ class AscendW8A8DynamicFusedMoEMethod:
                 1, 2).contiguous()
             layer.w2_weight.data = layer.w2_weight.data.transpose(
                 1, 2).contiguous()
+        if self.enable_weight_nz_layout:
+            # cast quantized weight tensors in NZ layout for higher inference speed
+            layer.w13_weight.data = torch_npu.npu_format_cast(
+                layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+            layer.w2_weight.data = torch_npu.npu_format_cast(
+                layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
             layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(

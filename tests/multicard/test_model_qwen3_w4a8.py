@@ -41,7 +41,7 @@ def test_qwen3_model_with_w4a8_linear_method(model: str,
     messages = [[{"role": "user", "content": prompt}] for prompt in PROMPTS]
     sampling_params = SamplingParams(
         max_tokens=max_tokens,
-        ignore_eos=False,
+        temperature=0.0,
     )
     llm = LLM(
         model=snapshot_download(model),
@@ -57,7 +57,7 @@ def test_qwen3_model_with_w4a8_linear_method(model: str,
     )
     golden_outputs = [
         "Hello! My name is Qwen, and I'm a large language model developed",
-        "The future of AI is a topic of great interest, discussion, and optimism.",
+        "The future of AI is a topic of great interest and debate, with many possibilities",
     ]
     assert len(vllm_outputs) == len(golden_outputs)
     for vllm_output, golden_output in zip(vllm_outputs, golden_outputs):

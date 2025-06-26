@@ -57,6 +57,9 @@ ASCEND_QUATIZATION_METHOD = "ascend"
 
 CUSTOM_OP_ENABLED = None
 
+ACL_FORMAT_ND = 2
+ACL_FORMAT_FRACTAL_NZ = 29
+
 
 def try_register_lib(lib_name: str, lib_info: str = ""):
     import importlib
