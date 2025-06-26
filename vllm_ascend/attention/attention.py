@@ -41,7 +41,6 @@ from vllm_ascend.worker.model_runner import (
     ModelInputForNPUBuilder, ModelInputForNPUWithSamplingMetadata)
 
 
-
 def generate_attn_mask(max_seq_len: int, dtype=torch.float16, mask_value=None):
     # Construct lower triangle matrix.
     mask_flag = torch.tril(
@@ -1005,7 +1004,6 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
-
 
     def exec_kv(
         self,
