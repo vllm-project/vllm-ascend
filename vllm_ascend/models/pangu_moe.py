@@ -15,19 +15,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn.functional as F
-import torch.distributed as dist
 from torch import nn
 from torch.nn import Parameter
-import vllm.envs as envs
+from transformers import PretrainedConfig
 from vllm.forward_context import get_forward_context
 from vllm_ascend.models.configuration_pangu_moe import PanGuMoEConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -46,8 +45,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
@@ -57,18 +55,20 @@ from vllm.model_executor.models.utils import (extract_layer_index, is_pp_missing
                                                 maybe_prefix)
 
 from vllm.distributed import divide
-from vllm.distributed.parallel_state import get_tp_group, get_dp_group, get_world_group
-from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ops.fused_moe import AscendFusedMoE
+from vllm.distributed.parallel_state import get_tp_group, get_dp_group, get_ep_grop, get_world_group
 
 from vllm.model_executor.utils import set_weight_attrs
-import torch_npu
 
 
 logger = init_logger(__name__)
 
 _ROUTER_SCALE = None
-H2P = get_dp_group().world_size > 1
+
+
+def use_h2p():
+    if get_dp_group().world_size > 1:
+        return True
+    return False
 
 
 # This class is adapted from vllm.model_executor.layers.linear.MergedColumnParallelLinear.
@@ -299,7 +299,7 @@ class PanguProMoEMLP(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        if not H2P:
+        if not use_h2p():
             self.gate_up_proj = MergedColumnParallelLinear(
                 hidden_size,
                 [intermediate_size] * 2,
@@ -455,7 +455,7 @@ class PanguProMoESparseMoeBlock(nn.Module):
         router_logits, _ = self.gate(hidden_states)
         global _ROUTER_SCALE
         _ROUTER_SCALE = self.router_scale
-        if not H2P:
+        if not use_h2p():
             final_hidden_states = self.experts(hidden_states=hidden_states,
                                             router_logits=router_logits)
         else:
@@ -524,7 +524,7 @@ class PanguProMoEAttention(nn.Module):
             prefix=f"{prefix}.qkv_proj",
         )
 
-        if H2P:
+        if use_h2p():
             self.o_proj = CustomRowParallelLinear(
                 self.total_num_heads * self.head_dim,
                 hidden_size,
@@ -645,15 +645,15 @@ class PanguProMoEDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        if H2P:
-            if layer_idx > 0:
-                hidden_states = get_tp_group().all_gather(hidden_states, 0)
-                if h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]:
-                    hidden_states = hidden_states.index_select(dim=0, index=h2p_unpad_idx)
-            else:
+        if use_h2p():
+            if is_start_layer:
                 if h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]:
                     residual = residual.index_select(dim=0, index=h2p_pad_idx)
                 residual = torch.tensor_split(residual, get_tp_group().world_size)[get_tp_group().rank_in_group]
+            else:
+                hidden_states = get_tp_group().all_gather(hidden_states, 0)
+                if h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]:
+                    hidden_states = hidden_states.index_select(dim=0, index=h2p_unpad_idx)
 
         hidden_states = self.self_attn(
             positions=positions,
@@ -662,7 +662,7 @@ class PanguProMoEDecoderLayer(nn.Module):
             attn_metadata=attn_metadata,
         )
 
-        if H2P and h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]:
+        if use_h2p() and h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]:
             hidden_states = hidden_states.index_select(dim=0, index=h2p_pad_idx)
         hidden_states = dist._functional_collectives.reduce_scatter_tensor(
             hidden_states,
@@ -674,13 +674,23 @@ class PanguProMoEDecoderLayer(nn.Module):
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
 
-        if H2P:
-            hidden_states = get_world_group().all_gather(hidden_states, 0)
+        if use_h2p():
+            all_rank_group = get_world_group().device_group
+            output_size = (hidden_states.shape[0] * get_world_group().world_size, hidden_states.shape[1])
+            # Allocate output tensor.
+            output_tensor = torch.empty(output_size,
+                                        dtype=hidden_states.dtype,
+                                        device=hidden_states.device)
+            # All-gather.
+            dist.all_gather_into_tensor(output_tensor,
+                                        hidden_states,
+                                        group=all_rank_group)
+            hidden_states = output_tensor
 
         hidden_states = self.mlp(hidden_states,
                                  attn_metadata=attn_metadata)
 
-        if H2P:
+        if use_h2p():
             hidden_states = dist._functional_collectives.reduce_scatter_tensor(
                 hidden_states,
                 "sum",
@@ -745,7 +755,7 @@ class PanguProMoEModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        if H2P:
+        if use_h2p():
             # calculate necessary padding/unpadding idx before model forward.
 
             # the attn_metadata will be passed directly when use torchair. 
@@ -782,7 +792,7 @@ class PanguProMoEModel(nn.Module):
                 attn_metadata,
                 h2p_unpad_idx,
                 h2p_pad_idx,
-                i)
+                i == self.start_layer)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
