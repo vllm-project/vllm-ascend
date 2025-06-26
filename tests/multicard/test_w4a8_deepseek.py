@@ -29,7 +29,7 @@ def test_deepseek_W4A8(monkeypatch: pytest.MonkeyPatch):
         m.setenv("VLLM_ASCEND_MLA_PA", "1")
         m.setenv("VLLM_USE_MODELSCOPE", "True")
 
-        from modelscope import snapshot_download
+        from modelscope import #type: ignore snapshot_download
 
         prompts = [
             "Hello, my name is",
