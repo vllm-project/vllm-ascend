@@ -1,8 +1,5 @@
 import json
-import subprocess
-import tempfile
 from argparse import ArgumentParser
-from pathlib import Path
 
 from modelscope import snapshot_download
 
