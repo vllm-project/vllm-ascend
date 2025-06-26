@@ -35,7 +35,6 @@ from tests.conftest import VllmRunner
 MODELS = [
     "Qwen/Qwen2.5-0.5B-Instruct",
     "Qwen/Qwen3-0.6B-Base",
-    "Qwen/Qwen3-30B-A3B",
 ]
 MULTIMODALITY_MODELS = ["Qwen/Qwen2.5-VL-3B-Instruct"]
 

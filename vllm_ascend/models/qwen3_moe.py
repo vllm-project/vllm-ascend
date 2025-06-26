@@ -16,31 +16,23 @@
 # Adapted from vllm/model_executor/models/qwen3_moe.py
 # This file is a part of the vllm-ascend project.
 
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Optional
 
 import torch
-import torch.distributed as dist
-import torch_npu
-import vllm
-import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
-from vllm.attention import AttentionMetadata
-from vllm.distributed import (get_tensor_model_parallel_world_size,
-                              get_tp_group)
-from vllm.distributed.parallel_state import get_dp_group
-from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.linear import ReplicatedLinear
-                                               
-from vllm.model_executor.layers.quantization import QuantizationConfig
-
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 
-from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
-from transformers import PretrainedConfig
+import vllm
+from vllm.attention import AttentionMetadata
+from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
+from vllm.distributed.parallel_state import get_dp_group
+from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
 
 
 class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
@@ -55,19 +47,18 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
             "up_proj",
         ],
         "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+            ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     }
 
 
 class AscendQwen3MoeSparseMoeBlock(nn.Module):
-    
     top_k: int
 
     def __init__(
-        self,
-        config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
+            self,
+            config: PretrainedConfig,
+            quant_config: Optional[QuantizationConfig] = None,
+            prefix: str = "",
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -97,7 +88,6 @@ class AscendQwen3MoeSparseMoeBlock(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.experts")
 
-        
         self.top_k = config.num_experts_per_tok
 
         self.dp_size = get_dp_group().world_size
@@ -122,7 +112,7 @@ class AscendQwen3MoeSparseMoeBlock(nn.Module):
             is_prefill = True
             enable_force_load_balance = True
         else:
-            # is_prefill = attn_metadata.num_prefills > 0 is_prefill or
+            # is_prefill = attn_metadata.num_prefills > 0
             enable_force_load_balance = False
             if hasattr(attn_metadata, 'with_prefill_across_dp'):
                 is_prefill = attn_metadata.with_prefill_across_dp

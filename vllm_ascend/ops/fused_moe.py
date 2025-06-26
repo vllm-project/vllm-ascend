@@ -118,9 +118,13 @@ def fused_experts_with_mc2(
     top_k: int,
     expert_map: torch.Tensor = None,
     moe_all_to_all_group_name: Optional[str] = None,
-    shared_experts: Optional[Any] = None
+    shared_experts: Optional[Any] = None,
+    global_batch_size: int = 256,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-    global_bs = 0
+
+    ep_group = get_ep_group().device_group
+    all_to_all_group_size = torch.distributed.get_world_size(ep_group)
+    global_bs = global_batch_size * all_to_all_group_size
     moe_expert_num = len(expert_map)
     kwargs_mc2 = {
         "x": hidden_states,
@@ -132,11 +136,8 @@ def fused_experts_with_mc2(
     }
 
     rank = torch.distributed.get_rank()
-
     quant_mode = 0
-    ep_group = get_ep_group().device_group
     local_rank = torch.distributed.get_rank(group=ep_group)
-    all_to_all_group_size = torch.distributed.get_world_size(ep_group)
 
     tp_size = get_etp_group().world_size
     tp_rank = rank % tp_size
@@ -204,7 +205,7 @@ def fused_experts_with_mc2(
         "expert_shard_type": 0,
         "shared_expert_rank_num": 0,
         "moe_expert_num": moe_expert_num,
-        "global_bs": 0,
+        "global_bs": global_bs,
     }
     tp_recv_counts = output[5]
     stage3_kwargs = {
@@ -1037,7 +1038,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 top_k=top_k,
                 expert_map=expert_map,
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name,
-                shared_experts=shared_experts)
+                shared_experts=shared_experts,
+                global_batch_size=self.global_batch_size)
         elif fused_moe_state == FusedMoEState.AllGather:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
