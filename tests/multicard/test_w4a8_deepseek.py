@@ -37,7 +37,7 @@ def test_deepseek_W4A8(model: str):
     dtype = "bfloat16"
     max_tokens = 5
     with VllmRunner(
-            model=snapshot_download(model),
+            model_name=snapshot_download(model),
             dtype=dtype,
             tensor_parallel_size=2,
             quantization="ascend",
