@@ -262,8 +262,8 @@ def vanilla_chunked_prefill_mla(
 
     attn_output = (attn_output[q_mask].view([-1, num_heads,
                                              v_head_dim]).to(output.dtype))
-    attn_output = attn_output.view_as(output)
-    output.copy_(attn_output)
+    output = output.view([-1, num_heads, v_head_dim])
+    output.copy_(attn_output[:query.size(0) - num_add_query])
     return attn_output
 
 
