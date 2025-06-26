@@ -56,11 +56,13 @@ def set_ascend_forward_context(
         forward_context.in_profile_run = in_profile_run
 
         dp_world_size = get_dp_group().world_size
-        if dp_world_size > 1:
+        if dp_world_size > 1 and forward_context.dp_metadata is not None:
             forward_context.max_tokens_across_dp = forward_context.dp_metadata.max_tokens_across_dp_cpu.item(
             )
+        elif attn_metadata is not None:
+            forward_context.max_tokens_across_dp = num_tokens or attn_metadata.num_actual_tokens
         else:
-            forward_context.max_tokens_across_dp = num_tokens
+            forward_context.max_tokens_across_dp = None
 
         try:
             yield
