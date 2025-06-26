@@ -17,6 +17,7 @@
 import os
 
 import pytest
+from modelscope import snapshot_download  #type: ignore[import-untyped]
 
 from tests.conftest import VllmRunner
 
@@ -29,8 +30,6 @@ def test_deepseek_W4A8(monkeypatch: pytest.MonkeyPatch):
         m.setenv("VLLM_USE_V1", "1")
         m.setenv("VLLM_ASCEND_MLA_PA", "1")
         m.setenv("VLLM_USE_MODELSCOPE", "True")
-
-        from modelscope import snapshot_download #type: ignore[import-untyped]
 
         prompts = [
             "Hello, my name is",
