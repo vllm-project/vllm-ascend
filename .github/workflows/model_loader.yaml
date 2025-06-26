@@ -46,11 +46,17 @@ jobs:
         HF_ENDPOINT: https://hf-mirror.com
         MS_TOKEN: ${{ secrets.MS_TOKEN }}
         HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        BASE_REF: ${{ github.event.pull_request.base.ref || 'main' }}
+        BASE_CONFIG: ci_model_list.json
+        NEW_CONFIG: ci_model_list_new.json
     steps:
       - name: Config mirrors
         run: |
           sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
           pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+          apt-get update -y
+          apt install git -y
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
  
       - name: Install dependencies
         run: |
@@ -62,8 +68,22 @@ jobs:
           echo "Triggered by dispatch, downloading ${{ inputs.model }}"
           modelscope download ${{ inputs.model }}
 
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v4
+
+      - name: Fetch base branch
+        run: |
+          git fetch origin $BASE_REF
+
+      - name: Get current model config
+        run: |
+          cp ci_model_list.json $NEW_CONFIG
+          git show origin/$BASE_REF:ci_model_list.json \
+            > $BASE_CONFIG || echo '{"models":[]}' > $BASE_CONFIG
+
       - name: Download via config file detection
         if: github.event_name == 'pull_request'
         run: |
-          git show HEAD^:ci_model_list.json > old.json || echo '{}' > old.json
-          python scripts/detect_and_download_new_models.py
+          python .github/workflows/scripts/download_new_models.py \
+          --base-config $BASE_CONFIG \
+          --new-config $NEW_CONFIG
