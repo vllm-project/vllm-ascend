@@ -168,7 +168,7 @@ class TestParallelState(unittest.TestCase):
     @patch('torch.distributed.is_initialized', return_value=True)
     @patch('torch.distributed.get_world_size', return_value=8)
     @patch('vllm_ascend.distributed.parallel_state.get_world_group',
-           return_value=MagicMock(device_group='npu:0', local_rank=0))
+           return_value=MagicMock(device_group='npu:0', local_rank=1))
     @patch('torch.distributed.get_backend', return_value='hccl')
     @patch('vllm_ascend.distributed.parallel_state.init_model_parallel_group')
     @patch('vllm_ascend.distributed.parallel_state.model_parallel_initialized',
