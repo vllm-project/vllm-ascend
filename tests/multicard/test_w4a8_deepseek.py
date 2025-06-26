@@ -17,8 +17,8 @@
 import os
 
 import pytest
-
 from modelscope import snapshot_download
+
 from tests.conftest import VllmRunner
 
 
