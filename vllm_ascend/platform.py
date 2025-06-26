@@ -16,7 +16,6 @@
 #
 
 import gc
-import logging
 import os
 from datetime import timedelta
 from typing import TYPE_CHECKING, Optional, Tuple
@@ -28,19 +27,9 @@ from torch.distributed.distributed_c10d import PrefixStore
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
-import vllm_ascend.envs as ascend_envs
 from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
-from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD, update_aclgraph_sizes
-
-CUSTOM_OP_ENABLED = False
-try:
-    # register custom ops into torch_library here
-    import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
-    CUSTOM_OP_ENABLED = True
-except ImportError as e:
-    logging.warning(
-        "Failed to import 'vllm_ascend.vllm_ascend_C': %s. All custom ops will be disabled. ",
-        e)
+from vllm_ascend.utils import (ASCEND_QUATIZATION_METHOD, is_310p,
+                               update_aclgraph_sizes)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -49,9 +38,6 @@ else:
     ModelConfig = None
     VllmConfig = None
     FlexibleArgumentParser = None
-
-os.environ["RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES"] = "1"
-os.environ["ACL_OP_INIT_MODE"] = ascend_envs.VLLM_ASCEND_ACL_OP_INIT_MODE
 
 
 class NPUPlatform(Platform):
@@ -164,6 +150,14 @@ class NPUPlatform(Platform):
         else:
             enforce_eager = getattr(model_config, "enforce_eager", False)
 
+        if ascend_config.torchair_graph_config.enabled and envs.VLLM_MLA_DISABLE:
+            # torchair_graph is not supported for V1 without mla currently.
+            logger.warning(
+                "Torchair graph mode is still experimental and not supported for V1 without mla currently, "
+                "Fallback to eager mode.")
+            ascend_config.torchair_graph_config.enabled = False
+            enforce_eager = True
+
         check_ascend_config(vllm_config, enforce_eager)
 
         if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:
@@ -192,6 +186,9 @@ class NPUPlatform(Platform):
             if envs.VLLM_USE_V1:
                 parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
             elif vllm_config.speculative_config:
+                # NOTE: We set this var to `1` in vllm-ascend to avoid segment
+                # fault when using spec decode with V0 engine.
+                os.environ["ACL_OP_INIT_MODE"] = "1"
                 parallel_config.worker_cls = "vllm.spec_decode.spec_decode_worker.create_spec_worker"
                 parallel_config.sd_worker_cls = "vllm_ascend.worker.worker.NPUWorker"
             elif vllm_config.scheduler_config.is_multi_step:
@@ -209,8 +206,9 @@ class NPUPlatform(Platform):
                 cache_config.block_size = 128
 
         if envs.VLLM_USE_V1:
-            # Activate custom ops for v1.
-            compilation_config.custom_ops = ["all"]
+            # Activate custom ops for v1, except on 310P
+            if not is_310p():
+                compilation_config.custom_ops = ["all"]
 
             # If ascend_scheduler_config is enabled,
             # extents original scheduler_config to use AscendScheduler.

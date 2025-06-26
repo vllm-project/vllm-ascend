@@ -144,7 +144,7 @@ class CaMemAllocator:
         return CaMemAllocator.instance
 
     def __init__(self):
-        conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+        conf = os.environ.get("PYTORCH_NPU_ALLOC_CONF", "")
         assert "expandable_segments:True" not in conf, \
             ("Expandable segments are not compatible with memory pool. "
             "Please track https://github.com/pytorch/pytorch/issues/147851 "

@@ -16,6 +16,16 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+function install_system_packages() {
+    if command -v apt-get >/dev/null; then
+        sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+        apt-get update -y && apt install -y curl
+    elif command -v yum >/dev/null; then
+        yum update -y && yum install -y curl
+    else
+        echo "Unknown package manager. Please install gcc, g++, numactl-devel, git, curl, and jq manually."
+    fi
+}
 
 function simple_test() {
   # Do real import test
@@ -23,13 +33,12 @@ function simple_test() {
 }
 
 function quickstart_offline_test() {
-  export VLLM_USE_MODELSCOPE=true
   # Do real script test
   python3 "${SCRIPT_DIR}/../../examples/offline_inference_npu.py"
 }
 
 function quickstart_online_test() {
-  export VLLM_USE_MODELSCOPE=true
+  install_system_packages
   vllm serve Qwen/Qwen2.5-0.5B-Instruct &
   wait_url_ready "vllm serve" "localhost:8000/v1/models"
   # Do real curl test
