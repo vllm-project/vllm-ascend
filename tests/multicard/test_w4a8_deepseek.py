@@ -18,14 +18,18 @@ import os
 from unittest.mock import patch
 
 import pytest
+from modelscope import snapshot_download  # type: ignore
 
 from tests.conftest import VllmRunner
+
+MODELS = ["vllm-ascend/DeepSeek-R1-w4a8-pruning"]
 
 
 @pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
                     reason="w4a8_dynamic is not supported on v0")
+@pytest.mark.parametrize("model", MODELS)
 @patch.dict(os.environ, {"VLLM_USE_V1": "1", "VLLM_ASCEND_MLA_PA": "1"})
-def test_deepseek_W4A8():
+def test_deepseek_W4A8(model: str):
     prompts = [
         "The capital of France is",
         "The future of AI is",
@@ -33,7 +37,7 @@ def test_deepseek_W4A8():
     dtype = "bfloat16"
     max_tokens = 5
     with VllmRunner(
-            "vllm-ascend/DeepSeek-R1-w4a8-pruning",
+            model=snapshot_download(model),
             dtype=dtype,
             tensor_parallel_size=2,
             quantization="ascend",
