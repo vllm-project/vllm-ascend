@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import vllm_ascend
 from vllm.distributed.parallel_state import GroupCoordinator
+
 from vllm_ascend.distributed.parallel_state import (
     destory_ascend_model_parallel, get_ep_group, get_etp_group,
     init_ascend_model_parallel, model_parallel_initialized)
