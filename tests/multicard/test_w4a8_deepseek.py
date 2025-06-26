@@ -18,6 +18,7 @@ import os
 
 import pytest
 
+from modelscope import snapshot_download
 from tests.conftest import VllmRunner
 
 
@@ -27,7 +28,6 @@ def test_deepseek_W4A8(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
         m.setenv("VLLM_ASCEND_MLA_PA", "1")
-        m.setenv("VLLM_USE_MODELSCOPE", "True")
 
         prompts = [
             "Hello, my name is",
@@ -37,8 +37,9 @@ def test_deepseek_W4A8(monkeypatch: pytest.MonkeyPatch):
         ]
         dtype = "bfloat16"
         max_tokens = 5
+        model_name = snapshot_download("vllm-ascend/DeepSeek-R1-w4a8-pruning")
         with VllmRunner(
-                "vllm-ascend/DeepSeek-R1-w4a8-pruning",
+                model_name,
                 dtype=dtype,
                 tensor_parallel_size=2,
                 enforce_eager=True,
