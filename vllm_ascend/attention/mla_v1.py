@@ -21,7 +21,8 @@ from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
-from vllm_ascend.utils import npu_stream_switch, npu_wait_tensor
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, npu_stream_switch,
+                               npu_wait_tensor)
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -137,8 +138,6 @@ class AscendMLAMetadata:
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
 
-    max_num_tokens_across_dp: int = 0
-    with_prefill_across_dp: bool = False
     enable_dbo_across_dp: bool = False
 
     query_lens: Optional[list[int]] = None
@@ -314,8 +313,8 @@ class AscendMLAMetadataBuilder:
 
         return graph_block_tables[:num_seqs, :max_blocks]
 
-    def build_dummy(self, num_reqs: int,
-                    num_actual_tokens: int) -> AscendMLAMetadata:
+    def build_torchair_graph_dummy(
+            self, num_reqs: int, num_actual_tokens: int) -> AscendMLAMetadata:
         device = self.runner.device
         _, max_blocks = self.runner.graph_block_tables.shape
         block_table = torch.zeros((num_reqs, max_blocks),
@@ -367,8 +366,6 @@ class AscendMLAMetadataBuilder:
         common_attn_metadata: CommonAttentionMetadata,
         common_prefix_len: Optional[int] = None,
         graph_pad_size: int = -1,
-        max_num_tokens_across_dp: int = 0,
-        with_prefill_across_dp: bool = False,
         enable_dbo_across_dp: bool = False,
     ) -> AscendMLAMetadata:
         assert self._num_decodes + self._num_prefills == num_reqs
@@ -514,8 +511,6 @@ class AscendMLAMetadataBuilder:
             query_start_loc=query_start_loc,
             block_tables=block_table,
             seq_lens=seq_lens,
-            max_num_tokens_across_dp=max_num_tokens_across_dp,
-            with_prefill_across_dp=with_prefill_across_dp,
             enable_dbo_across_dp=enable_dbo_across_dp)
 
 
@@ -654,8 +649,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.W_UV = W_UV.transpose(0, 1).contiguous()
         # Convert from (L, N, P) to (N, P, L)
         self.W_UK_T = W_UK.permute(1, 2, 0).contiguous()
-        self.W_UV.data = torch_npu.npu_format_cast(self.W_UV.data, 29)
-        self.W_UK_T.data = torch_npu.npu_format_cast(self.W_UK_T.data, 29)
+        if get_ascend_config().enable_weight_nz_layout:
+            # cast quantized weight tensors in NZ layout for higher inference speed
+            self.W_UV.data = torch_npu.npu_format_cast(self.W_UV.data,
+                                                       ACL_FORMAT_FRACTAL_NZ)
+            self.W_UK_T.data = torch_npu.npu_format_cast(
+                self.W_UK_T.data, ACL_FORMAT_FRACTAL_NZ)
 
     def _compute_prefill_context(
         self,
@@ -1055,11 +1054,10 @@ class AscendMLAImpl(MLAAttentionImpl):
         ]
         num_actual_toks = attn_metadata.num_actual_tokens
         if k_pe is None and not self.running_in_graph:
-            if not self.torchair_graph_enabled:
-                kv_c, k_pe = self.kv_a_proj_with_mqa(
-                    hidden_states_or_kv_c_normed)[0].split(
-                        [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-                kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+            kv_c, k_pe = self.kv_a_proj_with_mqa(
+                hidden_states_or_kv_c_normed)[0].split(
+                    [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+            kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
         else:
             kv_c_normed = hidden_states_or_kv_c_normed
         assert attn_metadata.num_decodes is not None and \
@@ -1078,12 +1076,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         if not self.running_in_graph:
             hidden_states_or_q_c = hidden_states_or_q_c[:num_actual_toks, ...]
             prefill_hs_or_q_c = hidden_states_or_q_c[num_decode_tokens:]
-            if not self.torchair_graph_enabled:
-                decode_hs_or_q_c = hidden_states_or_q_c[:num_decode_tokens]
-                k_pe = k_pe[:num_actual_toks, ...]
-                k_pe = k_pe.unsqueeze(1)
-                decode_k_pe = k_pe[:num_decode_tokens]
-                prefill_k_pe = k_pe[num_decode_tokens:]
+            decode_hs_or_q_c = hidden_states_or_q_c[:num_decode_tokens]
+            prefill_hs = hidden_states_or_kv_c_normed[num_decode_tokens:]
+            # if not self.torchair_graph_enabled:
+            k_pe = k_pe[:num_actual_toks, ...]
+            k_pe = k_pe.unsqueeze(1)
+            decode_k_pe = k_pe[:num_decode_tokens]
+            prefill_k_pe = k_pe[num_decode_tokens:]
         else:
             decode_hs_or_q_c = hidden_states_or_q_c
         if has_decode:
@@ -1147,11 +1146,11 @@ class AscendMLAImpl(MLAAttentionImpl):
 
                 prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
                 prefill_k_pe, prefill_k_nope = self.exec_kv_prefill(
-                    hidden_states_or_kv_c_normed, cos, sin, kv_cache,
-                    attn_metadata.slot_mapping)
+                    prefill_hs, cos, sin, kv_cache,
+                    attn_metadata.slot_mapping[num_decode_tokens:])
 
                 kv_c_normed = prefill_k_nope[:num_actual_toks, ...]
-                prefill_k_c_normed = prefill_k_nope[num_decode_tokens:]
+                prefill_k_c_normed = prefill_k_nope
                 prefill_k_pe = prefill_k_pe.view(num_tokens, self.num_kv_heads,
                                                  -1)
                 prefill_q = torch.cat([prefill_q_nope, prefill_q_pe], dim=-1)

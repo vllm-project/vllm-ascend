@@ -30,10 +30,13 @@ os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 @pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
                     reason="torchair graph is not supported on v0")
-def test_e2e_deepseekv3_with_torchair(monkeypatch: pytest.MonkeyPatch):
+@pytest.mark.parametrize("VLLM_ASCEND_ENABLE_DBO", ["0", "1"])
+def test_e2e_deepseekv3_with_torchair(monkeypatch: pytest.MonkeyPatch,
+                                      VLLM_ASCEND_ENABLE_DBO):
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_MODELSCOPE", "True")
         m.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+        m.setenv("VLLM_ASCEND_ENABLE_DBO", VLLM_ASCEND_ENABLE_DBO)
 
         example_prompts = [
             "Hello, my name is",

@@ -15,19 +15,21 @@
 # limitations under the License.
 #
 
+import math
 from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
 import torch_npu
-from vllm.distributed import GroupCoordinator
+from vllm.distributed import GroupCoordinator, get_ep_group, get_tp_group
+from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_ep_group
+from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.ops.fused_moe import select_experts
-from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
-                               get_fused_moe_state, npu_stream_switch,
-                               npu_wait_tensor)
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
+                               dispose_tensor, get_ascend_soc_version,
+                               npu_stream_switch, npu_wait_tensor)
 
 
 def apply_mlp(hidden_states: torch.Tensor,
@@ -117,10 +119,25 @@ def fused_experts_with_mc2(
     log2phy: torch.Tensor = None,
     global_redundant_expert_num: int = 0,
     shared_experts: Optional[Any] = None,
+    is_torchair: bool = False,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     if log2phy:
         topk_ids = log2phy[topk_ids]
-    global_bs = 0
+    quant_mode = 2
+    ep_group = get_ep_group()
+    ep_rank_id = ep_group.rank_in_group
+    ep_world_size = ep_group.world_size
+    tp_world_size = get_tp_group().world_size
+
+    # NOTE: `global_bs` should be equal to `max_num_tokens_across_dp` * `ep_world_size`,
+    # and `max_num_tokens_across_dp` has been split into `tp_world_size` parts before.
+    global_bs = math.ceil(get_forward_context().max_tokens_across_dp /
+                          tp_world_size) * ep_world_size
+
+    # NOTE: Currently, when in A3 or in torchair graph, we need to pass in some extra param into dispatch & combine
+    need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A3
+                       or is_torchair)
+
     if (expert_map is not None):
         moe_expert_num = len(expert_map) + global_redundant_expert_num
     else:
@@ -135,28 +152,19 @@ def fused_experts_with_mc2(
         "global_bs": global_bs,
     }
 
-    rank = torch.distributed.get_rank()
-
-    quant_mode = 2
-    ep_group = get_ep_group().device_group
-    local_rank = torch.distributed.get_rank(group=ep_group)
-    all_to_all_group_size = torch.distributed.get_world_size(ep_group)
-
-    world_szie = torch.distributed.get_world_size()
-    tp_size = world_szie // all_to_all_group_size
-    tp_rank = rank % tp_size
-
     stage1_kwargs = {
         "scales": None,
         "quant_mode": quant_mode,
         "group_ep": moe_all_to_all_group_name,
-        "ep_world_size": all_to_all_group_size,
-        "ep_rank_id": local_rank,
-        # "group_tp": self.moe_rs_group_name,
-        "group_tp": moe_all_to_all_group_name,
-        "tp_world_size": tp_size,
-        "tp_rank_id": tp_rank,
+        "ep_world_size": ep_world_size,
+        "ep_rank_id": ep_rank_id,
     }
+    if need_extra_args:
+        stage1_kwargs.update({
+            "group_tp": moe_all_to_all_group_name,
+            "tp_world_size": 1,
+            "tp_rank_id": 0,
+        })
     kwargs_mc2.update(stage1_kwargs)
 
     output = torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
@@ -197,14 +205,16 @@ def fused_experts_with_mc2(
     stage3_kwargs = {
         "ep_send_counts": ep_recv_counts,
         "group_ep": moe_all_to_all_group_name,
-        "ep_world_size": all_to_all_group_size,
-        "ep_rank_id": local_rank,
-        "tp_send_counts": tp_recv_counts,
-        # "group_tp": self.moe_rs_group_name,
-        "group_tp": moe_all_to_all_group_name,
-        "tp_world_size": tp_size,
-        "tp_rank_id": tp_rank,
+        "ep_world_size": ep_world_size,
+        "ep_rank_id": ep_rank_id,
     }
+    if need_extra_args:
+        stage3_kwargs.update({
+            "tp_send_counts": tp_recv_counts,
+            "group_tp": moe_all_to_all_group_name,
+            "tp_world_size": 1,
+            "tp_rank_id": 0,
+        })
     kwargs_mc2.update(stage3_kwargs)
 
     hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
@@ -467,6 +477,8 @@ class AscendW8A8DynamicLinearMethod:
 
     def __init__(self):
         self.transpose_weight = True
+        ascend_config = get_ascend_config()
+        self.enable_weight_nz_layout = ascend_config.enable_weight_nz_layout
 
     @staticmethod
     def get_weight(input_size: int, output_size: int,
@@ -532,8 +544,10 @@ class AscendW8A8DynamicLinearMethod:
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:
             layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        # cast quantized weight tensors in NZ format (29) for higher inference speed
-        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, 29)
+        if self.enable_weight_nz_layout:
+            # cast quantized weight tensors in NZ layout for higher inference speed
+            layer.weight.data = torch_npu.npu_format_cast(
+                layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.weight_scale.data = layer.weight_scale.data.flatten()
         layer.weight_scale_fp32 = layer.weight_scale.data.to(torch.float32)
         layer.weight_offset.data = layer.weight_offset.data.flatten()
@@ -550,6 +564,7 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+        self.enable_weight_nz_layout = ascend_config.enable_weight_nz_layout
 
         try:
             device_group = self.ep_group.device_group
@@ -665,8 +680,7 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         topk_weights = topk_weights.to(x.dtype)
 
-        fused_moe_state = get_fused_moe_state(self.ep_group.world_size,
-                                              is_prefill)
+        fused_moe_state = get_forward_context().fused_moe_state
         if fused_moe_state == FusedMoEState.MC2:
             return fused_experts_with_mc2(
                 hidden_states=x,
@@ -681,7 +695,8 @@ class AscendW8A8DynamicFusedMoEMethod:
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name,
                 log2phy=log2phy,
                 global_redundant_expert_num=global_redundant_expert_num,
-                shared_experts=shared_experts)
+                shared_experts=shared_experts,
+                is_torchair=self.torchair_graph_enabled)
         elif fused_moe_state == FusedMoEState.AllGather:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
@@ -718,6 +733,12 @@ class AscendW8A8DynamicFusedMoEMethod:
                 1, 2).contiguous()
             layer.w2_weight.data = layer.w2_weight.data.transpose(
                 1, 2).contiguous()
+        if self.enable_weight_nz_layout:
+            # cast quantized weight tensors in NZ layout for higher inference speed
+            layer.w13_weight.data = torch_npu.npu_format_cast(
+                layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ)
+            layer.w2_weight.data = torch_npu.npu_format_cast(
+                layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
             layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(

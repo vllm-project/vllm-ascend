@@ -47,6 +47,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   --data-parallel-address 172.19.32.175 \
   --data-parallel-rpc-port 13356 \
   --tensor-parallel-size 8 \
+  --enable-expert-parallel \
   --no-enable-prefix-caching \
   --seed 1024 \
   --served-model-name deepseek \
@@ -65,7 +66,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enabled": false, "enable_multistream_shared_expert": false}, "expert_tensor_parallel_size": 1}'
+  '{"torchair_graph_config": {"enabled":false, "enable_multistream_shared_expert":false}, "ascend_scheduler_config":{"enabled":true, "enable_chunked_prefill":false}}'
 ```
 
 * Run prefill server P2 on second node
@@ -88,6 +89,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   --data-parallel-address 172.19.32.175 \
   --data-parallel-rpc-port 13356 \
   --tensor-parallel-size 8 \
+  --enable-expert-parallel \
   --no-enable-prefix-caching \
   --seed 1024 \
   --served-model-name deepseek \
@@ -97,7 +99,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   --enforce-eager \
   --gpu-memory-utilization 0.9  \
   --kv-transfer-config  \
-  '{"kv_connector": "LLMDataDistCMgrConnector",
+  '{"kv_connector": "LLMDataDistCMgrConnector", \
   "kv_buffer_device": "npu",
   "kv_role": "kv_producer",
   "kv_parallel_size": 1,
@@ -106,7 +108,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enabled": false, "enable_multistream_shared_expert": false}, "expert_tensor_parallel_size": 1}' 
+  '{"torchair_graph_config": {"enabled":false, "enable_multistream_shared_expert":false},  "ascend_scheduler_config":{"enabled":true, "enable_chunked_prefill":false}}' 
 ```
 
 * Run decode server d1 on third node
@@ -128,6 +130,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   --data-parallel-address 172.19.123.51 \
   --data-parallel-rpc-port 13356 \
   --tensor-parallel-size 8 \
+  --enable-expert-parallel \
   --no-enable-prefix-caching \
   --seed 1024 \
   --served-model-name deepseek \
@@ -146,7 +149,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enabled": false, "enable_multistream_shared_expert": false}, "expert_tensor_parallel_size": 1}'
+  '{"torchair_graph_config": {"enabled":false, "enable_multistream_shared_expert":false},  "ascend_scheduler_config":{"enabled":true, "enable_chunked_prefill":false}}'
 ```
 
 * Run decode server d2 on last node
@@ -169,6 +172,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   --data-parallel-address 172.19.123.51 \
   --data-parallel-rpc-port 13356 \
   --tensor-parallel-size 8 \
+  --enable-expert-parallel \
   --no-enable-prefix-caching \
   --seed 1024 \
   --served-model-name deepseek \
@@ -187,7 +191,7 @@ vllm serve /data01/deepseek_r1_w8a8_zhw \
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enabled": false, "enable_multistream_shared_expert": false}, "expert_tensor_parallel_size": 1}' 
+  '{"torchair_graph_config": {"enabled":false, "enable_multistream_shared_expert":false},  "ascend_scheduler_config":{"enabled":true, "enable_chunked_prefill":false}}' 
 ```
 
 * Run proxy server on the first node

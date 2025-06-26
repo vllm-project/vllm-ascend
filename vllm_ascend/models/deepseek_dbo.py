@@ -43,7 +43,8 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
-                                               RowParallelLinear)
+                                               RowParallelLinear,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
@@ -75,6 +76,7 @@ from vllm_ascend.multistream.metadata import (MultiStreamConfig,
                                               MultiStreamStepMetadata,
                                               make_multistream_metadata_ds)
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
+from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import dispose_tensor
 
 VLLM_ASCEND_ENABLE_DBO: bool = envs_ascend.VLLM_ASCEND_ENABLE_DBO
@@ -82,24 +84,48 @@ VLLM_ASCEND_ENABLE_DBO: bool = envs_ascend.VLLM_ASCEND_ENABLE_DBO
 
 class CustomDeepseekDBOMLP(CustomDeepseekV2MLP):
 
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: Optional[QuantizationConfig] = None,
+        reduce_results: bool = True,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(hidden_size=hidden_size,
+                         intermediate_size=intermediate_size,
+                         hidden_act=hidden_act,
+                         quant_config=quant_config,
+                         prefix=prefix)
+        self.is_dynamic_quant = not isinstance(
+            self.gate_up_proj.quant_method,
+            UnquantizedLinearMethod) and isinstance(
+                self.gate_up_proj.quant_method.quant_method,
+                AscendW8A8DynamicLinearMethod)
+
     def _forward_ms_mlp(self, x):
         current_ms_metadata = get_multistream_comm_context()
         assert current_ms_metadata is not None
         gate_up, _ = self.gate_up_proj(x)
-        x, dynamic_scale = self.act_fn(gate_up)
-        x = torch_npu.npu_quant_matmul(
-            x,
-            self.down_proj.weight,
-            self.down_proj.weight_scale,
-            pertoken_scale=dynamic_scale,
-            output_dtype=torch.bfloat16,
-        )
-        if self.down_proj.reduce_results and self.down_proj.tp_size > 1:
-            current_ms_metadata.before_comm_event.record()
-            with torch.npu.stream(current_ms_metadata.comm_stream):
-                current_ms_metadata.before_comm_event.wait()
-                x = tensor_model_parallel_all_reduce(x)
-                current_ms_metadata.after_comm_event.record()
+        if self.is_dynamic_quant:
+            x, dynamic_scale = self.act_fn(gate_up)
+            x = torch_npu.npu_quant_matmul(
+                x,
+                self.down_proj.weight,
+                self.down_proj.weight_scale,
+                pertoken_scale=dynamic_scale,
+                output_dtype=torch.bfloat16,
+            )
+            if self.down_proj.reduce_results and self.down_proj.tp_size > 1:
+                current_ms_metadata.before_comm_event.record()
+                with torch.npu.stream(current_ms_metadata.comm_stream):
+                    current_ms_metadata.before_comm_event.wait()
+                    x = tensor_model_parallel_all_reduce(x)
+                    current_ms_metadata.after_comm_event.record()
+        else:
+            x = self.act_fn(gate_up)
+            x, _ = self.down_proj(x)
         return x
 
 
@@ -180,20 +206,18 @@ class CustomDeepseekDBOMoE(nn.Module):
             self,
             hidden_states: torch.Tensor,
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
+        forward_context = get_forward_context()
         if attn_metadata is None:
-            attn_metadata = get_forward_context().attn_metadata
+            attn_metadata = forward_context.attn_metadata
         # when profile runs, force experts to load balanced tokens
         # to avoid high memory consumption on a single rank.
-        # TODO: need a better flag to indicate whether in profile run or not.
-        if attn_metadata is None:
-            # for profile run
-            is_prefill = True
-            enable_force_load_balance = True
-        else:
-            is_prefill = attn_metadata.num_prefills > 0
-            enable_force_load_balance = False
-            if hasattr(attn_metadata, 'with_prefill_across_dp'):
-                is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
+        enable_force_load_balance = forward_context.in_profile_run
+
+        is_prefill = forward_context.with_prefill
+        # If this node is kv_consumer, we force the moe always runs in decode path to make sure
+        # the behaviour aligned between dummy_run and normal model_execute.
+        if self.kv_consumer:
+            is_prefill = False
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
@@ -628,8 +652,8 @@ class CustomDeepseekDBODecoderLayer(DeepseekV2DecoderLayer):
 
             if self.dp_size > 1:
                 if attn_metadata[i] is not None:
-                    max_num_tokens_across_dp = attn_metadata[
-                        i].max_num_tokens_across_dp
+                    max_num_tokens_across_dp = get_forward_context(
+                    ).max_tokens_across_dp
                     if num_tokens[i] < max_num_tokens_across_dp:
                         hidden_states[i] = nn.functional.pad(
                             hidden_states[i],
@@ -798,6 +822,7 @@ class CustomDeepseekDBOModel(nn.Module):
         attn_metadata: Optional[AttentionMetadata] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        graph_enable: Optional[bool] = True
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -811,8 +836,9 @@ class CustomDeepseekDBOModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         num_normal_layers = (self.first_k_dense_replace
-                             if VLLM_ASCEND_ENABLE_DBO and self.can_run_ms()
-                             else self.end_layer - self.start_layer)
+                             if VLLM_ASCEND_ENABLE_DBO and not graph_enable
+                             and self.can_run_ms() else self.end_layer -
+                             self.start_layer)
 
         moe_start_layer = self.start_layer + num_normal_layers
         for i in range(self.start_layer, min(moe_start_layer, self.end_layer)):
@@ -849,15 +875,13 @@ class CustomDeepseekDBOModel(nn.Module):
             return False
         return True
 
-    def _forward_ms_layers(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        residual: torch.Tensor,
-        moe_start_layer: int,
-        kv_caches: Optional[List[torch.Tensor]] = None,
-        is_prefill: bool = False,
-    ):
+    def _forward_ms_layers(self,
+                           positions: torch.Tensor,
+                           hidden_states: torch.Tensor,
+                           residual: torch.Tensor,
+                           moe_start_layer: int,
+                           kv_caches: Optional[List[torch.Tensor]] = None,
+                           is_prefill: bool = False):
 
         if moe_start_layer == self.end_layer:
             return hidden_states, residual
@@ -919,8 +943,9 @@ class CustomDeepseekDBOForCausalLM(DeepseekV2ForCausalLM):
         attn_metadata: Optional[AttentionMetadata] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        graph_enable: Optional[bool] = True
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, intermediate_tensors,
-                                   inputs_embeds)
+                                   inputs_embeds, graph_enable)
         return hidden_states
