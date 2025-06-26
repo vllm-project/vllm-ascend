@@ -47,9 +47,6 @@ def test_deepseek_W4A8(monkeypatch: pytest.MonkeyPatch):
                 quantization="ascend",
                 enable_expert_parallel=True,
                 additional_config={
-                    "torchair_graph_config": {
-                        "enabled": False,
-                    },
                     "ascend_scheduler_config": {
                         "enabled": True,
                     }
