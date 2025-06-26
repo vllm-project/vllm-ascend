@@ -42,15 +42,25 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 
 Run the following script to execute offline inference on a single NPU:
 
-```python
+:::::{tab-set}
+::::{tab-item} Graph Mode
+
+```{code-block} python
+   :substitutions:
+import os
 from vllm import LLM, SamplingParams
+
+os.environ["VLLM_USE_V1"] = "1"
 
 prompts = [
     "Hello, my name is",
     "The future of AI is",
 ]
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
-llm = LLM(model="Qwen/Qwen3-8B", max_model_len=26240)
+llm = LLM(
+        model="Qwen/Qwen3-8B",
+        max_model_len=26240
+)
 
 outputs = llm.generate(prompts, sampling_params)
 for output in outputs:
@@ -58,6 +68,36 @@ for output in outputs:
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
+::::
+
+::::{tab-item} Eager Mode
+
+```{code-block} python
+   :substitutions:
+import os
+from vllm import LLM, SamplingParams
+
+os.environ["VLLM_USE_V1"] = "1"
+
+prompts = [
+    "Hello, my name is",
+    "The future of AI is",
+]
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+llm = LLM(
+        model="Qwen/Qwen3-8B",
+        max_model_len=26240,
+        enforce_eager=True
+)
+
+outputs = llm.generate(prompts, sampling_params)
+for output in outputs:
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+```
+::::
+:::::
 
 If you run this script successfully, you can see the info shown below:
 
@@ -70,9 +110,11 @@ Prompt: 'The future of AI is', Generated text: ' following you. As the technolog
 
 Run docker container to start the vLLM server on a single NPU:
 
+:::::{tab-set}
+::::{tab-item} Graph Mode
+
 ```{code-block} bash
    :substitutions:
-
 # Update the vllm-ascend image
 export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 docker run --rm \
@@ -91,8 +133,35 @@ docker run --rm \
 -e VLLM_USE_MODELSCOPE=True \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
 -it $IMAGE \
-vllm serve Qwen/Qwen3-8B --max_model_len 26240
+VLLM_USE_V1=1 vllm serve Qwen/Qwen3-8B --max_model_len 26240
 ```
+::::
+
+::::{tab-item} Eager Mode
+
+```{code-block} bash
+   :substitutions:
+export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+docker run --rm \
+--name vllm-ascend \
+--device /dev/davinci0 \
+--device /dev/davinci_manager \
+--device /dev/devmm_svm \
+--device /dev/hisi_hdc \
+-v /usr/local/dcmi:/usr/local/dcmi \
+-v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
+-v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
+-v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
+-v /etc/ascend_install.info:/etc/ascend_install.info \
+-v /root/.cache:/root/.cache \
+-p 8000:8000 \
+-e VLLM_USE_MODELSCOPE=True \
+-e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
+-it $IMAGE \
+VLLM_USE_V1=1 vllm serve Qwen/Qwen3-8B --max_model_len 26240 --enforce-eager
+```
+::::
+:::::
 
 :::{note}
 Add `--max_model_len` option to avoid ValueError that the Qwen2.5-7B model's max seq len (32768) is larger than the maximum number of tokens that can be stored in KV cache (26240). This will differ with different NPU series base on the HBM size. Please modify the value according to a suitable value for your NPU series.
