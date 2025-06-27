@@ -143,6 +143,7 @@ docker run --rm \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /root/.cache:/root/.cache \
 -p 8000:8000 \
+-e VLLM_USE_V1=1 \
 -e VLLM_USE_MODELSCOPE=True \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
 -it $IMAGE \
