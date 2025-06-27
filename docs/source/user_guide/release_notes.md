@@ -1,5 +1,35 @@
 # Release note
 
+## v0.9.1rc2 - 2025.06.28
+
+This is the 2nd release candidate of v0.9.1 for vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to get started.
+
+### Highlights
+- Reset all unused positions to prevent out-of-bounds in GatherV3 [#1416](https://github.com/vllm-project/vllm-ascend/pull/1416)
+- Fix block table shape to make Prefix cache work with Ascend scheduler [#1446](https://github.com/vllm-project/vllm-ascend/pull/1446)
+- Support prompt logprobs to recover ceval accuracy in V1 [#1483](https://github.com/vllm-project/vllm-ascend/pull/1483)
+
+### Model
+- MoGE model is now supported. You can try with Pangu Pro Moe-72B on Atlas A2 series and Atlas 300I series. Please follow the official [tutorials](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_npu_moge.html) and [300I series tutorials](https://vllm-ascend.readthedocs.io/en/latest/tutorials/single_node_300i.html). [#1204](https://github.com/vllm-project/vllm-ascend/pull/1204)
+
+### Other Improvements
+- Update torch-npu to 2.5.1.post1.dev20250619 [#1347](https://github.com/vllm-project/vllm-ascend/pull/1347)
+- Support support fused_moe_allgather_ep [#1335](https://github.com/vllm-project/vllm-ascend/pull/1335)
+- Fix a bug and enable DBO for DeepSeek-V3 [#1284]https://github.com/vllm-project/vllm-ascend/pull/1284
+- Fix accuracy for deepseek V3/R1 models with torchair graph in long sequence predictions [#1331](https://github.com/vllm-project/vllm-ascend/pull/1331)
+- Remove useless stateless_init_torch_distributed_process_group patch [#1366](https://github.com/vllm-project/vllm-ascend/pull/1366)
+- Sync vLLM MRotaryEmbedding interface change [#1399](https://github.com/vllm-project/vllm-ascend/pull/1399)
+- Add max_num_tokens_across_dp to AscendMetadata to fix dp [#1273](https://github.com/vllm-project/vllm-ascend/pull/1273)
+- Make accuracy report work [#1288](https://github.com/vllm-project/vllm-ascend/pull/1288)
+- Use npu_top_k_top_p and fix parameter order for _apply_top_k_top_p
+- Handle with_prefill_across_dp for multistream mla [#1322](https://github.com/vllm-project/vllm-ascend/pull/1322)
+- Improve UT coverage for parallel_state.py [#1460](https://github.com/vllm-project/vllm-ascend/pull/1460)
+- Add testing guide and design docs for patch / sleep mode / register new models [#1374](https://github.com/vllm-project/vllm-ascend/pull/1374) [#1426](https://github.com/vllm-project/vllm-ascend/pull/1426) [#1414](https://github.com/vllm-project/vllm-ascend/pull/1414) [#1295](https://github.com/vllm-project/vllm-ascend/pull/1295)
+
+### Full Changelog
+https://github.com/vllm-project/vllm-ascend/compare/v0.9.1rc1...v0.9.1rc2
+
+
 ## v0.9.1rc1 - 2025.06.22
 
 This is the 1st release candidate of v0.9.1 for vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to get started.
