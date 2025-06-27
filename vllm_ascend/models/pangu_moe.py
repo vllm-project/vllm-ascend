@@ -18,6 +18,7 @@
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
 from torch import nn
 from torch.nn import Parameter
@@ -55,7 +56,7 @@ from vllm.model_executor.models.utils import (extract_layer_index, is_pp_missing
                                                 maybe_prefix)
 
 from vllm.distributed import divide
-from vllm.distributed.parallel_state import get_tp_group, get_dp_group, get_ep_grop, get_world_group
+from vllm.distributed.parallel_state import get_tp_group, get_dp_group, get_ep_group, get_world_group
 
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -459,13 +460,21 @@ class PanguProMoESparseMoeBlock(nn.Module):
             final_hidden_states = self.experts(hidden_states=hidden_states,
                                             router_logits=router_logits)
         else:
+            # TODO: when using h2p, we have to skip communication in vLLM
+            # native FusedMoE. here we need to design a better FusedMoE
+            # (maybe using AscendFusedMoE) to enable these different
+            # communication schema.
             final_hidden_states = self.experts.quant_method(
                 layer=self.experts,
                 x=hidden_states,
                 router_logits=router_logits,
                 top_k=self.experts.top_k,
                 renormalize=False,
-                global_num_experts=self.experts.global_num_experts
+                use_grouped_topk=False,
+                global_num_experts=self.experts.global_num_experts,
+                expert_map=self.experts.expert_map,
+                custom_routing_function=self.experts.custom_routing_function,
+                apply_router_weight_on_input=self.experts.apply_router_weight_on_input
             )
 
         if shared_output is not None:
@@ -635,7 +644,7 @@ class PanguProMoEDecoderLayer(nn.Module):
         attn_metadata: Optional[AttentionMetadata] = None,
         h2p_unpad_idx: Optional[torch.Tensor] = None,
         h2p_pad_idx: Optional[torch.Tensor] = None,
-        layer_idx: Optional[int] = None,
+        is_start_layer: Optional[bool] = False,
     ) -> torch.Tensor:
 
         # Self Attention
@@ -662,13 +671,14 @@ class PanguProMoEDecoderLayer(nn.Module):
             attn_metadata=attn_metadata,
         )
 
-        if use_h2p() and h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]:
-            hidden_states = hidden_states.index_select(dim=0, index=h2p_pad_idx)
-        hidden_states = dist._functional_collectives.reduce_scatter_tensor(
-            hidden_states,
-            "sum",
-            scatter_dim=0,
-            group=get_tp_group().device_group)
+        if use_h2p():
+            if h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]:
+                hidden_states = hidden_states.index_select(dim=0, index=h2p_pad_idx)
+            hidden_states = dist._functional_collectives.reduce_scatter_tensor(
+                hidden_states,
+                "sum",
+                scatter_dim=0,
+                group=get_tp_group().device_group)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
@@ -800,7 +810,7 @@ class PanguProMoEModel(nn.Module):
             })
         hidden_states, _ = self.norm(hidden_states, residual)
         hidden_states = get_tp_group().all_gather(hidden_states, 0)
-        if h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]:
+        if use_h2p() and h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]:
             hidden_states = hidden_states.index_select(dim=0, index=h2p_unpad_idx)
         return hidden_states
 
