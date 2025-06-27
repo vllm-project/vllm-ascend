@@ -83,3 +83,33 @@ class ExpertMapUtils():
         pt_local[g_idx, slot_idx] = k_idx
 
         return pt_local
+
+    @classmethod
+    def global2local_load(self,
+        workload: torch.Tensor,
+        placement: torch.Tensor,
+        E_local: int
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+
+        L, G, _ = placement.shape
+        device = placement.device
+
+        wt_local = torch.full((L, G, E_local),
+                              fill_value=-1,
+                              dtype=workload.dtype,
+                              device=device)
+        pt_local = torch.full((L, G, E_local),
+                              fill_value=-1,
+                              dtype=torch.long,
+                              device=device)
+
+        valid = placement >= 0
+        l_idx, g_idx, k_idx = valid.nonzero(as_tuple=True)
+
+        slot_idx = placement[l_idx, g_idx, k_idx]
+        values = workload[l_idx, g_idx, k_idx]
+
+        wt_local[l_idx, g_idx, slot_idx] = values
+        pt_local[l_idx, g_idx, slot_idx] = k_idx
+
+        return wt_local, pt_local
