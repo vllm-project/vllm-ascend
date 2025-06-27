@@ -29,8 +29,8 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (divide, get_pp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
-                                             get_tp_group, get_world_group)
+from vllm.distributed.parallel_state import (get_dp_group, get_tp_group,
+                                             get_world_group)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -56,12 +56,15 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.distributed.parallel_state import get_ep_group
+
 logger = init_logger(__name__)
 
 _ROUTER_SCALE = None
 
 
 def use_h2p():
+    # only use H2P when dp_size > 1.
     if get_dp_group().world_size > 1:
         return True
     return False
@@ -138,8 +141,8 @@ class CustomMergedColumnParallelLinear(LinearBase):
 
         assert loaded_shard_id < len(self.output_sizes)
 
-        tp_rank = get_ep_group().rank_in_group
-        tp_size = get_ep_group().world_size
+        tp_rank = get_world_group().rank_in_group
+        tp_size = get_world_group().world_size
         if output_dim is not None:
             shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
             shard_size = self.output_sizes[loaded_shard_id] // tp_size
@@ -471,7 +474,7 @@ class PanguProMoESparseMoeBlock(nn.Module):
 
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
-        if self.tp_size > 1:
+        if not use_h2p():
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 
@@ -810,8 +813,8 @@ class PanguProMoEModel(nn.Module):
                 "residual": residual
             })
         hidden_states, _ = self.norm(hidden_states, residual)
-        hidden_states = get_tp_group().all_gather(hidden_states, 0)
         if use_h2p() and h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]:
+            hidden_states = get_tp_group().all_gather(hidden_states, 0)
             hidden_states = hidden_states.index_select(dim=0,
                                                        index=h2p_unpad_idx)
         return hidden_states
