@@ -869,7 +869,9 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-    #
+    # NOTE: This `load_weights` is mainly copied from
+    # https://github.com/vllm-project/vllm/commit/07b8fae219b1fff51ef115c38c44b51395be5bb5
+    # to fix CI, and it is different from the implementation in main
     # TODO: support eplb style load_weights
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
