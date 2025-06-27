@@ -40,7 +40,7 @@ from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import try_register_lib
+from vllm_ascend.utils import sleep_mode_enabled, try_register_lib
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -91,6 +91,10 @@ class NPUWorker(WorkerBase):
         self.profiler = self._init_profiler()
 
     def sleep(self, level: int = 1) -> None:
+        if not sleep_mode_enabled():
+            raise ValueError(
+                "Sleep mode is not enabled. Please compile vllm-ascend with COMPILE_CUSTOM_KERNELS=1."
+            )
         free_bytes_before_sleep = NPUPlatform.mem_get_info()[0]
         allocator = CaMemAllocator.get_instance()
         allocator.sleep(offload_tags=("weights", ) if level == 1 else tuple())
@@ -104,6 +108,10 @@ class NPUWorker(WorkerBase):
             used_bytes / GiB_bytes)
 
     def wake_up(self, tags: Optional[list[str]] = None) -> None:
+        if not sleep_mode_enabled():
+            raise ValueError(
+                "Sleep mode is not enabled. Please compile vllm-ascend with COMPILE_CUSTOM_KERNELS=1."
+            )
         allocator = CaMemAllocator.get_instance()
         allocator.wake_up(tags=tags)
 
