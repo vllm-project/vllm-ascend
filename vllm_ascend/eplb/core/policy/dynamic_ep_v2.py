@@ -383,7 +383,30 @@ class DynamicEplbV2(EplbPolicy):
         return device_assignments, device_weights, device_loads, device_counts
 
     @staticmethod
-    def distribute_redun_experts(device_assignments, device_weights, device_loads, device_counts, redundant_expert_list,
+    def recomputing_weight(layer_workloads, device_assignments, device_weights, device_loads):
+        # 统计专家出现次数
+        num_all_experts = [0] * len(layer_workloads)
+        num_devices = len(device_assignments)
+        for device_id in range(num_devices):
+            num_expert_per_npu = len(device_assignments[device_id])
+            for idx in range(num_expert_per_npu):
+                num_all_experts[idx] += device_assignments[device_id][idx]
+
+        for device_id in range(num_devices):
+            num_expert_per_npu = len(device_weights[device_id])
+            total_weight = 0.0
+            for idx in range(num_expert_per_npu):
+                expert_id = device_assignments[device_id][idx]
+                if num_all_experts[expert_id] == 0:
+                    print("Error: Division by zero")
+                device_weights[device_id][idx] = layer_workloads[expert_id] / num_all_experts[expert_id]
+                total_weight += device_weights[device_id][idx]
+            device_loads[device_id] = total_weight
+
+        return device_weights, device_loads
+
+    @staticmethod
+    def distribute_redun_experts(self, layer_workloads, device_assignments, device_weights, device_loads, device_counts, redundant_expert_list,
                                  items_per_device, expert_form_device, num_experts):
 
         num_devices = len(device_assignments)
@@ -411,18 +434,16 @@ class DynamicEplbV2(EplbPolicy):
                 communication_box_index = expert_form_device[expert_id]
                 com_between_devices[candidate][communication_box_index] = expert_id
         # 极端情况下存在冗余专家没装箱 导致箱子有空位 随机填入专家 待优化
+        flag = False
         for dev_id in range(num_devices):
             # 检查容量限制
             if device_counts[dev_id] < items_per_device:
                 # 遍历合适的专家
                 for expert_id in range(num_experts):
                     if expert_id not in device_assignments[dev_id]:
-                        # 找到对应权重
-                        weight = 0
-                        for i in range(num_devices):
-                            for j in range(len(device_assignments[i])):
-                                if expert_id == device_assignments[i][j]:
-                                    weight = device_weights[i][j]
+                        flag = True
+                        # 随机初始化一个权重
+                        weight = 0.0
                         # 和该专家相关的卡权重发生变化 待修改
                         device_assignments[dev_id].insert(0, expert_id)
                         device_weights[dev_id].insert(0, weight)
@@ -432,12 +453,14 @@ class DynamicEplbV2(EplbPolicy):
                         communication_box_index = expert_form_device[expert_id]
                         com_between_devices[dev_id][communication_box_index] = expert_id
                         break
-        #todo 重新生成权重
+
+        if flag:
+            device_weights, device_loads = self.recomputing_weight(layer_workloads, device_assignments, device_weights, device_loads)
 
         return device_assignments, device_weights, device_loads, device_counts, com_between_devices
 
     @staticmethod
-    def redundancy_again(self, origin_weights, num_redundant_experts, origin_deployment, expert_form_device, num_node,
+    def redundancy_again(self, layer_workloads, origin_weights, num_redundant_experts, origin_deployment, expert_form_device, num_node,
                          is_node_redundant):
 
         # 每张卡上专家数量
@@ -461,6 +484,8 @@ class DynamicEplbV2(EplbPolicy):
 
         # 新计算的冗余专家进行分配
         device_assignments, device_weights, device_loads, device_counts, com_between_devices = self.distribute_redun_experts(
+            self,
+            layer_workloads,
             device_assignments,
             device_weights,
             device_loads,
@@ -554,6 +579,7 @@ class DynamicEplbV2(EplbPolicy):
 
                 cur_device_assignments, cur_device_weights, cur_device_loads, cur_device_counts, cur_com_between_devices = self.redundancy_again(
                     self,
+                    layer_workloads,
                     cur_node_weights,
                     per_node_redun_expert_num,
                     cur_original_deployment,
@@ -569,6 +595,7 @@ class DynamicEplbV2(EplbPolicy):
         else:
             device_assignments, device_weights, device_loads, device_counts, com_between_devices = self.redundancy_again(
                 self,
+                layer_workloads,
                 weights,
                 redundancy_expert_num,
                 original_deployment,
@@ -583,7 +610,7 @@ class DynamicEplbV2(EplbPolicy):
 
     @staticmethod
     def two_device_exchange_experts(cur_device_result, exchange_device_result, cur_exchanged_expert_id,
-                                    next_exchanged_expert_id, ave_workload, increment, num_redundancy_expert):
+                                    next_exchanged_expert_id, ave_workload, increment, num_redundancy_expert, cur_org_placement, next_org_placement):
 
         cur_device_weight = cur_device_result['expert_weights']
         next_device_weight = exchange_device_result['expert_weights']
@@ -609,7 +636,8 @@ class DynamicEplbV2(EplbPolicy):
                     continue
                     # 交换专家限制卡内专家不同
                 change_flag = True
-                if cur_device_expert_id[index] in next_device_expert_id or next_device_expert_id[next_index] in cur_device_expert_id:
+                if ((cur_device_expert_id[index] in next_device_expert_id or next_device_expert_id[next_index] in cur_device_expert_id) or
+                        (cur_org_placement[0] == next_device_expert_id[next_index] or next_org_placement[0] == cur_device_expert_id[index])):
                     change_flag = False
                 # 选择的专家不能是参与过交换的
                 if (cur_device_expert_id[index] not in cur_exchanged_expert_id) and (
@@ -627,8 +655,7 @@ class DynamicEplbV2(EplbPolicy):
 
     @staticmethod
     def expert_exchange_between_devices(self, ave_workload, increment, cur_layer_result, com_between_devices, num_redundancy_expert,
-                                        node_idx=0,
-                                        per_node_device_num=0, is_node_redundant=False):
+                                        org_placement_table, node_idx=0, per_node_device_num=0, is_node_redundant=False):
 
         if is_node_redundant:
             # 拿出当前节点内设备的信息
@@ -677,7 +704,9 @@ class DynamicEplbV2(EplbPolicy):
                         next_exchanged_expert_id,
                         ave_workload,
                         increment,
-                        num_redundancy_expert)
+                        num_redundancy_expert,
+                        org_placement_table[max_weight_device_id],
+                        org_placement_table[min_weight_device_id])
 
                     # 有符合条件的专家进行交换
                     if cur_exchange_index != -1:
@@ -700,7 +729,7 @@ class DynamicEplbV2(EplbPolicy):
 
     @staticmethod
     def exchange_experts(self, layer_result, layer_com_between_devices, num_nodes, device_num, is_node_redundant,
-                         ave_workload, increment, num_redundancy_expert):
+                         ave_workload, increment, num_redundancy_expert, org_placement_table):
 
         global_deployment = []
 
@@ -709,9 +738,9 @@ class DynamicEplbV2(EplbPolicy):
             for node_idx in range(num_nodes):
                 self.expert_exchange_between_devices(self, ave_workload, increment, layer_result,
                                                      layer_com_between_devices, num_redundancy_expert,
-                                                     node_idx, per_node_device_num, is_node_redundant)
+                                                     org_placement_table, node_idx, per_node_device_num, is_node_redundant)
         else:
-            self.expert_exchange_between_devices(self, ave_workload, increment, layer_result, layer_com_between_devices, num_redundancy_expert)
+            self.expert_exchange_between_devices(self, ave_workload, increment, layer_result, layer_com_between_devices, num_redundancy_expert, org_placement_table)
 
         max_workload = 0
         for box in layer_result:
@@ -734,14 +763,15 @@ class DynamicEplbV2(EplbPolicy):
         return count
 
     def rebalance_experts(self, current_expert_table, expert_workload):
-
+        # 输入：当前专家部署信息和对应的负载信息，形状为layer_num, num_npus, experts_per_npu
         info = DynamicTable()
-        info.workload_table = np.array(expert_workload)
-        info.placement_table = np.array(current_expert_table)
+        info.workload_table = expert_workload.numpy()
+        info.placement_table = current_expert_table.numpy()
         layer_num, num_npus, experts_per_npu = info.workload_table.shape
         expert_ids, counts = np.unique(info.placement_table[0], return_counts=True)
         num_redundancy_expert = self.get_redundant_num(num_npus, counts)
         num_original_expert = len(expert_ids)
+        # 负载信息转化为 58 * 256
         layer_workloads = self.add_redundant(info.placement_table, info.workload_table, num_original_expert)
         max_heat_per_layer_before = self.calculate_max_heat_per_layer(info.workload_table, layer_num)
         npu_heat_all_origin = sum(max_heat_per_layer_before)
@@ -764,50 +794,31 @@ class DynamicEplbV2(EplbPolicy):
         # 每个卡部署的专家数量 一个冗余专家
         global_deployment = [[[] for _ in range(num_npus)] for _ in range(layer_num)]
         # 统计更换数据集后的初始58层不均衡度
-        layer_initial_imbalance = self.calculate_initial_imbalance(current_expert_table, layer_workloads)
+        layer_initial_imbalance = self.calculate_initial_imbalance(info.placement_table, layer_workloads)
         # 遍历获得每一层的放置策略，考虑计算均衡
         max_heat_per_layer_after = np.zeros([layer_num])
         sum_num = 0
         for layer in range(layer_num):
             # 不均衡度小于特定阈值不调整
             if layer_initial_imbalance[layer] < 1.1:
-                global_deployment[layer] = current_expert_table[layer]
+                global_deployment[layer] = info.placement_table[layer]
                 continue
 
             ave_workload = np.sum(layer_workloads[layer]) / num_npus
-            for device_id, device in enumerate(current_expert_table[layer]):
+            for device_id, device in enumerate(info.placement_table[layer]):
                 for index, expert_id in enumerate(device):
                     if index != 0:
                         expert_from_device[layer][expert_id] = device_id
 
             # 调整冗余专家
             result, max_workload, com_between_devices = self.redundant_expert_deployment(self, layer_workloads[layer],
-                                                                                         current_expert_table[layer],
+                                                                                         info.placement_table[layer],
                                                                                          expert_from_device[layer],
                                                                                          num_node, False)
             # 交换专家
             global_deployment[layer], new_max_workload = self.exchange_experts(self, result, com_between_devices,
                                                                                num_node, num_npus, False, ave_workload,
-                                                                               0.05, num_redundancy_expert)
-
-            # To guarantee there is no expert movement inside a NPU
-            start_physical_idx = 1 if num_redundancy_expert else 0
-            for rank in range(num_npus):
-                physical_expert = start_physical_idx
-                while physical_expert in range(start_physical_idx, experts_per_npu):
-                    # skip the expert which is moved into this rank
-                    if global_deployment[layer][rank][physical_expert] not in current_expert_table[layer, rank, :]:
-                        physical_expert += 1
-                        continue
-
-                    if global_deployment[layer][rank][physical_expert] != current_expert_table[layer][rank][physical_expert]:
-                        right_idx = np.where(current_expert_table[layer][rank] == global_deployment[layer][rank][physical_expert])[0][0]
-                        # exchange expert with the expert on the right physical index
-                        tempt = global_deployment[layer][rank][right_idx]
-                        global_deployment[layer][rank][right_idx] = global_deployment[layer][rank][physical_expert]
-                        global_deployment[layer][rank][physical_expert] = tempt
-                    else:
-                        physical_expert += 1
+                                                                               0.05, num_redundancy_expert, info.placement_table[layer])
 
             for device_id in range(num_npus):
                 com_between_devices[device_id] = {int(key): int(value) for key, value in
@@ -829,7 +840,3 @@ class DynamicEplbV2(EplbPolicy):
             change = 1
 
         return change, per_layer_priority, np.array(global_deployment).tolist()
-
-
-
-

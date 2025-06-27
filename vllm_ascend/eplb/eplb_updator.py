@@ -74,8 +74,6 @@ class EplbUpdator:
             "moe_load": None,
             # 所有的专家表[num_layers, world_size, num_experts]
             "expert_maps": None,
-            # 热度负载信息 [num_layers, world_size, local_num_experts]
-            "load_info": None,
         })
 
         self.eplb = EplbProcess(
@@ -235,11 +233,28 @@ class EplbUpdator:
         ]
         return recovered
 
-    def get_expert_load(self) -> torch.Tensor:
-        load_info = self.shared_dict["load_info"]  # Tensor [L, W, local_experts_num]
-        logger.info(f"lt -- load_info {load_info=}...")
-        return load_info
+    def get_expert_load(self):
+        expert_maps = self.shared_dict["expert_maps"]
+        moe_load = self.shared_dict["moe_load"]  # Tensor [L, W, global_experts_num]  
+        num_local_experts = expert_maps.max() + 1
+        load_info, _ = ExpertMapUtils.global2local_load(moe_load, expert_maps, num_local_experts)
+        
+        L, W, _ = load_info.shape
 
+        expert_load: Dict[str, List[dict]] = {}
+        for c in range(W):
+            layers: List[dict] = []
+            for l in range(L):
+                counts_1d = load_info[l, c]         
+        
+                layer_val = {
+                    f"expert_{e}": int(v)            
+                    for e, v in enumerate(counts_1d.tolist())
+                }
+                layers.append({f"layer_{l}": layer_val})
+            expert_load[f"card_{c}"] = layers
+
+        return {"expert_load": expert_load}
 
     def update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
         logger.info(f" start update {self.num_expert_load_gather=}, {self.num_iterations}...")
