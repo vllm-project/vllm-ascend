@@ -1,0 +1,100 @@
+name: Release Checklist
+description: Generate a release checklist issue when prepare a new release.(Used for release team)
+title: "[Release]: Release checklist for v"
+
+body:
+- type: textarea
+  attributes:
+    description: >
+      Brief info for the new release.
+    label: Release Checklist
+    value: >
+      **Release Version**: 
+
+      **Release Branch**: 
+
+      **Release Date**: 
+
+      **Release Manager**: 
+- type: textarea
+  attributes:
+    description: >
+      Release notes.
+    label: Prepare Release Note
+    value: >
+      - [ ] Create a new issue for release feedback
+
+      - [ ] Write the release note PR.
+
+        - [ ] Update the feedback issue link in docs/source/faqs.md
+
+        - [ ] Add release note to docs/source/user_guide/release_notes.md
+
+        - [ ] Update version info in docs/source/community/versioning_policy.md
+
+        - [ ] Update contributor info in docs/source/community/contributors.md
+
+        - [ ] Update package version in docs/conf.py
+- type: textarea
+  attributes:
+    description: >
+      Make sure the code is merged.
+    label: PR need Merge
+    value: >
+      - [ ] PR link1
+
+      - [ ] PR link2
+
+      - [ ] ...
+- type: textarea
+  attributes:
+    description: >
+      Make sure the new Feature/Function is tested
+    label: Functional Test
+    value: >
+      - [ ] Feature1
+
+      - [ ] Bug1
+
+      - [ ] ...
+- type: textarea
+  attributes:
+    description: >
+      Make sure the doc is updated.
+    label: Doc Test
+    value: >
+      - [ ] Tutorial is updated.
+
+      - [ ] User Guide is updated.
+
+      - [ ] Developer Guide is updated.
+- type: textarea
+  attributes:
+    description: >
+      Make sure the artifacts is ready
+    label: Prepare Artifacts
+    value: >
+      - [ ] Docker image is ready.
+
+      - [ ] Wheel package is ready.
+- type: textarea
+  attributes:
+    description: >
+      Start to release.
+    label: Release Step
+    value: >
+      - [ ] Release note PR is merged.
+
+      - [ ] Post the release on GitHub release page.
+
+      - [ ] Generate official doc page on https://app.readthedocs.org/dashboard/
+
+      - [ ] Wait for the wheel package to be available on https://pypi.org/project/vllm-ascend
+
+      - [ ] Wait for the docker image to be available on https://quay.io/ascend/vllm-ascend
+
+      - [ ] Upload 310p wheel to Github release page
+
+      - [ ] Brodcast the release news (By message, blog , etc)
+
+      - [ ] Close this issue
