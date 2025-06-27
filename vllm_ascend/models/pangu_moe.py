@@ -641,6 +641,7 @@ class PanguProMoEDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         need_h2p_pad = h2p_unpad_idx is not None and h2p_pad_idx is not None \
             and h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]
+        tp_size = get_tp_group().world_size
 
         # Self Attention
         if residual is None:
@@ -654,10 +655,10 @@ class PanguProMoEDecoderLayer(nn.Module):
                 if need_h2p_pad:
                     residual = residual.index_select(dim=0, index=h2p_pad_idx)
                 residual = torch.tensor_split(
-                    residual,
-                    get_tp_group().world_size)[get_tp_group().rank_in_group]
+                    residual, tp_size)[get_tp_group().rank_in_group]
             else:
-                hidden_states = get_tp_group().all_gather(hidden_states, 0)
+                if tp_size > 1:
+                    hidden_states = get_tp_group().all_gather(hidden_states, 0)
                 if need_h2p_pad:
                     hidden_states = hidden_states.index_select(
                         dim=0, index=h2p_unpad_idx)
@@ -673,11 +674,12 @@ class PanguProMoEDecoderLayer(nn.Module):
             if need_h2p_pad:
                 hidden_states = hidden_states.index_select(dim=0,
                                                            index=h2p_pad_idx)
-            hidden_states = dist._functional_collectives.reduce_scatter_tensor(
-                hidden_states,
-                "sum",
-                scatter_dim=0,
-                group=get_tp_group().device_group)
+            if tp_size > 1:
+                hidden_states = dist._functional_collectives.reduce_scatter_tensor(
+                    hidden_states,
+                    "sum",
+                    scatter_dim=0,
+                    group=get_tp_group().device_group)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
@@ -813,10 +815,12 @@ class PanguProMoEModel(nn.Module):
                 "residual": residual
             })
         hidden_states, _ = self.norm(hidden_states, residual)
-        if use_h2p() and h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]:
-            hidden_states = get_tp_group().all_gather(hidden_states, 0)
-            hidden_states = hidden_states.index_select(dim=0,
-                                                       index=h2p_unpad_idx)
+        if use_h2p():
+            if get_tp_group().world_size > 1:
+                hidden_states = get_tp_group().all_gather(hidden_states, 0)
+            if h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]:
+                hidden_states = hidden_states.index_select(dim=0,
+                                                           index=h2p_unpad_idx)
         return hidden_states
 
 
