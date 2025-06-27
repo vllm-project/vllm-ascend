@@ -62,14 +62,13 @@ class EplbWorker:
 
         #根据负载信息，获取更新后的专家表
         load_info, old_placement = self.global2local(load_info, self.old_expert_maps, self.num_local_experts)
-        self.shared_dict["load_info"] = load_info
         changed, priority, new_placement = self.calculate_rebalance_experts(load_info, old_placement)
 
         if not torch.is_tensor(new_placement):
             new_placement = torch.tensor(new_placement)
         self.check_expert_placement(old_placement, new_placement)
         new_expert_maps = self.local2global(new_placement)
-
+        self.update_expert_map(new_expert_maps)
         logger.debug(f"[EPLB Process  new_map differs, performing D2D")
 
         update_info = self.compose_expert_update_info_bipartite(new_expert_maps, self.old_expert_maps)\
