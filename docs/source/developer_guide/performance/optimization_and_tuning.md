@@ -43,6 +43,23 @@ echo "deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ jammy-security 
 apt update && apt install wget gcc g++ libnuma-dev git vim -y
 ```
 
+Install vllm and vllm-ascend:
+
+```bash
+# Install necessary dependencies
+pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+pip install "modelscope<1.23.0" pandas datasets gevent sacrebleu rouge_score pybind11 pytest
+
+# Configure this var to speed up model download
+VLLM_USE_MODELSCOPE=true
+```
+
+Please follow the [Installation Guide](https://vllm-ascend.readthedocs.io/en/v0.7.3/installation.html#setup-vllm-and-vllm-ascend) to make sure vllm, vllm-ascend and mindie-turbo is installed correctly.
+
+:::{note}
+Make sure your vllm, vllm-ascend and mindie-turbo is installed after your python configuration completed, because these packages will build binary files using the python in current environment. If you install vllm, vllm-ascend and mindie-turbo before chapter 1.1, the binary files will not use the optimized python. 
+:::
+
 ## Optimizations
 
 ### 1. Compilation Optimization
