@@ -866,6 +866,9 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+        # TODO(yikun): a placeholder to make CI passed
+        # support EPLB (vllm#18343) in future
+        self.num_redundant_experts = 0
 
     def forward(
         self,
