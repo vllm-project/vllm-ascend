@@ -46,6 +46,10 @@ faqs
 user_guide/suppoted_features
 user_guide/supported_models
 user_guide/env_vars
+user_guide/additional_config
+user_guide/sleep_mode
+user_guide/graph_mode.md
+user_guide/quantization.md
 user_guide/release_notes
 :::
 
@@ -53,14 +57,18 @@ user_guide/release_notes
 :::{toctree}
 :caption: Developer Guide
 :maxdepth: 1
-developer_guide/contributing
-developer_guide/versioning_policy
+developer_guide/contribution/index
+developer_guide/feature_guide/index
 developer_guide/evaluation/index
+developer_guide/performance/index
 :::
 
-% User stories about vLLM Ascend project
+% How to involve vLLM Ascend
 :::{toctree}
-:caption: User Story
+:caption: Community
 :maxdepth: 1
-user_stories/index
+community/governance
+community/contributors
+community/versioning_policy
+community/user_stories/index
 :::

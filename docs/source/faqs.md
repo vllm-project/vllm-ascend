@@ -3,7 +3,7 @@
 ## Version Specific FAQs
 
 - [[v0.7.3.post1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1007)
-- [[v0.8.5rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/754)
+- [[v0.9.1rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1351)
 
 ## General FAQs
 
@@ -69,14 +69,14 @@ If all above steps are not working, feel free to submit a GitHub issue.
 
 ### 7. How does vllm-ascend perform?
 
-Currently, only some models are improved. Such as `Qwen2 VL`, `Deepseek  V3`. Others are not good enough. In the future, we will support graph mode and custom ops to improve the performance of vllm-ascend. And when the official release of vllm-ascend is released, you can install `mindie-turbo` with `vllm-ascend` to speed up the inference as well.
+Currently, only some models are improved. Such as `Qwen2 VL`, `Deepseek  V3`. Others are not good enough. From 0.9.0rc2, Qwen and Deepseek works with graph mode to play a good performance. What's more, you can install `mindie-turbo` with `vllm-ascend v0.7.3` to speed up the inference as well.
 
 ### 8. How vllm-ascend work with vllm?
 vllm-ascend is a plugin for vllm. Basically, the version of vllm-ascend is the same as the version of vllm. For example, if you use vllm 0.7.3, you should use vllm-ascend 0.7.3 as well. For main branch, we will make sure `vllm-ascend` and `vllm` are compatible by each commit.
 
 ### 9. Does vllm-ascend support Prefill Disaggregation feature?
 
-Currently, only 1P1D is supported by vllm. For vllm-ascend, it'll be done by [this PR](https://github.com/vllm-project/vllm-ascend/pull/432). For NPND, vllm is not stable and fully supported yet. We will make it stable and supported by vllm-ascend in the future.
+Currently, only 1P1D is supported on V0 Engine. For V1 Engine or NPND support, We will make it stable and supported by vllm-ascend in the future.
 
 ### 10. Does vllm-ascend support quantization method?
 
@@ -84,11 +84,9 @@ Currently, w8a8 quantization is already supported by vllm-ascend originally on v
 
 ### 11. How to run w8a8 DeepSeek model?
 
-Currently, w8a8 DeepSeek is working in process: [support AscendW8A8 quantization](https://github.com/vllm-project/vllm-ascend/pull/511)
+Please following the [quantization inferencing tutorail](https://vllm-ascend.readthedocs.io/en/main/tutorials/multi_npu_quantization.html) and replace model to DeepSeek.
 
-Please run DeepSeek with BF16 now, following the [Multi-Node DeepSeek inferencing tutorail](https://vllm-ascend.readthedocs.io/en/main/tutorials/multi_node.html)
-
-### 12. There is not output in log when loading models using vllm-ascend, How to solve it?
+### 12. There is no output in log when loading models using vllm-ascend, How to solve it?
 
 If you're using vllm 0.7.3 version, this is a known progress bar display issue in VLLM, which has been resolved in [this PR](https://github.com/vllm-project/vllm/pull/12428), please cherry-pick it locally by yourself. Otherwise, please fill up an issue.
 
@@ -115,3 +113,53 @@ In scenarios where NPUs have limited HBM (High Bandwidth Memory) capacity, dynam
 - **Adjust `--gpu-memory-utilization`**: If unspecified, will use the default value of `0.9`. You can decrease this param to reserve more memory to reduce fragmentation risks. See more note in: [vLLM - Inference and Serving - Engine Arguments](https://docs.vllm.ai/en/latest/serving/engine_args.html#vllm.engine.arg_utils-_engine_args_parser-cacheconfig).
 
 - **Configure `PYTORCH_NPU_ALLOC_CONF`**: Set this environment variable to optimize NPU memory management. For example, you can `export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` to enable virtual memory feature to mitigate memory fragmentation caused by frequent dynamic memory size adjustments during runtime, see more note in: [PYTORCH_NPU_ALLOC_CONF](https://www.hiascend.com/document/detail/zh/Pytorch/700/comref/Envvariables/Envir_012.html).
+
+### 16. Failed to enable NPU graph mode when running DeepSeek?
+You may encounter the following error if running DeepSeek with NPU graph mode enabled. The allowed number of queries per kv when enabling both MLA and Graph mode only support {32, 64, 128}, **Thus this is not supported for DeepSeek-V2-Lite**, as it only has 16 attention heads. The NPU graph mode support on DeepSeek-V2-Lite will be done in the future.
+
+And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tensor parallel split, num_heads / num_kv_heads in {32, 64, 128}.
+
+```bash
+[rank0]: RuntimeError: EZ9999: Inner Error!
+[rank0]: EZ9999: [PID: 62938] 2025-05-27-06:52:12.455.807 numHeads / numKvHeads = 8, MLA only support {32, 64, 128}.[FUNC:CheckMlaAttrs][FILE:incre_flash_attention_tiling_check.cc][LINE:1218]
+```
+
+### 17. Failed to reinstall vllm-ascend from source after uninstalling vllm-ascend?
+You may encounter the problem of C compilation failure when reinstalling vllm-ascend from source using pip. If the installation fails, it is recommended to use `python setup.py install` to install, or use `python setup.py clean` to clear the cache.
+
+### 18. How to generate determinitic results when using vllm-ascend?
+There are several factors that affect output certainty:
+
+1. Sampler Method: using **Greedy sample** by setting `temperature=0` in `SamplingParams`, e.g.:
+
+```python
+from vllm import LLM, SamplingParams
+
+prompts = [
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+]
+
+# Create a sampling params object.
+sampling_params = SamplingParams(temperature=0)
+# Create an LLM.
+llm = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
+
+# Generate texts from the prompts.
+outputs = llm.generate(prompts, sampling_params)
+for output in outputs:
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+```
+
+2. Set the following enveriments parameters:
+
+```bash
+export LCCL_DETERMINISTIC = 1
+export HCCL_DETERMINISTIC = 1
+export ATB_MATMUL_SHUFFLE_K_ENABLE = 0
+export ATB_LLM_LCOC_ENABLE = 0
+```

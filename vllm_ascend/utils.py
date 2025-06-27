@@ -17,14 +17,28 @@
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 
+import atexit
 import math
-from typing import TYPE_CHECKING
+from contextlib import contextmanager, nullcontext
+from enum import Enum
+from threading import Lock
+from typing import TYPE_CHECKING, List, Tuple
 
 import torch
+import torch_npu  # noqa: F401  # noqa: F401
 from packaging.version import InvalidVersion, Version
+from torch_npu.npu.streams import Event
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs
+
+try:
+    # Recent release of torchair has moved these ops to `.scope`.
+    from torchair.scope import npu_stream_switch as _npu_stream_switch
+    from torchair.scope import npu_wait_tensor as _npu_wait_tensor
+except ImportError:
+    from torchair.ops import NpuStreamSwitch as _npu_stream_switch
+    from torchair.ops import npu_wait_tensor as _npu_wait_tensor
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -39,6 +53,126 @@ else:
 MAX_CAPTURE_SIZE = 1920
 
 ASCEND_QUATIZATION_METHOD = "ascend"
+SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
+
+ACL_FORMAT_FRACTAL_ND = 2
+ACL_FORMAT_FRACTAL_NZ = 29
+
+_CUSTOM_OP_ENABLED = None
+_IS_310P = None
+_SLEEP_MODE_ENABLED = None
+_CURRENT_STREAM = None
+
+
+def is_310p():
+    global _IS_310P
+    if _IS_310P is None:
+        from vllm_ascend import _build_info  # type: ignore
+        _IS_310P = _build_info.__soc_version__.lower().startswith("ascend310p")
+    return _IS_310P
+
+
+def sleep_mode_enabled():
+    global _SLEEP_MODE_ENABLED
+    if _SLEEP_MODE_ENABLED is None:
+        from vllm_ascend import _build_info  # type: ignore
+        _SLEEP_MODE_ENABLED = _build_info.__sleep_mode_enabled__
+    return _SLEEP_MODE_ENABLED
+
+
+def _round_up(x: int, align: int):
+    # round up x to align, for example, if align is 16, x will be rounded up to 16, 32, 48, etc.
+    # input: 15, 16 -> output: 16
+    # input: 17, 16 -> output: 32
+    # input: 30, 16 -> output: 32
+    # input: 33, 16 -> output: 48
+    # ...
+    return (x + align - 1) // align * align
+
+
+def _custom_pad(x, pad_dims):
+    # pad the input tensor to the shape of pad_dims
+    # input: (13, 30), pad_dims: [0, 2, 0, 3]
+    # output: (16, 32)
+    return torch.nn.functional.pad(x, pad_dims)
+
+
+def _custom_reshape(x, target_shape):
+    # reshape the input tensor to the shape of target_shape
+    # input: (16, 32), target_shape: [1, 16, 2, 16]
+    # output: (1, 16, 2, 16)
+    return x.reshape(target_shape)
+
+
+def _custom_transpose(x, dim1, dim2):
+    # transpose the input tensor
+    # input: (1, 16, 2, 16), dim1: 1, dim2: 2
+    # output: (1, 2, 16, 16)
+    return x.transpose(dim1, dim2)
+
+
+def nd_to_nz_2d(in_tensor: torch.Tensor) -> torch.Tensor:
+    # in_tensor: (13, 30)
+    aux_dims = [1, 0, 0, 16]
+    # aux_dims[1]: 16
+    aux_dims[1] = _round_up(in_tensor.size(0), 16)
+    # aux_dims[2]: 2
+    aux_dims[2] = _round_up(in_tensor.size(1), 16) // 16
+
+    # after: aux_dims: [1, 16, 2, 16]
+
+    pad_dims = [0, 0, 0, 0]
+    # pad_dims[1]: 2
+    pad_dims[1] = _round_up(in_tensor.size(1), 16) - in_tensor.size(1)
+    # pad_dims[3]: 3
+    pad_dims[3] = _round_up(in_tensor.size(0), 16) - in_tensor.size(0)
+
+    # after: pad_dims: [0, 2, 0, 3]
+
+    # return: (1, 2, 16, 16)
+    return _custom_transpose(
+        _custom_reshape(_custom_pad(in_tensor, pad_dims), aux_dims), 1,
+        2).contiguous()
+
+
+def nd_to_nz_spec(mask_tensor: torch.Tensor) -> torch.Tensor:
+    num_tokens = mask_tensor.shape[0]
+    max_seq_len = mask_tensor.shape[1]
+
+    tokens_pad = (num_tokens + 15) // 16 * 16
+    max_seq_len_pad = (max_seq_len + 15) // 16 * 16
+
+    mask_tensor_pad = \
+        torch.zeros((1, tokens_pad, max_seq_len_pad), dtype=mask_tensor.dtype, device=mask_tensor.device)
+    mask_tensor_pad[0][:num_tokens, :max_seq_len] = mask_tensor
+    mask = mask_tensor_pad.reshape(
+        (1, tokens_pad, max_seq_len_pad // 16, 16)).permute(0, 2, 1, 3)
+    return mask
+
+
+def aligned_16(tensor: torch.Tensor):
+    """Aligned tensor for 310P"""
+
+    # Get the size of the current 0th dimension
+    n = tensor.size(0)
+
+    # Calculate the aligned size
+    n_aligned = ((n + 15) // 16) * 16
+
+    # If already aligned, return the original tensor
+    if n == n_aligned:
+        return tensor
+
+    # Create a new tensor with shape (n_aligned, H, W) and fill it with zeros
+    new_tensor = torch.zeros(n_aligned,
+                             *tensor.shape[1:],
+                             dtype=tensor.dtype,
+                             device=tensor.device)
+
+    # Copy the original tensor to the first N positions of the new tensor
+    new_tensor[:n] = tensor
+
+    return new_tensor
 
 
 def try_register_lib(lib_name: str, lib_info: str = ""):
@@ -52,6 +186,26 @@ def try_register_lib(lib_name: str, lib_info: str = ""):
                 logger.info(lib_info)
     except Exception:
         pass
+
+
+def enable_custom_op():
+    """
+    Enable lazy init for vllm_ascend_C to avoid early initialization of CANN's RTS component. 
+    Ensure that ASCEND_RT_VISIBLE_DEVICES can be dynamically modified before torch.npu.set_device().
+    """
+    global _CUSTOM_OP_ENABLED
+    if _CUSTOM_OP_ENABLED is not None:
+        return _CUSTOM_OP_ENABLED
+    try:
+        # register custom ops into torch_library here
+        import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+        _CUSTOM_OP_ENABLED = True
+    except ImportError:
+        _CUSTOM_OP_ENABLED = False
+        logger.warning(
+            "Warning: Failed to register custom ops, all custom ops will be disabled"
+        )
+    return _CUSTOM_OP_ENABLED
 
 
 def find_hccl_library() -> str:
@@ -76,9 +230,6 @@ def find_hccl_library() -> str:
     return so_file
 
 
-_current_stream = None
-
-
 def current_stream() -> torch.npu.Stream:
     """
     replace `torch.npu.current_stream()` with `vllm.utils.current_stream()`.
@@ -88,12 +239,12 @@ def current_stream() -> torch.npu.Stream:
     directly, so that we can avoid calling `torch.npu.current_stream()`.
 
     """
-    global _current_stream
-    if _current_stream is None:
+    global _CURRENT_STREAM
+    if _CURRENT_STREAM is None:
         # when this function is called before any stream is set,
         # we return the default stream.
-        _current_stream = torch.npu.current_stream()
-    return _current_stream
+        _CURRENT_STREAM = torch.npu.current_stream()
+    return _CURRENT_STREAM
 
 
 def adapt_patch(is_global_patch: bool = False):
@@ -173,5 +324,92 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
             len(original_sizes))
 
 
+# TODO(wxy): Move to ops module
 def dispose_tensor(x: torch.Tensor):
     x.set_(torch.empty((0, ), device=x.device, dtype=x.dtype))
+
+
+class ProfileExecuteDuration:
+    _instance = None
+    _observations: List[Tuple[str, Event, Event]] = []
+    _lock = Lock()
+
+    def __new__(cls):
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super().__new__(cls)
+                atexit.register(cls._instance.destroy)
+            return cls._instance
+
+    def destroy(self):
+        with self._lock:
+            self._observations.clear()
+
+    @contextmanager
+    def capture_async(self, duration_tag: str):
+        if not envs.VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE:
+            yield
+            return
+
+        observe_start = Event(enable_timing=True)
+        observe_start.record()
+        try:
+            yield
+        finally:
+            observe_end = Event(enable_timing=True)
+            observe_end.record()
+            with self._lock:
+                self._observations.append(
+                    (duration_tag, observe_start, observe_end))
+
+    def pop_captured_sync(self) -> dict:
+        """Pop and synchronize all events in the observation list"""
+        durations: dict[str, float] = {}
+        if not envs.VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE:
+            return durations
+
+        while self._observations:
+            with self._lock:
+                tag, observe_start, observe_end = self._observations.pop()
+            observe_end.synchronize()
+            durations[tag] = observe_start.elapsed_time(observe_end)
+
+        return durations
+
+
+# TODO(wxy): Move to ops module
+def npu_stream_switch(tag: str, priority: int, *, enabled: bool = True):
+    return _npu_stream_switch(tag, priority) if enabled else nullcontext()
+
+
+# TODO(wxy): Move to ops module
+def npu_wait_tensor(self: torch.Tensor,
+                    dependency: torch.Tensor,
+                    *,
+                    enabled: bool = True):
+    return _npu_wait_tensor(self, dependency) if enabled else self
+
+
+# TODO(zzzzwwjj): move this into forward_context
+class FusedMoEState(Enum):
+    AllGather = 0
+    All2All = 1
+    MC2 = 2
+    AllGatherEP = 3
+
+
+# TODO(zzzzwwjj): add soc_version to choose branch
+def get_fused_moe_state(ep_size: int, with_prefill: bool,
+                        is_deepseek_v3_r1: bool):
+    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
+    # only supports deepseek v3/r1
+    if (envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
+            and is_deepseek_v3_r1):
+        return FusedMoEState.AllGatherEP
+    elif ep_size == 1:
+        return FusedMoEState.AllGather
+    # NOTE: mc2 need ep_size >= 16 & all2all can't use in torchair graph.
+    elif ep_size < 16 or with_prefill:
+        return FusedMoEState.All2All
+    else:
+        return FusedMoEState.MC2

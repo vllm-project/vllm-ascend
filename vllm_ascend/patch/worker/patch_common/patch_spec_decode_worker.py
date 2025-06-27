@@ -56,6 +56,7 @@ def create_worker(
         draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
     ngram_prompt_lookup_min = (
         draft_worker_kwargs.pop("ngram_prompt_lookup_min"))
+
     draft_model_config = draft_worker_kwargs["vllm_config"].model_config
     draft_parallel_config: ParallelConfig = draft_worker_kwargs[
         'vllm_config'].parallel_config
@@ -66,6 +67,13 @@ def create_worker(
         proposer_worker.set_ngram_window_size(ngram_prompt_lookup_min,
                                               ngram_prompt_lookup_max)
     else:
+        # TODO(Yizhou): A quick fix, must be refactored ASAP
+        # ngram need not this fix.
+        draft_worker_kwargs[
+            "vllm_config"].parallel_config.expert_parallel_size = 1
+        draft_worker_kwargs[
+            "vllm_config"].parallel_config.expert_tensor_parallel_size = 1
+
         draft_tp = draft_parallel_config.tensor_parallel_size
         target_tp = scorer_worker.parallel_config.tensor_parallel_size
 

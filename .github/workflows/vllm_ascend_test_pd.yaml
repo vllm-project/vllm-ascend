@@ -30,9 +30,10 @@ defaults:
   run:
     shell: bash -el {0}
 
+# only 1 job can runs on static-8-01-cards
 concurrency:
-  group: pr-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: static-8-01-cards
+  cancel-in-progress: false
 
 jobs:
   prefilling-decoding-disaggregation:
@@ -40,7 +41,11 @@ jobs:
     if: ${{ contains(github.event.pull_request.labels.*.name, 'pd-test') && contains(github.event.pull_request.labels.*.name, 'ready-for-test') || github.event_name == 'schedule' }}
     strategy:
       matrix:
-        vllm_verison: [main, v0.9.0]
+        vllm_verison: [
+            # revert me when V1 disaggregation prefill is merged in main
+            # main, 
+            v0.9.1
+          ]
     name: vLLM Ascend prefilling decoding disaggregation test
     runs-on: linux-arm64-npu-static-8
 
@@ -96,6 +101,8 @@ jobs:
           VLLM_TARGET_DEVICE=empty pip install -e .
 
       - name: Install vllm-project/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           pip install -r requirements-dev.txt
           pip install -v -e .

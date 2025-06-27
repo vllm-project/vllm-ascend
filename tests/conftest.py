@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/blob/main/tests/conftest.py
 #
 
+import contextlib
 import gc
 from typing import List, Optional, Tuple, TypeVar, Union
 
@@ -53,11 +54,17 @@ PromptAudioInput = _PromptMultiModalInput[Tuple[np.ndarray, int]]
 PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 
 
-def cleanup_dist_env_and_memory():
+def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     destroy_model_parallel()
     destroy_distributed_environment()
+    with contextlib.suppress(AssertionError):
+        torch.distributed.destroy_process_group()
+    if shutdown_ray:
+        import ray  # Lazy import Ray
+        ray.shutdown()
     gc.collect()
     torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
 
 
 class VllmRunner:
@@ -78,6 +85,7 @@ class VllmRunner:
         enable_chunked_prefill: bool = False,
         swap_space: int = 4,
         enforce_eager: Optional[bool] = True,
+        quantization: Optional[str] = None,
         **kwargs,
     ) -> None:
         self.model = LLM(
@@ -94,6 +102,7 @@ class VllmRunner:
             max_model_len=max_model_len,
             block_size=block_size,
             enable_chunked_prefill=enable_chunked_prefill,
+            quantization=quantization,
             **kwargs,
         )
 
