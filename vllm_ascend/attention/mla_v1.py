@@ -9,6 +9,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               MLAAttentionImpl)
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import get_current_vllm_config
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.utils import cdiv, round_down
@@ -557,12 +558,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        self.tp_size = get_tensor_model_parallel_world_size()
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
-        self.enable_multistream_mla = \
-            ascend_config.torchair_graph_config.enable_multistream_mla
 
         # Adapt torch air graph mode with spec decoding.
         speculative_config = get_current_vllm_config().speculative_config
@@ -586,7 +586,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         x = torch.bmm(x, self.W_UV)
         # Convert from (N, B, V) to (B, N * V)
         x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
-        return self.o_proj(x)[0]
+        return self.o_proj(x, is_prefill=False)[0]
 
     # Return `ql_nope`, `q_pe`
     def _q_proj_and_k_up_proj(self, x):
@@ -847,12 +847,12 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         current_ms_metadata = get_multistream_comm_context()
         if current_ms_metadata is None:
-            return self.o_proj(attn_output)[0]
+            return self.o_proj(attn_output, is_prefill=True)[0]
         else:
             current_ms_metadata.before_comm_event.record()
             with torch.npu.stream(current_ms_metadata.comm_stream):
                 current_ms_metadata.before_comm_event.wait()
-                return self.o_proj(attn_output)[0]
+                return self.o_proj(attn_output, is_prefill=True)[0]
 
     def exec_kv(
         self,
@@ -861,6 +861,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         sin: torch.Tensor,
         kv_cache: Tuple,
         slots: torch.Tensor,
+        enable_multistream_mla: bool = False,
     ):
 
         B = hidden_states.shape[0]
@@ -872,7 +873,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
         with npu_stream_switch("mla_secondary",
                                0,
-                               enabled=self.enable_multistream_mla):
+                               enabled=enable_multistream_mla):
             k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
                 kv,
                 self.kv_a_layernorm.weight,
@@ -1032,6 +1033,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: M,
         output: Optional[torch.Tensor] = None,
+        enable_multistream_mla: bool = False,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
         if attn_metadata is None:
@@ -1091,22 +1093,22 @@ class AscendMLAImpl(MLAAttentionImpl):
                 # KvRmsNormRopeCache and SingleRope.
                 npu_wait_tensor(decode_hs_or_q_c,
                                 cos,
-                                enabled=self.enable_multistream_mla)
+                                enabled=enable_multistream_mla)
                 npu_wait_tensor(decode_hs_or_q_c,
                                 sin,
-                                enabled=self.enable_multistream_mla)
+                                enabled=enable_multistream_mla)
             decode_ql_nope, decode_q_pe = \
                 self._q_proj_and_k_up_proj(decode_hs_or_q_c)
             if self.running_in_graph:
                 decode_k_pe, decode_k_nope = self.exec_kv(
                     hidden_states_or_kv_c_normed, cos, sin, kv_cache,
-                    attn_metadata.slot_mapping)
+                    attn_metadata.slot_mapping, enable_multistream_mla)
                 with npu_stream_switch("mla_secondary",
                                        0,
-                                       enabled=self.enable_multistream_mla):
+                                       enabled=enable_multistream_mla):
                     npu_wait_tensor(decode_q_pe,
                                     decode_k_pe,
-                                    enabled=self.enable_multistream_mla)
+                                    enabled=enable_multistream_mla)
                     decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
             else:
                 decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
