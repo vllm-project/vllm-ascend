@@ -237,8 +237,6 @@ class EplbUpdator:
     def get_expert_load(self) -> torch.Tensor:
         expert_maps = self.shared_dict["expert_maps"]
         moe_load = self.shared_dict["moe_load"]  # Tensor [L, W, global_experts_num]
-        if not moe_load:
-            return None
         num_local_experts = expert_maps.max() + 1
         load_info, _ = ExpertMapUtils.global2local_load(moe_load, expert_maps, num_local_experts)
         return load_info
