@@ -23,14 +23,15 @@ import torch.nn.functional as F
 from torch import nn
 from torch.nn import Parameter
 from transformers import PretrainedConfig
-from vllm.forward_context import get_forward_context
-from vllm_ascend.models.configuration_pangu_moe import PanGuMoEConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (get_pp_group,
+from vllm.distributed import (divide, get_pp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
+from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
+                                             get_tp_group, get_world_group)
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -47,19 +48,13 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors
-
 from vllm.model_executor.models.interfaces import SupportsPP
-from vllm.model_executor.models.utils import (extract_layer_index, is_pp_missing_parameter,
-                                                make_empty_intermediate_tensors_factory, make_layers,
-                                                maybe_prefix)
-
-from vllm.distributed import divide
-from vllm.distributed.parallel_state import get_tp_group, get_dp_group, get_ep_group, get_world_group
-
+from vllm.model_executor.models.utils import (
+    extract_layer_index, is_pp_missing_parameter,
+    make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
-
+from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
 
@@ -75,6 +70,7 @@ def use_h2p():
 # This class is adapted from vllm.model_executor.layers.linear.MergedColumnParallelLinear.
 # It is used to customize parallelism of certain linear(e.g., shared experts with all-rank tp).
 class CustomMergedColumnParallelLinear(LinearBase):
+
     def __init__(
         self,
         input_size: int,
@@ -135,10 +131,8 @@ class CustomMergedColumnParallelLinear(LinearBase):
         else:
             self.register_parameter("bias", None)
 
-    def weight_loader(self,
-                      param: Parameter,
-                      loaded_weight: torch.Tensor,
-                      loaded_shard_id: Optional[int] = None):
+    def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor,
+                      loaded_shard_id: int):
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
 
@@ -167,7 +161,7 @@ class CustomMergedColumnParallelLinear(LinearBase):
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
-    
+
     def forward(
         self, input_
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
@@ -201,7 +195,7 @@ class CustomRowParallelLinear(LinearBase):
         prefix: str = "",
         *,
         return_bias: bool = True,
-        group = None,
+        group=None,
     ):
         # Divide the weight matrix along the first dimension.
         self.group = group if group is not None else get_world_group()
@@ -247,7 +241,6 @@ class CustomRowParallelLinear(LinearBase):
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
         tp_rank = self.group.rank_in_group
-        tp_size = self.group.world_size
         input_dim = getattr(param, "input_dim", None)
         is_sharded_weight = getattr(param, "is_sharded_weight", False)
         is_sharded_weight = is_sharded_weight
@@ -266,7 +259,7 @@ class CustomRowParallelLinear(LinearBase):
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
-    
+
     def forward(
         self, input_
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
@@ -277,9 +270,7 @@ class CustomRowParallelLinear(LinearBase):
         # Only fuse bias add into GEMM for rank 0 (this ensures that
         # bias will not get added more than once in TP>1 case)
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        output = self.quant_method.apply(self,
-                                                  input_parallel,
-                                                  bias=bias_)
+        output = self.quant_method.apply(self, input_parallel, bias=bias_)
 
         output_bias = self.bias if self.skip_bias_add else None
 
@@ -318,11 +309,12 @@ class PanguProMoEMLP(nn.Module):
             )
         else:
             self.gate_up_proj = CustomMergedColumnParallelLinear(
-                hidden_size, [intermediate_size] * 2,
+                hidden_size,
+                [intermediate_size] * 2,
                 bias=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.gate_up_proj",
-                )
+            )
             self.down_proj = CustomRowParallelLinear(
                 intermediate_size,
                 hidden_size,
@@ -330,8 +322,8 @@ class PanguProMoEMLP(nn.Module):
                 quant_config=quant_config,
                 reduce_results=reduce_results,
                 prefix=f"{prefix}.down_proj",
-                )
-        
+            )
+
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
@@ -458,7 +450,7 @@ class PanguProMoESparseMoeBlock(nn.Module):
         _ROUTER_SCALE = self.router_scale
         if not use_h2p():
             final_hidden_states = self.experts(hidden_states=hidden_states,
-                                            router_logits=router_logits)
+                                               router_logits=router_logits)
         else:
             # TODO: when using h2p, we have to skip communication in vLLM
             # native FusedMoE. here we need to design a better FusedMoE
@@ -474,8 +466,8 @@ class PanguProMoESparseMoeBlock(nn.Module):
                 global_num_experts=self.experts.global_num_experts,
                 expert_map=self.experts.expert_map,
                 custom_routing_function=self.experts.custom_routing_function,
-                apply_router_weight_on_input=self.experts.apply_router_weight_on_input
-            )
+                apply_router_weight_on_input=self.experts.
+                apply_router_weight_on_input)
 
         if shared_output is not None:
             final_hidden_states = final_hidden_states + shared_output
@@ -534,14 +526,13 @@ class PanguProMoEAttention(nn.Module):
         )
 
         if use_h2p():
-            self.o_proj = CustomRowParallelLinear(
-                self.total_num_heads * self.head_dim,
-                hidden_size,
-                bias=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.o_proj",
-                group=get_tp_group()
-            )
+            self.o_proj = CustomRowParallelLinear(self.total_num_heads *
+                                                  self.head_dim,
+                                                  hidden_size,
+                                                  bias=True,
+                                                  quant_config=quant_config,
+                                                  prefix=f"{prefix}.o_proj",
+                                                  group=get_tp_group())
         else:
             self.o_proj = RowParallelLinear(
                 self.total_num_heads * self.head_dim,
@@ -615,8 +606,7 @@ class PanguProMoEDecoderLayer(nn.Module):
         layer_idx = extract_layer_index(prefix)
         mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
                            config.mlp_only_layers)
-        if (layer_idx
-                not in mlp_only_layers) and (config.num_experts > 0):  ### ???
+        if (layer_idx not in mlp_only_layers) and (config.num_experts > 0):
             self.mlp = PanguProMoESparseMoeBlock(
                 config=config,
                 quant_config=quant_config,
@@ -646,6 +636,8 @@ class PanguProMoEDecoderLayer(nn.Module):
         h2p_pad_idx: Optional[torch.Tensor] = None,
         is_start_layer: Optional[bool] = False,
     ) -> torch.Tensor:
+        need_h2p_pad = h2p_unpad_idx is not None and h2p_pad_idx is not None \
+            and h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]
 
         # Self Attention
         if residual is None:
@@ -656,13 +648,16 @@ class PanguProMoEDecoderLayer(nn.Module):
                 hidden_states, residual)
         if use_h2p():
             if is_start_layer:
-                if h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]:
+                if need_h2p_pad:
                     residual = residual.index_select(dim=0, index=h2p_pad_idx)
-                residual = torch.tensor_split(residual, get_tp_group().world_size)[get_tp_group().rank_in_group]
+                residual = torch.tensor_split(
+                    residual,
+                    get_tp_group().world_size)[get_tp_group().rank_in_group]
             else:
                 hidden_states = get_tp_group().all_gather(hidden_states, 0)
-                if h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]:
-                    hidden_states = hidden_states.index_select(dim=0, index=h2p_unpad_idx)
+                if need_h2p_pad:
+                    hidden_states = hidden_states.index_select(
+                        dim=0, index=h2p_unpad_idx)
 
         hidden_states = self.self_attn(
             positions=positions,
@@ -672,8 +667,9 @@ class PanguProMoEDecoderLayer(nn.Module):
         )
 
         if use_h2p():
-            if h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]:
-                hidden_states = hidden_states.index_select(dim=0, index=h2p_pad_idx)
+            if need_h2p_pad:
+                hidden_states = hidden_states.index_select(dim=0,
+                                                           index=h2p_pad_idx)
             hidden_states = dist._functional_collectives.reduce_scatter_tensor(
                 hidden_states,
                 "sum",
@@ -686,7 +682,9 @@ class PanguProMoEDecoderLayer(nn.Module):
 
         if use_h2p():
             all_rank_group = get_world_group().device_group
-            output_size = (hidden_states.shape[0] * get_world_group().world_size, hidden_states.shape[1])
+            output_size = (hidden_states.shape[0] *
+                           get_world_group().world_size,
+                           hidden_states.shape[1])
             # Allocate output tensor.
             output_tensor = torch.empty(output_size,
                                         dtype=hidden_states.dtype,
@@ -697,8 +695,7 @@ class PanguProMoEDecoderLayer(nn.Module):
                                         group=all_rank_group)
             hidden_states = output_tensor
 
-        hidden_states = self.mlp(hidden_states,
-                                 attn_metadata=attn_metadata)
+        hidden_states = self.mlp(hidden_states, attn_metadata=attn_metadata)
 
         if use_h2p():
             hidden_states = dist._functional_collectives.reduce_scatter_tensor(
@@ -768,7 +765,7 @@ class PanguProMoEModel(nn.Module):
         if use_h2p():
             # calculate necessary padding/unpadding idx before model forward.
 
-            # the attn_metadata will be passed directly when use torchair. 
+            # the attn_metadata will be passed directly when use torchair.
             # if attn_meatadata is not passed, we try to get it from forward_context.
             if attn_metadata is None:
                 attn_metadata = get_forward_context().attn_metadata
@@ -783,12 +780,18 @@ class PanguProMoEModel(nn.Module):
             # reduce scatter will split the input tensor into equal sizes and then scatter them on all ranks.
             # we need pad it before if the shape can't be divided by group size.
             # for h2p, we need pad it so that it can be divided by tp_size.
-            h2p_padded_len = (tp_size - (max_tokens_across_dp % tp_size)) % tp_size + max_tokens_across_dp - hidden_states.shape[0]
-            h2p_unpad_idx = torch.arange(hidden_states.shape[0], device=hidden_states.device, dtype=torch.int32)
+            h2p_padded_len = (
+                tp_size - (max_tokens_across_dp % tp_size)
+            ) % tp_size + max_tokens_across_dp - hidden_states.shape[0]
+            h2p_unpad_idx = torch.arange(hidden_states.shape[0],
+                                         device=hidden_states.device,
+                                         dtype=torch.int32)
             h2p_pad_idx = torch.cat([
-                    h2p_unpad_idx,
-                    torch.zeros(h2p_padded_len, dtype=torch.int32, device=hidden_states.device)
-                ])
+                h2p_unpad_idx,
+                torch.zeros(h2p_padded_len,
+                            dtype=torch.int32,
+                            device=hidden_states.device)
+            ])
         else:
             h2p_unpad_idx = None
             h2p_pad_idx = None
@@ -799,9 +802,7 @@ class PanguProMoEModel(nn.Module):
                 positions, hidden_states, residual,
                 kv_caches[i -
                           self.start_layer] if kv_caches is not None else None,
-                attn_metadata,
-                h2p_unpad_idx,
-                h2p_pad_idx,
+                attn_metadata, h2p_unpad_idx, h2p_pad_idx,
                 i == self.start_layer)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -811,7 +812,8 @@ class PanguProMoEModel(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         hidden_states = get_tp_group().all_gather(hidden_states, 0)
         if use_h2p() and h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]:
-            hidden_states = hidden_states.index_select(dim=0, index=h2p_unpad_idx)
+            hidden_states = hidden_states.index_select(dim=0,
+                                                       index=h2p_unpad_idx)
         return hidden_states
 
 
