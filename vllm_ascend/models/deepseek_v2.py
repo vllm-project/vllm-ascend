@@ -772,5 +772,12 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
     def get_topk_ids(self,layer_id):
         return self.model.layers[layer_id+3].mlp.experts.topk_ids
 
+    def get_all_topk_ids(self,num_moe_layers):
+        all_topk_id = []
+        for layer_id in range(num_moe_layers):
+            load_tensor = self.get_topk_ids(layer_id)  
+            all_topk_id.append(load_tensor)
+        return all_topk_id
+
 class CustomDeepseekV3ForCausalLM(CustomDeepseekV2ForCausalLM):
     pass

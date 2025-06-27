@@ -678,7 +678,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 global_redundant_expert_num=global_redundant_expert_num,
                 shared_experts=shared_experts,
                 **kwargs), topk_ids
-        elif self.torchair_graph_enabled or self.ep_group.world_size == 1:
+        elif fused_moe_state == FusedMoEState.AllGather:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
                                  w1_scale=layer.w13_weight_scale,

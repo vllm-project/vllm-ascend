@@ -14,7 +14,9 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+
 import torch
+from typing import Dict, List
 import torch.distributed as dist
 import vllm.envs as envs
 from multiprocessing import Queue, Manager
@@ -22,7 +24,7 @@ from multiprocessing import Queue, Manager
 from vllm.logger import logger
 from vllm_ascend.eplb.core.worker.eplb_worker import EplbProcess
 from vllm_ascend.eplb.core.loader.device_transfer_loader import D2DExpertWeightLoader
-
+from vllm_ascend.eplb.tool.eplb_utils import ExpertMapUtils
 
 class EplbUpdator:
 
@@ -33,6 +35,7 @@ class EplbUpdator:
         self.adaptor = adaptor
         self.eplb_loader = D2DExpertWeightLoader(eplb_adaptor=self.adaptor)
         self.num_moe_layers = self.adaptor.num_moe_layers
+        self.global_expert_num = self.adaptor.global_expert_num
 
     def init_eplb(self, expert_map_path):
         self.num_expert_load_gather = 10
@@ -44,7 +47,7 @@ class EplbUpdator:
             if not envs.VLLM_ALLOW_EXPERT_LOAD_COLLECTING:
                 self.num_expert_load_gather = self.num_iterations
         except Exception as e:
-            self.num_expert_load_gather = self.num_iterations
+                self.num_expert_load_gather = self.num_iterations
 
         self.weight_update_counter = 0
         self.expert_map_initialized = False
@@ -58,7 +61,7 @@ class EplbUpdator:
         self.cur_iterations: torch.int64 = 0
 
         self.wait_worker_iterations: torch.int64 = 0
-        self.num_wait_worker_iterations: torch.int64 = 10
+        self.num_wait_worker_iterations: torch.int64 = 20
 
         self.planner_block_queue = Queue()
         self.block_update_queue = Queue(maxsize=1)
@@ -70,16 +73,16 @@ class EplbUpdator:
             # 热度负载信息 [num_layers, world_size, num_experts]
             "moe_load": None,
             # 所有的专家表[num_layers, world_size, num_experts]
-            "expert_maps": None
+            "expert_maps": None,
         })
 
         self.eplb = EplbProcess(
-            shared_dict=self.shared_dict,
-            planner_q=self.planner_block_queue,
-            block_update_q=self.block_update_queue,
-            redundant_enable=self.redundant_enable,
-            policy_type=6,
-            enable_d2d=True
+            shared_dict = self.shared_dict,
+            planner_q = self.planner_block_queue,
+            block_update_q = self.block_update_queue,
+            redundant_enable = self.redundant_enable, 
+            policy_type = 6,
+            enable_d2d = True
         )
 
         self.eplb_process = self.eplb._launch_process()
@@ -88,15 +91,14 @@ class EplbUpdator:
 
     def get_update_iteration(self):
         self.cur_iterations = self.cur_iterations + 1
-        load_gather_iteration = self.cur_iterations % self.num_expert_load_gather == 0 if not self.gate_eplb else self.cur_iterations == self.num_iterations
-        upate_iteration = self.cur_iterations % self.num_iterations == 0 if not self.gate_eplb else self.cur_iterations == self.num_iterations
+        load_gather_iteration = self.cur_iterations % self.num_expert_load_gather == 0 if not self.gate_eplb else self.cur_iterations == self.num_iterations 
+        upate_iteration = self.cur_iterations % self.num_iterations == 0 if not self.gate_eplb else self.cur_iterations == self.num_iterations 
         return load_gather_iteration, upate_iteration
 
     def get_init_expert_map(self):
         try:
             if not self.expert_map_initialized:
-                self.shared_dict["expert_maps"] = self.adaptor.get_init_expert_map_from_file(self.num_moe_layers,
-                                                                                             self.expert_map_path)
+                self.shared_dict["expert_maps"] = self.adaptor.get_init_expert_map_from_file(self.num_moe_layers, self.expert_map_path)
                 self.expert_map_initialized = True
         except Exception as e:
             logger.warning(f"[ModelRunner] Failed to wake EPLB process: {e}", exc_info=True)
@@ -114,32 +116,31 @@ class EplbUpdator:
             self.weight_loading = True
 
         if self.update_in_flight and self.weight_loading and self.weight_update_counter < self.num_moe_layers:
-            (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = self.update_info_all.pop(
-                0)
+            (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = self.update_info_all.pop(0)
             rank_id = torch.distributed.get_rank()
             self.eplb_loader.set_log2phy_map(log2phy_map)
             expert_send_info_this_rank = expert_send_info[rank_id] if rank_id in expert_send_info else []
             expert_recv_info_this_rank = expert_recv_info[rank_id] if rank_id in expert_recv_info else []
-            # logger.info(f"check update info, layer = {layer_id}, send = {expert_send_info_this_rank}, recv = {expert_recv_info_this_rank}")
+            #logger.info(f"check update info, layer = {layer_id}, send = {expert_send_info_this_rank}, recv = {expert_recv_info_this_rank}")
             self.eplb_loader.generate_expert_d2d_transfer_task(expert_send_info_this_rank,
-                                                               expert_recv_info_this_rank, updated_expert_map,
-                                                               layer_id + 3)
+                expert_recv_info_this_rank, updated_expert_map, layer_id + 3)
             self.weight_update_counter += 1
             if self.weight_update_counter == self.num_moe_layers:
                 self.weight_update_counter = 0
                 self.update_in_flight = False
                 self.update_info_all = []
-
         # set asynchronous stream for d2d expert weight update
         self.reqs = []
         self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
-    def forward_end(self, dummy_run=False):
-        self.adaptor.get_rank_expert_workload(self.num_moe_layers, dummy_run)
+
+    def forward_end(self,dummy_run=False):
+        self.adaptor.collect_topk_ids(dummy_run)
         if not self.update_in_flight:
             load_gather_iteration, update_iteration = self.get_update_iteration()
             if load_gather_iteration:
-                moe_load = self.compute_and_set_moe_load(dummy_run)
+                moe_load = self.compute_and_set_moe_load()
+                self.get_expert_load()
             if update_iteration:
                 self.wakeup_eplb_worker()
                 self.update_in_flight = True
@@ -151,8 +152,9 @@ class EplbUpdator:
 
         self.eplb_loader.update_expert_map_and_weight(self.reqs, self.redundant_enable)
 
-    def compute_and_set_moe_load(self, dummy_run=False):
-        local_load = self.adaptor.get_rank_expert_workload(self.num_moe_layers, dummy_run)
+    def compute_and_set_moe_load(self,dummy_run=False):
+        local_load = self.adaptor.get_rank_expert_workload()
+
         self._gather_buffer = None
         if dist.is_initialized():
             self.world_size = dist.get_world_size()
@@ -177,7 +179,7 @@ class EplbUpdator:
     def warm_up_eplb(self):
 
         self.get_init_expert_map()
-
+        self.adaptor.collect_topk_ids(dummy_run=False)
         self.compute_and_set_moe_load()
 
         src_tensor = torch.empty((1,), device=self.device)
@@ -197,7 +199,7 @@ class EplbUpdator:
                 continue
             comm_op_list.append(
                 dist.P2POp(dist.irecv, src_tensor, src_rank)
-            )
+        )
         if comm_op_list:
             reqs = dist.batch_isend_irecv(comm_op_list)
 
@@ -210,7 +212,7 @@ class EplbUpdator:
         """
         send_all, recv_all, stacked_maps, stacked_log2phy, layer_id_tensor = packed_update_info
 
-        maps = stacked_maps.unbind(0)
+        maps     = stacked_maps.unbind(0)
         layer_ids = layer_id_tensor.tolist()
 
         if self.redundant_enable:
@@ -222,7 +224,7 @@ class EplbUpdator:
         _send = send_all
         _recv = recv_all
         _maps = maps
-        _l2p = log2phy_list
+        _l2p  = log2phy_list
         _lids = layer_ids
 
         recovered = [
@@ -232,21 +234,14 @@ class EplbUpdator:
         ]
         return recovered
 
-    def get_expert_load(self) -> str:
-
-        # todo wjh 给到返回值
-        # return self.shared_dict['moe_load']
-        # mock json_str
-        experts_load = ('{\"expert_load\":['
-                        '{\"ip\":\"141.xxx.xxx.181\",'
-                        '\"node_0\":'
-                        '{\"card_0\":'
-                        '[{\"layer_4\":{\"expert_0\":3,\"expert_2\":1}},{\"layer_5\":{\"expert_0\":3,\"expert_2\":1}}],'
-                        '\"card_1\":[{\"layer_4\":{\"expert_1\":3,\"expert_3\":1},\"layer_5\":{\"expert_0\":3,\"'
-                        'expert_2\":1}}]}},{\"ip\":\"141.xxx.xxx.177\",\"node_0\":{\"card_0\":[{\"layer_4\":'
-                        '{\"expert_0\":3,\"expert_2\":1}},{\"layer_5\":{\"expert_0\":3,\"expert_2\":1}}],'
-                        '\"card_1\":[{\"layer_4\":{\"expert_1\":3,\"expert_3\":1}}]}}]}')
-        return experts_load
+    def get_expert_load(self) -> torch.Tensor:
+        expert_maps = self.shared_dict["expert_maps"]
+        moe_load = self.shared_dict["moe_load"]  # Tensor [L, W, global_experts_num]
+        if not moe_load:
+            return None
+        num_local_experts = expert_maps.max() + 1
+        load_info, _ = ExpertMapUtils.global2local_load(moe_load, expert_maps, num_local_experts)
+        return load_info
 
     def update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
         logger.info(f" start update {self.num_expert_load_gather=}, {self.num_iterations}...")
