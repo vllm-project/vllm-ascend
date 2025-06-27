@@ -138,7 +138,6 @@ class CaMemAllocator:
         We cannot call the constructor directly.
         Call this method to get the instance.
         """
-        assert camem_available, "camem allocator is not available"
         if CaMemAllocator.instance is None:
             CaMemAllocator.instance = CaMemAllocator()
         return CaMemAllocator.instance
