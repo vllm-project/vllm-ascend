@@ -111,6 +111,10 @@ jobs:
         run: |
           VLLM_TARGET_DEVICE=empty pip install -e .
 
+      - name: Pin transformers to 4.52.1
+        run: |
+          pip install transformers==4.52.1
+
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
