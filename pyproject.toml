@@ -12,12 +12,14 @@ requires = [
     "scipy",
     "setuptools>=64",
     "setuptools-scm>=8",
-    "torch-npu==2.5.1.post1.dev20250528",
+    "torch-npu==2.5.1.post1.dev20250619",
     "torch>=2.5.1",
     "torchvision<0.21.0",
     "wheel",
     "msgpack",
     "quart",
     "numba",
+    # Remove after https://github.com/vllm-project/vllm-ascend/issues/1470
+    "transformers<4.53.0",
 ]
 build-backend = "setuptools.build_meta"
