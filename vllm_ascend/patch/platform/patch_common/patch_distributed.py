@@ -23,7 +23,7 @@ import vllm.distributed
 import vllm.envs as envs
 from vllm.config import ParallelConfig
 
-from vllm_ascend.utils import NullHandle, is_310p
+from vllm_ascend.utils import is_310p
 
 
 def ascend_destroy_model_parallel():
@@ -64,6 +64,15 @@ def parallel_config_get_dp_port(self) -> int:
 
 vllm.distributed.parallel_state.destroy_model_parallel = ascend_destroy_model_parallel
 ParallelConfig.get_next_dp_init_port = parallel_config_get_dp_port
+
+
+class NullHandle:
+
+    def __init__(self):
+        pass
+
+    def wait(self):
+        pass
 
 
 def communication_adaptation_310p():
