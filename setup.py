@@ -27,6 +27,7 @@ from typing import Dict, List
 
 from setuptools import Extension, find_packages, setup
 from setuptools.command.build_ext import build_ext
+from setuptools.command.build_py import build_py
 from setuptools.command.develop import develop
 from setuptools.command.install import install
 from setuptools_scm import get_version
@@ -76,6 +77,30 @@ class CMakeExtension(Extension):
                  **kwargs) -> None:
         super().__init__(name, sources=[], py_limited_api=False, **kwargs)
         self.cmake_lists_dir = os.path.abspath(cmake_lists_dir)
+
+
+class custom_build_info(build_py):
+
+    def run(self):
+        soc_version = envs.SOC_VERSION
+        if not soc_version:
+            raise ValueError(
+                "SOC version is not set. Please set SOC_VERSION environment variable."
+            )
+        if "310" in soc_version and not envs.COMPILE_CUSTOM_KERNELS:
+            raise ValueError(
+                "SOC version 310 only supports custom kernels. Please set COMPILE_CUSTOM_KERNELS=1 to enable custom kernels."
+            )
+
+        package_dir = os.path.join(ROOT_DIR, "vllm_ascend", "_build_info.py")
+        with open(package_dir, "w+") as f:
+            f.write('# Auto-generated file\n')
+            f.write(f"__soc_version__ = '{soc_version}'\n")
+            f.write(
+                f"__sleep_mode_enabled__ = {envs.COMPILE_CUSTOM_KERNELS}\n")
+        logging.info(
+            f"Generated _build_info.py with SOC version: {soc_version}")
+        super().run()
 
 
 class cmake_build_ext(build_ext):
@@ -326,7 +351,11 @@ def get_requirements() -> List[str]:
     return requirements
 
 
-cmdclass = {"build_ext": cmake_build_ext, "install": custom_install}
+cmdclass = {
+    "build_py": custom_build_info,
+    "build_ext": cmake_build_ext,
+    "install": custom_install
+}
 
 setup(
     name="vllm_ascend",
