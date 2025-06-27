@@ -254,7 +254,6 @@ class EplbUpdator:
                 layers.append({f"layer_{l}": layer_val})
             expert_load[f"card_{c}"] = layers
 
-        print(expert_load)
         return {"expert_load": expert_load}
 
     def update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
