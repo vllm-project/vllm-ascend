@@ -2,6 +2,7 @@ from collections.abc import Iterable
 from typing import Optional, Union
 
 import torch
+import torch_npu
 from torch import nn
 from transformers import Qwen3Config
 
@@ -62,7 +63,7 @@ class CustomQwen3Attention(Qwen3Attention):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        q, k, v = torch_npu.npu_split_with_size(qkv, [self.q_size, self.kv_size, self.kv_size], dim=1)
         # Add qk-norm
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
                            self.head_dim)
