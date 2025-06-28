@@ -124,6 +124,10 @@ class NPUPlatform(Platform):
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         cache_config = vllm_config.cache_config
+        kv_cache_dtype = vllm_config.additional_config.get(
+            "kv_cache_dtype", None)
+        if kv_cache_dtype is not None:
+            vllm_config.cache_config.cache_dtype = kv_cache_dtype
 
         if parallel_config:
             # Default value for expert tensor parallel size
