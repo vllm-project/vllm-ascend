@@ -33,6 +33,7 @@ class AscendW8A8LinearMethod:
     Args:
         w_sym: whether the linear weight is symmetrically quantized.
     """
+    params_dtype: torch.dtype = torch.bfloat16
 
     def __init__(self) -> None:
         # aclnn quant matmul requires to transpose matrix B, set to true by default.
@@ -54,6 +55,7 @@ class AscendW8A8LinearMethod:
         params_dict = {}
         params_dict["input_scale"] = torch.empty(1, dtype=params_dtype)
         params_dict["input_offset"] = torch.empty(1, dtype=torch.int8)
+        AscendW8A8LinearMethod.params_dtype = params_dtype
         return params_dict
 
     @staticmethod
@@ -75,6 +77,7 @@ class AscendW8A8LinearMethod:
         params_dict["weight_offset"] = torch.empty(output_size,
                                                    1,
                                                    dtype=params_dtype)
+        AscendW8A8LinearMethod.params_dtype = params_dtype
         return params_dict
 
     @staticmethod
@@ -84,11 +87,10 @@ class AscendW8A8LinearMethod:
         bias: Optional[torch.Tensor] = None,
         tp_rank: Optional[int] = 0,
     ) -> torch.Tensor:
-        original_dtype = x.dtype
-        if original_dtype != torch.int8:
+        if x.dtype != torch.int8:
             x = quant_per_tensor(
                 x,
-                layer.aclnn_input_scale,
+                layer.aclnn_input_scale_reciprocal,
                 layer.aclnn_input_offset,
             )
         quant_bias = layer.quant_bias if tp_rank == 0 else None
@@ -97,12 +99,15 @@ class AscendW8A8LinearMethod:
             layer.weight,
             layer.deq_scale,
             bias=quant_bias,
-            output_dtype=original_dtype,
+            output_dtype=AscendW8A8LinearMethod.params_dtype,
         )
 
     def process_weights_after_loading(self, layer):
         expanding_factor = layer.weight.data.shape[1]
-        layer.aclnn_input_scale = 1 / torch.nn.Parameter(
+        layer.aclnn_input_scale = torch.nn.Parameter(
+            layer.input_scale.data.repeat(expanding_factor),
+            requires_grad=False)
+        layer.aclnn_input_scale_reciprocal = 1 / torch.nn.Parameter(
             layer.input_scale.data.repeat(expanding_factor),
             requires_grad=False)
         layer.aclnn_input_offset = torch.nn.Parameter(
