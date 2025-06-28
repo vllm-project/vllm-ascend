@@ -56,16 +56,6 @@
 #       Need a PR to vllm to support get port from environment.
 #    Future Plan:
 #       Remove those patch when vllm merged them
-#   3. `vllm.config.ParallelConfig.ParallelConfig.stateless_init_dp_group`
-#    Why:
-#       vLLM use gloo backend by default to initialize stateless dp process gourp, but we want to use hccl here to
-#       get better performance
-#    How：
-#       adopt nccl backend to init process group.(Now we still use gloo, it's just a placeholder, we'll use nccl in the future)
-#    Related PR (if no, explain why):
-#       Need a PR to vllm to support more backend.
-#    Future Plan:
-#       Remove those patch when vllm support more backend.
 #
 # * Worker Patch:
 # ===============
@@ -100,18 +90,6 @@
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm and vllm-ascend.
 #
-#   2. `vllm.spec_decode.multi_step_worker.MultiStepWorker.set_include_gpu_probs_tensor` and
-#       `vllm.spec_decode.multi_step_worker.MultiStepWorker.set_should_modify_greedy_probs_inplace`
-#    Why:
-#       vLLM `Remove Sampler from Model Code` so vllm-ascend needs adapt to this change.
-#    How：
-#       Use vLLM 0.8.4 method to patch it.
-#    Related PR (if no, explain why):
-#       - https://github.com/vllm-project/vllm/pull/15195
-#       - https://github.com/vllm-project/vllm-ascend/pull/395
-#    Future Plan:
-#       Remove it when we identify the reasons clearly.
-#
 # ** File: worker/patch_common/patch_spec_decode_worker.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.spec_decode.spec_decode_worker.SpecDecodeWorker.create_worker`
@@ -126,20 +104,6 @@
 #       - https://github.com/vllm-project/vllm-ascend/pull/395
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm and vllm-ascend.
-#
-# ** File: worker/patch_common/patch_eagle.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.spec_decode.eagle.prepare_inputs`
-#    Why:
-#       We need to use the patched `prepare_input_kernel` in `eagle.prepare_inputs`.
-#       The mainly reason to overwrite `prepare_input_kernel` is this is a triton
-#       kernel, ascend is now not support triton kernel.
-#    How：
-#       Re-implementation the `prepare_input_kernel` triton kernel by pytorch
-#    Related PR (if no, explain why):
-#       - Ascend doesn't support triton
-#    Future Plan:
-#       Revert it when the ascend support triton kernel.
 #
 # ** File: worker/patch_common/patch_sampler.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

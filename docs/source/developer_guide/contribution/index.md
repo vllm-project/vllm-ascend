@@ -4,7 +4,7 @@
 It's recommended to set up a local development environment to build and test
 before you submit a PR.
 
-### Prepare environment and build
+### Setup development environment
 
 Theoretically, the vllm-ascend build is only supported on Linux because
 `vllm-ascend` dependency `torch_npu` only supports Linux.
@@ -48,37 +48,11 @@ bash format.sh
 git commit -sm "your commit info"
 ```
 
-### Testing
+🎉 Congratulations! You have completed the development environment setup.
 
-Although vllm-ascend CI provide integration test on [Ascend](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test.yaml), you can run it
-locally. The simplest way to run these integration tests locally is through a container:
+### Test locally
 
-```bash
-# Under Ascend NPU environment
-git clone https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-
-export IMAGE=vllm-ascend-dev-image
-export CONTAINER_NAME=vllm-ascend-dev
-export DEVICE=/dev/davinci1
-
-# The first build will take about 10 mins (10MB/s) to download the base image and packages
-docker build -t $IMAGE -f ./Dockerfile .
-# You can also specify the mirror repo via setting VLLM_REPO to speedup
-# docker build -t $IMAGE -f ./Dockerfile . --build-arg VLLM_REPO=https://gitee.com/mirrors/vllm
-
-docker run --rm --name $CONTAINER_NAME --network host --device $DEVICE \
-           --device /dev/davinci_manager --device /dev/devmm_svm \
-           --device /dev/hisi_hdc -v /usr/local/dcmi:/usr/local/dcmi \
-           -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-           -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-           -ti $IMAGE bash
-
-cd vllm-ascend
-pip install -r requirements-dev.txt
-
-pytest tests/
-```
+You can refer to [Testing](./testing.md) doc to help you setup testing environment and running tests locally.
 
 ## DCO and Signed-off-by
 
@@ -111,3 +85,10 @@ If the PR spans more than one category, please include all relevant prefixes.
 
 You may find more information about contributing to vLLM Ascend backend plugin on [<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing/overview.html).
 If you find any problem when contributing, you can feel free to submit a PR to improve the doc to help other developers.
+
+
+:::{toctree}
+:caption: Index
+:maxdepth: 1
+testing
+:::

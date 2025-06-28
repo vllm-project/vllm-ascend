@@ -43,6 +43,7 @@ on:
       - '**/*.py'
       - '.github/workflows/vllm_ascend_test.yaml'
       - '!docs/**'
+      - '!examples/**'
       - 'pytest.ini'
       - '!benchmarks/**'
       - 'tools/mypy.sh'
@@ -66,6 +67,8 @@ concurrency:
 
 jobs:
   lint:
+    # Only trigger lint on pull request
+    if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -131,7 +134,8 @@ jobs:
   ut:
     needs: [lint]
     name: unit test
-    if: ${{ needs.lint.result == 'success' }}
+    # only trigger e2e test on [pull request after lint passed] and [merged commit]
+    if: ${{ needs.lint.result == 'success' || github.event_name == 'push' }}
     runs-on: ubuntu-latest
     container:
       image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
@@ -191,7 +195,8 @@ jobs:
 
   e2e:
     needs: [lint]
-    if: ${{ needs.lint.result == 'success' }}
+    # only trigger e2e test on pull request after lint passed
+    if: ${{ needs.lint.result == 'success' && github.event_name == 'pull_request' }}
     strategy:
       max-parallel: 2
       matrix:
@@ -255,8 +260,7 @@ jobs:
           # TODO: switch hf to modelscope
           VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
             pytest -sv tests/e2e/singlecard/test_ilama_lora.py
-          # TODO(sss): guided decoding doesn't work, fix it later
-          # pytest -sv tests/e2e/singlecard/test_guided_decoding.py
+          pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv tests/e2e/singlecard/test_camem.py
           pytest -sv tests/e2e/singlecard/ \
           --ignore=tests/e2e/singlecard/test_offline_inference.py \
@@ -274,8 +278,7 @@ jobs:
           # TODO: switch hf to modelscope
           VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
             pytest -sv tests/e2e/singlecard/test_ilama_lora.py
-          # guided decoding doesn't work, fix it later
-          # pytest -sv tests/e2e/singlecard/test_guided_decoding.py
+          pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv tests/e2e/singlecard/test_camem.py
           pytest -sv tests/e2e/singlecard/test_prompt_embedding.py
           pytest -sv tests/e2e/singlecard/ \
@@ -355,11 +358,17 @@ jobs:
             pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
           # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py will raise error.
           # To avoid oom, we need to run the test in a single process.
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_topk
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
-          pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_ilama_lora_tp2.py --ignore=tests/e2e/multicard/test_offline_inference_distributed.py
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_dbo
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeekV3_dbo
+          pytest -sv tests/e2e/multicard/test_data_parallel.py
+          pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_ilama_lora_tp2.py \
+            --ignore=tests/e2e/multicard/test_offline_inference_distributed.py \
+            --ignore=tests/e2e/multicard/test_data_parallel.py
 
       - name: Run vllm-project/vllm-ascend test on V0 engine
         if: ${{ github.event_name == 'schedule' }}
@@ -376,4 +385,7 @@ jobs:
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_topk
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
-          pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_ilama_lora_tp2.py --ignore=tests/e2e/multicard/test_offline_inference_distributed.py
+          pytest -sv tests/e2e/multicard/test_data_parallel.py
+          pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_ilama_lora_tp2.py \
+            --ignore=tests/e2e/multicard/test_offline_inference_distributed.py \
+            --ignore=tests/e2e/multicard/test_data_parallel.py

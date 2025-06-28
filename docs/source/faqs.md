@@ -3,7 +3,7 @@
 ## Version Specific FAQs
 
 - [[v0.7.3.post1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1007)
-- [[v0.9.0rc2] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1115)
+- [[v0.9.1rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1351)
 
 ## General FAQs
 
@@ -86,7 +86,7 @@ Currently, w8a8 quantization is already supported by vllm-ascend originally on v
 
 Please following the [quantization inferencing tutorail](https://vllm-ascend.readthedocs.io/en/main/tutorials/multi_npu_quantization.html) and replace model to DeepSeek.
 
-### 12. There is not output in log when loading models using vllm-ascend, How to solve it?
+### 12. There is no output in log when loading models using vllm-ascend, How to solve it?
 
 If you're using vllm 0.7.3 version, this is a known progress bar display issue in VLLM, which has been resolved in [this PR](https://github.com/vllm-project/vllm/pull/12428), please cherry-pick it locally by yourself. Otherwise, please fill up an issue.
 
@@ -114,7 +114,7 @@ In scenarios where NPUs have limited HBM (High Bandwidth Memory) capacity, dynam
 
 - **Configure `PYTORCH_NPU_ALLOC_CONF`**: Set this environment variable to optimize NPU memory management. For example, you can `export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True` to enable virtual memory feature to mitigate memory fragmentation caused by frequent dynamic memory size adjustments during runtime, see more note in: [PYTORCH_NPU_ALLOC_CONF](https://www.hiascend.com/document/detail/zh/Pytorch/700/comref/Envvariables/Envir_012.html).
 
-### 15. Failed to enable NPU graph mode when running DeepSeek?
+### 16. Failed to enable NPU graph mode when running DeepSeek?
 You may encounter the following error if running DeepSeek with NPU graph mode enabled. The allowed number of queries per kv when enabling both MLA and Graph mode only support {32, 64, 128}, **Thus this is not supported for DeepSeek-V2-Lite**, as it only has 16 attention heads. The NPU graph mode support on DeepSeek-V2-Lite will be done in the future.
 
 And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tensor parallel split, num_heads / num_kv_heads in {32, 64, 128}.
@@ -122,4 +122,44 @@ And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tenso
 ```bash
 [rank0]: RuntimeError: EZ9999: Inner Error!
 [rank0]: EZ9999: [PID: 62938] 2025-05-27-06:52:12.455.807 numHeads / numKvHeads = 8, MLA only support {32, 64, 128}.[FUNC:CheckMlaAttrs][FILE:incre_flash_attention_tiling_check.cc][LINE:1218]
+```
+
+### 17. Failed to reinstall vllm-ascend from source after uninstalling vllm-ascend?
+You may encounter the problem of C compilation failure when reinstalling vllm-ascend from source using pip. If the installation fails, it is recommended to use `python setup.py install` to install, or use `python setup.py clean` to clear the cache.
+
+### 18. How to generate determinitic results when using vllm-ascend?
+There are several factors that affect output certainty:
+
+1. Sampler Method: using **Greedy sample** by setting `temperature=0` in `SamplingParams`, e.g.:
+
+```python
+from vllm import LLM, SamplingParams
+
+prompts = [
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+]
+
+# Create a sampling params object.
+sampling_params = SamplingParams(temperature=0)
+# Create an LLM.
+llm = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
+
+# Generate texts from the prompts.
+outputs = llm.generate(prompts, sampling_params)
+for output in outputs:
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+```
+
+2. Set the following enveriments parameters:
+
+```bash
+export LCCL_DETERMINISTIC = 1
+export HCCL_DETERMINISTIC = 1
+export ATB_MATMUL_SHUFFLE_K_ENABLE = 0
+export ATB_LLM_LCOC_ENABLE = 0
 ```

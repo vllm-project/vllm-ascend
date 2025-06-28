@@ -1,4 +1,4 @@
-name: 'image / Ubuntu'
+name: 'image / Ubuntu / 310p'
 # This is a docker build check and publish job:
 # 1. PR Triggered docker image build check
 #   - is for image build check
@@ -16,7 +16,7 @@ on:
       - 'main'
       - '*-dev'
     paths:
-      - '.github/workflows/image_310p.ubuntu.yml'
+      - '.github/workflows/image_310p_ubuntu.yml'
       - 'Dockerfile.310p'
       - 'vllm_ascend/**'
       - 'setup.py'
