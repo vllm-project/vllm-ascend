@@ -64,3 +64,4 @@ def test_deepseek_W4A8():
 def get_weight():
     from modelscope import snapshot_download  # type: ignore
     model_name=snapshot_download("vllm-ascend/DeepSeek-R1-w4a8-pruning")
+    return model_name
