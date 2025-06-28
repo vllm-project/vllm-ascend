@@ -751,7 +751,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         if attn_metadata.attn_state in [
                 AscendAttentionState.ChunkedPrefill,
-                AscendAttentionState.SpecDecoding
+                AscendAttentionState.SpecDecoding,
+                AscendAttentionState.PrefillCacheHit
         ] and not ascend_config.chunked_prefill_for_mla:
             attn_output_torch = torch.empty(num_tokens,
                                             self.num_heads * self.v_head_dim,
@@ -776,7 +777,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 causal=True)
         elif attn_metadata.attn_state in [
                 AscendAttentionState.ChunkedPrefill,
-                AscendAttentionState.SpecDecoding
+                AscendAttentionState.SpecDecoding,
+                AscendAttentionState.PrefillCacheHit
         ]:
             attn_lse = torch.empty(self.num_heads,
                                    num_tokens,
@@ -830,7 +832,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             [num_tokens, self.num_heads * self.v_head_dim])
         if attn_metadata.attn_state in [
                 AscendAttentionState.ChunkedPrefill,
-                AscendAttentionState.SpecDecoding
+                AscendAttentionState.SpecDecoding,
+                AscendAttentionState.PrefillCacheHit
         ] and not ascend_config.chunked_prefill_for_mla:
             attn_output = attn_output_torch
 
