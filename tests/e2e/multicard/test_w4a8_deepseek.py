@@ -41,7 +41,7 @@ def test_deepseek_W4A8():
     with VllmRunner(
             model_name,
             dtype=dtype,
-            tensor_parallel_size=2,
+            tensor_parallel_size=4,
             quantization="ascend",
             enforce_eager=True,
             enable_expert_parallel=True,
