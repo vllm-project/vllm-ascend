@@ -22,7 +22,7 @@ import pytest
 from tests.conftest import VllmRunner
 
 
-@pytest.mark.skip(reason="Wait for the version of the cann package to be upgraded to 8.2.RC"）
+@pytest.mark.skip(reason="Wait for the version of the cann package to be upgraded to 8.2.RC")
 @pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
                     reason="w4a8_dynamic is not supported on v0")
 @patch.dict(os.environ, {"VLLM_USE_V1": "1", "VLLM_ASCEND_MLA_PA": "1"})
