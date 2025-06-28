@@ -33,6 +33,8 @@ def custom_rotary_embedding_enabled(query, neox_style, head_size):
 def rope_forward_oot(
     self,
     positions: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
     query: torch.Tensor,
     key: torch.Tensor,
     offsets: Optional[torch.Tensor] = None,
@@ -66,11 +68,11 @@ def rope_forward_oot(
         query = query.contiguous().view(query.shape[0], -1)
         key = key.contiguous().view(key.shape[0], -1)
         torch_npu._npu_rotary_embedding(
-            positions,
+            cos,
+            sin,
             query,
             key,
             self.head_size,
-            self.cos_sin_cache,
             neox_style,
         )
     return query.view(query_shape), key.view(key_shape)
