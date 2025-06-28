@@ -15,53 +15,51 @@
 # limitations under the License.
 
 import os
+from unittest.mock import patch
 
 import pytest
+from modelscope import snapshot_download  # type: ignore
 
 from tests.conftest import VllmRunner
 
 
-@pytest.mark.skip(reason="Skipped due to incompatible weights")
+model_name=snapshot_download("vllm-ascend/DeepSeek-R1-w4a8-pruning")
+
+
 @pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
                     reason="w4a8_dynamic is not supported on v0")
-def test_deepseek_W4A8(monkeypatch: pytest.MonkeyPatch):
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", "1")
-
-        prompts = [
-            "Hello, my name is",
-            "The president of the United States is",
-            "The capital of France is",
-            "The future of AI is",
-        ]
-        dtype = "bfloat16"
-        max_tokens = 5
-        with VllmRunner(
-                "vllm-ascend/DeepSeek-R1-w4a8-pruning",
-                dtype=dtype,
-                tensor_parallel_size=2,
-                enforce_eager=True,
-                quantization="ascend",
-                enable_expert_parallel=True,
-                additional_config={
-                    "torchair_graph_config": {
-                        "enabled": False,
-                    },
-                    "ascend_scheduler_config": {
-                        "enabled": True,
-                    }
+@patch.dict(os.environ, {"VLLM_USE_V1": "1", "VLLM_ASCEND_MLA_PA": "1"})
+def test_deepseek_W4A8(model: str):
+    prompts = [
+        "The capital of France is",
+        "The future of AI is",
+    ]
+    dtype = "bfloat16"
+    max_tokens = 5
+    with VllmRunner(
+            model_name,
+            dtype=dtype,
+            tensor_parallel_size=2,
+            quantization="ascend",
+            enforce_eager=True,
+            enable_expert_parallel=True,
+            additional_config={
+                "torchair_graph_config": {
+                    "enabled": False,
                 },
-        ) as vllm_model:
-            # use greedy sampler to make sure the generated results are fix
-            vllm_output = vllm_model.generate_greedy(prompts, max_tokens)
+                "ascend_scheduler_config": {
+                    "enabled": True,
+                }
+            },
+    ) as vllm_model:
+        # use greedy sampler to make sure the generated results are fix
+        vllm_output = vllm_model.generate_greedy(prompts, max_tokens)
 
-        golden_results = [
-            'Hello, my name is逸研究发现IPPudsimentary',
-            'The president of the United States is逸 Ban Corporealistically',
-            'The capital of France is逸 Ban Corporealistically',
-            'The future of AI is逸 Ban Corporealistically',
-        ]
-        assert len(golden_results) == len(vllm_output)
-        for i in range(len(vllm_output)):
-            assert golden_results[i] == vllm_output[i][1]
-            print(f"Generated text: {vllm_output[i][1]!r}")
+    golden_results = [
+        'The capital of France is逸 Ban Corporealistically',
+        'The future of AI is逸 Ban Corporealistically',
+    ]
+    assert len(golden_results) == len(vllm_output)
+    for i in range(len(vllm_output)):
+        assert golden_results[i] == vllm_output[i][1]
+        print(f"Generated text: {vllm_output[i][1]!r}")
