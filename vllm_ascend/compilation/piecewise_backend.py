@@ -28,8 +28,11 @@ from vllm.compilation.backends import VllmBackend
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import end_monitoring_torch_compile
 from vllm.config import VllmConfig
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.utils import weak_ref_tensors
+
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
 
 @dataclasses.dataclass
@@ -117,6 +120,13 @@ class NPUPiecewiseBackend:
             end_monitoring_torch_compile(self.vllm_config)
 
     def __call__(self, *args) -> Any:
+        forward_context = get_forward_context()
+
+        if (getattr(forward_context.attn_metadata, 'attn_state',
+                    None) != AscendAttentionState.DecodeOnly
+                and self.compilation_config.full_cuda_graph):
+            return self.compiled_graph_for_general_shape(*args)
+
         if not self.first_run_finished:
             self.first_run_finished = True
             self.check_for_ending_compilation()

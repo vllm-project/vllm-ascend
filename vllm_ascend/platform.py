@@ -162,8 +162,9 @@ class NPUPlatform(Platform):
                 "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
                 "using only ACL Graph mode")
             compilation_config.use_inductor = False
-            compilation_config.splitting_ops.extend(
-                ["vllm.unified_ascend_attention_with_output"])
+            if not compilation_config.full_cuda_graph:
+                compilation_config.splitting_ops.extend(
+                    ["vllm.unified_ascend_attention_with_output"])
             update_aclgraph_sizes(vllm_config)
 
         if parallel_config and parallel_config.worker_cls == "auto":

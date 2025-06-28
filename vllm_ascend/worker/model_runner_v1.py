@@ -258,6 +258,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.seq_lens = torch.zeros(self.max_num_reqs,
                                     dtype=torch.int32,
                                     device=self.device)
+        self.slot_mapping = torch.zeros(self.max_num_tokens,
+                                        dtype=torch.int32,
+                                        device=self.device)
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: Optional[IntermediateTensors] = None
 
@@ -956,15 +959,21 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.query_start_loc_cpu[:num_reqs + 1], non_blocking=True)
         self.seq_lens[:num_reqs].copy_(self.seq_lens_cpu[:num_reqs],
                                        non_blocking=True)
+        self.slot_mapping[:total_num_scheduled_tokens].copy_(
+            self.slot_mapping_cpu[:total_num_scheduled_tokens],
+            non_blocking=True)
 
         # Fill unused with -1. Needed for reshape_and_cache
+        self.slot_mapping[total_num_scheduled_tokens:].fill_(-1)
         self.seq_lens[num_reqs:].fill_(0)
         self.query_start_loc[num_reqs + 1:].fill_(-1)
 
         query_start_loc = self.query_start_loc[:num_reqs + 1]
         seq_lens = self.seq_lens[:num_reqs]
+        # Use host tensor, other wise error: tensor.hostData is null
         common_attn_metadata = CommonAttentionMetadata(
-            query_start_loc=query_start_loc, seq_lens=seq_lens)
+            query_start_loc=query_start_loc,
+            seq_lens=self.seq_lens_cpu[:num_reqs])
         with_prefill = attn_state not in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
@@ -1011,6 +1020,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
+                common_attn_metadata=common_attn_metadata,
                 common_prefix_len=None,
                 **extra_builder_kwargs,
             )
@@ -1598,8 +1608,41 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         elif skip_attn:
             attn_metadata = None
         else:
-            # TODO(zzzzwwjj): when aclgraph and full graph mode, we need build attn_metadata
-            attn_metadata = None
+            query_start_loc = self.query_start_loc[:num_reqs + 1]
+            query_start_loc[:] = torch.arange(
+                query_start_loc.numel(),
+                device=query_start_loc.device,
+                dtype=query_start_loc.dtype,
+            )
+            seq_lens = self.seq_lens_cpu[:num_reqs]
+            seq_lens[:] = seq_lens + 2
+
+            common_attn_metadata = CommonAttentionMetadata(
+                query_start_loc=query_start_loc, seq_lens=seq_lens)
+
+            self.query_lens = torch.from_numpy(num_scheduled_tokens)
+
+            block_table = self.input_batch.block_table[0].block_table
+            block_table[:num_reqs, 0] = torch.arange(1,
+                                                     num_reqs + 1,
+                                                     device=block_table.device,
+                                                     dtype=block_table.dtype)
+
+            self.slot_mapping[:num_tokens] = torch.arange(
+                1,
+                num_tokens + 1,
+                device=self.slot_mapping.device,
+                dtype=self.slot_mapping.dtype) * self.block_size + 1
+
+            attn_metadata = self.attn_metadata_builder.build(
+                num_reqs=num_reqs,
+                num_actual_tokens=num_tokens,
+                max_query_len=num_tokens,
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            )
+
+            attn_metadata.attn_state = AscendAttentionState.DecodeOnly
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
@@ -1982,11 +2025,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # can reuse the memory pool allocated for the large shapes.
             # TODO(zzzzwwjj): Check dummy_run with ACL Graph and full graph mode
             with graph_capture(device=self.device):
+                skip_attn = not self.vllm_config.compilation_config.full_cuda_graph
                 for num_tokens in reversed(self.aclgraph_batch_sizes):
                     for _ in range(self.vllm_config.compilation_config.
                                    cudagraph_num_of_warmups):
-                        self._dummy_run(num_tokens)
-                    self._dummy_run(num_tokens)
+                        self._dummy_run(num_tokens, skip_attn=skip_attn)
+                    self._dummy_run(num_tokens, skip_attn=skip_attn)
         else:
             logger.info("Skipping NPU graph capture for eager mode.")
             return

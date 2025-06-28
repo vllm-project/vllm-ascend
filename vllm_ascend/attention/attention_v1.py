@@ -26,6 +26,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import direct_register_custom_op
+from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
@@ -149,8 +150,10 @@ class AscendAttentionMetadataBuilder:
               num_reqs,
               num_actual_tokens,
               max_query_len,
-              common_prefix_len,
-              enable_dbo_across_dp: bool = False):
+              common_attn_metadata: CommonAttentionMetadata,
+              enable_dbo_across_dp: bool = False,
+              *args,
+              **kwargs):
 
         block_table = self.runner.input_batch.block_table[0].get_device_tensor(
         )
@@ -158,14 +161,11 @@ class AscendAttentionMetadataBuilder:
             block_table[:num_reqs])
 
         query_lens = self.runner.query_lens
-        seq_lens = self.runner.seq_lens_cpu[:num_reqs]
-        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
-            self.runner.device, non_blocking=True)
+        seq_lens = common_attn_metadata.seq_lens
+        slot_mapping = self.runner.slot_mapping[:num_actual_tokens]
         attn_mask = self.runner.attn_mask
         attn_state = self.runner.attn_state
-        query_start_loc_cpu = self.runner.query_start_loc_cpu[:num_reqs + 1]
-        query_start_loc = query_start_loc_cpu.to(self.runner.device,
-                                                 non_blocking=True)
+        query_start_loc = common_attn_metadata.query_start_loc
 
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
