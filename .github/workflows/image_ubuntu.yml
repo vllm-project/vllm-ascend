@@ -90,7 +90,7 @@ jobs:
         username: ${{ vars.QUAY_USERNAME }}
         password: ${{ secrets.QUAY_PASSWORD }}
 
-    - name: Build and push 910b
+    - name: Build and push
       uses: docker/build-push-action@v6
       with:
         platforms: >-
@@ -101,7 +101,6 @@ jobs:
           }}
         # use the current repo path as the build context, ensure .git is contained
         context: .
-        file: Dockerfile
         # only trigger when tag, branch/main push
         push: ${{ github.event_name == 'push' && github.repository_owner == 'vllm-project' }}
         labels: ${{ steps.meta.outputs.labels }}

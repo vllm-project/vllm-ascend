@@ -337,8 +337,8 @@ class PanguProMoEDecoderLayer(nn.Module):
         layer_idx = extract_layer_index(prefix)
         mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
                            config.mlp_only_layers)
-        if (layer_idx
-                not in mlp_only_layers) and (config.num_experts > 0):  ### ???
+        if (layer_idx not in mlp_only_layers) and (config.num_experts
+                                                   > 0):  ### ???
             self.mlp = PanguProMoESparseMoeBlock(
                 config=config,
                 quant_config=quant_config,
