@@ -22,7 +22,7 @@ from vllm.model_executor.layers.fused_moe.layer import \
     UnquantizedFusedMoEMethod
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ops.fused_moe import (fused_experts, fused_experts_310p,
+from vllm_ascend.ops.fused_moe import (fused_experts, fused_experts_moge,
                                        select_experts,
                                        select_gating_top_k_softmax_experts)
 from vllm_ascend.utils import is_310p
