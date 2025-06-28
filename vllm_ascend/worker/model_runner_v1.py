@@ -1588,7 +1588,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.encoder_cache.clear()
         gc.collect()
 
-    def do_get_expert_load(self) ->  torch.Tensor:
+    def do_get_expert_load(self) ->  tuple:
         return self.eplb_updator.get_expert_load()
 
     def do_update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):

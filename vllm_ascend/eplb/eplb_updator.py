@@ -234,12 +234,12 @@ class EplbUpdator:
         ]
         return recovered
 
-    def get_expert_load(self) -> torch.Tensor:
+    def get_expert_load(self) -> tuple:
         expert_maps = self.shared_dict["expert_maps"]
         moe_load = self.shared_dict["moe_load"]  # Tensor [L, W, global_experts_num]
         num_local_experts = expert_maps.max() + 1
-        load_info, _ = ExpertMapUtils.global2local_load(moe_load, expert_maps, num_local_experts)
-        return load_info
+        return  moe_load, expert_maps, num_local_experts
+
 
     def update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
         logger.info(f" start update {self.num_expert_load_gather=}, {self.num_iterations}...")
