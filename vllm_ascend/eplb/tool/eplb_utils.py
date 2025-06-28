@@ -90,7 +90,6 @@ class ExpertMapUtils():
         placement: torch.Tensor,
         E_local: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
-
         L, G, _ = placement.shape
         device = placement.device
 
