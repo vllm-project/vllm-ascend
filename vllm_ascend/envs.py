@@ -19,119 +19,150 @@
 #
 
 import os
-from typing import Any, Callable, Dict
+from typing import Dict
 
-# The begin-* and end* here are used by the documentation generator
-# to extract the used env vars.
 
-# begin-env-vars-definition
+class EnvVar:
+    """
+    Environment variable object used for system configuration and doc generation.
+    """
 
-env_variables: Dict[str, Callable[[], Any]] = {
-    # max compile thread number for package building. Usually, it is set to
-    # the number of CPU cores. If not set, the default value is None, which
-    # means all number of CPU cores will be used.
+    def __init__(self, name: str, type: str, default, description: str):
+        self.name = name
+        self.type = type
+        self.default = default
+        self.description = description
+
+    @property
+    def value(self):
+        if (type == "bool"):
+            return bool(int(os.getenv(self.name, self.default)))
+        return os.getenv(self.name, self.default)
+
+    @property
+    def doc(self) -> str:
+        """Generate doc for this environment variable."""
+        return f"| `{self.name}` | {self.type} | `{self.default}` | {self.description} |\n"
+
+
+# NOTE: Run `python generate_env_var_doc.py` after updating this dict.
+environment_variables: Dict[str, EnvVar] = {
     "MAX_JOBS":
-    lambda: os.getenv("MAX_JOBS", None),
-    # The build type of the package. It can be one of the following values:
-    # Release, Debug, RelWithDebugInfo. If not set, the default value is Release.
-    "CMAKE_BUILD_TYPE":
-    lambda: os.getenv("CMAKE_BUILD_TYPE"),
-    # Whether to compile custom kernels. If not set, the default value is True.
-    # If set to False, the custom kernels will not be compiled. Please note that
-    # the sleep mode feature will be disabled as well if custom kernels are not
-    # compiled.
-    "COMPILE_CUSTOM_KERNELS":
-    lambda: bool(int(os.getenv("COMPILE_CUSTOM_KERNELS", "1"))),
-    # The CXX compiler used for compiling the package. If not set, the default
-    # value is None, which means the system default CXX compiler will be used.
-    "CXX_COMPILER":
-    lambda: os.getenv("CXX_COMPILER", None),
-    # The C compiler used for compiling the package. If not set, the default
-    # value is None, which means the system default C compiler will be used.
-    "C_COMPILER":
-    lambda: os.getenv("C_COMPILER", None),
-    # Whether to enable the topk optimization. It's disabled by default for experimental support
-    # We'll make it enabled by default in the future.
-    "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE", '0'))),
-    # The version of the Ascend chip. If not set, the default value is
-    # ASCEND910B1. It's used for package building. Please make sure that the
-    # version is correct.
-    "SOC_VERSION":
-    lambda: os.getenv("SOC_VERSION", "ASCEND910B1"),
-    # If set, vllm-ascend will print verbose logs during compilation
-    "VERBOSE":
-    lambda: bool(int(os.getenv('VERBOSE', '0'))),
-    # The home path for CANN toolkit. If not set, the default value is
-    # /usr/local/Ascend/ascend-toolkit/latest
-    "ASCEND_HOME_PATH":
-    lambda: os.getenv("ASCEND_HOME_PATH", None),
-    # The path for HCCN Tool, the tool will be called by disaggregated prefilling
-    # case.
-    "HCCN_PATH":
-    lambda: os.getenv("HCCN_PATH", "/usr/local/Ascend/driver/tools/hccn_tool"),
-    # The path for HCCL library, it's used by pyhccl communicator backend. If
-    # not set, the default value is libhccl.so。
-    "HCCL_SO_PATH":
-    # The prefill device id for disaggregated prefilling case.
-    lambda: os.environ.get("HCCL_SO_PATH", None),
-    "PROMPT_DEVICE_ID":
-    lambda: os.getenv("PROMPT_DEVICE_ID", None),
-    # The decode device id for disaggregated prefilling case.
-    "DECODE_DEVICE_ID":
-    lambda: os.getenv("DECODE_DEVICE_ID", None),
-    # The port number for llmdatadist communication. If not set, the default
-    # value is 26000.
-    "LLMDATADIST_COMM_PORT":
-    lambda: os.getenv("LLMDATADIST_COMM_PORT", "26000"),
-    # The wait time for llmdatadist sync cache. If not set, the default value is
-    # 5000ms.
-    "LLMDATADIST_SYNC_CACHE_WAIT_TIME":
-    lambda: os.getenv("LLMDATADIST_SYNC_CACHE_WAIT_TIME", "5000"),
-    # The version of vllm is installed. This value is used for developers who
-    # installed vllm from source locally. In this case, the version of vllm is
-    # usually changed. For example, if the version of vllm is "0.9.0", but when
-    # it's installed from source, the version of vllm is usually set to "0.9.1".
-    # In this case, developers need to set this value to "0.9.0" to make sure
-    # that the correct package is installed.
-    "VLLM_VERSION":
-    lambda: os.getenv("VLLM_VERSION", None),
-    # Whether to enable the trace recompiles from pytorch.
-    "VLLM_ASCEND_TRACE_RECOMPILES":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_TRACE_RECOMPILES", '0'))),
-    # Whether to enable fused_experts_allgather_ep. MoeInitRoutingV3 and
-    # GroupedMatmulFinalizeRouting operators are combined to implement EP.
-    "VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP":
-    lambda: bool(int(os.getenv("VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP", '0'))
-                 ),
-    "VLLM_ASCEND_ENABLE_DBO":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_DBO", '0'))),
-    # Whether to enable the model execute time observe profile. Disable it when
-    # running vllm ascend in production environment.
-    "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE", '0'))
-                 ),
-    # MOE_ALL2ALL_BUFFER:
-    #   0: default, normal init.
-    #   1: enable moe_all2all_buffer.
-    "MOE_ALL2ALL_BUFFER":
-    lambda: bool(int(os.getenv("MOE_ALL2ALL_BUFFER", '0'))),
-    # Some models are optimized by vllm ascend. While in some case, e.g. rlhf
-    # training, the optimized model may not be suitable. In this case, set this
-    # value to False to disable the optimized model.
-    "USE_OPTIMIZED_MODEL":
-    lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
-}
+    EnvVar("MAX_JOBS", "int", None, "Max compile thread number for package " \
+    "building. Usually, it is set to the number of CPU cores. If not set, " \
+    "the default value is None, which means all number of CPU cores will " \
+    "be used."),
 
-# end-env-vars-definition
+    "CMAKE_BUILD_TYPE":
+    EnvVar("CMAKE_BUILD_TYPE", "string", None, "The build type of the " \
+    "package. It can be one of the following values: Release, Debug, " \
+    "RelWithDebugInfo. If not set, the default value is Release."),
+
+    "COMPILE_CUSTOM_KERNELS":
+    EnvVar("COMPILE_CUSTOM_KERNELS", "bool", "1", "Whether to compile custom " \
+    "kernels. If not set, the default value is True. If set to False, the " \
+    "custom kernels will not be compiled. Please note that the sleep mode " \
+    "feature will be disabled as well if custom kernels are not compiled."),
+
+    "CXX_COMPILER":
+    EnvVar("CXX_COMPILER", "string", None, "The CXX compiler used for " \
+    "compiling the package. If not set, the default value is None, which " \
+    "means the system default CXX compiler will be used."),
+
+    "C_COMPILER":
+    EnvVar("C_COMPILER", "string", None, "The C compiler used for compiling " \
+    "the package. If not set, the default value is None, which means the " \
+    "system default C compiler will be used."),
+
+    "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE":
+    EnvVar("VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE", "bool", "0", "Whether to " \
+    "enable the topk optimization. It's disabled by default for experimental " \
+    "support We'll make it enabled by default in the future."),
+
+    "SOC_VERSION":
+    EnvVar("SOC_VERSION", "string", "ASCEND910B1", "The version of the " \
+    "Ascend chip. If not set, the default value is ASCEND910B1. It's used "
+    "for package building. Please make sure that the version is correct."),
+
+    "VERBOSE":
+    EnvVar("VERBOSE", "bool", "0", "If set, vllm-ascend will print verbose " \
+    "logs during compilation."),
+
+    "ASCEND_HOME_PATH":
+    EnvVar("ASCEND_HOME_PATH", "string", None, "The home path for CANN " \
+    "toolkit. If not set, the default value is " \
+    "`/usr/local/Ascend/ascend-toolkit/latest`."),
+
+    "HCCN_PATH":
+    EnvVar("HCCN_PATH", "string", "/usr/local/Ascend/driver/tools/hccn_tool",
+    "The path for HCCN Tool, the tool will be called by disaggregated " \
+    "prefilling case."),
+
+    "HCCL_SO_PATH":
+    EnvVar("HCCL_SO_PATH", "string", None, "The path for HCCL library, " \
+    "it's used by pyhccl communicator backend. If not set, the default value "
+    "is `libhccl.so`."),
+
+    "PROMPT_DEVICE_ID":
+    EnvVar("PROMPT_DEVICE_ID", "string", None, "The prefill device id for " \
+    "disaggregated prefilling case."),
+
+    "DECODE_DEVICE_ID":
+    EnvVar("DECODE_DEVICE_ID", "string", None, "The decode device id for " \
+    "disaggregated prefilling case."),
+
+    "LLMDATADIST_COMM_PORT":
+    EnvVar("LLMDATADIST_COMM_PORT", "int", "26000", "The port number for " \
+    "llmdatadist communication. If not set, the default value is 26000."),
+
+    "LLMDATADIST_SYNC_CACHE_WAIT_TIME":
+    EnvVar("LLMDATADIST_SYNC_CACHE_WAIT_TIME", "int", "5000", "The wait time "
+    "for llmdatadist sync cache. If not set, the default value is 5000ms."),
+
+    "VLLM_VERSION":
+    EnvVar("VLLM_VERSION", "string", None, "The version of vllm is " \
+    "installed. This value is used for developers who installed vllm from " \
+    "source locally. In this case, the version of vllm is usually changed. " \
+    "For example, if the version of vllm is `0.9.0`, but when it's installed " \
+    "from source, the version of vllm is usually set to `0.9.1`. In this " \
+    "case, developers need to set this value to `0.9.0` to make sure that " \
+    "the correct package is installed."),
+
+    "VLLM_ASCEND_TRACE_RECOMPILES":
+    EnvVar("VLLM_ASCEND_TRACE_RECOMPILES", "bool", "0", "Whether to enable " \
+    "the trace recompiles from pytorch."),
+
+    "VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP":
+    EnvVar("VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP", "bool", "0", "Whether " \
+    "to enable fused_experts_allgather_ep. `MoeInitRoutingV3` and " \
+    "`GroupedMatmulFinalizeRouting` operators are combined to implement EP."),
+
+    "VLLM_ASCEND_ENABLE_DBO":
+    EnvVar("VLLM_ASCEND_ENABLE_DBO", "bool", "0", ""),
+
+    "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
+    EnvVar("VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE", "bool", "0", "Whether " \
+    "to enable the model execute time observe profile. Disable it when " \
+    "running vllm ascend in production environment."),
+
+    "MOE_ALL2ALL_BUFFER":
+    EnvVar("MOE_ALL2ALL_BUFFER", "bool", "0", "MOE_ALL2ALL_BUFFER: `0`: " \
+    "default, normal init; `1`: enable moe_all2all_buffer."),
+
+    "USE_OPTIMIZED_MODEL":
+    EnvVar('USE_OPTIMIZED_MODEL', "bool", "1", "Some models are optimized " \
+    "by vllm ascend. While in some case, e.g. rlhf training, the optimized " \
+    "model may not be suitable. In this case, set this value to False to " \
+    "disable the optimized model."),
+}
 
 
 def __getattr__(name: str):
-    # lazy evaluation of environment variables
-    if name in env_variables:
-        return env_variables[name]()
+    # Lazy evaluation of environment variables
+    if name in environment_variables:
+        return environment_variables[name].val
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def __dir__():
-    return list(env_variables.keys())
+    return list(environment_variables.keys())
