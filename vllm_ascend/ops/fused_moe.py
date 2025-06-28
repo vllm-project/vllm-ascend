@@ -39,7 +39,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
-                               get_fused_moe_state, npu_stream_switch,
+                               get_fused_moe_state, is_310p, npu_stream_switch,
                                npu_wait_tensor)
 
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
@@ -548,8 +548,7 @@ def fused_experts_with_all2all_buffer(
     return final_hidden_states
 
 
-# Currently, fused_experts on 310p only supports PanguProMoE.
-def fused_experts_310p(
+def fused_experts_moge(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -614,8 +613,11 @@ def fused_experts_310p(
         group_list=group_list,
     )[0]
 
-    gate_up_out = torch_npu.npu_swiglu(gate_up_out.to(torch.float32)).to(
-        torch.float16)
+    if is_310p():
+        gate_up_out = torch_npu.npu_swiglu(gate_up_out.to(torch.float32)).to(
+            torch.float16)
+    else:
+        gate_up_out = torch_npu.npu_swiglu(gate_up_out)
     gate_up_out *= topk_scales
 
     w2 = w2.transpose(1, 2)
@@ -628,8 +630,7 @@ def fused_experts_310p(
         group_list=group_list,
     )[0]
 
-    unsorted_topk_ids = torch.argsort(sorted_topk_ids.float()).to(
-        torch.int32) + torch.Tensor([0]).to(torch.int32).npu()
+    unsorted_topk_ids = torch.argsort(sorted_topk_ids.float()).to(torch.int32)
     unsorted_hidden_states = down_out_list.index_select(0, unsorted_topk_ids)
     final_hidden_states = unsorted_hidden_states.reshape(
         bsz, top_k // ep_size, -1).sum(1)
