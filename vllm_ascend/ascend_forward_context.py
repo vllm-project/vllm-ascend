@@ -7,22 +7,37 @@ from vllm.config import VllmConfig
 from vllm.distributed import get_dp_group
 from vllm.forward_context import get_forward_context, set_forward_context
 
+import vllm_ascend.envs as envs
+
 
 class FusedMoEState(Enum):
     AllGather = 0
     All2All = 1
     MC2 = 2
+    MC2_PREFILL = 3
 
 
 # TODO(zzzzwwjj): add soc_version to choose branch
 def get_fused_moe_state(ep_size: int, with_prefill: bool):
-    if ep_size == 1:
-        return FusedMoEState.AllGather
-    # NOTE: mc2 need ep_size >= 16 & all2all can't use in torchair graph.
-    elif ep_size < 16 or with_prefill:
-        return FusedMoEState.All2All
+    enable_chunk_mc2 = envs.VLLM_ASCEND_ENABLE_CHUNK_MC2
+    if enable_chunk_mc2:
+        if ep_size == 1:
+            return FusedMoEState.AllGather
+        # NOTE: mc2 need ep_size >= 16 & all2all can't use in torchair graph.
+        elif ep_size < 16 and with_prefill:
+            return FusedMoEState.All2All
+        elif ep_size >= 16 and with_prefill:
+            return FusedMoEState.MC2_PREFILL
+        else:
+            return FusedMoEState.MC2
     else:
-        return FusedMoEState.MC2
+        if ep_size == 1:
+            return FusedMoEState.AllGather
+        # NOTE: mc2 need ep_size >= 16 & all2all can't use in torchair graph.
+        elif ep_size < 16 or with_prefill:
+            return FusedMoEState.All2All
+        else:
+            return FusedMoEState.MC2
 
 
 @contextmanager
@@ -62,7 +77,7 @@ def set_ascend_forward_context(
         elif attn_metadata is not None:
             forward_context.max_tokens_across_dp = num_tokens or attn_metadata.num_actual_tokens
         else:
-            forward_context.max_tokens_across_dp = None
+            forward_context.max_tokens_across_dp = num_tokens
 
         try:
             yield

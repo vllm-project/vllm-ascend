@@ -20,16 +20,20 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
+import torch.nn as nn
 import torch_npu
 from vllm.distributed import GroupCoordinator, get_ep_group, get_tp_group
 from vllm.forward_context import get_forward_context
 
+import vllm_ascend.envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.ops.fused_moe import select_experts
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
                                dispose_tensor, get_ascend_soc_version,
                                npu_stream_switch, npu_wait_tensor)
+
+CHUNK_SIZE: int = ascend_envs.VLLM_ASCEND_FUSED_MOE_MC2_CHUNK_SIZE
 
 
 def apply_mlp(hidden_states: torch.Tensor,
@@ -218,7 +222,7 @@ def fused_experts_with_mc2(
         "expert_shard_type": 0,
         "shared_expert_rank_num": 0,
         "moe_expert_num": moe_expert_num,
-        "global_bs": 0,
+        "global_bs": global_bs,
     }
     tp_recv_counts = torch.empty(1,
                                  dtype=torch.int32,
@@ -246,6 +250,83 @@ def fused_experts_with_mc2(
         with npu_stream_switch("moe_secondary", 0):
             npu_wait_tensor(shared_act[0], down_out_list)
             shared_output, _ = shared_experts.down_proj(shared_act)
+        return hidden_states, shared_output
+
+
+def fused_prefill_experts_with_mc2(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    top_k: int,
+    expert_map: torch.Tensor = None,
+    moe_all_to_all_group_name: str = "",
+    log2phy: torch.Tensor = None,
+    global_redundant_expert_num: int = 0,
+    shared_experts: Optional[Any] = None,
+    is_torchair: bool = False,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    num_tokens = hidden_states.shape[0]
+    local_chunk_size = CHUNK_SIZE
+    tp_world_size = get_tp_group().world_size
+    max_tokens_across_dp = get_forward_context().max_tokens_across_dp
+    max_num_chunks = math.ceil(
+        max_tokens_across_dp / tp_world_size) // local_chunk_size + 1
+    if max_num_chunks > num_tokens:
+        hidden_states = nn.functional.pad(
+            hidden_states, (0, 0, 0, max_num_chunks - num_tokens))
+        topk_weights = nn.functional.pad(
+            topk_weights, (0, 0, 0, max_num_chunks - num_tokens))
+        topk_ids = nn.functional.pad(topk_ids,
+                                     (0, 0, 0, max_num_chunks - num_tokens))
+    hidden_states_chunk_list = []
+    shared_chunk_list = []
+    hidden_states_chunks = torch.tensor_split(hidden_states,
+                                              max_num_chunks,
+                                              dim=0)
+    topk_weights_chunks = torch.tensor_split(topk_weights,
+                                             max_num_chunks,
+                                             dim=0)
+    topk_ids_chunks = torch.tensor_split(topk_ids, max_num_chunks, dim=0)
+
+    for i in range(len(hidden_states_chunks)):
+        hidden_states_chunk = hidden_states_chunks[i]
+        topk_weights_chunk = topk_weights_chunks[i]
+        topk_ids_chunk = topk_ids_chunks[i]
+        prefill_expert_outputs = fused_experts_with_mc2(
+            hidden_states=hidden_states_chunk,
+            w1=w1,
+            w2=w2,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            topk_weights=topk_weights_chunk,
+            topk_ids=topk_ids_chunk,
+            top_k=top_k,
+            expert_map=expert_map,
+            moe_all_to_all_group_name=moe_all_to_all_group_name,
+            log2phy=log2phy,
+            global_redundant_expert_num=global_redundant_expert_num,
+            shared_experts=shared_experts,
+            is_torchair=is_torchair,
+        )
+        if isinstance(prefill_expert_outputs, torch.Tensor):
+            hidden_states_chunk_list.append(prefill_expert_outputs)
+        else:
+            hidden_states_chunk_list.append(prefill_expert_outputs[0])
+            shared_chunk_list.append(prefill_expert_outputs[1])
+    if max_num_chunks > num_tokens:
+        hidden_states_chunk_list = hidden_states_chunk_list[:max_num_chunks -
+                                                            num_tokens]
+        if len(shared_chunk_list) > 0:
+            shared_chunk_list = shared_chunk_list[:max_num_chunks - num_tokens]
+    hidden_states = torch.cat(hidden_states_chunk_list, dim=0)
+    if len(shared_chunk_list) == 0:
+        return hidden_states
+    else:
+        shared_output = torch.cat(shared_chunk_list, dim=0)
         return hidden_states, shared_output
 
 
@@ -706,6 +787,22 @@ class AscendW8A8DynamicFusedMoEMethod:
         fused_moe_state = get_forward_context().fused_moe_state
         if fused_moe_state == FusedMoEState.MC2:
             return fused_experts_with_mc2(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                top_k=top_k,
+                expert_map=expert_map,
+                moe_all_to_all_group_name=self.moe_all_to_all_group_name,
+                log2phy=log2phy,
+                global_redundant_expert_num=global_redundant_expert_num,
+                shared_experts=shared_experts,
+                is_torchair=self.torchair_graph_enabled)
+        elif fused_moe_state == FusedMoEState.MC2_PREFILL:
+            return fused_prefill_experts_with_mc2(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
