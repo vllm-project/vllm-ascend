@@ -98,6 +98,9 @@ class AscendQuantConfig(QuantizationConfig):
             'fa_quant_type' in self.quant_description.keys() and \
             self.quant_description['fa_quant_type'] is not None:
             return AscendKVCacheMethod(self, prefix)
+        elif isinstance(layer, Attention) and self.quant_description.get(
+                'kv_quant_type') == 'C8':
+            return AscendKVCacheMethod(self, prefix)
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
@@ -235,32 +238,11 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
 
-    def apply(self,
-              layer: torch.nn.Module,
-              query: torch.Tensor,
-              key: torch.Tensor,
-              value: torch.Tensor,
-              k_cache: List[torch.Tensor],
-              v_cache: List[torch.Tensor],
-              scale: torch.Tensor,
-              block_tables: torch.Tensor,
-              isPrefill: bool,
-              attn_metadata,
-              output,
-              seq_lens_tensor_cpu: Optional[int] = None) -> torch.Tensor:
-        return self.quant_method.apply(layer,
-                                       query,
-                                       key,
-                                       value,
-                                       k_cache,
-                                       v_cache,
-                                       scale,
-                                       block_tables,
-                                       isPrefill,
-                                       attn_metadata.attn_mask,
-                                       attn_metadata.slot_mapping,
-                                       output,
-                                       seq_lens_tensor_cpu=seq_lens_tensor_cpu)
+    def apply(self, layer: torch.nn.Module, query: torch.Tensor,
+              key: torch.Tensor, value: torch.Tensor, kv_cache, attn_metadata,
+              attn_type, scale, output) -> torch.Tensor:
+        return self.quant_method.apply(layer, query, key, value, kv_cache,
+                                       attn_metadata, attn_type, scale, output)
 
 
 class AscendFusedMoEMethod(FusedMoEMethodBase):
