@@ -35,7 +35,7 @@ class EnvVar:
 
     @property
     def value(self):
-        if (type is "bool"):
+        if (str(type) == "bool"):
             return bool(int(os.getenv(self.name, self.default)))
         return os.getenv(self.name, self.default)
 
@@ -160,7 +160,7 @@ environment_variables: Dict[str, EnvVar] = {
 def __getattr__(name: str):
     # Lazy evaluation of environment variables
     if name in environment_variables:
-        return environment_variables[name].val
+        return environment_variables[name].value
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
