@@ -291,7 +291,7 @@ jobs:
   #           --ignore=tests/e2e/singlecard/core/test_ascend_scheduler_e2e.py
 
   e2e-4-cards:
-    needs: [e2e]
+    #needs: [e2e]
     # if: ${{ needs.e2e.result == 'success' }}
     strategy:
       max-parallel: 1
