@@ -15,7 +15,6 @@
 # limitations under the License.
 
 import os
-import sys
 from unittest.mock import patch
 
 import pytest
@@ -37,8 +36,8 @@ def test_deepseek_W4A8():
     ]
     dtype = "bfloat16"
     max_tokens = 5
-    if "modelscope" in sys.modules:
-        del sys.modules["modelscope"]
+    #if "modelscope" in sys.modules:
+    #    del sys.modules["modelscope"]
     with VllmRunner(
             model_name,
             dtype=dtype,
