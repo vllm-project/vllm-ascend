@@ -45,7 +45,7 @@ faqs
 :maxdepth: 1
 user_guide/suppoted_features
 user_guide/supported_models
-user_guide/env_vars
+user_guide/environment_variables
 user_guide/additional_config
 user_guide/sleep_mode
 user_guide/graph_mode.md

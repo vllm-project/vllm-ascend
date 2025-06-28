@@ -35,7 +35,7 @@ class EnvVar:
 
     @property
     def value(self):
-        if (type == "bool"):
+        if (type is "bool"):
             return bool(int(os.getenv(self.name, self.default)))
         return os.getenv(self.name, self.default)
 
