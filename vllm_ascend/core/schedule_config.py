@@ -72,3 +72,23 @@ class AscendSchedulerConfig(SchedulerConfig):
             raise NotImplementedError(
                 "currently AscendScheduler doesn't support scheduler_delay_factor."
             )
+
+
+@dataclass
+class AscendSchedulerV1Config(SchedulerConfig):
+    scheduler_cls: Union[str, Type[object]] = (
+        "vllm_ascend.core.scheduler.AscendSchedulerV1")
+
+    @classmethod
+    def initialize_from_config(
+        cls,
+        vllm_scheduler_config: SchedulerConfig,
+    ):
+        scheduler_config = {
+            field.name: getattr(vllm_scheduler_config, field.name)
+            for field in fields(vllm_scheduler_config) if field.init
+        }
+        # Override default values into original SchedulerConfig
+        scheduler_config["scheduler_cls"] = (
+            "vllm_ascend.core.scheduler_v1.AscendSchedulerV1")
+        return cls(**scheduler_config)
