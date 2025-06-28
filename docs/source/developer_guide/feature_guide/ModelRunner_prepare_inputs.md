@@ -1,7 +1,7 @@
 # ModelRunner_prepare_inputs
 
 ## Before Start:
-### Some coventions
+### Some conventions
 In `ModelRunner class`(`NPUModelRunner` or `GPUModelRunner`), typically there are two corresponding tensors stored on the **CPU** (`self.xxx_cpu`) and **device** (`self.xxx`). Generally, we process data on the CPU first, and then copy the processed CPU-side variables to the device. We also frequently convert CPU-side tensors to **NumPy arrays** `(self.xxx_np)` for convenient processing. In terms of memory view, these two types of variables (CPU tensors and NumPy arrays) **share the same memory space**, meaning an operation on one is equivalent to an operation on both. However, in `gpu_input_batch.py` , the `self.token_ids_cpu_tensor` is `tensor`, `self.token_ids_cpu` is `numpy ndarray`. The different naming conventions across various `Python modules` can indeed be confusing (Me too!!!!😭), so we should carefully distinguish them.
 ### Create an example for better understanding
 Let’s assume that in the current model's forward step, 5 requests are scheduled. Requests `0` and `1` are in the decode phase, requests `2` and `3` are undergoing full prefill, and request `4` is in chunked prefill. The scheduled tokens for these requests are `1`, `1`, `93`, `75`, and `30`, respectively. So the number of total scheduled tokens are `1 + 1 + 93 + 75 + 30 = 200` (for more detail, let’s say `200` is the initial token budget in `scheduler.py`, you can read the code of `scheduler.py` later or before, either is fine, it won't affect your understanding of what follows.) And let’s say that the `request 0` and `request 1` already computed `54`, `145` tokens respectively. And we assume the `block_size = 16` i.e. one block will contain 16 tokens (vllm page attention mechanism), the `max_model_len = 240`, `max_num_blocks_per_req = ceil(240/16)= 15`. We assume the LLM has `32` self-attention layers.
@@ -17,7 +17,7 @@ Let’s assume that in the current model's forward step, 5 requests are schedule
     - Important system level variable overview:
         - `self.input_batch.token_ids_cpu_tensor` (i.e. `token_ids table`), `block_table`.
 
-## Go throgh the _prepare_inputs() method:
+## Go through the _prepare_inputs() method:
 Here I would use the example I created before to go through the `_prepare_inputs()` method in in `ModelRunner`(`NPUModelRunner` or `GPUModelRunner`):
 
 ### Prepare basic useful variables
@@ -36,14 +36,14 @@ Here I would use the example I created before to go through the `_prepare_inputs
 - `req_indices` : The shape of `req_indices` is `(total_num_scheduled_tokens,)`, where each token position mapping to which request the token belong to, and the requests are represented by `int` rather than `str`.
     - It equal to `[0, 1, 2, 2, …,2, 3, 3, …, 3, 4, 4, …, 4]` where `2` repeats `93` times, `3` repeats `75` times, `4` repeats `30` times. (**token level**)
 - `_get_cumsum_and_arange()` : Get the **cumulative sum** `cu_num_tokens` and **batched arange** `arange` of the given array, i.e. accumulate different requests and set an `arange` for every request. The results of `_get_cumsum_and_arange()`: `cu_num_tokens` and `arange`:
-    - `cu_num_tokens` equals to `[1, 2, 95, 170，200]`. (**reqest level**)
+    - `cu_num_tokens` equals to `[1, 2, 95, 170，200]`. (**request level**)
     - `arange` equals to `[0, 0, 0, 1, 2, ..., 92, 0, 1, ..., 74, 0, 1, ..., 29]`. (**token level**)
 - `positions_np = self.positions_np[:total_num_scheduled_tokens]` at CPU end. The `positions of each token = computed_tokens + arange`. So its the token relative position for each individual request.
     - It is equal to `[54, 145, 0, 1, 2, …, 92, 0, 1, 2, …, 74, …, 0, 1, 2, …, 29]` . Note that the `request 0` and `request 1` already computed `54 (0~53)` and `145 (0~144)` tokens before. (**token level**)
 - `positions = self.positions[:num_input_tokens]` at Device end (GPU or NPU) which is copied from the CPU (via `self.positions_cpu`) to the device.
 
 ### Prepare input_ids
-- `token_indices` represents indices of `token_ids_cpu` for every scheduled token. It will select the correspoding `token_ids` in the `token_ids_cpu`. It is derived from the `positions` and `req_indices * max_model_len`. Its shape is `(total_num_scheduled_tokens, )`
+- `token_indices` represents indices of `token_ids_cpu` for every scheduled token. It will select the corresponding `token_ids` in the `token_ids_cpu`. It is derived from the `positions` and `req_indices * max_model_len`. Its shape is `(total_num_scheduled_tokens, )`
     - Using `M=max_model_len` , then it equal to `[54, 145 + M, 0 + 2 * M, 1 + 2 * M, …, 92 + 2 * M, 0 + 3 * M, 1 + 3 * M, …, 74 + 3 * M, 0 + 4 * M, …, 29 + 4 * M]` (**token level**)
 - `self.input_batch.token_ids_cpu`: Its shape is `(self.max_num_reqs, self.model_config.max_model_len)`. Unlike the block-based `block_table` in `self.input_batch` (which has shape `(max_num_reqs, max_num_blocks_per_req)`). Note that `max_num_blocks_per_req = ceil(max_model_len / block_size)`. (**system level**)
     - Although `token_ids_cpu` and `block_table` are somewhat similar in shape and organization, they play different roles.
@@ -75,7 +75,7 @@ Here I would use the example I created before to go through the `_prepare_inputs
 ### Calculate the slot mapping
 - `block_table_cpu` is the CPU end `block_table` which is a tensor and shape is `(max_num_reqs, max_num_blocks_per_req)`.
 - `self.kv_caches: list[torch.Tensor] = []` is a list, which record each attention layer's actual kv_cache tensors. E.g. `self.kv_caches[1]` is the second attention layer's kv_cache tensor. In common case, we typically use full self-attention layer in text-only model, then kv_cache tensor's shape are all same in every self-attention layer. And if the model have total 32 layers, then `len(self.kv_caches) = 32`.
-    - The shape of `self.kv_caches[i]` (`i` ranges form `0` to `31`) may equal to `torch.Size([2, 5146, 16, 4, 128])`, where `2` means there are 2 caches, one for k_cache and another for v_cache, `5146` means there are `5146` available kv_cache blocks for each attention layer, which is derived from the `memory size of your device` (gpu or npu) and the `block_size` (for more detail, please refer to initialize_kv_cache() method), `16` is the block_size, `4` means `num_kv_heads` (for more detial, please refer to Grouped Query Attention, GQA), `128` means the `head_size` of each head.
+    - The shape of `self.kv_caches[i]` (`i` ranges form `0` to `31`) may equal to `torch.Size([2, 5146, 16, 4, 128])`, where `2` means there are 2 caches, one for k_cache and another for v_cache, `5146` means there are `5146` available kv_cache blocks for each attention layer, which is derived from the `memory size of your device` (gpu or npu) and the `block_size` (for more detail, please refer to initialize_kv_cache() method), `16` is the block_size, `4` means `num_kv_heads` (for more detail, please refer to Grouped Query Attention, GQA), `128` means the `head_size` of each head.
 - Every element in `block_table` is a `physical block_id` in the `HBM` which totally has `num_gpu_blocks` blocks. More detail, every `physical block_id` is the index of `self.kv_caches[i]` along second dimension. We will reserve the `kv_cache_block 0` as a dummy block for indicating we didn't allocated the block yet in `block_table`. We will use the block 1 as the first allocated `kvcache_block`.
     - At this moment, we assume the `block_size` is 16, so request `0`, `1`, `2`, `3`, `4` occupies `ceil(54/16)=4`, `ceil(145/16)=10`, `ceil(93/16)=6`, `ceil(75/16)=5`, `ceil(30/16)=2` blocks respectively. And we assume there is not Auto prefix caching and the `self.kv_cache_manager.allocate_slots` in `scheduler.py` allocated the `KVCacheBlock` sequentially to these requests, and the `max_num_blocks_per_req = ceil(max_model_len / block_size) = 15` ,note that the `block 0` is a dummy block we discussed before, then the `block_table` equal to: (**system level**)
         ```
