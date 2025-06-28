@@ -121,6 +121,11 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value to False to disable the optimized model.
     "USE_OPTIMIZED_MODEL":
     lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
+    # VLLM_ASCEND_ENABLE_MOE_ALL2ALLV:
+    #   0: default, normal init.
+    #   1: enable moe all2allv.
+    "VLLM_ASCEND_ENABLE_MOE_ALL2ALLV":
+    lambda: bool(int(os.getenv('VLLM_ASCEND_ENABLE_MOE_ALL2ALLV', '0'))),
 }
 
 # end-env-vars-definition
