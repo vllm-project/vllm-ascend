@@ -27,4 +27,4 @@ numba
 torch-npu==2.5.1.post1.dev20250619
 
 # Remove after https://github.com/vllm-project/vllm-ascend/issues/1470
-transformers<4.53.0
+transformers==4.52.4
