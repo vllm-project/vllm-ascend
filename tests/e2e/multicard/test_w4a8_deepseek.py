@@ -18,26 +18,23 @@ import os
 from unittest.mock import patch
 
 import pytest
-from modelscope import snapshot_download  # type: ignore
 
 from tests.conftest import VllmRunner
 
 
-model_name=snapshot_download("vllm-ascend/DeepSeek-R1-w4a8-pruning")
-
-
+@pytest.mark.skip(reason="Wait for the version of the cann package to be upgraded to 8.2.RC"）
 @pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
                     reason="w4a8_dynamic is not supported on v0")
 @patch.dict(os.environ, {"VLLM_USE_V1": "1", "VLLM_ASCEND_MLA_PA": "1"})
 def test_deepseek_W4A8():
+    from modelscope import snapshot_download  # type: ignore
     prompts = [
         "The capital of France is",
         "The future of AI is",
     ]
     dtype = "bfloat16"
     max_tokens = 5
-    #if "modelscope" in sys.modules:
-    #    del sys.modules["modelscope"]
+    model_name=snapshot_download("vllm-ascend/DeepSeek-R1-w4a8-pruning")
     with VllmRunner(
             model_name,
             dtype=dtype,
