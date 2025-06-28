@@ -15,24 +15,30 @@
 # limitations under the License.
 
 import os
+import sys
 from unittest.mock import patch
 
 import pytest
+from modelscope import snapshot_download  # type: ignore
 
 from tests.conftest import VllmRunner
+
+
+model_name=snapshot_download("vllm-ascend/DeepSeek-R1-w4a8-pruning")
 
 
 @pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
                     reason="w4a8_dynamic is not supported on v0")
 @patch.dict(os.environ, {"VLLM_USE_V1": "1", "VLLM_ASCEND_MLA_PA": "1"})
 def test_deepseek_W4A8():
-    model_name = get_weight()
     prompts = [
         "The capital of France is",
         "The future of AI is",
     ]
     dtype = "bfloat16"
     max_tokens = 5
+    if "modelscope" in sys.modules:
+        del sys.modules["modelscope"]
     with VllmRunner(
             model_name,
             dtype=dtype,
@@ -60,8 +66,3 @@ def test_deepseek_W4A8():
     for i in range(len(vllm_output)):
         assert golden_results[i] == vllm_output[i][1]
         print(f"Generated text: {vllm_output[i][1]!r}")
-
-def get_weight():
-    from modelscope import snapshot_download  # type: ignore
-    model_name=snapshot_download("vllm-ascend/DeepSeek-R1-w4a8-pruning")
-    return model_name
