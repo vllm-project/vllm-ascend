@@ -34,7 +34,7 @@ def test_deepseek_W4A8():
     ]
     dtype = "bfloat16"
     max_tokens = 5
-    model_name=snapshot_download("vllm-ascend/DeepSeek-R1-w4a8-pruning")
+    model_name = snapshot_download("vllm-ascend/DeepSeek-R1-w4a8-pruning")
     with VllmRunner(
             model_name,
             dtype=dtype,
