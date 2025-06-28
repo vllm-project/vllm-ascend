@@ -895,6 +895,8 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+            if "module" in name:
+                continue
 
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is not None:
@@ -983,13 +985,6 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                                    attn_metadata, intermediate_tensors,
                                    inputs_embeds)
         return hidden_states
-
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
-        weights = filter(lambda x: ".module." not in x[0], weights)
-        loaded_params = super().load_weights(weights)
-
-        return loaded_params
 
 
 class CustomDeepseekV3ForCausalLM(CustomDeepseekV2ForCausalLM):
