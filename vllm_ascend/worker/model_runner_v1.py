@@ -215,8 +215,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Set up speculative decoding.
         self.use_spec_decode = False
         self.spec_attn_mask = None
+        self.actual_seq_q_lens = []
         if self.speculative_config:
             self.use_spec_decode = True
+            self.spec_token_num =  self.speculative_config.num_speculative_tokens
+            assert self.spec_token_num > 0
             self.spec_attn_mask = torch.triu(torch.ones(2048,
                                                         2048,
                                                         dtype=torch.bool),
@@ -229,6 +232,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                  self.device)  # type: ignore
                 elif self.speculative_config.method == 'deepseek_mtp':
                     self.drafter = MtpProposer(self.vllm_config, self)
+                    actual_token_per_req = self.spec_token_num + 1
+                    self.actual_seq_q_lens = [len 
+                                              for len in range(
+                                                  actual_token_per_req,
+                                                  self.max_num_reqs + 1,
+                                                  actual_token_per_req)]
                 else:
                     raise ValueError("Unknown speculative decoding method: "
                                      f"{self.speculative_config.method}")
@@ -565,6 +574,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # Append to the end.
                 req_index = None
             self.input_batch.add_request(req_state, req_index)
+            spec_token_ids = scheduler_output.scheduled_spec_decode_token.get(
+                req_id, ()
+            )
+            if spec_token_ids:
+                req_index = self.input_batch.num_reqs - 1
+                start_index = len(req_state.prompt_token_ids) + len(req_state.output_token_ids)
+                end_token_index = start_index + len(spec_token_ids)
+                self.input_batch.token_ids_cpu[
+                    req_index, start_index:end_token_index] = spec_token_ids
+                self.input_batch.num_tokens[req_index] = end_token_index
 
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
@@ -950,11 +969,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         extra_builder_kwargs['enable_dbo_across_dp'] = enable_dbo
 
         # TODO(zzzzwwjj): this code need to refactor afterwards.
+        self.with_prefill = with_prefill
         # Add graph_pad_size here
         if self.torchair_graph_enabled and not with_prefill:
             graph_pad_size = padded_num_tokens_across_dp - total_num_scheduled_tokens
 
             extra_builder_kwargs['graph_pad_size'] = graph_pad_size
+            self.padded_batch_size = padded_num_tokens_across_dp
+        self.extra_builder_kwargs = extra_builder_kwargs
 
         if self.vllm_config.model_config.use_mla:
             attn_metadata = self.attn_metadata_builder.build(  # type: ignore
@@ -1043,6 +1065,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if self.torchair_graph_enabled and not with_prefill:
                     compiled_model = self._get_torchair_lazy_compiled_model(
                         padded_num_tokens_across_dp)
+                    # FIXME(xyx): adapt dummyrun for mtp to avoid recompile  
+                    torch._dynamo.mark_static(input_ids)
+                    torch._dynamo.mark_static(positions)
+                    torch._dynamo.mark_static(
+                        attn_metadata.decode.block_table)
+                    torch._dynamo.mark_static(
+                        attn_metadata.decode.input_positions)
+                    torch._dynamo.mark_static(attn_metadata.slot_mapping)
+                    for kv in self.kv_caches:
+                        assert isinstance(
+                            kv, tuple), "kv_cache must be a tuple"
+                        torch._dynamo.mark_static(kv[0])
+                        torch._dynamo.mark_static(kv[1])
                     hidden_states = compiled_model(
                         input_ids=input_ids,
                         positions=positions,
@@ -1625,7 +1660,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=inputs_embeds,
                         **model_kwargs)
-                return hidden_states
+            if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
+                assert isinstance(self.drafter, MtpProposer)
+                self.drafter.dummy_run(num_tokens)
+            return hidden_states
 
     @contextmanager
     def set_in_profile_run(self):
@@ -2031,6 +2069,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             cu_num_tokens, token_indices = self.drafter.prepare_inputs(
                 attn_metadata.query_start_loc,
                 num_rejected_tokens,
+                force_one_token=True
             )
             target_token_ids = self.input_ids[token_indices]
             target_positions = positions[token_indices]
