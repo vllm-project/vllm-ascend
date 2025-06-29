@@ -580,6 +580,10 @@ class AscendW8A8DynamicFusedMoEMethod:
     """FusedMoe method for Ascend W8A8_DYNAMIC.
     """
 
+    # When calculating topk, we prefetch the weights when using torchair graph,
+    # Additionally, since the L2 cache is only about a little over 100MB, we set it to 80MB to prevent memory overflow.
+    WEIGHT_PREFETCH_SIZE = 80 * 1024 * 1024  # 80MB
+
     def __init__(self):
         self.transpose_weight = True
 
@@ -703,11 +707,17 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         topk_weights = topk_weights.to(x.dtype)
 
+        w1_weight = layer.w13_weight
+        #We only enable weight prefetch in torch_air mode, and benchmark shows no performance gain in enforce_eager mode.
+        if self.torchair_graph_enabled:
+            torch_npu.npu_prefetch(w1_weight, topk_weights,
+                                   self.WEIGHT_PREFETCH_SIZE)
+
         fused_moe_state = get_forward_context().fused_moe_state
         if fused_moe_state == FusedMoEState.MC2:
             return fused_experts_with_mc2(
                 hidden_states=x,
-                w1=layer.w13_weight,
+                w1=w1_weight,
                 w2=layer.w2_weight,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
@@ -722,7 +732,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 is_torchair=self.torchair_graph_enabled)
         elif fused_moe_state == FusedMoEState.AllGather:
             return fused_experts(hidden_states=x,
-                                 w1=layer.w13_weight,
+                                 w1=w1_weight,
                                  w1_scale=layer.w13_weight_scale,
                                  w2=layer.w2_weight,
                                  w2_scale=layer.w2_weight_scale,
@@ -737,7 +747,7 @@ class AscendW8A8DynamicFusedMoEMethod:
             # dispatch/combine tokens.
             return fused_experts_with_all2all(
                 hidden_states=x,
-                w1=layer.w13_weight,
+                w1=w1_weight,
                 w1_scale=layer.w13_weight_scale,
                 w2=layer.w2_weight,
                 w2_scale=layer.w2_weight_scale,
