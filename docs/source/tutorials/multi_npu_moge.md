@@ -2,7 +2,7 @@
 
 ## Run vllm-ascend on Multi-NPU
 
-Run docker container:
+Run container:
 
 ```{code-block} bash
    :substitutions:
