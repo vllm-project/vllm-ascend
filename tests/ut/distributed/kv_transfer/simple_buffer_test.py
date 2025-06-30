@@ -1,5 +1,6 @@
 import unittest
 import zlib
+
 import torch
 
 from unittest.mock import MagicMock
