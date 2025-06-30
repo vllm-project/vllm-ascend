@@ -68,9 +68,10 @@ if __name__ == '__main__':
         description=
         "Patch benchmark_dataset.py to set streaming=False in load_dataset calls"
     )
-    parser.add_argument("--path",
-                        type=str,
-                        default="/vllm-workspace/vllm/vllm/benchmarks/datasets.py",
-                        help="Path to the benchmark_dataset.py file")
+    parser.add_argument(
+        "--path",
+        type=str,
+        default="/vllm-workspace/vllm/vllm/benchmarks/datasets.py",
+        help="Path to the benchmark_dataset.py file")
     args = parser.parse_args()
     patch_file(args.path)
