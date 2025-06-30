@@ -9,7 +9,7 @@ from enum import Enum
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Dict, List, Tuple, Union
+from typing import TYPE_CHECKING, Any, Optional, List, Tuple
 import os
 import json
 import msgspec
@@ -27,15 +27,13 @@ from vllm_ascend import envs
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
-    get_tp_group, get_dp_group, get_world_group)
+from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
+    get_tp_group, get_dp_group)
 from vllm.utils import logger
-from vllm.utils import make_zmq_path, make_zmq_socket, round_down, get_ip
+from vllm.utils import make_zmq_path, make_zmq_socket, get_ip
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 from mooncake.engine import TransferEngine
-from vllm.distributed.kv_transfer.kv_lookup_buffer.mooncake_store import MooncakeStoreConfig
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -670,7 +668,7 @@ class MooncakeConnectorWorker:
                             success_count += 1
                 except Exception as e:
                     # 处理任务中的异常情况
-                    logger.error("Mooncake Transfer Engine Return Error.")
+                    logger.error("Mooncake Transfer Engine Return Error, error is %s", e)
                     raise RuntimeError("Mooncake Transfer Engine Return Error.")
 
                 if success_count == len(self.futures[req]):
@@ -862,7 +860,7 @@ class MooncakeConnectorWorker:
         ret = self.engine.transfer_sync_read(session_id, buffer,
                                              peer_buffer_address, length)
         if ret < 0:
-            logger.error("Mooncake Transfer Engine Return Error.")
+            logger.error("Mooncake Transfer Engine Return Error, ret is %s", ret)
             raise RuntimeError("Mooncake Transfer Engine Return Error.")
         return ret
 
