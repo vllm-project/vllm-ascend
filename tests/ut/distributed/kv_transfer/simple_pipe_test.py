@@ -1,12 +1,9 @@
 import unittest
-from typing import Optional
 import torch
 import llm_datadist 
 import zmq  
 from unittest.mock import MagicMock, patch
 from vllm_ascend.distributed.kv_transfer.simple_pipe import SimplePipe
-from vllm_ascend.distributed.kv_transfer.utils import NPU_DTYPE_TO_TORCH_DTYPE
-import subprocess 
 class TestSimplePipe(unittest.TestCase):
     
     @classmethod
@@ -29,19 +26,6 @@ class TestSimplePipe(unittest.TestCase):
             
 
             self.context = zmq.Context()
-
-    def tearDown(self):
-
-        if hasattr(self, 'router_socket'):
-            self.router_socket.close()
-        if hasattr(self, 'context'):
-            self.context.term()
-        for patcher in self.patches:
-            patcher.stop()
-        
-
-        super().tearDown()
-
     @classmethod
     def _create_mock_config(self):
         mock_config = MagicMock()
@@ -82,7 +66,6 @@ class TestSimplePipe(unittest.TestCase):
         with patch('llm_datadist.LLMDataDist') as MockLLMDataDist:
             self.context = zmq.Context()
             self.router_socket = self.context.socket(zmq.ROUTER)
-            patcher = patch('threading.Thread')
             self.pipe = SimplePipe(
                 rank=5,
                 local_rank=0,
@@ -95,7 +78,6 @@ class TestSimplePipe(unittest.TestCase):
             # Assert
             mock_data_dist.init.assert_called_once()
             self.pipe.router_socket.close()
-            self.tearDown()
 
     def test_init_with_invalid_kv_role(self):
         with self.assertRaises(NotImplementedError):
@@ -110,7 +92,7 @@ class TestSimplePipe(unittest.TestCase):
                 "proxy_port": "8000",
                 "port": 5500
             }
-            SimplePipe(
+            pipe = SimplePipe(
                 rank=5,
                 local_rank=0,
                 kv_transfer_config=mock_config,
@@ -129,7 +111,7 @@ class TestSimplePipe(unittest.TestCase):
                 "proxy_port": "8000",
                 "port": 5500
             }
-            SimplePipe(
+            pipe = SimplePipe(
                 rank=0,
                 local_rank=0,
                 kv_transfer_config=mock_config,
