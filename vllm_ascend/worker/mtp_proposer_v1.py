@@ -64,11 +64,11 @@ class MtpProposer:
 
     @staticmethod
     def prepare_inputs(
-        # [batch_size + 1]
-        cu_target_query_lens: torch.Tensor,
-        # [batch_size]
-        num_rejected_tokens: torch.Tensor,
-        enforce_one_token: bool = True
+            # [batch_size + 1]
+            cu_target_query_lens: torch.Tensor,
+            # [batch_size]
+            num_rejected_tokens: torch.Tensor,
+            enforce_one_token: bool = True
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # cu_target_query_lens: [0, a, a + b, a + b + c]
         # num_rejected_tokens: [n1, n2, n3]
@@ -85,10 +85,10 @@ class MtpProposer:
         num_tokens_per_req = query_len_per_req - num_rejected_tokens
         if enforce_one_token:
             # enable force_one_token means we only focus on the last token position of each request
-            # token_indices: [batch_size] 
+            # token_indices: [batch_size]
             cu_num_tokens = torch.arange(cu_target_query_lens.size(0),
-                                          device=cu_target_query_lens.device,
-                                          dtype=torch.int32)
+                                         device=cu_target_query_lens.device,
+                                         dtype=torch.int32)
             relative_index = query_len_per_req - num_rejected_tokens - 1
             token_indices = cu_target_query_lens[:-1] + relative_index
         else:
