@@ -26,7 +26,8 @@ from .func_wrapper import (wrapper_load_model, wrapper_rmsnorm_forward_oot,
                            wrapper_rmsnorm_init)
 from .w4a8_dynamic import (AscendW4A8DynamicFusedMoEMethod,
                            AscendW4A8DynamicLinearMethod)
-from .w8a8 import AscendW8A8LinearMethod
+from .w8a8 import (AscendC8KVCacheMethod, AscendW8A8FusedMoEMethod,
+                   AscendW8A8LinearMethod)
 from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
                            AscendW8A8DynamicLinearMethod)
 
@@ -252,6 +253,8 @@ class VLLMAscendQuantizer:
         # Attention
         if '.attn' in prefix and 'fa_quant_type' in quant_description.keys():
             quant_type = quant_description['fa_quant_type']
+        if '.attn' in prefix and 'kv_quant_type' in quant_description.keys():
+            quant_type = quant_description['kv_quant_type']
         # Linear
         else:
             quant_type = cls.get_linear_quant_type(quant_description, prefix,
@@ -282,6 +285,14 @@ class W8A8Quantizer(VLLMAscendQuantizer):
     def build_linear_method():
         return AscendW8A8LinearMethod()
 
+    @staticmethod
+    def build_moe_method():
+        return AscendW8A8FusedMoEMethod()
+
+    @staticmethod
+    def build_attention_method():
+        return AscendC8KVCacheMethod()
+
 
 class W8A8DYNAMICQuantizer(VLLMAscendQuantizer):
 
@@ -298,4 +309,5 @@ SUPPORT_ASCEND_QUANTIZER_TYPE = {
     "W4A8_DYNAMIC": W4A8DYNAMICQuantizer,
     "W8A8": W8A8Quantizer,
     "W8A8_DYNAMIC": W8A8DYNAMICQuantizer,
+    "C8": W8A8Quantizer,
 }
