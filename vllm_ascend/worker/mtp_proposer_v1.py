@@ -1,7 +1,6 @@
 import torch
 from vllm.attention.layer import Attention
 from vllm.config import VllmConfig, get_layers_from_vllm_config, set_current_vllm_config
-from vllm.forward_context import set_forward_context
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading,
@@ -207,7 +206,7 @@ class MtpProposer:
         self.hidden_states[:num_tokens] = target_hidden_states
             
 
-        with set_forward_context(attn_metadata, self.vllm_config, num_tokens=num_input_tokens):
+        with set_ascend_forward_context(attn_metadata, self.vllm_config, num_tokens=num_input_tokens):
             with ProfileExecuteDuration().capture_async('mtp_forward'):
                 model_kwargs = {}
                 model_kwargs["attn_metadata"] = attn_metadata
@@ -309,7 +308,7 @@ class MtpProposer:
         #     num_actual_tokens=1,
         #     is_mtp_model=True
         # )
-        with set_forward_context(None, self.vllm_config, num_tokens=num_tokens):
+        with set_ascend_forward_context(None, self.vllm_config, num_tokens=num_tokens):
             self.model(
                 input_ids=self.input_ids[:num_tokens],
                 positions=self.positions[:num_tokens],
