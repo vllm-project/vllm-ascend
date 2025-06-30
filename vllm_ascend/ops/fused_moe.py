@@ -1137,6 +1137,7 @@ class AscendFusedMoE(FusedMoE):
         self.activation = activation
         self.log2phy = None
         self.global_redundant_expert_num = 0
+        self.all_reduce_merge = envs_ascend.VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE
 
         ascend_config = get_ascend_config()
         expert_map_path = ascend_config.expert_map_path
@@ -1227,6 +1228,7 @@ class AscendFusedMoE(FusedMoE):
                                               is_prefill, is_deepseek_v3_r1)
         if shared_experts:
             if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
+                # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
                 shared_hidden_states = shared_experts(hidden_states)
 
         tp_size = get_tensor_model_parallel_world_size()
@@ -1310,8 +1312,9 @@ class AscendFusedMoE(FusedMoE):
         else:
             final_hidden_states = e_hidden_states
 
-        if tp_size > 1 and (fused_moe_state == FusedMoEState.AllGather
-                            or fused_moe_state == FusedMoEState.AllGatherEP):
+        if tp_size > 1 and not self.all_reduce_merge and (
+                fused_moe_state == FusedMoEState.AllGather
+                or fused_moe_state == FusedMoEState.AllGatherEP):
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 

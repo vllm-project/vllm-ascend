@@ -21,7 +21,8 @@ for concurrency in "${concurrency_array[@]}"; do
         python /mnt/deepseek/vllm/benchmarks/benchmark_serving.py \
             --backend vllm \
             --trust-remote-code \
-            --model /mnt/deepseek/DeepSeek-R1-W8A8-VLLM \
+            --model auto \
+            --tokenizer /mnt/deepseek/DeepSeek-R1-W8A8-VLLM \ 
             --dataset-name random \
             --random-input-len 4096 \
             --random-output-len 1536 \
