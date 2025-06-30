@@ -56,7 +56,7 @@ def test_models_distributed_DeepSeek_multistream_moe():
     with VllmRunner(
             "vllm-ascend/DeepSeek-V3-Pruning",
             dtype=dtype,
-            tensor_parallel_size=2,
+            tensor_parallel_size=4,
             distributed_executor_backend="mp",
             additional_config={
                 "torchair_graph_config": {
