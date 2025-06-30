@@ -21,14 +21,14 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import numpy as np
 import torch
 import torch_npu
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionLayer, AttentionType)
+from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
+                                              AttentionType)
 from vllm.attention.backends.utils import PAD_SLOT_ID, CommonAttentionState
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl, AscendAttentionState
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d)
 
@@ -328,7 +328,7 @@ class AscendAttentionTorchairMetadataBuilder:
         return attn_metadata
 
 
-class AscendAttentionTorchairBackendImpl(AttentionImpl):
+class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
 
     def __init__(
         self,
@@ -345,24 +345,20 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
         kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
     ) -> None:
-        self.num_heads = num_heads
-        self.head_size = head_size
-        self.scale = float(scale)
-        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
-        self.hidden_size = self.num_heads * self.head_size
-        self.kv_cache_dtype = kv_cache_dtype
-        self.sliding_window = sliding_window
-        if alibi_slopes is not None:
-            alibi_slopes = torch.tensor(alibi_slopes,
-                                        dtype=torch.float32,
-                                        device="npu")
-        self.alibi_slopes = alibi_slopes
-        self.attn_type = attn_type
-
-        assert self.num_heads % self.num_kv_heads == 0
-        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-        self.key_cache = None
-        self.value_cache = None
+        super().__init__(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            alibi_slopes=alibi_slopes,
+            sliding_window=sliding_window,
+            kv_cache_dtype=kv_cache_dtype,
+            blocksparse_params=blocksparse_params,
+            logits_soft_cap=logits_soft_cap,
+            attn_type=attn_type,
+            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+            use_irope=use_irope, 
+        )
 
     def forward(
         self,
@@ -422,7 +418,6 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
-        # print_rank_0(f"attn_metadata.attn_state: {attn_metadata.attn_state}")
         if kv_cache is not None and kv_cache[0].numel() > 0:
             key_cache, value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
@@ -439,37 +434,32 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
                 value_cache, indices,
                 value.view(-1, self.num_kv_heads * self.head_size))
 
-        if hasattr(layer, 'quant_method'):
-            # TODO: Add attr (num_prefills, prefill_metadata, decode_metadata) to AscendMetadata
-            pass
-        # V0-Style scheduler situation.
-        elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-            assert attn_metadata is not None
-            assert attn_metadata.attn_mask is not None
-            mask = attn_metadata.attn_mask
+        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+                assert attn_metadata is not None
+                assert attn_metadata.attn_mask is not None
+                mask = attn_metadata.attn_mask
+                if is_310p():
+                    # align q k v output tensors
+                    query = aligned_16(query)
+                    key = aligned_16(key)
+                    value = aligned_16(value)
+                    output = aligned_16(output)
 
-            if is_310p():
-                # align q k v output tensors
-                query = aligned_16(query)
-                key = aligned_16(key)
-                value = aligned_16(value)
-                output = aligned_16(output)
+                    # do reformat in case of broadcasted tensors
+                    mask = mask.repeat(attn_metadata.seq_lens.size(0), 1, 1, 1)
+                    mask = torch_npu.npu_format_cast(mask.contiguous(),
+                                                     ACL_FORMAT_FRACTAL_NZ)
 
-                # do reformat in case of broadcasted tensors
-                mask = mask.repeat(attn_metadata.seq_lens.size(0), 1, 1, 1)
-                mask = torch_npu.npu_format_cast(mask.contiguous(),
-                                                 ACL_FORMAT_FRACTAL_NZ)
-
-            torch_npu._npu_flash_attention(query=query,
-                                           key=key,
-                                           value=value,
-                                           mask=mask,
-                                           seq_len=attn_metadata.seq_lens,
-                                           scale_value=self.scale,
-                                           num_heads=self.num_heads,
-                                           num_kv_heads=self.num_kv_heads,
-                                           out=output)
-            output = output[:num_tokens, :, :]
+                torch_npu._npu_flash_attention(query=query,
+                                               key=key,
+                                               value=value,
+                                               mask=mask,
+                                               seq_len=attn_metadata.seq_lens,
+                                               scale_value=self.scale,
+                                               num_heads=self.num_heads,
+                                               num_kv_heads=self.num_kv_heads,
+                                               out=output)
+                output = output[:num_tokens, :, :]
         elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
             decode_meta = attn_metadata.decode
             assert decode_meta is not None
@@ -490,5 +480,15 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
                 input_layout='BSH',
                 block_size=block_size)
         else:
-            raise RuntimeError("Currently the attn status is not supported.")
+            output = super().forward(
+                layer=layer,
+                query=query,
+                key=key,
+                value=value,
+                kv_cache=kv_cache,
+                attn_metadata=attn_metadata,
+                output=output,
+                trace_flag=trace_flag,
+            )
+        
         return output.view(num_tokens, self.hidden_size)
