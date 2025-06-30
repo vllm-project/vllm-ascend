@@ -72,29 +72,27 @@ Before running the benchmarks, ensure the following:
   }
   ]
   ```
-  this Json will be structured and parsed into server parameters and client parameters by the benchmark script. This configuration defines a test case named `serving_qwen2_5vl_7B_tp1`, designed to evaluate the performance of the `Qwen/Qwen2.5-VL-7B-Instruct` model under different request rates. The test includes both server and client parameters.
+  this Json will be structured and parsed into server parameters and client parameters by the benchmark script. This configuration defines a test case named `serving_qwen2_5vl_7B_tp1`, designed to evaluate the performance of the `Qwen/Qwen2.5-VL-7B-Instruct` model under different request rates. The test includes both server and client parameters, for more parameters details, see vllm benchmark [cli](https://github.com/vllm-project/vllm/tree/main/vllm/benchmarks).
 
   - **Test Overview**
    - Test Name: serving_qwen2_5vl_7B_tp1
 
    - Queries Per Second (QPS): The test is run at four different QPS levels: 1, 4, 16, and inf (infinite load, typically used for stress testing).
 
-  - Server Parameters
-    - Model: Qwen/Qwen2.5-VL-7B-Instruct
+   - Server Parameters
+      - Model: Qwen/Qwen2.5-VL-7B-Instruct
 
-    - Tensor Parallelism: 1 (no model parallelism is used; the model runs on a single device or node)
+      - Tensor Parallelism: 1 (no model parallelism is used; the model runs on a single device or node)
 
-    - Swap Space: 16 GB (used to handle memory overflow by swapping to disk)
+      - Swap Space: 16 GB (used to handle memory overflow by swapping to disk)
 
-    - Logging Options:
+      - disable_log_stats: disables logging of performance statistics.
 
-    - disable_log_stats: disables logging of performance statistics.
+      - disable_log_requests: disables logging of individual requests.
 
-    - disable_log_requests: disables logging of individual requests.
+      - Trust Remote Code: enabled (allows execution of model-specific custom code)
 
-    - Trust Remote Code: Enabled (allows execution of model-specific custom code)
-
-    - Max Model Length: 16,384 tokens (maximum context length supported by the model)
+      - Max Model Length: 16,384 tokens (maximum context length supported by the model)
 
   - Client Parameters
 
