@@ -203,12 +203,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # Set up speculative decoding.
         self.use_aux_hidden_state_outputs = False
-        self.use_spec_decode = False
         self.spec_attn_mask = None
         self.use_eagle = False
         self.drafter = None
         if self.speculative_config:
-            self.use_spec_decode = True
             self.spec_attn_mask = torch.triu(torch.ones(2048,
                                                         2048,
                                                         dtype=torch.bool),
@@ -217,7 +215,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if self.speculative_config.method == "ngram":
                     self.drafter = NgramProposer(self.vllm_config)
                 elif self.speculative_config.method in ["eagle", "eagle3"]:
-                    self.use_eagle = True
                     self.drafter = EagleProposer(self.vllm_config, self.device,
                                                  self)  # type: ignore
                     if self.speculative_config.method == "eagle3":
@@ -888,7 +885,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 mm_embeds.append(mm_embeds_item)
         return mm_embeds
 
-    def _process_reqs(
+    def _prepare_inputs(
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
@@ -992,9 +989,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             attn_state = AscendAttentionState.DecodeOnly
         # Speculative decoding.
         elif np.all(num_valid_tokens == 1):
-            if self.use_eagle:
+            if isinstance(self.drafter, EagleProposer):
                 attn_state = AscendAttentionState.ChunkedPrefill
-            else:
+            elif isinstance(self.drafter, MtpProposer):
                 attn_state = AscendAttentionState.SpecDecoding
         # splitfuse
         elif not ascend_config.ascend_scheduler_config.enabled or self.chunked_prefill_enabled:
@@ -1336,7 +1333,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         attn_metadata: SpecDecodeMetadata,
         aux_hidden_states: torch.Tensor = None,
     ) -> Optional[list[list[int]]]:
-        if not self.use_spec_decode:
+        if not self.speculative_config:
             # Speculative decoding is not enabled.
             spec_token_ids = None
         elif self.speculative_config.method == "ngram":
@@ -1445,14 +1442,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 return EMPTY_MODEL_RUNNER_OUTPUT
             (attn_metadata, hidden_states, spec_decode_metadata, positions,
              num_scheduled_tokens, sample_indices,
-             aux_hidden_states) = (self._process_reqs(scheduler_output,
-                                                      intermediate_tensors))
+             aux_hidden_states) = (self._prepare_inputs(
+                 scheduler_output, intermediate_tensors))
 
         with ProfileExecuteDuration().capture_async("post process"):
 
             logits = self.model.compute_logits(hidden_states[sample_indices],
                                                None)
-            if self.use_eagle:
+            if isinstance(self.drafter, EagleProposer):
                 attn_metadata = self.get_eagle_atten_dict(scheduler_output)
             # Apply structured output bitmasks if present
             if scheduler_output.grammar_bitmask is not None:
@@ -1761,7 +1758,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         hidden_states, _ = hidden_states
                     else:
                         hidden_states = hidden_states
-                    if self.use_spec_decode and \
+                    if self.speculative_config and \
                         self.speculative_config.method in ('eagle', 'eagle3'):
                         assert isinstance(self.drafter, EagleProposer)
                         self.drafter.dummy_run(num_tokens)
@@ -2090,6 +2087,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Add sampled_token_ids to token_ids_cpu.
             start_idx = self.input_batch.num_tokens_no_spec[i]
             end_idx = start_idx + num_sampled_ids
+            if end_idx >= self.max_model_len:
+                # Skip requests that have already reached the max model length.
+                draft_token_ids.append([])
+                continue
+
             self.input_batch.token_ids_cpu[i, start_idx:end_idx] = sampled_ids
             assert self.drafter is not None
             drafter_output = self.drafter.propose(
