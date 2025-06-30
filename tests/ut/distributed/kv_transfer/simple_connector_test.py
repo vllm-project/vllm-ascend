@@ -1,11 +1,14 @@
-import unittest
 import torch
+import unittest
 from unittest.mock import MagicMock, patch
+
+from vllm.config import VllmConfig
+from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
+
 from vllm_ascend.distributed.kv_transfer.simple_connector import SimpleConnector
 from vllm_ascend.distributed.kv_transfer.simple_buffer import SimpleBuffer
 from vllm_ascend.distributed.kv_transfer.simple_pipe import SimplePipe
-from vllm.config import VllmConfig
-from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
+
 
 class TestSimpleConnector(unittest.TestCase):
 
