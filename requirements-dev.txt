@@ -12,3 +12,4 @@ xgrammar
 zmq
 types-psutil
 pytest-cov
+sentence_transformers
