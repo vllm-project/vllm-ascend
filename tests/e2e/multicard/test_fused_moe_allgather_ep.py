@@ -17,7 +17,7 @@
 """
 Execute the inference of fused_moe_allgather_ep and fused_moe_alltoall_ep.
 
-Run 'pytest tests/multicard/test_fused_moe_allgather_ep.py'.
+Run 'pytest e2e/tests/multicard/test_fused_moe_allgather_ep.py'.
 """
 
 import os
