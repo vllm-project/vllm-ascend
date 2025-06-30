@@ -1,39 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 import contextlib
+import hashlib
+import json
 import math
-import threading
-import time
+import os
+import pickle
 import random
 import socket
-from enum import Enum
+import struct
+import threading
+import time
 from collections import defaultdict
 from collections.abc import Iterator
+from concurrent.futures import Future
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, List, Tuple
-import os
-import json
+from enum import Enum
+from typing import TYPE_CHECKING, Any, List, Optional, Tuple
+
 import msgspec
-import torch
-import zmq
 import numpy as np
 import numpy.typing as npt
-import hashlib
-import pickle
-import struct
-
-from concurrent.futures import Future
-
-from vllm_ascend import envs
+import torch
+import zmq
+from mooncake.engine import TransferEngine
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
-from vllm.distributed.parallel_state import (get_tensor_model_parallel_rank,
-                                             get_tp_group, get_dp_group)
-from vllm.utils import logger
-from vllm.utils import make_zmq_path, make_zmq_socket, get_ip
+from vllm.distributed.parallel_state import (get_dp_group,
+                                             get_tensor_model_parallel_rank,
+                                             get_tp_group)
+from vllm.utils import get_ip, logger, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
-from mooncake.engine import TransferEngine
+
+from vllm_ascend import envs
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
