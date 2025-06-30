@@ -853,6 +853,8 @@ class MooncakeConnectorWorker:
                 
                     logger.info("****--- sync transfer, mooncake_session_id: %s, src:%s, dst: %s, length:%s", mooncake_session_id, src, dst, length)
                     ret = self._transfer_sync( mooncake_session_id, src, dst, length)
+                    if ret > 0:
+                        logger.info("Mooncake Transfer Engine Return Success, ret is %s", ret)
 
     def _transfer_sync(self, session_id: str, buffer: int,
                        peer_buffer_address: int, length: int) -> int:
