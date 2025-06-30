@@ -493,7 +493,7 @@ class MooncakeConnectorWorker:
         path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
 
         logger.info("Starting listening on path: %s", path)
-        with zmq_ctx(zmq.ROUTER, path) as sock: # type: ignore[attr-defined]
+        with zmq_ctx(zmq.ROUTER, path) as sock:  # type: ignore[attr-defined]
             ready_event.set()
             while True:
                 identity, _, msg = sock.recv_multipart()
@@ -908,7 +908,7 @@ class MooncakeConnectorWorker:
 
 
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any, 
+def zmq_ctx(socket_type: Any,
             addr: str) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
     """Context manager for a ZMQ socket"""
 
@@ -918,13 +918,11 @@ def zmq_ctx(socket_type: Any,
     ctx: Optional[zmq.Context] = None  # type: ignore[name-defined]
     try:
         ctx = zmq.Context()  # type: ignore[attr-defined]
-        yield make_zmq_socket(ctx=ctx,
-                              path=addr,
-                              socket_type=socket_type,
-                              bind=socket_type == zmq.ROUTER)  # type: ignore[attr-defined]
-    except Exception as e:
-        logger.error(f"ZeroMQ error: {e}")
-        raise RuntimeError("ZeroMQ error.")
+        yield make_zmq_socket(
+            ctx=ctx,
+            path=addr,
+            socket_type=socket_type,
+            bind=socket_type == zmq.ROUTER)  # type: ignore[attr-defined]
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
