@@ -50,7 +50,6 @@ UPDATE_ASYNC_REQ =False
 
 
 global MOONCAKE_BASE_PORT
-#MOONCAKE_BASE_PORT = int(os.environ.get('MOONCAKE_BASE_PORT', 10000))
 BASE_PORT = int(os.getenv("VLLM_BASE_PORT", "8790"))
 
 
@@ -100,17 +99,6 @@ class MooncakeConnectorV1_barebone(KVConnectorBase_V1):
     def __init__(self, vllm_config: VllmConfig, role: KVConnectorRole):
         assert vllm_config.kv_transfer_config is not None
         self.engine_id = vllm_config.kv_transfer_config.engine_id
-
-        # self.rank = get_tensor_model_parallel_rank()
-        # self.side_channel_host = get_local_ip_by_remote()  #变量名
-        # self.max_device_id = vllm_config.parallel_config.tensor_parallel_size * \
-        #                      vllm_config.parallel_config.data_parallel_size
-        # # 单边port用于TE上进行数据面的传输
-        # self.side_channel_port = (
-        #         MOONCAKE_BASE_PORT +
-        #         vllm_config.parallel_config.data_parallel_rank_local *
-        #         vllm_config.parallel_config.tensor_parallel_size + self.max_device_id + self.rank)
-
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler: Optional[MooncakeConnectorScheduler] = \
@@ -346,11 +334,9 @@ class MooncakeConnectorWorker:
         # Metadata.
         self.engine_id = engine_id
         self.tp_rank = get_tensor_model_parallel_rank()
-        # self.world_size = get_tensor_model_parallel_world_size()
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
         self.tp_group = get_tp_group()
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank_local
-        # self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_size =  vllm_config.parallel_config.data_parallel_size_local # here we use dp local size
         self.kv_caches: dict[str, torch.Tensor] = {}
         self.side_channel_host = get_local_ip_by_remote()
@@ -362,19 +348,19 @@ class MooncakeConnectorWorker:
         device_ids = os.getenv("ASCEND_RT_VISIBLE_DEVICES", None)
         
         logger.info(f"os getenv ASCEND_RT_VISIBLE_DEVICES: {device_ids}")
-        #device_ids = device_ids.split(',')
+        # device_ids = device_ids.split(',')
         if device_ids is None:
-            device_ids = list(range(self.dp_rank * self.tp_size, (self.dp_rank+1) * self.tp_size))
+            device_ids_list = list(range(self.dp_rank * self.tp_size, (self.dp_rank+1) * self.tp_size))
         else:
-            device_ids = list(map(int, device_ids.split(',')))
-        assert len(device_ids) > self.tp_rank
+            device_ids_list = list(map(int, device_ids.split(',')))
+        assert len(device_ids_list) > self.tp_rank
         # self.device_id = device_ids[self.tp_rank + self.dp_group_num*self.dp_size]   
         # 0: [0,0,2,4] 1:[]
         
         # self.device_id = device_ids[self.dp_rank * self.tp_size + self.tp_rank]
         # self.device_id = (self.dp_rank * self.tp_size + self.tp_rank)
         # TODO just verify TP=1
-        self.device_id = device_ids[self.tp_rank]
+        self.device_id = device_ids_list[self.tp_rank]
 
         
         # 单边port用于TE上进行数据面的传输
@@ -736,9 +722,9 @@ class MooncakeConnectorWorker:
                     del self._done_sending_count[req_id]
                     all_done_sending.add(req_id)
             if self.kv_role =='kv_producer':
-                return all_done_sending, None
+                return all_done_sending, set()
             else:
-                return None,all_done_recving
+                return set(), all_done_recving
 
         # Ranks 1 to N-1: send finished ids to Rank 0.
         else:
