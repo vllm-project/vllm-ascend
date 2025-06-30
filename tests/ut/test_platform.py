@@ -2,7 +2,7 @@ import unittest
 from unittest.mock import patch, MagicMock
 import torch
 import importlib
-from vllm.platforms import current_platform, PlatformEnum
+from vllm.platforms import PlatformEnum
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD
 from vllm.config import CompilationLevel
@@ -53,7 +53,7 @@ class TestNPUPlatform(unittest.TestCase):
 
         mock_adapt_patch.assert_called_once_with(is_global_patch=True)
         
-        self.assertIn(ASCEND_QUATIZATION_METHOD, mock_action.choices)
+        self.assertTrue(ASCEND_QUATIZATION_METHOD in mock_action.choices)
         self.assertEqual(len(mock_action.choices), 3)  # original 2 + ascend
 
     @patch('vllm_ascend.utils.adapt_patch')
@@ -290,7 +290,6 @@ class TestNPUPlatform(unittest.TestCase):
     @patch('vllm_ascend.ascend_config.init_ascend_config')
     def test_check_and_update_config_unsupported_compilation_level(self, mock_init_ascend, mock_check_ascend, mock_is_310p):
         mock_init_ascend.return_value = self.mock_ascend_config
-        self.mock_vllm_config.cache_config = None
         self.mock_vllm_config.model_config.enforce_eager = False
         self.mock_vllm_config.compilation_config.level = CompilationLevel.DYNAMO_ONCE
         
