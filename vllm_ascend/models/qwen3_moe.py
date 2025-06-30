@@ -19,13 +19,9 @@
 from typing import Optional
 
 import torch
+import vllm
 from torch import nn
 from transformers import PretrainedConfig
-from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_ep_group
-from vllm_ascend.ops.fused_moe import AscendFusedMoE
-
-import vllm
 from vllm.attention import AttentionMetadata
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.distributed.parallel_state import get_dp_group
@@ -33,6 +29,10 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
+
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.parallel_state import get_ep_group
+from vllm_ascend.ops.fused_moe import AscendFusedMoE
 
 
 class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
@@ -47,7 +47,7 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
             "up_proj",
         ],
         "experts":
-            ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     }
 
 
@@ -55,10 +55,10 @@ class AscendQwen3MoeSparseMoeBlock(nn.Module):
     top_k: int
 
     def __init__(
-            self,
-            config: PretrainedConfig,
-            quant_config: Optional[QuantizationConfig] = None,
-            prefix: str = "",
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -126,8 +126,7 @@ class AscendQwen3MoeSparseMoeBlock(nn.Module):
             is_prefill=is_prefill,
             top_k=self.top_k,
             enable_force_load_balance=enable_force_load_balance,
-            shared_experts=None,
-        )
+            shared_experts=None)
 
         return hidden_states
 
