@@ -141,11 +141,11 @@ echo 'vllm-ascend mypy: Done'
 # https://github.com/codespell-project/codespell/issues/1915
 # Avoiding the "./" prefix and using "/**" globs for directories appears to solve the problem
 CODESPELL_EXCLUDES=(
-    '--skip' 'tests/prompts/**,tests/ut/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**'
+    '--skip' 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**'
 )
 
 CODESPELL_IGNORE_WORDS=(
-    '-L' 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn'
+    '-L' 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,assertIn'
 )
 
 # check spelling of specified files
