@@ -2031,6 +2031,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             cu_num_tokens, token_indices = self.drafter.prepare_inputs(
                 attn_metadata.query_start_loc,
                 num_rejected_tokens,
+                enforce_one_tokens=True,  # Always enforce one token for MTP.
             )
             target_token_ids = self.input_ids[token_indices]
             target_positions = positions[token_indices]

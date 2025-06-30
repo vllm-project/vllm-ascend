@@ -68,6 +68,7 @@ class MtpProposer:
         cu_target_query_lens: torch.Tensor,
         # [batch_size]
         num_rejected_tokens: torch.Tensor,
+        enforce_one_token: bool = True
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # cu_target_query_lens: [0, a, a + b, a + b + c]
         # num_rejected_tokens: [n1, n2, n3]
@@ -82,26 +83,34 @@ class MtpProposer:
                              cu_target_query_lens[:-1])
         # [a, b, c] -> [a - n1, b - n2, c - n3]
         num_tokens_per_req = query_len_per_req - num_rejected_tokens
+        if enforce_one_token:
+            # enable force_one_token means we only focus on the last token position of each request
+            # token_indices: [batch_size] 
+            cu_num_tokens = torch.arange(cu_target_query_lens.size(0),
+                                          device=cu_target_query_lens.device,
+                                          dtype=torch.int32)
+            relative_index = query_len_per_req - num_rejected_tokens - 1
+            token_indices = cu_target_query_lens[:-1] + relative_index
+        else:
+            cu_num_tokens = torch.empty_like(cu_target_query_lens)
+            torch.cumsum(num_tokens_per_req, dim=0, out=cu_num_tokens[1:])
+            cu_num_tokens[0] = 0
 
-        cu_num_tokens = torch.empty_like(cu_target_query_lens)
-        torch.cumsum(num_tokens_per_req, dim=0, out=cu_num_tokens[1:])
-        cu_num_tokens[0] = 0
+            # FIXME(woosuk): Avoid synchronization.
+            num_tokens = cu_num_tokens[-1].item()
+            token_indices = torch.empty(
+                num_tokens,
+                dtype=torch.int32,
+                device=cu_num_tokens.device,
+            )
 
-        # FIXME(woosuk): Avoid synchronization.
-        num_tokens = cu_num_tokens[-1].item()
-        token_indices = torch.empty(
-            num_tokens,
-            dtype=torch.int32,
-            device=cu_num_tokens.device,
-        )
-
-        BLOCK_SIZE = 1024
-        prepare_input_kernel(
-            token_indices,
-            cu_target_query_lens,
-            cu_num_tokens,
-            block_size=BLOCK_SIZE,
-        )
+            BLOCK_SIZE = 1024
+            prepare_input_kernel(
+                token_indices,
+                cu_target_query_lens,
+                cu_num_tokens,
+                block_size=BLOCK_SIZE,
+            )
         return cu_num_tokens, token_indices
 
     def propose(
@@ -160,6 +169,10 @@ class MtpProposer:
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
         )
+
+        if attn_metadata.prefill_metadata is not None:
+            # Assume enforce_one_token is True
+            attn_metadata.prefill_metadata.query_lens[:] = 1
 
         with set_ascend_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
