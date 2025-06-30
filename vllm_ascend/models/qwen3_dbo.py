@@ -192,8 +192,7 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
-        # if self.enable_force_load_balance:
-        if True:
+        if self.enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, self.config.num_experts)
 
         return topk_weights, topk_ids, local_hidden_states, chunked_hidden_states_sizes
