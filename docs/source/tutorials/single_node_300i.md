@@ -61,31 +61,24 @@ Run the following command to start the vLLM server:
 ```{code-block} bash
    :substitutions:
 export VLLM_USE_V1=1
-export MODEL="Qwen/Qwen3-0.6B"
-python -m vllm.entrypoints.api_server \
-    --model $MODEL \
+vllm serve Qwen/Qwen3-0.6B \
     --tensor-parallel-size 1 \
-    --max-num-batched-tokens 2048 \
-    --gpu-memory-utilization 0.5 \
-    --max-num-seqs 4 \
     --enforce-eager \
-    --trust-remote-code \
-    --max-model-len 1024 \
-    --disable-custom-all-reduce \
     --dtype float16 \
-    --port 8000 \
-    --compilation-config '{"custom_ops":["+rms_norm", "+rotary_embedding"]}' 
+    --compilation-config '{"custom_ops":["none", "+rms_norm", "+rotary_embedding"]}'
 ```
 
 Once your server is started, you can query the model with input prompts
 
 ```bash
-curl http://localhost:8000/generate \
+curl http://localhost:8000/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "Hello, my name is ？",
-    "max_tokens": 20,
-    "temperature": 0
+    "prompt": "The future of AI is",
+    "max_tokens": 64,
+    "top_p": 0.95,
+    "top_k": 50,
+    "temperature": 0.6
   }'
 ```
 ::::
@@ -98,31 +91,24 @@ Run the following command to start the vLLM server:
 ```{code-block} bash
    :substitutions:
 export VLLM_USE_V1=1
-export MODEL="Qwen/Qwen2.5-7B-Instruct"
-python -m vllm.entrypoints.api_server \
-    --model $MODEL \
+vllm serve Qwen/Qwen2.5-7B-Instruct \
     --tensor-parallel-size 2 \
-    --max-num-batched-tokens 2048 \
-    --gpu-memory-utilization 0.5 \
-    --max-num-seqs 4 \
     --enforce-eager \
-    --trust-remote-code \
-    --max-model-len 1024 \
-    --disable-custom-all-reduce \
     --dtype float16 \
-    --port 8000 \
-    --compilation-config '{"custom_ops":["+rms_norm", "+rotary_embedding"]}' 
+    --compilation-config '{"custom_ops":["none", "+rms_norm", "+rotary_embedding"]}'
 ```
 
 Once your server is started, you can query the model with input prompts
 
 ```bash
-curl http://localhost:8000/generate \
+curl http://localhost:8000/v1/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "prompt": "Hello, my name is ？",
-    "max_tokens": 20,
-    "temperature": 0
+    "prompt": "The future of AI is",
+    "max_tokens": 64,
+    "top_p": 0.95,
+    "top_k": 50,
+    "temperature": 0.6
   }'
 ```
 
@@ -206,14 +192,10 @@ sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 # Create an LLM.
 llm = LLM(
     model="Qwen/Qwen3-0.6B",
-    max_model_len=4096,
-    max_num_seqs=4,
-    trust_remote_code=True,
     tensor_parallel_size=1,
     enforce_eager=True, # For 300I series, only eager mode is supported.
     dtype="float16", # IMPORTANT cause some ATB ops cannot support bf16 on 300I series
-    disable_custom_all_reduce=True, # IMPORTANT cause 300I series needed
-    compilation_config={"custom_ops":["+rms_norm", "+rotary_embedding"]}, # IMPORTANT cause 300I series needed custom ops
+    compilation_config={"custom_ops":["none", "+rms_norm", "+rotary_embedding"]}, # High performance for 300I series
 )
 # Generate texts from the prompts.
 outputs = llm.generate(prompts, sampling_params)
@@ -253,14 +235,10 @@ sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 # Create an LLM.
 llm = LLM(
     model="Qwen/Qwen2.5-7B-Instruct",
-    max_model_len=4096,
-    max_num_seqs=4,
-    trust_remote_code=True,
     tensor_parallel_size=2,
     enforce_eager=True, # For 300I series, only eager mode is supported.
     dtype="float16", # IMPORTANT cause some ATB ops cannot support bf16 on 300I series
-    disable_custom_all_reduce=True, # IMPORTANT cause 300I series needed
-    compilation_config={"custom_ops":["+rms_norm", "+rotary_embedding"]}, # IMPORTANT cause 300I series needed custom ops
+    compilation_config={"custom_ops":["none", "+rms_norm", "+rotary_embedding"]}, # High performance for 300I series
 )
 # Generate texts from the prompts.
 outputs = llm.generate(prompts, sampling_params)
