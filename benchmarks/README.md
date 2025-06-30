@@ -75,9 +75,9 @@ Before running the benchmarks, ensure the following:
   this Json will be structured and parsed into server parameters and client parameters by the benchmark script. This configuration defines a test case named `serving_qwen2_5vl_7B_tp1`, designed to evaluate the performance of the `Qwen/Qwen2.5-VL-7B-Instruct` model under different request rates. The test includes both server and client parameters, for more parameters details, see vllm benchmark [cli](https://github.com/vllm-project/vllm/tree/main/vllm/benchmarks).
 
   - **Test Overview**
-   - Test Name: serving_qwen2_5vl_7B_tp1
+     - Test Name: serving_qwen2_5vl_7B_tp1
 
-   - Queries Per Second (QPS): The test is run at four different QPS levels: 1, 4, 16, and inf (infinite load, typically used for stress testing).
+     - Queries Per Second (QPS): The test is run at four different QPS levels: 1, 4, 16, and inf (infinite load, typically used for stress testing).
 
    - Server Parameters
       - Model: Qwen/Qwen2.5-VL-7B-Instruct
