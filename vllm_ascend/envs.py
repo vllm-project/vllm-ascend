@@ -136,7 +136,13 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to enable mla_pa for deepseek mla decode, this flag will be removed after its available torch_npu is public accessible
     # and the mla_pa will be the default path of deepseek decode path.
     "VLLM_ASCEND_MLA_PA":
-    lambda: int(os.getenv("VLLM_ASCEND_MLA_PA", 0))
+    lambda: int(os.getenv("VLLM_ASCEND_MLA_PA", 0)),
+    # Specify the ip and port of prefill and decode, and the configuration file of the underlying communication method
+    "MOONCAKE_CONFIG_PATH":
+    lambda: os.getenv("MOONCAKE_CONFIG_PATH", None),
+    # Specify which cards of the npu to run on
+    "ASCEND_RT_VISIBLE_DEVICES":
+    lambda: os.getenv("ASCEND_RT_VISIBLE_DEVICES", None),
 }
 
 # end-env-vars-definition
