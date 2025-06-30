@@ -40,8 +40,8 @@ def test_generate_with_allgather():
     example_prompts = ["Hello, my name is"]
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 
-    with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V3-Pruning"),
-                    tensor_parallel_size=16,
+    with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V3-Pruning-New"),
+                    tensor_parallel_size=4,
                     enforce_eager=True,
                     max_model_len=1024,
                     dtype="auto",
@@ -66,8 +66,8 @@ def test_generate_with_alltoall():
     example_prompts = ["Hello, my name is"]
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 
-    with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V3-Pruning"),
-                    tensor_parallel_size=16,
+    with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V3-Pruning-New"),
+                    tensor_parallel_size=4,
                     enforce_eager=True,
                     max_model_len=1024,
                     dtype="auto",
