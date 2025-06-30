@@ -1,5 +1,9 @@
 # Single Node (Atlas 300I series)
 
+```{note}
+This Atlas 300I series is currently experimental. In future versions, there may be behavioral changes around model coverage, performance improvement.
+```
+
 ## Run vLLM on Altlas 300I series
 
 Run docker container:
@@ -43,10 +47,16 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 
 ### Online Inference on NPU
 
-Run the following script to start the vLLM server on NPU(Qwen3-0.6B:1 card, Qwen2.5-7B-Instruct:2 cards):
+Run the following script to start the vLLM server on NPU(Qwen3-0.6B:1 card, Qwen2.5-7B-Instruct:2 cards, Pangu-Pro-MoE-72B: 8 cards):
 
 :::::{tab-set}
+:sync-group: inference
+
 ::::{tab-item} Qwen3-0.6B
+:selected:
+:sync: qwen0.6
+
+Run the following command to start the vLLM server:
 
 ```{code-block} bash
    :substitutions:
@@ -66,9 +76,24 @@ python -m vllm.entrypoints.api_server \
     --port 8000 \
     --compilation-config '{"custom_ops":["+rms_norm", "+rotary_embedding"]}' 
 ```
+
+Once your server is started, you can query the model with input prompts
+
+```bash
+curl http://localhost:8000/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "Hello, my name is ？",
+    "max_tokens": 20,
+    "temperature": 0
+  }'
+```
 ::::
 
 ::::{tab-item} Qwen/Qwen2.5-7B-Instruct
+:sync: qwen7b
+
+Run the following command to start the vLLM server:
 
 ```{code-block} bash
    :substitutions:
@@ -88,9 +113,6 @@ python -m vllm.entrypoints.api_server \
     --port 8000 \
     --compilation-config '{"custom_ops":["+rms_norm", "+rotary_embedding"]}' 
 ```
-::::
-
-:::::
 
 Once your server is started, you can query the model with input prompts
 
@@ -104,29 +126,72 @@ curl http://localhost:8000/generate \
   }'
 ```
 
-If you run this script successfully, you can see the info shown below:
+::::
+
+::::{tab-item} Pangu-Pro-MoE-72B
+:sync: pangu
+
+Download the model:
 
 ```bash
-{"text":["The future of AI is ？  \nA. 充满希望的  \nB. 不确定的  \nC. 危险的  \nD. 无法预测的  \n答案：A  \n解析："]}
+git lfs install
+git clone https://gitcode.com/ascend-tribe/pangu-pro-moe-model.git
 ```
+
+Run the following command to start the vLLM server:
+
+```{code-block} bash
+   :substitutions:
+
+VLLM_USE_V1=1 vllm serve /home/pangu-pro-moe-mode/ \
+--tensor-parallel-size 4 \
+--enable-expert-parallel \
+--dtype "float16" \
+--trust-remote-code \
+--enforce-eager
+
+```
+
+Once your server is started, you can query the model with input prompts
+
+```bash
+export question="你是谁？"
+curl http://localhost:8000/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "prompt": "[unused9]系统：[unused10][unused9]用户：'${question}'[unused10][unused9]助手：",
+    "max_tokens": 64,
+    "top_p": 0.95,
+    "top_k": 50,
+    "temperature": 0.6
+  }'
+```
+
+::::
+:::::
+
+If you run this script successfully, you can see the results.
 
 ### Offline Inference
 
-Run the following script to execute offline inference on NPU:
+Run the following script (`example.py`) to execute offline inference on NPU:
 
 :::::{tab-set}
+:sync-group: inference
+
 ::::{tab-item} Qwen3-0.6B
+:selected:
+:sync: qwen0.6
 
 ```{code-block} python
    :substitutions:
 from vllm import LLM, SamplingParams
 import gc
-import os
 import torch
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import (destroy_distributed_environment,
                                              destroy_model_parallel)
-os.environ["VLLM_USE_V1"] = "1"
+
 def clean_up():
     destroy_model_parallel()
     destroy_distributed_environment()
@@ -134,8 +199,6 @@ def clean_up():
     torch.npu.empty_cache()
 prompts = [
     "Hello, my name is",
-    "The president of the United States is",
-    "The capital of France is",
     "The future of AI is",
 ]
 # Create a sampling params object.
@@ -165,17 +228,17 @@ clean_up()
 ::::
 
 ::::{tab-item} Qwen2.5-7B-Instruct
+:sync: qwen7b
 
 ```{code-block} python
    :substitutions:
 from vllm import LLM, SamplingParams
 import gc
-import os
 import torch
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import (destroy_distributed_environment,
                                              destroy_model_parallel)
-os.environ["VLLM_USE_V1"] = "1"
+
 def clean_up():
     destroy_model_parallel()
     destroy_distributed_environment()
@@ -183,8 +246,6 @@ def clean_up():
     torch.npu.empty_cache()
 prompts = [
     "Hello, my name is",
-    "The president of the United States is",
-    "The capital of France is",
     "The future of AI is",
 ]
 # Create a sampling params object.
@@ -213,13 +274,81 @@ clean_up()
 
 ::::
 
+::::{tab-item} Pangu-Pro-MoE-72B
+:sync: pangu
+
+Download the model:
+
+```bash
+git lfs install
+git clone https://gitcode.com/ascend-tribe/pangu-pro-moe-model.git
+```
+
+```{code-block} python
+   :substitutions:
+
+import gc
+from transformers import AutoTokenizer
+import torch
+
+from vllm import LLM, SamplingParams
+from vllm.distributed.parallel_state import (destroy_distributed_environment,
+                                             destroy_model_parallel)
+
+def clean_up():
+    destroy_model_parallel()
+    destroy_distributed_environment()
+    gc.collect()
+    torch.npu.empty_cache()
+
+
+if __name__ == "__main__":
+
+    tokenizer = AutoTokenizer.from_pretrained("/home/pangu-pro-moe-mode/", trust_remote_code=True)
+    tests = [
+        "Hello, my name is",
+        "The future of AI is",
+    ]
+    prompts = []
+    for text in tests:
+        messages = [
+        {"role": "system", "content": ""},    # Optionally customize system content
+        {"role": "user", "content": text}
+    ]
+        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)        # 推荐使用官方的template
+        prompts.append(prompt)
+    sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40)
+
+    llm = LLM(model="/home/pangu-pro-moe-mode/",
+            tensor_parallel_size=8,
+            distributed_executor_backend="mp",
+            enable_expert_parallel=True,
+            dtype="float16",
+            max_model_len=1024,
+            trust_remote_code=True,
+            enforce_eager=True)
+
+    outputs = llm.generate(prompts, sampling_params)
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+    del llm
+    clean_up()
+```
+
+::::
 :::::
+
+Run script:
+```bash
+VLLM_USE_V1=1 python example.py
+```
 
 If you run this script successfully, you can see the info shown below:
 
 ```bash
 Prompt: 'Hello, my name is', Generated text: " Lina. I'm a 22-year-old student from China. I'm interested in studying in the US. I'm looking for a job in the US. I want to know if there are any opportunities in the US for me to work. I'm also interested in the culture and lifestyle in the US. I want to know if there are any opportunities for me to work in the US. I'm also interested in the culture and lifestyle in the US. I'm interested in the culture"
-Prompt: 'The president of the United States is', Generated text: ' the same as the president of the United Nations. This is because the president of the United States is the same as the president of the United Nations. The president of the United States is the same as the president of the United Nations. The president of the United States is the same as the president of the United Nations. The president of the United States is the same as the president of the United Nations. The president of the United States is the same as the president of the United Nations. The president'
-Prompt: 'The capital of France is', Generated text: ' Paris. The capital of Italy is Rome. The capital of Spain is Madrid. The capital of China is Beijing. The capital of Japan is Tokyo. The capital of India is New Delhi. The capital of Brazil is Brasilia. The capital of Egypt is Cairo. The capital of South Africa is Cape Town. The capital of Nigeria is Abuja. The capital of Lebanon is Beirut. The capital of Morocco is Rabat. The capital of Indonesia is Jakarta. The capital of Peru is Lima. The'
 Prompt: 'The future of AI is', Generated text: " not just about the technology itself, but about how we use it to solve real-world problems. As AI continues to evolve, it's important to consider the ethical implications of its use. AI has the potential to bring about significant changes in society, but it also has the power to create new challenges. Therefore, it's crucial to develop a comprehensive approach to AI that takes into account both the benefits and the risks associated with its use. This includes addressing issues such as bias, privacy, and accountability."
 ```
