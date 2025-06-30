@@ -1012,8 +1012,6 @@ class AscendFusedMoE(FusedMoE):
 
         AscendFusedMoE.moe_counter += 1
         self.moe_instance_id = AscendFusedMoE.moe_counter
-        self.moe_load = None
-        self.topk_ids =  None
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -1103,6 +1101,10 @@ class AscendFusedMoE(FusedMoE):
         local_num_experts = torch.sum(self.expert_map != -1) \
             if self.expert_map is not None else num_experts
 
+        self.moe_load = None
+        if self.dynamic_eplb:
+            self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
+
         moe_quant_params = {
             "num_experts": local_num_experts,
             "hidden_size": hidden_size,
@@ -1176,7 +1178,7 @@ class AscendFusedMoE(FusedMoE):
             router_logits = get_dp_group().all_gather(router_logits, 0)
 
         # Matrix multiply.
-        e_hidden_states, self.topk_ids = self.quant_method.apply(
+        e_hidden_states, expert_token_num, group_list_type = self.quant_method.apply(
             layer=self,
             x=hidden_states,
             router_logits=router_logits,
@@ -1197,6 +1199,10 @@ class AscendFusedMoE(FusedMoE):
             shared_experts=shared_experts if self.torchair_graph_enabled
             and self.enable_multistream_moe and not is_prefill else None,
         )
+
+        if self.dynamic_eplb:
+            self.moe_load += expert_token_num if group_list_type else \
+                torch.cat([expert_token_num[:1], expert_token_num[1:] - expert_token_num[:-1]])
 
         if shared_experts:
             if isinstance(e_hidden_states, tuple):
@@ -1266,4 +1272,8 @@ class AscendFusedMoE(FusedMoE):
 
     def get_log2phy_map(self):
         return self.log2phy
+
+    def clear_moe_load(self):
+        self.moe_load.zero_()
+
 

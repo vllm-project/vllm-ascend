@@ -80,8 +80,8 @@ class EplbUpdator:
             shared_dict = self.shared_dict,
             planner_q = self.planner_block_queue,
             block_update_q = self.block_update_queue,
-            redundant_enable = self.redundant_enable, 
-            policy_type = 6,
+            redundant_enable = self.redundant_enable,
+            policy_type = 1,
             enable_d2d = True
         )
 
@@ -91,8 +91,8 @@ class EplbUpdator:
 
     def get_update_iteration(self):
         self.cur_iterations = self.cur_iterations + 1
-        load_gather_iteration = self.cur_iterations % self.num_expert_load_gather == 0 if not self.gate_eplb else self.cur_iterations == self.num_iterations 
-        upate_iteration = self.cur_iterations % self.num_iterations == 0 if not self.gate_eplb else self.cur_iterations == self.num_iterations 
+        load_gather_iteration = self.cur_iterations % self.num_expert_load_gather == 0 if not self.gate_eplb else self.cur_iterations == self.num_iterations
+        upate_iteration = self.cur_iterations % self.num_iterations == 0 if not self.gate_eplb else self.cur_iterations == self.num_iterations
         return load_gather_iteration, upate_iteration
 
     def get_init_expert_map(self):
@@ -135,7 +135,6 @@ class EplbUpdator:
 
 
     def forward_end(self,dummy_run=False):
-        self.adaptor.collect_topk_ids(dummy_run)
         if not self.update_in_flight:
             load_gather_iteration, update_iteration = self.get_update_iteration()
             if load_gather_iteration:
@@ -174,12 +173,12 @@ class EplbUpdator:
             moe_load = local_load.unsqueeze(1)
             self.shared_dict["moe_load"] = moe_load.cpu()
             logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
+        self.adaptor.model.clear_all_moe_loads()
         return moe_load
 
     def warm_up_eplb(self):
 
         self.get_init_expert_map()
-        self.adaptor.collect_topk_ids(dummy_run=False)
         self.compute_and_set_moe_load()
 
         src_tensor = torch.empty((1,), device=self.device)
@@ -239,7 +238,6 @@ class EplbUpdator:
         moe_load = self.shared_dict["moe_load"]  # Tensor [L, W, global_experts_num]
         num_local_experts = expert_maps.max() + 1
         return  moe_load, expert_maps, num_local_experts
-
 
     def update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
         logger.info(f" start update {self.num_expert_load_gather=}, {self.num_iterations}...")

@@ -208,13 +208,14 @@ def fused_experts_with_mc2(
 
     hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
 
+    group_list_type = 1
     if shared_experts is None:
-        return hidden_states
+        return hidden_states, expert_token_nums, group_list_type
     else:
         with npu_stream_switch("moe_secondary", 0):
             npu_wait_tensor(shared_act[0], down_out_list)
             shared_output, _ = shared_experts.down_proj(shared_act)
-        return hidden_states, shared_output
+        return hidden_states, shared_output, expert_token_nums, group_list_type
 
 
 # currently expert parallelism implemented with all2all
@@ -343,7 +344,7 @@ def fused_experts_with_all2all(
         )
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
-    return final_hidden_states
+    return final_hidden_states, expert_tokens, group_list_type
 
 
 def fused_experts(hidden_states: torch.Tensor,
@@ -457,7 +458,7 @@ def fused_experts(hidden_states: torch.Tensor,
 
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
-    return final_hidden_states
+    return final_hidden_states, expert_tokens, group_list_type
 
 
 class AscendW8A8DynamicLinearMethod:
@@ -677,7 +678,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 log2phy=log2phy,
                 global_redundant_expert_num=global_redundant_expert_num,
                 shared_experts=shared_experts,
-                **kwargs), topk_ids
+                **kwargs)
         elif fused_moe_state == FusedMoEState.AllGather:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
@@ -687,7 +688,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                                  topk_weights=topk_weights,
                                  topk_ids=topk_ids,
                                  top_k=top_k,
-                                 expert_map=expert_map), topk_ids
+                                 expert_map=expert_map)
         else:
             # The current implementation of deepseek moe splits hidden_states
             # according to tp_size before they are feed into fused_moe module.
@@ -706,7 +707,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 ep_group=self.ep_group,
                 log2phy=log2phy,
                 global_redundant_expert_num=global_redundant_expert_num,
-            ), topk_ids
+            )
 
     def process_weights_after_loading(self, layer):
         if self.transpose_weight:

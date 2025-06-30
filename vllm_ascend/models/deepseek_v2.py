@@ -727,6 +727,9 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        self.num_dense_layers = self.config.first_k_dense_replace
+        self.num_moe_layers = self.config.num_hidden_layers - self.num_dense_layers
+
         self.model = CustomDeepseekV2Model(vllm_config=vllm_config,
                                            prefix=maybe_prefix(
                                                prefix, "model"))
@@ -755,13 +758,13 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                                    inputs_embeds)
         return hidden_states
 
-    def get_expert_map(self,layer_id):
+    def get_expert_map(self, layer_id):
         return self.model.layers[layer_id].mlp.experts.get_map()
 
-    def get_log2phy_map(self,layer_id):
+    def get_log2phy_map(self, layer_id):
         return self.model.layers[layer_id].mlp.experts.get_log2phy_map()
 
-    def get_all_expert_map(self,num_moe_layers):
+    def get_all_expert_map(self, num_moe_layers):
         all_loads = []
         for layer_id in range(num_moe_layers):
             load_tensor = self.get_expert_map(3+layer_id)  # (num_experts_per_layer,)
@@ -769,15 +772,17 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 
         return torch.stack(all_loads, dim=0)
 
-    def get_topk_ids(self,layer_id):
-        return self.model.layers[layer_id+3].mlp.experts.topk_ids
+    def get_all_moe_loads(self):
+        all_moe_loads = torch.stack(
+            [self.model.layers[layer_id + self.num_dense_layers].mlp.experts.moe_load \
+                for layer_id in range(self.num_moe_layers)],
+            dim=0
+        )
+        return all_moe_loads
 
-    def get_all_topk_ids(self,num_moe_layers):
-        all_topk_id = []
-        for layer_id in range(num_moe_layers):
-            load_tensor = self.get_topk_ids(layer_id)  
-            all_topk_id.append(load_tensor)
-        return all_topk_id
+    def clear_all_moe_loads(self):
+        for layer_id in range(self.num_moe_layers):
+            self.model.layers[layer_id + self.num_dense_layers].mlp.experts.clear_moe_load()
 
 class CustomDeepseekV3ForCausalLM(CustomDeepseekV2ForCausalLM):
     pass
