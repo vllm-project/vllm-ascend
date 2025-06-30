@@ -355,11 +355,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 assert attn_metadata is not None
                 assert attn_metadata.attn_mask is not None
                 compress_mask = attn_metadata.attn_mask
+                batch_size = attn_metadata.query_lens.shape[0]
+                block_table = attn_metadata.block_tables[:batch_size, :]
                 torch_npu._npu_flash_attention_qlens(
                     query=query,
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
-                    block_table=attn_metadata.block_tables,
+                    block_table=block_table,
                     mask=compress_mask,
                     seq_len=attn_metadata.query_lens,
                     context_lens=attn_metadata.seq_lens,
