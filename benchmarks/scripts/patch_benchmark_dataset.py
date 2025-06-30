@@ -45,20 +45,22 @@ class StreamingFalseTransformer(cst.CSTTransformer):
 
 
 def patch_file(path):
-    if not os.path.exists(path):
-        print(f"File not found: {path}")
+    abs_path = os.path.abspath(path)
+
+    if not os.path.exists(abs_path):
+        print(f"File not found: {abs_path}")
         return
 
-    with open(path, "r", encoding="utf-8") as f:
+    with open(abs_path, "r", encoding="utf-8") as f:
         source = f.read()
 
     module = cst.parse_module(source)
     modified = module.visit(StreamingFalseTransformer())
 
-    with open(path, "w", encoding="utf-8") as f:
+    with open(abs_path, "w", encoding="utf-8") as f:
         f.write(modified.code)
 
-    print(f"Patched: {path}")
+    print(f"Patched: {abs_path}")
 
 
 if __name__ == '__main__':

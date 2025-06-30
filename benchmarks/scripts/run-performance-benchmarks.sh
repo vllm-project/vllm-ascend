@@ -54,13 +54,20 @@ json2args() {
 }
 
 wait_for_server() {
-  # wait for vllm server to start
-  # return 1 if vllm server crashes
-  timeout 1200 bash -c '
-    until curl -s -X GET localhost:8000/health; do
-      echo "Waiting for vllm server to start..."
-      sleep 1
-    done' && return 0 || return 1
+  local waited=0
+  local timeout_sec=1200
+
+  while (( waited < timeout_sec )); do
+    if curl -s -X GET localhost:8000/health > /dev/null; then
+      return 0
+    fi
+    echo "Waiting for vllm server to start..."
+    sleep 1
+    ((waited++))
+  done
+
+  echo "Timeout waiting for server"
+  return 1
 }
 
 get_cur_npu_id() {
@@ -274,6 +281,7 @@ cleanup_on_error() {
 main() {
   START_TIME=$(date +%s)
   check_npus
+  python3 scripts/patch_benchmark_dataset.py
 
   # dependencies
   (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
@@ -291,7 +299,6 @@ main() {
 
   # prepare for benchmarking
   cd benchmarks || exit 1
-  python3 scripts/patch_benchmark_dataset.py
   trap cleanup EXIT
 
   QUICK_BENCHMARK_ROOT=./
