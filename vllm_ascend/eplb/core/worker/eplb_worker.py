@@ -61,8 +61,7 @@ class EplbWorker:
             return
 
         #根据负载信息，获取更新后的专家表
-        load_info, old_placement = self.global2local(load_info, self.old_expert_maps, self.num_local_experts)
-        self.shared_dict["load_info"] = load_info
+        old_placement = self.global2local(self.old_expert_maps, self.num_local_experts)
         changed, priority, new_placement = self.calculate_rebalance_experts(load_info, old_placement)
 
         if not torch.is_tensor(new_placement):
@@ -277,7 +276,6 @@ class EplbWorker:
         self.shared_dict["expert_maps"] = expert_maps
 
     def global2local(self,
-        workload: torch.Tensor,
         placement: torch.Tensor,
         E_local: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -285,10 +283,6 @@ class EplbWorker:
         L, G, _ = placement.shape
         device = placement.device
 
-        wt_local = torch.full((L, G, E_local),
-                              fill_value=-1,
-                              dtype=workload.dtype,
-                              device=device)
         pt_local = torch.full((L, G, E_local),
                               fill_value=-1,
                               dtype=torch.long,
@@ -298,12 +292,10 @@ class EplbWorker:
         l_idx, g_idx, k_idx = valid.nonzero(as_tuple=True)
 
         slot_idx = placement[l_idx, g_idx, k_idx]
-        values = workload[l_idx, g_idx, k_idx]
 
-        wt_local[l_idx, g_idx, slot_idx] = values
         pt_local[l_idx, g_idx, slot_idx] = k_idx
 
-        return wt_local, pt_local
+        return pt_local
 
 
     def local2global(self,

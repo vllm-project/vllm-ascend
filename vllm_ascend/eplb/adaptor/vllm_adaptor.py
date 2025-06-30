@@ -84,42 +84,13 @@ class VllmEplbAdaptor(EplbAdaptor):
                         for name in self.expert_weight_names]
                 )
 
-    def collect_topk_ids(self, dummy_run=False):
-        if dummy_run:
-            return 
-        self.all_topk_ids.append(self.model.get_all_topk_ids(self.num_moe_layers))
+    # def collect_topk_ids(self, dummy_run=False):
+    #     if dummy_run:
+    #         return
+        # self.all_topk_ids.append(self.model.get_all_topk_ids(self.num_moe_layers))
 
     def get_rank_expert_workload(self) -> torch.Tensor:
-        device = self.all_topk_ids[0][0].device
-        if not hasattr(self, "moe_load"):
-            self.moe_load = torch.zeros(
-                (self.num_moe_layers), self.global_expert_num,
-                dtype=torch.int64,
-                device=self.all_topk_ids[0][0].device,
-            )
-        else:
-            self.moe_load.zero_()   
-            # pass       
-        flat_list_per_layer = [[] for _ in range(self.num_moe_layers)]  
-
-        for period_data in self.all_topk_ids:     
-            for l in range(self.num_moe_layers):  
-                t = period_data[l]       
-                flat_list_per_layer[l].append(t.reshape(-1))  
-
-        index_2d = torch.nn.utils.rnn.pad_sequence(
-            [torch.cat(flat_list_per_layer[l]) for l in range(self.num_moe_layers)],
-            batch_first=True, padding_value=-1     
-        ).to(device)               
-
-        mask = index_2d != -1
-        index_2d = index_2d.masked_select(mask).reshape(self.num_moe_layers, -1)
-        src_2d   = torch.ones_like(index_2d, dtype=torch.int64)
-
-        self.moe_load.scatter_add_(dim=1, index=index_2d, src=src_2d)
-
-        if self.all_topk_ids:                     
-            self.all_topk_ids[:] = self.all_topk_ids[-1:]
+        self.moe_load = self.model.get_all_moe_loads()
         return self.moe_load
 
     def get_init_expert_map(self, num_moe_layers):
@@ -224,13 +195,13 @@ class VllmEplbAdaptor(EplbAdaptor):
 
         for r in range(self.world_size):
             if r < self.world_size - 1:
-                start = r * local_num_experts 
-                end   = (r + 1) * local_num_experts 
-                local_count = local_num_experts 
+                start = r * local_num_experts
+                end   = (r + 1) * local_num_experts
+                local_count = local_num_experts
             else:
-                start = r * local_num_experts 
+                start = r * local_num_experts
                 end   = self.global_expert_num
-                local_count = self.global_expert_num - r * local_num_experts 
+                local_count = self.global_expert_num - r * local_num_experts
 
             local_ids = torch.arange(local_count, dtype=torch.int32)
             expert_map_all[:, r, start:end] = local_ids.unsqueeze(0).expand(self.num_moe_layers, -1)

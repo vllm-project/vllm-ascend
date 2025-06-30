@@ -366,7 +366,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 
-        #EPLB 
+        #EPLB
         self.dynamic_eplb = ascend_config.dynamic_eplb
         if self.dynamic_eplb == True:
             self.eplb_adaptor = None
@@ -1240,7 +1240,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             if self.dynamic_eplb:
                 self.eplb_updator.forward_before()
-              
+
             (attn_metadata, hidden_states, spec_decode_metadata, positions,
              num_scheduled_tokens,
              sample_indices) = (self._process_reqs(scheduler_output,
@@ -1544,6 +1544,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=inputs_embeds)
 
+                if is_profile_run and self.dynamic_eplb:
+                    self.model.clear_all_moe_loads()
                 if not is_compile and not is_profile_run and self.dynamic_eplb:
                     dummy_run = True
                     self.eplb_updator.forward_end(dummy_run)
