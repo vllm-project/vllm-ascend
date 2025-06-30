@@ -1,8 +1,8 @@
 import unittest
 import zlib
-from unittest.mock import MagicMock
-
 import torch
+
+from unittest.mock import MagicMock
 from vllm_ascend.distributed.kv_transfer.simple_buffer import (SimpleBuffer,
                                                                int32_hash)
 
