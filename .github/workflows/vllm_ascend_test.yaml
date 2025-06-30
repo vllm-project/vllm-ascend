@@ -86,7 +86,7 @@ jobs:
       - name: Run codespell check
         run: |
           CODESPELL_EXCLUDES=('--skip' 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**')
-          CODESPELL_IGNORE_WORDS=('-L' 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn')
+          CODESPELL_IGNORE_WORDS=('-L' 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,assertIn')
 
           codespell --toml pyproject.toml "${CODESPELL_EXCLUDES[@]}" "${CODESPELL_IGNORE_WORDS[@]}"
       - name: Analysing the code with ruff
@@ -262,11 +262,13 @@ jobs:
             pytest -sv tests/e2e/singlecard/test_ilama_lora.py
           pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv tests/e2e/singlecard/test_camem.py
+          pytest -sv tests/e2e/singlecard/test_embedding.py
           pytest -sv tests/e2e/singlecard/ \
           --ignore=tests/e2e/singlecard/test_offline_inference.py \
           --ignore=tests/e2e/singlecard/test_ilama_lora.py \
           --ignore=tests/e2e/singlecard/test_guided_decoding.py \
-          --ignore=tests/e2e/singlecard/test_camem.py
+          --ignore=tests/e2e/singlecard/test_camem.py \
+          --ignore=tests/e2e/singlecard/test_embedding.py
 
       - name: Run e2e test on V0 engine
         if: ${{ github.event_name == 'schedule' }}
@@ -281,6 +283,7 @@ jobs:
           pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv tests/e2e/singlecard/test_camem.py
           pytest -sv tests/e2e/singlecard/test_prompt_embedding.py
+          pytest -sv tests/e2e/singlecard/test_embedding.py
           pytest -sv tests/e2e/singlecard/ \
             --ignore=tests/e2e/singlecard/test_offline_inference.py \
             --ignore=tests/e2e/singlecard/test_ilama_lora.py \
@@ -288,7 +291,8 @@ jobs:
             --ignore=tests/e2e/singlecard/test_camem.py \
             --ignore=tests/e2e/singlecard/test_prompt_embedding.py \
             --ignore=tests/e2e/singlecard/core/test_ascend_scheduler.py \
-            --ignore=tests/e2e/singlecard/core/test_ascend_scheduler_e2e.py
+            --ignore=tests/e2e/singlecard/core/test_ascend_scheduler_e2e.py \
+            --ignore=tests/e2e/singlecard/test_embedding.py
 
   e2e-4-cards:
     needs: [e2e]
