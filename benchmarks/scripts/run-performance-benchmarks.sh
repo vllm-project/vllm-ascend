@@ -272,7 +272,6 @@ cleanup_on_error() {
 }
 
 main() {
-  PATCH_PATCH="$1"
   START_TIME=$(date +%s)
   check_npus
 
@@ -292,7 +291,7 @@ main() {
 
   # prepare for benchmarking
   cd benchmarks || exit 1
-  python3 scripts/patch_benchmark_dataset.py --path $PATCH_PATCH
+  python3 scripts/patch_benchmark_dataset.py
   trap cleanup EXIT
 
   QUICK_BENCHMARK_ROOT=./
