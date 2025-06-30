@@ -1,11 +1,9 @@
 import unittest
-from typing import List, Optional
 import torch
 from unittest.mock import MagicMock, patch
 from vllm_ascend.distributed.kv_transfer.simple_connector import SimpleConnector
 from vllm_ascend.distributed.kv_transfer.simple_buffer import SimpleBuffer
 from vllm_ascend.distributed.kv_transfer.simple_pipe import SimplePipe
-from vllm_ascend.distributed.llmdatadist_connector_v1_a3 import LLMDataDistConnectorMetadata
 from vllm.config import VllmConfig
 from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
@@ -25,8 +23,8 @@ class TestSimpleConnector(unittest.TestCase):
         mock_config = MagicMock()
         mock_config.kv_role = "kv_producer"
         mock_config.kv_connector_extra_config = {
-            "prefill_device_ips": ["10.52.3.144"],
-            "decode_device_ips": ["10.52.3.143"],
+            "prefill_device_ips": ["127.0.0.1"],
+            "decode_device_ips": ["127.0.0.1"],
             "llmdatadist_comm_port": 26000,
             "http_port": 8000,
             "proxy_ip": "127.0.0.1",
@@ -85,11 +83,7 @@ class TestSimpleConnector(unittest.TestCase):
             input_tokens = torch.tensor([1, 2, 3])
             roi = torch.tensor([True, True, True])
             req_id = "test_req"
-
-            mock_key = torch.randn(4, 3, 1, 32)
-            mock_value = torch.randn(4, 3, 1, 32)
-            mock_hidden = torch.randn(3, 128)
-            result = connector.select(input_tokens, roi, req_id)
+            connector.select(input_tokens, roi, req_id)
 
     @patch('vllm_ascend.distributed.kv_transfer.simple_connector.SimplePipe')
     @patch('vllm_ascend.distributed.kv_transfer.simple_connector.SimpleBuffer')

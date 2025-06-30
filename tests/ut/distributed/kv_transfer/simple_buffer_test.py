@@ -1,7 +1,7 @@
 import unittest
 import torch
 import zlib
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 from vllm_ascend.distributed.kv_transfer.simple_buffer import SimpleBuffer, int32_hash
 
 class MockSimplePipe:

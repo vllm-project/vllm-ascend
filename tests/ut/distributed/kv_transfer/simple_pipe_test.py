@@ -1,9 +1,7 @@
 import unittest
 from typing import Optional
 import torch
-import torch_npu
 import llm_datadist 
-import msgpack  
 import zmq  
 from unittest.mock import MagicMock, patch
 from vllm_ascend.distributed.kv_transfer.simple_pipe import SimplePipe
@@ -49,8 +47,8 @@ class TestSimplePipe(unittest.TestCase):
         mock_config = MagicMock()
         mock_config.kv_role = "kv_producer"
         mock_config.kv_connector_extra_config = {
-            "prefill_device_ips": ["10.52.3.144"],
-            "decode_device_ips": ["10.52.3.143"],
+            "prefill_device_ips": ["127.0.0.1"],
+            "decode_device_ips": ["127.0.0.1"],
             "llmdatadist_comm_port": 26000,
             "http_port": 8000,
             "proxy_ip": "127.0.0.1",
@@ -104,8 +102,8 @@ class TestSimplePipe(unittest.TestCase):
             mock_config = MagicMock()
             mock_config.kv_role = "err_role"
             mock_config.kv_connector_extra_config = {
-                "prefill_device_ips": ["10.52.3.144"],
-                "decode_device_ips": ["10.52.3.143"],
+                "prefill_device_ips": ["127.0.0.1"],
+                "decode_device_ips": ["127.0.0.1"],
                 "llmdatadist_comm_port": 26000,
                 "http_port": 8000,
                 "proxy_ip": "127.0.0.1",
