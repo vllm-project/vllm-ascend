@@ -28,7 +28,8 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention_v1 import AscendAttentionBackendImpl, AscendAttentionState
+from vllm_ascend.attention.attention_v1 import (AscendAttentionBackendImpl,
+                                                AscendAttentionState)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d)
 
@@ -267,7 +268,7 @@ class AscendAttentionTorchairMetadataBuilder:
             device, non_blocking=True).long()
 
         decode_metadata = None
-        use_torchair_graph = graph_pad_size > 0
+        use_torchair_graph = graph_pad_size > -1
         if self.runner.attn_state in [
                 AscendAttentionState.DecodeOnly,
         ]:
@@ -300,9 +301,6 @@ class AscendAttentionTorchairMetadataBuilder:
                                         dtype=input_positions.dtype,
                                         device=input_positions.device)
                 input_positions = torch.cat([input_positions, padding_0])
-
-            block_table = self._get_graph_runner_block_tables(
-                num_seqs + graph_pad_size, block_table)
 
             decode_metadata = AscendDecodeMetadata(
                 input_positions=input_positions,
@@ -357,7 +355,7 @@ class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
             logits_soft_cap=logits_soft_cap,
             attn_type=attn_type,
             kv_sharing_target_layer_name=kv_sharing_target_layer_name,
-            use_irope=use_irope, 
+            use_irope=use_irope,
         )
 
     def forward(
@@ -435,31 +433,31 @@ class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
                 value.view(-1, self.num_kv_heads * self.head_size))
 
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-                assert attn_metadata is not None
-                assert attn_metadata.attn_mask is not None
-                mask = attn_metadata.attn_mask
-                if is_310p():
-                    # align q k v output tensors
-                    query = aligned_16(query)
-                    key = aligned_16(key)
-                    value = aligned_16(value)
-                    output = aligned_16(output)
+            assert attn_metadata is not None
+            assert attn_metadata.attn_mask is not None
+            mask = attn_metadata.attn_mask
+            if is_310p():
+                # align q k v output tensors
+                query = aligned_16(query)
+                key = aligned_16(key)
+                value = aligned_16(value)
+                output = aligned_16(output)
 
-                    # do reformat in case of broadcasted tensors
-                    mask = mask.repeat(attn_metadata.seq_lens.size(0), 1, 1, 1)
-                    mask = torch_npu.npu_format_cast(mask.contiguous(),
-                                                     ACL_FORMAT_FRACTAL_NZ)
+                # do reformat in case of broadcasted tensors
+                mask = mask.repeat(attn_metadata.seq_lens.size(0), 1, 1, 1)
+                mask = torch_npu.npu_format_cast(mask.contiguous(),
+                                                 ACL_FORMAT_FRACTAL_NZ)
 
-                torch_npu._npu_flash_attention(query=query,
-                                               key=key,
-                                               value=value,
-                                               mask=mask,
-                                               seq_len=attn_metadata.seq_lens,
-                                               scale_value=self.scale,
-                                               num_heads=self.num_heads,
-                                               num_kv_heads=self.num_kv_heads,
-                                               out=output)
-                output = output[:num_tokens, :, :]
+            torch_npu._npu_flash_attention(query=query,
+                                           key=key,
+                                           value=value,
+                                           mask=mask,
+                                           seq_len=attn_metadata.seq_lens,
+                                           scale_value=self.scale,
+                                           num_heads=self.num_heads,
+                                           num_kv_heads=self.num_kv_heads,
+                                           out=output)
+            output = output[:num_tokens, :, :]
         elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
             decode_meta = attn_metadata.decode
             assert decode_meta is not None
@@ -490,5 +488,5 @@ class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
                 output=output,
                 trace_flag=trace_flag,
             )
-        
+
         return output.view(num_tokens, self.hidden_size)
