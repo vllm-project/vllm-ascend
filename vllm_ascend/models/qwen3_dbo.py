@@ -14,9 +14,12 @@ from vllm.attention import AttentionMetadata
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.distributed import tensor_model_parallel_all_reduce, get_tensor_model_parallel_world_size, get_tp_group, get_pp_group
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.models.utils import (make_empty_intermediate_tensors_factory, make_layers)
+from vllm.model_executor.models.utils import (make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.sequence import IntermediateTensors
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 
 
 
@@ -492,5 +495,40 @@ class CustomQwen3DBOMoEModel(Qwen3MoeModel):
         [hidden_states,
          residual] = self.ms_post_layer([hidden_states, residual], )
         return hidden_states, residual
+
+
+
+class CustomQwen3MoeForCausalLMDBO(Qwen3MoeForCausalLM):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+        "experts":
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+    }
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        nn.Module.__init__(self)
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        self.config = config
+        self.quant_config = quant_config
+        self.model = CustomQwen3DBOMoEModel(vllm_config=vllm_config,
+                                            prefix=maybe_prefix(prefix, "model"))
+        self.lm_head = ParallelLMHead(config.vocab_size,
+                                      config.hidden_size,
+                                      quant_config=quant_config)
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
+
     
 
