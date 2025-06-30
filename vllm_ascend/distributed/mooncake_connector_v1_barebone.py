@@ -22,7 +22,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 import zmq
-from mooncake.engine import TransferEngine  # type: ignore[name-defined]
+from mooncake.engine import TransferEngine  # type: ignore[import-not-found]
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
@@ -493,7 +493,7 @@ class MooncakeConnectorWorker:
         path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
 
         logger.info("Starting listening on path: %s", path)
-        with zmq_ctx(zmq.ROUTER, path) as sock: # type: ignore[name-defined]
+        with zmq_ctx(zmq.ROUTER, path) as sock: # type: ignore[attr-defined]
             ready_event.set()
             while True:
                 identity, _, msg = sock.recv_multipart()
@@ -520,7 +520,7 @@ class MooncakeConnectorWorker:
         print("_message_req port:", port)
         path = make_zmq_path("tcp", host, port)
         logger.debug("Querying metadata on path: %s", path)
-        with zmq_ctx(zmq.REQ, path) as sock:  # type: ignore[name-defined]
+        with zmq_ctx(zmq.REQ, path) as sock:  # type: ignore[attr-defined]
             # Send msg to remote. It will recv a msg in shakehand case and other would not
             if msg[0] == GET_META_MSG:
                 logger.debug("Sending query for metadata")
@@ -908,19 +908,20 @@ class MooncakeConnectorWorker:
 
 
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
+def zmq_ctx(socket_type: Any, 
+            addr: str) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]
     """Context manager for a ZMQ socket"""
 
-    if socket_type not in (zmq.ROUTER, zmq.REQ):  # type: ignore[name-defined]
+    if socket_type not in (zmq.ROUTER, zmq.REQ):  # type: ignore[attr-defined]
         raise ValueError(f"Unexpected socket type: {socket_type}")
 
     ctx: Optional[zmq.Context] = None  # type: ignore[name-defined]
     try:
-        ctx = zmq.Context()  # type: ignore[name-defined]
+        ctx = zmq.Context()  # type: ignore[attr-defined]
         yield make_zmq_socket(ctx=ctx,
                               path=addr,
                               socket_type=socket_type,
-                              bind=socket_type == zmq.ROUTER)  # type: ignore[name-defined]
+                              bind=socket_type == zmq.ROUTER)  # type: ignore[attr-defined]
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
