@@ -36,6 +36,8 @@ from vllm.model_executor.layers.quantization.base_config import \
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.communication_op import \
+    data_parallel_reduce_scatter
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
@@ -1220,7 +1222,7 @@ class AscendFusedMoE(FusedMoE):
         else:
             real_top_k = self.top_k
 
-        num_tokens, _ = hidden_states.shape
+        num_tokens, hidden_size = hidden_states.shape
         is_deepseek_v3_r1 = self.global_num_experts == 256
 
         fused_moe_state = get_fused_moe_state(self.moe_parallel_config.ep_size,
@@ -1300,16 +1302,8 @@ class AscendFusedMoE(FusedMoE):
                 final_hidden_states = final_hidden_states[:num_tokens]
             dispose_tensor(e_hidden_states)
         elif self.dp_size > 1 and fused_moe_state == FusedMoEState.AllGather:
-            final_hidden_states_shape = (
-                e_hidden_states.size(0) //
-                self.dp_size, ) + e_hidden_states.shape[1:]
-            final_hidden_states = torch.empty(final_hidden_states_shape,
-                                              dtype=e_hidden_states.dtype,
-                                              device=e_hidden_states.device)
-            dist.reduce_scatter_tensor(final_hidden_states,
-                                       e_hidden_states,
-                                       op=dist.ReduceOp.SUM,
-                                       group=get_dp_group().device_group)
+            final_hidden_states = data_parallel_reduce_scatter(e_hidden_states,
+                                                               dim=0)
             final_hidden_states = final_hidden_states[:num_tokens]
             dispose_tensor(e_hidden_states)
         else:
