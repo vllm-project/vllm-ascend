@@ -187,7 +187,7 @@ jobs:
 
             cd /github/home
             ERROR_MSG=""
-            if ! bash benchmarks/scripts/run-performance-benchmarks.sh ./vllm_empty; then
+            if ! bash benchmarks/scripts/run-performance-benchmarks.sh; then
               ERROR_MSG="Benchmark failed to run"
             fi
             # send the result to es
