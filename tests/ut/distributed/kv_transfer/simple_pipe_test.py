@@ -1,9 +1,9 @@
 import unittest
-import torch
-import llm_datadist 
-import zmq
-  
 from unittest.mock import MagicMock, patch
+
+import llm_datadist
+import torch
+import zmq
 from vllm_ascend.distributed.kv_transfer.simple_pipe import SimplePipe
 class TestSimplePipe(unittest.TestCase):
     @classmethod

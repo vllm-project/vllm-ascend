@@ -1,12 +1,12 @@
-import torch
 import unittest
 from unittest.mock import MagicMock, patch
 
+import torch
 from vllm.config import VllmConfig
 from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
-
-from vllm_ascend.distributed.kv_transfer.simple_connector import SimpleConnector
 from vllm_ascend.distributed.kv_transfer.simple_buffer import SimpleBuffer
+from vllm_ascend.distributed.kv_transfer.simple_connector import \
+    SimpleConnector
 from vllm_ascend.distributed.kv_transfer.simple_pipe import SimplePipe
 
 
@@ -20,6 +20,7 @@ class TestSimpleConnector(unittest.TestCase):
         self.addCleanup(patcher.stop)
         self.MockSimpleBuffer = patcher.start()
         self.MockSimpleBuffer.return_value = self.mock_buffer
+
         
     def _create_mock_config(self,kv_role):
         mock_config = MagicMock()
@@ -42,7 +43,7 @@ class TestSimpleConnector(unittest.TestCase):
         self.mock_config.model_config.hf_config.qk_rope_head_dim = 16
         self.mock_config.model_config.hf_config.kv_lora_rank = 16
         self.mock_config.model_config.is_deepseek_mla = True
-
+        # 模拟 parallel_config
         self.mock_config.parallel_config = MagicMock()
         self.mock_config.parallel_config.tensor_parallel_size = 1
         self.mock_config.parallel_config.get_num_layers.return_value = 4
@@ -99,6 +100,7 @@ class TestSimpleConnector(unittest.TestCase):
         )
 
         connector.producer_buffer = mock_buffer
+        
         input_tokens = torch.randint(0, 1000, (5,))
         roi = torch.ones_like(input_tokens, dtype=torch.bool)
         keys = torch.randn(3, 5, 1, 96)
@@ -107,6 +109,7 @@ class TestSimpleConnector(unittest.TestCase):
         req_id = "test_req"
         
         connector.insert(input_tokens, roi, keys, values, hidden, req_id)
+        
         mock_buffer.insert.assert_called_once_with(
             input_tokens, roi, keys, values, hidden, req_id
         )
@@ -128,6 +131,7 @@ class TestSimpleConnector(unittest.TestCase):
         mock_model_executable.model.start_layer = 0
         mock_model_executable.model.end_layer = 3
         
+
         mock_model_input = MagicMock(spec=ModelInputForGPUWithSamplingMetadata)
         mock_model_input.input_tokens = torch.randint(0, 1000, (10,))
         mock_model_input.attn_metadata.seq_lens = [5, 5]
@@ -135,7 +139,10 @@ class TestSimpleConnector(unittest.TestCase):
         mock_model_input.attn_metadata.num_prefill_tokens = 10
         mock_model_input.request_ids_to_seq_ids = {"req1": [0], "req2": [1]}
         
+
         kv_caches = [torch.randn(2, 100, 1, 96) for _ in range(3)]
+        
+
         hidden_states = torch.randn(10, 768)
         
         connector.send_kv_caches_and_hidden_states(
@@ -168,6 +175,7 @@ class TestSimpleConnector(unittest.TestCase):
         mock_model_executable.model.start_layer = 0
         mock_model_executable.model.end_layer = 3
         mock_model_executable.model.layers = [MagicMock() for _ in range(3)]
+
         mock_model_input = MagicMock(spec=ModelInputForGPUWithSamplingMetadata)
         mock_model_input.input_tokens = torch.randint(0, 1000, (5,))
         mock_model_input.attn_metadata.seq_lens = [5]

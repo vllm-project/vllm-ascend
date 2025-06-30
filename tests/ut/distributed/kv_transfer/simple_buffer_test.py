@@ -1,9 +1,11 @@
 import unittest
 import zlib
-import torch
-
 from unittest.mock import MagicMock
-from vllm_ascend.distributed.kv_transfer.simple_buffer import SimpleBuffer, int32_hash
+
+import torch
+from vllm_ascend.distributed.kv_transfer.simple_buffer import (SimpleBuffer,
+                                                               int32_hash)
+
 
 class MockSimplePipe:
     def __init__(self):
@@ -64,5 +66,7 @@ class TestSimpleBuffer(unittest.TestCase):
 
     def test_close(self):
         self.buffer.close()
+        # Should not raise any exceptions
+
 if __name__ == '__main__':
     unittest.main()
