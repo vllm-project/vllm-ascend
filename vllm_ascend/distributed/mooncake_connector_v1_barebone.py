@@ -22,7 +22,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 import zmq
-from mooncake.engine import TransferEngine  # type: ignore[import-not-found]
+from mooncake.engine import TransferEngine  # type: ignore[import-untyped]
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
