@@ -1273,8 +1273,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Serialization of np.ndarray is much more efficient than a tensor,
         # so we receive it in that format.
         grammar_bitmask = scheduler_output.grammar_bitmask
-        if grammar_bitmask is None:
-            return
 
         # We receive the structured output bitmask from the scheduler, but the
         # indices of the requests in the batch may not match the indices of
