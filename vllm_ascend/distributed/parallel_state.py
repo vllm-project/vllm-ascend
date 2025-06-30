@@ -28,36 +28,33 @@ def model_parallel_initialized():
 def init_ascend_model_parallel(
     expert_parallel_size: int = 1,
     expert_tensor_parallel_size: int = 1,
-    world_size: Optional[int] = None,
     backend: Optional[str] = None,
 ):
     if model_parallel_initialized():
         return
     assert torch.distributed.is_initialized()
-    world_size = world_size or torch.distributed.get_world_size()
+    world_size = torch.distributed.get_world_size()
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
-    num_expert_parallel_groups = expert_tensor_parallel_size
-    num_expert_tensor_parallel_groups = expert_parallel_size
+
+    # The layout of all ranks: ExternalDP * EP * ETP
+    # ExternalDP is the data parallel group that is not part of the model,
+    # every dp rank can generate independently (in verl integration).
+    all_ranks = torch.arange(world_size).reshape(-1, expert_parallel_size, expert_tensor_parallel_size)
 
     global _EP
-    group_ranks = []
-    for i in range(num_expert_parallel_groups):
-        ranks = list(range(i, world_size, num_expert_parallel_groups))
-        group_ranks.append(ranks)
+    group_ranks = all_ranks.transpose(1, 2).view(-1, expert_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
 
     _EP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
                                     group_name="ep")
 
-    group_ranks = []
+
     global _ETP
-    for i in range(num_expert_tensor_parallel_groups):
-        ranks = list(
-            range(i * expert_tensor_parallel_size,
-                  (i + 1) * expert_tensor_parallel_size))
-        group_ranks.append(ranks)
+    group_ranks = all_ranks.view(-1, expert_tensor_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
 
     _ETP = init_model_parallel_group(group_ranks,
                                      get_world_group().local_rank,
