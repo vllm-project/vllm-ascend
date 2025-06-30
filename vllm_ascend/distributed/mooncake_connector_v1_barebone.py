@@ -922,6 +922,9 @@ def zmq_ctx(socket_type: Any,
                               path=addr,
                               socket_type=socket_type,
                               bind=socket_type == zmq.ROUTER)  # type: ignore[attr-defined]
+    except Exception as e:
+        logger.error(f"ZeroMQ error: {e}")
+        raise RuntimeError("ZeroMQ error.")
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
