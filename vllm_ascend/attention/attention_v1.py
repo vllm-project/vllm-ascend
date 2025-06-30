@@ -17,13 +17,19 @@
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionLayer, AttentionType)
+                                              AttentionLayer,
+                                              AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group,
+                                          is_v1_kv_transfer_group)
+from vllm.distributed.kv_transfer.kv_connector.v1.base import \
+    KVConnectorBase_V1
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import direct_register_custom_op
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -444,6 +450,7 @@ def unified_ascend_attention_with_output(
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
+    wait_for_kv_layer_load(layer_name, attn_metadata)
     self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
     self.impl.forward(self,
@@ -454,6 +461,7 @@ def unified_ascend_attention_with_output(
                       attn_metadata,
                       output,
                       trace_flag=False)
+    kv_layer_save(layer_name, attn_metadata, kv_cache)
     return
 
 
@@ -465,6 +473,28 @@ def unified_attention_with_output_fake(
     layer_name: str,
 ) -> None:
     return
+
+
+def wait_for_kv_layer_load(
+    layer_name: str, attn_metadata: Union["AttentionMetadata",
+                                          dict[str, "AttentionMetadata"]]
+) -> None:
+    if not has_kv_transfer_group() or not is_v1_kv_transfer_group(
+    ) or not attn_metadata:
+        return
+    kvconnector: KVConnectorBase_V1 = get_kv_transfer_group()
+    kvconnector.wait_for_layer_load(layer_name)
+
+
+def kv_layer_save(layer_name: str,
+                  attn_metadata: Union["AttentionMetadata",
+                                       dict[str, "AttentionMetadata"]],
+                  kv_cache_layer: torch.Tensor) -> None:
+    if not has_kv_transfer_group() or not is_v1_kv_transfer_group(
+    ) or not attn_metadata:
+        return
+    kvconnector: KVConnectorBase_V1 = get_kv_transfer_group()
+    kvconnector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
 
 
 direct_register_custom_op(
