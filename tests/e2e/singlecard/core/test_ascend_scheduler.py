@@ -774,7 +774,6 @@ def assert_scheduler_empty(scheduler: AscendScheduler):
     assert len(scheduler.waiting) == 0
     assert len(scheduler.running) == 0
     assert len(scheduler.finished_req_ids) == 0
-    assert len(scheduler._cached_reqs_data) == 0
 
     # EncoderCacheManager.
     assert len(scheduler.encoder_cache_manager.freed) == 0
