@@ -388,6 +388,8 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
             shape = [batch_size * seq_len, num_heads, head_size]
         """
         num_tokens = query.shape[0]
+        use_kv_cache_quant = kv_cache is not None and kv_cache[0].numel(
+        ) > 0 and kv_cache[0].dtype == torch.int8
         if output is None:
             output = torch.empty(num_tokens,
                                  self.num_heads,
@@ -395,7 +397,7 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
                                  dtype=query.dtype,
                                  device=query.device)
 
-        if hasattr(layer, 'quant_method'):
+        if hasattr(layer, 'quant_method') and use_kv_cache_quant:
             output = layer.quant_method.apply(layer, query, key, value,
                                               kv_cache, attn_metadata,
                                               self.attn_type, self.scale,
