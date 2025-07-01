@@ -1716,6 +1716,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     spec_token_ids=spec_token_ids,
                     logprobs=logprobs_lists,
                     prompt_logprobs_dict=prompt_logprobs_dict,
+                    finished_sending=finished_sending,
+                    finished_recving=finished_recving,
                 )
             else:
                 model_runner_output = ModelRunnerOutput(
@@ -1726,6 +1728,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     logprobs=logprobs_lists,
                     prompt_logprobs_dict=prompt_logprobs_dict,
                     pooler_output=[],
+                    finished_sending=finished_sending,
+                    finished_recving=finished_recving,
                 )
 
         durations = ProfileExecuteDuration().pop_captured_sync()
@@ -1744,16 +1748,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         with set_forward_context(None, self.vllm_config):
             self.maybe_setup_kv_connector(scheduler_output)
-            finsihed_sending, finished_recving = (
+            finished_sending, finished_recving = (
                 self.get_finished_kv_transfer(scheduler_output))
             # For the case of no forward caused by receiving remote kv,
             # one round of dummy inference is necessary
             # to prevent hang over the collective calls.
-        if not finsihed_sending and not finished_recving:
+        if not finished_sending and not finished_recving:
             return EMPTY_MODEL_RUNNER_OUTPUT
 
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.finished_sending = finsihed_sending
+        output.finished_sending = finished_sending
         output.finished_recving = finished_recving
         return output
 
