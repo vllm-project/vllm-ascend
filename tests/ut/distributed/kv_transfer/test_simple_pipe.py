@@ -76,7 +76,7 @@ class TestSimplePipe(unittest.TestCase):
                 port_offset=0)
             mock_data_dist = MockLLMDataDist.return_value
             mock_data_dist.init.return_value = None
-
+            # Assert
             mock_data_dist.init.assert_called_once()
             self.pipe.router_socket.close()
 
@@ -155,7 +155,7 @@ class TestSimplePipe(unittest.TestCase):
             self.assertIsNotNone(pipe._register_thread)
             mock_data_dist = MockLLMDataDist.return_value
             mock_data_dist.init.return_value = None
-
+            # Assert
             mock_data_dist.init.assert_called_once()
             pipe.router_socket.close()
 

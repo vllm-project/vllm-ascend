@@ -43,6 +43,7 @@ class TestSimpleConnector(unittest.TestCase):
         self.mock_config.model_config.hf_config.qk_rope_head_dim = 16
         self.mock_config.model_config.hf_config.kv_lora_rank = 16
         self.mock_config.model_config.is_deepseek_mla = True
+        # 模拟 parallel_config
         self.mock_config.parallel_config = MagicMock()
         self.mock_config.parallel_config.tensor_parallel_size = 1
         self.mock_config.parallel_config.get_num_layers.return_value = 4
