@@ -110,7 +110,7 @@ class AscendQuantConfig(QuantizationConfig):
         elif isinstance(layer,VocabParallelEmbedding):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
-                return UnquantizedEmbeddngMethod()
+                return UnquantizedEmbeddingMethod()
             return AscendEmbeddingMethod(self,prefix,
                                         self.packed_modules_mapping)
         return None
