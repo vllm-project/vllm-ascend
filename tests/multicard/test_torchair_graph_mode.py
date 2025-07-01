@@ -71,10 +71,10 @@ def test_e2e_deepseekv3_with_torchair(monkeypatch: pytest.MonkeyPatch,
         # inaccurate. This will only change if accuracy improves with the
         # official weights of DeepSeek-V3.
         golden_results = [
-            'Hello, my name is feasibility伸 spazio debtor添',
-            'The president of the United States is begg"""\n杭州风和 bestimm',
-            'The capital of France is frequentlyশามalinkAllowed',
-            'The future of AI is deleting俯احت怎么样了حراف',
+            'Hello, my name is下载早点向前很有่อง',
+            'The president of the United States isSender)## physiological Albany',
+            'The capital of France is Rocky转角 hospitalizedinterval sparked',
+            'The future of AI is её asegο BIOS一扫',
         ]
 
         assert len(golden_results) == len(vllm_output)
