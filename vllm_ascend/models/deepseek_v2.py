@@ -310,7 +310,10 @@ class CustomDeepseekV2MoE(nn.Module):
             is_prefill = False
 
         # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
+        if self.enable_multistream_moe:
+            router_logits = None
+        else:
+            router_logits, _ = self.gate(hidden_states)
 
         experts_hidden_states = self.experts(
             hidden_states=hidden_states,
@@ -319,6 +322,7 @@ class CustomDeepseekV2MoE(nn.Module):
             top_k=CustomDeepseekV2MoE.top_k,
             enable_force_load_balance=enable_force_load_balance,
             shared_experts=self.shared_experts,
+            gate=self.gate if self.enable_multistream_moe else None,
         )
 
         hidden_states = (
