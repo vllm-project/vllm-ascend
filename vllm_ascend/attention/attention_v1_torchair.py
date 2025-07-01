@@ -29,7 +29,8 @@ from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import (AscendAttentionBackendImpl,
-                                                AscendAttentionState)
+                                                AscendAttentionState,
+                                                AscendMetadata)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d)
 
@@ -365,7 +366,7 @@ class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: AscendTorchairMetadata,
+        attn_metadata: AscendMetadata,
         output: Optional[torch.Tensor] = None,
         trace_flag: bool = False,
     ) -> torch.Tensor:
@@ -410,11 +411,7 @@ class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
                                       "are not implemented for "
-                                      "PallasAttentionBackendImpl")
-        # View q k v to BSH.
-        query = query.view(-1, self.num_heads, self.head_size)
-        key = key.view(-1, self.num_kv_heads, self.head_size)
-        value = value.view(-1, self.num_kv_heads, self.head_size)
+                                      "AscendAttentionTorchairBackendImpl")
 
         if kv_cache is not None and kv_cache[0].numel() > 0:
             key_cache, value_cache = kv_cache[0], kv_cache[1]
@@ -425,17 +422,19 @@ class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
             block_indices = slots_indices // block_size
             slots_indices = slots_indices % block_size
             indices = torch.cat((block_indices, slots_indices), dim=1)
-            torch_npu.npu_scatter_nd_update_(
-                key_cache, indices,
-                key.view(-1, self.num_kv_heads * self.head_size))
-            torch_npu.npu_scatter_nd_update_(
-                value_cache, indices,
-                value.view(-1, self.num_kv_heads * self.head_size))
+            torch_npu.npu_scatter_nd_update_(key_cache, indices, key)
+            torch_npu.npu_scatter_nd_update_(value_cache, indices, value)
 
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             assert attn_metadata is not None
             assert attn_metadata.attn_mask is not None
             mask = attn_metadata.attn_mask
+
+            # View q k v to BSH.
+            query = query.view(-1, self.num_heads, self.head_size)
+            key = key.view(-1, self.num_kv_heads, self.head_size)
+            value = value.view(-1, self.num_kv_heads, self.head_size)
+
             if is_310p():
                 # align q k v output tensors
                 query = aligned_16(query)
@@ -458,6 +457,22 @@ class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
                                            num_kv_heads=self.num_kv_heads,
                                            out=output)
             output = output[:num_tokens, :, :]
+        elif attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
+            assert attn_metadata is not None
+            assert attn_metadata.attn_mask is not None
+            compress_mask = attn_metadata.attn_mask
+            torch_npu._npu_flash_attention_qlens(
+                query=query,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                block_table=attn_metadata.block_tables,
+                mask=compress_mask,
+                seq_len=attn_metadata.query_lens,
+                context_lens=attn_metadata.seq_lens,
+                num_kv_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale_value=self.scale,
+                out=output)
         elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
             decode_meta = attn_metadata.decode
             assert decode_meta is not None
@@ -478,15 +493,10 @@ class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
                 input_layout='BSH',
                 block_size=block_size)
         else:
-            output = super().forward(
-                layer=layer,
-                query=query,
-                key=key,
-                value=value,
-                kv_cache=kv_cache,
-                attn_metadata=attn_metadata,
-                output=output,
-                trace_flag=trace_flag,
-            )
+            raise NotImplementedError(
+                "Torchair graph mode with non-MLA attention backend is still experimental."
+                "v1 scheduler(chunked prefill) is not supported at this moment. Please"
+                "setting 'ascend_scheduler_config':{'enabled':true} in additional_config"
+                "to use ascend scheduler.")
 
         return output.view(num_tokens, self.hidden_size)
