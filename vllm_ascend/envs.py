@@ -121,6 +121,12 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value to False to disable the optimized model.
     "USE_OPTIMIZED_MODEL":
     lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
+    # The tolerance of the kv cache size, if the difference between the
+    # actual kv cache size and the cached kv cache size is less than this value,
+    # then the cached kv cache size will be used.
+    "VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE":
+    lambda: int(
+        os.getenv("VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE", 64)),
 }
 
 # end-env-vars-definition
