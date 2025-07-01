@@ -16,7 +16,7 @@
 #
 
 import math
-from typing import Any, Callable, Dict, Optional, Tuple, Union, List
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -30,6 +30,7 @@ from vllm_ascend.ops.fused_moe import select_experts
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
                                dispose_tensor, get_ascend_soc_version,
                                npu_stream_switch, npu_wait_tensor)
+
 
 def apply_mlp_decode(hidden_states_wrapper: List[torch.Tensor],
                      w1: torch.Tensor,
@@ -80,7 +81,7 @@ def apply_mlp_decode(hidden_states_wrapper: List[torch.Tensor],
 
     # act_fn: swiglu
     hidden_states, swiglu_out_scale = torch_npu.npu_dequant_swiglu_quant(
-        x=hidden_states,         
+        x=hidden_states,
         weight_scale=w1_scale,
         activation_scale=pertoken_scale,
         bias=None,
@@ -269,17 +270,18 @@ def fused_experts_with_mc2(
     if shared_experts is not None:
         with npu_stream_switch("moe_secondary", 0):
             npu_wait_tensor(quantized_x_for_share, expand_x)
-            shared_act_out = shared_experts.act_fn((quantized_x_for_share, dynamic_scale_for_share))
+            shared_act_out = shared_experts.act_fn(
+                (quantized_x_for_share, dynamic_scale_for_share))
             shared_act, swiglu_out_scale = shared_act_out[0], shared_act_out[1]
 
     # `expand_x` will be disposed in the `apply_mlp` function
     down_out_list = apply_mlp_decode([expand_x],
-                              w1,
-                              w1_scale,
-                              w2,
-                              w2_scale,
-                              expert_token_nums,
-                              dynamic_scale=dynamic_scale)
+                                     w1,
+                                     w1_scale,
+                                     w2,
+                                     w2_scale,
+                                     expert_token_nums,
+                                     dynamic_scale=dynamic_scale)
 
     # moeCombine
     kwargs_mc2 = {
@@ -317,7 +319,8 @@ def fused_experts_with_mc2(
     else:
         with npu_stream_switch("moe_secondary", 0):
             npu_wait_tensor(shared_act, down_out_list)
-            shared_output, _ = shared_experts.down_proj((shared_act, swiglu_out_scale))
+            shared_output, _ = shared_experts.down_proj(
+                (shared_act, swiglu_out_scale))
         return hidden_states, shared_output
 
 
@@ -768,14 +771,16 @@ class AscendW8A8DynamicFusedMoEMethod:
                 scoring_func=scoring_func,
                 e_score_correction_bias=e_score_correction_bias,
             )
-        
+
         fused_moe_state = get_forward_context().fused_moe_state
         shared_gate_up, shared_dequant_scale = None, None
         if shared_experts is not None and fused_moe_state == FusedMoEState.MC2:
             with npu_stream_switch("moe_secondary", 0):
                 npu_wait_tensor(quantized_x_for_share, router_logits)
-                share_up_out, _ = shared_experts.gate_up_proj((quantized_x_for_share, dynamic_scale_for_share))
-                shared_gate_up, shared_dequant_scale = share_up_out[0], share_up_out[1]
+                share_up_out, _ = shared_experts.gate_up_proj(
+                    (quantized_x_for_share, dynamic_scale_for_share))
+                shared_gate_up, shared_dequant_scale = share_up_out[
+                    0], share_up_out[1]
 
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.

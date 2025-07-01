@@ -1139,13 +1139,17 @@ class AscendFusedMoE(FusedMoE):
         fused_moe_state = get_forward_context().fused_moe_state
         # For w8a8 dynamic we can do npu_dynamic_quant and gate in parallel.
         quantized_x_for_share, dynamic_scale_for_share = None, None
-        from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicFusedMoEMethod
+        from vllm_ascend.quantization.w8a8_dynamic import \
+            AscendW8A8DynamicFusedMoEMethod
         if self.enable_multistream_moe:
             assert gate is not None
             router_logits, _ = gate(hidden_states)
-            if isinstance(self.quant_method.quant_method, AscendW8A8DynamicFusedMoEMethod) and fused_moe_state == FusedMoEState.MC2:
+            if isinstance(self.quant_method.quant_method,
+                          AscendW8A8DynamicFusedMoEMethod
+                          ) and fused_moe_state == FusedMoEState.MC2:
                 with npu_stream_switch("moe_secondary", 0):
-                    quantized_x_for_share, dynamic_scale_for_share = torch_npu.npu_dynamic_quant(hidden_states)
+                    quantized_x_for_share, dynamic_scale_for_share = torch_npu.npu_dynamic_quant(
+                        hidden_states)
 
         if shared_experts:
             if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
