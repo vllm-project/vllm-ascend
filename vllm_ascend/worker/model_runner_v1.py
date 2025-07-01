@@ -537,9 +537,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
 
-        batch_reordered = self._may_reorder_batch(scheduler_output)
-
-        if batch_changed or batch_reordered:
+        if batch_changed:
             self.input_batch.refresh_sampling_metadata()
 
     def _get_forward_metadata_across_dp(
