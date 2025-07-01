@@ -123,6 +123,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE":
     lambda: int(
         os.getenv("VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE", 64)),
+    "MOONCAKE_CONNECTOR_PROTOCOL":
+    lambda: os.getenv("MOONCAKE_CONNECTOR_PROTOCOL", "ascend"),
 }
 
 # end-env-vars-definition
