@@ -68,8 +68,3 @@ class TestSimpleBuffer(unittest.TestCase):
 
     def test_close(self):
         self.buffer.close()
-        # Should not raise any exceptions
-
-
-if __name__ == '__main__':
-    unittest.main()
