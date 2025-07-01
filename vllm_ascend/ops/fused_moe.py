@@ -214,7 +214,7 @@ def fused_experts_with_mc2(
         "expert_shard_type": 0,
         "shared_expert_rank_num": 0,
         "moe_expert_num": moe_expert_num,
-        "global_bs": 0,
+        "global_bs": global_bs,
     }
     tp_recv_counts = output[5]
     stage3_kwargs = {
