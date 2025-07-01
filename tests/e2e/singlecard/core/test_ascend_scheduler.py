@@ -277,7 +277,7 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     if vllm_version_is("0.9.1"):
         assert len(output1.scheduled_cached_reqs) == 3
     else:
-        assert output.scheduled_cached_reqs.num_reqs == 3
+        assert output1.scheduled_cached_reqs.num_reqs == 3
     assert len(output1.finished_req_ids) == 0
     assert output1.num_scheduled_tokens[requests[0].request_id] == 400
     assert output1.num_scheduled_tokens[requests[1].request_id] == 400
