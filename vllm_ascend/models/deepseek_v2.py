@@ -74,6 +74,7 @@ from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import dispose_tensor, npu_prefetch
+from vllm_ascend.ops.linear import Oproj_RowParallelLinear
 
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
@@ -165,41 +166,6 @@ class CustomDeepseekV2RowParallelLinearReplaceAllreduce(RowParallelLinear):
                                                               dim=0)
             else:
                 output = tensor_model_parallel_all_reduce(output_parallel)
-        else:
-            output = output_parallel
-
-        output_bias = self.bias if self.skip_bias_add else None
-
-        if not self.return_bias:
-            return output
-        return output, output_bias
-
-
-class CustomDeepseekV2RowParallelLinear(RowParallelLinear):
-
-    def forward(
-        self,
-        input_,
-        is_prefill=True
-    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[nn.Parameter]]]:
-        if self.input_is_parallel:
-            input_parallel = input_
-        else:
-            tp_rank = get_tensor_model_parallel_rank()
-            splitted_input = split_tensor_along_last_dim(
-                input_, num_partitions=self.tp_size)
-            input_parallel = splitted_input[tp_rank].contiguous()
-
-        # Matrix multiply.
-        assert self.quant_method is not None
-        # Only fuse bias add into GEMM for rank 0 (this ensures that
-        # bias will not get added more than once in TP>1 case)
-        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        output_parallel = self.quant_method.apply(self,
-                                                  input_parallel,
-                                                  bias=bias_)
-        if self.reduce_results and self.tp_size > 1:
-            output = tensor_model_parallel_all_reduce(output_parallel)
         else:
             output = output_parallel
 
@@ -462,7 +428,6 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_multistream_mla = \
             ascend_config.torchair_graph_config.enable_multistream_mla
-
         if self.q_lora_rank is not None:
             self.q_a_proj = ReplicatedLinear(self.hidden_size,
                                              self.q_lora_rank,
@@ -510,7 +475,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 quant_config=quant_config,
                 prefix=f"{prefix}.o_proj")
         else:
-            self.o_proj = CustomDeepseekV2RowParallelLinear(
+            self.o_proj = Oproj_RowParallelLinear(
                 self.num_heads * self.v_head_dim,
                 self.hidden_size,
                 bias=False,

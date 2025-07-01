@@ -47,6 +47,8 @@ class AscendConfig:
         self.expert_map_path = additional_config.get("expert_map_path", None)
         self.chunked_prefill_for_mla = additional_config.get(
             "chunked_prefill_for_mla", False)
+        self.oproj_tensor_parallel_size = additional_config.get(
+            "oproj_tensor_parallel_size", None)
 
 
 class TorchairGraphConfig:
