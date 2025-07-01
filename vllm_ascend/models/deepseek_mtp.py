@@ -39,20 +39,19 @@ from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import CustomDeepseekV2DecoderLayer
 
+
 class CustomDeepSeekShareHead(SharedHead):
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = ""
-    ) -> None:
+
+    def __init__(self,
+                 config: PretrainedConfig,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "") -> None:
         nn.Module.__init__(self)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.head = ParallelLMHead(config.vocab_size,
                                    config.hidden_size,
                                    quant_config=quant_config,
-                                   prefix=maybe_prefix(
-                                    prefix, "head"))
+                                   prefix=maybe_prefix(prefix, "head"))
 
 
 class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
@@ -79,7 +78,7 @@ class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
         self.shared_head = CustomDeepSeekShareHead(config=config,
                                                    quant_config=quant_config,
                                                    prefix=maybe_prefix(
-                                                    prefix, "shared_head"))
+                                                       prefix, "shared_head"))
         self.mtp_block = CustomDeepseekV2DecoderLayer(config, prefix,
                                                       model_config,
                                                       cache_config,

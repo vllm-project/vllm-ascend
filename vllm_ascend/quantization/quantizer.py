@@ -292,7 +292,6 @@ class W8A8Quantizer(VLLMAscendQuantizer):
         return AscendW8A8LinearMethod()
 
 
-
 class W8A8DYNAMICQuantizer(VLLMAscendQuantizer):
 
     @staticmethod
