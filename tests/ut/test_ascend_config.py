@@ -6,9 +6,9 @@ from transformers import PretrainedConfig
 from vllm.config import ModelConfig, VllmConfig
 
 from vllm_ascend.ascend_config import (check_ascend_config,
-                                       clear_ascend_config,
                                        check_torchair_supported,
-                                       get_ascend_config, init_ascend_config)
+                                       clear_ascend_config, get_ascend_config,
+                                       init_ascend_config)
 
 
 class TestAscendConfig(unittest.TestCase):
