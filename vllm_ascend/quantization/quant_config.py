@@ -29,13 +29,13 @@ from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                RowParallelLinear,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers import (VocabParallelEmbedding,
-                                        UnquantizedEmbeddngMethod)
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    UnquantizedEmbeddingMethod, VocabParallelEmbedding)
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -43,6 +43,7 @@ from vllm_ascend.ops.fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD
 
 from .quantizer import AscendQuantizer
+
 
 
 @register_quantization_config(ASCEND_QUATIZATION_METHOD)
