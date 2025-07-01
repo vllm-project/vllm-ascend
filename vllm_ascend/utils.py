@@ -419,6 +419,7 @@ class FusedMoEState(Enum):
     All2All = 1
     MC2 = 2
     AllGatherEP = 3
+    NaiveMulticast = 4
 
 
 # TODO(zzzzwwjj): add soc_version to choose branch
@@ -430,7 +431,10 @@ def get_fused_moe_state(ep_size: int, with_prefill: bool,
             and is_deepseek_v3_r1):
         return FusedMoEState.AllGatherEP
     elif ep_size == 1:
-        return FusedMoEState.AllGather
+        if with_prefill:
+            return FusedMoEState.NaiveMulticast
+        else:
+            return FusedMoEState.AllGather
     # NOTE: mc2 need ep_size >= 16 & all2all can't use in torchair graph.
     elif ep_size < 16 or with_prefill:
         return FusedMoEState.All2All
