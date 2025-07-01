@@ -372,6 +372,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # NOTE: we need to use `in_profile_run` to determine whether `enable_force_load_balance` is True
         self.in_profile_run = False
 
+        # kv role
+        self.is_kv_producer = False
+        if vllm_config.kv_transfer_config is not None:
+            self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
         output.
@@ -1521,6 +1526,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     ) -> torch.Tensor:
         if self.torchair_graph_enabled and not with_prefill:
             num_tokens = self.select_torchair_padded_batch_size(num_tokens)
+
+        # For kv producer, with prefill always true
+        if self.is_kv_producer:
+            with_prefill = True
         # Padding for DP
         (num_tokens, num_tokens_across_dp, with_prefill,
          enable_dbo) = self._get_forward_metadata_across_dp(
