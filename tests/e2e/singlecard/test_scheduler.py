@@ -192,7 +192,10 @@ def test_schedule(enable_prefix_caching: Optional[bool],
     # Test initial scheduling
     output = scheduler.schedule()
     assert len(output.scheduled_new_reqs) == len(requests)
-    assert len(output.scheduled_cached_reqs) == 0
+    if vllm_version_is("0.9.1"):
+        assert len(output.scheduled_cached_reqs) == 0
+    else:
+        assert output.scheduled_cached_reqs.num_reqs == 0
     assert len(output.finished_req_ids) == 0
     # Verify all requests are scheduled.
     for req_id, num_tokens in output.num_scheduled_tokens.items():
