@@ -10,12 +10,17 @@ import vllm_ascend.envs as envs_ascend
 # Currently, mc2 op need their own group coordinator.
 _MC2: Optional[GroupCoordinator] = None
 _MLP_TP: Optional[GroupCoordinator] = None
+_OTP: Optional[GroupCoordinator] = None
 
 
 def get_mc2_group() -> GroupCoordinator:
     assert _MC2 is not None, ("mc2 group is not initialized")
     return _MC2
 
+def get_otp_group() -> GroupCoordinator:
+    assert _OTP is not None, (
+        "output tensor parallel group is not initialized")
+    return _OTP
 
 def get_mlp_tp_group() -> GroupCoordinator:
     assert _MLP_TP is not None, ("mlp group is not initialized")
@@ -64,6 +69,23 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                             get_world_group().local_rank,
                                             backend,
                                             group_name="mlp_tp")
+        
+    # If oproj tensor parallel size is set, we will create a group for it.
+    otp_size = parallel_config.oproj_tensor_parallel_size
+    if otp_size is not None:
+        group_ranks = []
+        global _OTP
+        num_oproj_tensor_parallel_groups: int = (world_size //
+                                                otp_size)
+        for i in range(num_oproj_tensor_parallel_groups):
+            ranks = list(
+                range(i * otp_size,
+                    (i + 1) * otp_size))
+            group_ranks.append(ranks)
+        _OTP = init_model_parallel_group(group_ranks,
+                                        get_world_group().local_rank,
+                                        backend,
+                                        group_name="otp")
 
 
 def get_mlp_tensor_model_parallel_world_size():
@@ -74,6 +96,8 @@ def get_mlp_tensor_model_parallel_world_size():
 def get_mlp_tensor_model_parallel_rank():
     """Return world size for the tensor model parallel group."""
     return get_mlp_tp_group().rank_in_group
+    
+    
 
 
 def destroy_ascend_model_parallel():
@@ -86,3 +110,8 @@ def destroy_ascend_model_parallel():
     if _MLP_TP:
         _MLP_TP.destroy()
     _MLP_TP = None
+    
+    global _OTP
+    if _OTP:
+        _OTP.destroy()  
+    _OTP = None
