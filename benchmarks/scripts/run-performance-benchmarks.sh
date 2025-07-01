@@ -54,13 +54,20 @@ json2args() {
 }
 
 wait_for_server() {
-  # wait for vllm server to start
-  # return 1 if vllm server crashes
-  timeout 1200 bash -c '
-    until curl -s -X GET localhost:8000/health; do
-      echo "Waiting for vllm server to start..."
-      sleep 1
-    done' && return 0 || return 1
+  local waited=0
+  local timeout_sec=1200
+
+  while (( waited < timeout_sec )); do
+    if curl -s -X GET localhost:8000/health > /dev/null; then
+      return 0
+    fi
+    echo "Waiting for vllm server to start..."
+    sleep 1
+    ((waited++))
+  done
+
+  echo "Timeout waiting for server"
+  return 1
 }
 
 get_cur_npu_id() {
@@ -114,7 +121,7 @@ run_latency_tests() {
     latency_params=$(echo "$params" | jq -r '.parameters')
     latency_args=$(json2args "$latency_params")
 
-    latency_command="python3 vllm_benchmarks/benchmark_latency.py \
+    latency_command="vllm bench latency \
       --output-json $RESULTS_FOLDER/${test_name}.json \
       $latency_args"
 
@@ -157,7 +164,7 @@ run_throughput_tests() {
     throughput_params=$(echo "$params" | jq -r '.parameters')
     throughput_args=$(json2args "$throughput_params")
 
-    throughput_command="python3 vllm_benchmarks/benchmark_throughput.py \
+    throughput_command="vllm bench throughput \
       --output-json $RESULTS_FOLDER/${test_name}.json \
       $throughput_args"
 
@@ -243,7 +250,7 @@ run_serving_tests() {
 
       new_test_name=$test_name"_qps_"$qps
 
-      client_command="python3 vllm_benchmarks/benchmark_serving.py \
+      client_command="vllm bench serve \
         --save-result \
         --result-dir $RESULTS_FOLDER \
         --result-filename ${new_test_name}.json \
@@ -271,17 +278,11 @@ cleanup_on_error() {
   rm -rf $RESULTS_FOLDER
 }
 
-get_benchmarks_scripts() {
-  git clone -b main --depth=1 https://github.com/vllm-project/vllm.git && \
-  mv vllm/benchmarks vllm_benchmarks
-  rm -rf ./vllm
-}
-
 main() {
-
   START_TIME=$(date +%s)
   check_npus
-
+  python3 benchmarks/scripts/patch_benchmark_dataset.py
+  
   # dependencies
   (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
   (which jq) || (apt-get update && apt-get -y install jq)
@@ -298,8 +299,6 @@ main() {
 
   # prepare for benchmarking
   cd benchmarks || exit 1
-  get_benchmarks_scripts
-  python3 scripts/patch_benchmark_dataset.py --path vllm_benchmarks/benchmark_dataset.py
   trap cleanup EXIT
 
   QUICK_BENCHMARK_ROOT=./
