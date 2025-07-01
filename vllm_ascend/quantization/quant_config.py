@@ -30,7 +30,7 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                RowParallelLinear,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers import (VocabParallelEmbedding,
-                                            UnquantizedEmbeddngMethod)
+                                        UnquantizedEmbeddngMethod)
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
 from vllm.model_executor.layers.quantization.base_config import (
