@@ -1,15 +1,13 @@
 import math
-import torch
-import torch_npu
-
 import unittest
 from unittest.mock import MagicMock, patch
 
+import torch
+
 from tests.ut.base import TestBase
 from vllm_ascend.ops.rotary_embedding import (custom_rotary_embedding_enabled,
-                                              rope_forward_oot,
                                               native_rope_deepseek_forward,
-                                              rotate_half,
+                                              rope_forward_oot, rotate_half,
                                               yarn_find_correction_dim,
                                               yarn_get_mscale)
 
@@ -221,7 +219,6 @@ class TestNativeRopeDeepseekForward(TestBase):
         key = torch.randn(1, 8, 128)
 
         mock_rope_forward_oot.return_value = (query, key)
-        mock_set_cache = MagicMock()
 
         q_pe, k_pe = native_rope_deepseek_forward(module,
                                                   positions,
