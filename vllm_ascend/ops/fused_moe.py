@@ -1299,6 +1299,21 @@ class AscendFusedMoE(FusedMoE):
 
         fused_moe_state = get_fused_moe_state(self.moe_parallel_config.ep_size,
                                               is_prefill, is_deepseek_v3_r1)
+        # For w8a8 dynamic we can do npu_dynamic_quant and gate in parallel.
+        quantized_x_for_share, dynamic_scale_for_share = None, None
+        from vllm_ascend.quantization.w8a8_dynamic import \
+            AscendW8A8DynamicFusedMoEMethod
+        if self.enable_multistream_moe:
+            if not self.rm_router_logits:
+                router_logits, _ = gate(hidden_states)
+            if hasattr(self.quant_method, "quant_method") and \
+               isinstance(self.quant_method.quant_method,
+                          AscendW8A8DynamicFusedMoEMethod
+                          ) and fused_moe_state == FusedMoEState.MC2:
+                with npu_stream_switch("moe_secondary", 0):
+                    quantized_x_for_share, dynamic_scale_for_share = torch_npu.npu_dynamic_quant(
+                        hidden_states)
+
         if shared_experts:
             if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
                 # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
@@ -1379,6 +1394,8 @@ class AscendFusedMoE(FusedMoE):
             global_redundant_expert_num=self.global_redundant_expert_num,
             shared_experts=shared_experts if self.torchair_graph_enabled
             and self.enable_multistream_moe and not is_prefill else None,
+            quantized_x_for_share=quantized_x_for_share,
+            dynamic_scale_for_share=dynamic_scale_for_share,
         )
 
         if shared_experts:
