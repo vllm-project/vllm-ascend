@@ -21,16 +21,14 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import numpy as np
 import torch
 import torch_npu
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
-                                              AttentionType)
+from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
+                                              AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import PAD_SLOT_ID, CommonAttentionState
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention_v1 import (AscendAttentionBackendImpl,
-                                                AscendAttentionState,
-                                                AscendMetadata)
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d)
 
@@ -327,7 +325,7 @@ class AscendAttentionTorchairMetadataBuilder:
         return attn_metadata
 
 
-class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
+class AscendAttentionTorchairBackendImpl(AttentionImpl):
 
     def __init__(
         self,
@@ -344,20 +342,24 @@ class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
         kv_sharing_target_layer_name: Optional[str] = None,
         use_irope: bool = False,
     ) -> None:
-        super().__init__(
-            num_heads=num_heads,
-            head_size=head_size,
-            scale=scale,
-            num_kv_heads=num_kv_heads,
-            alibi_slopes=alibi_slopes,
-            sliding_window=sliding_window,
-            kv_cache_dtype=kv_cache_dtype,
-            blocksparse_params=blocksparse_params,
-            logits_soft_cap=logits_soft_cap,
-            attn_type=attn_type,
-            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
-            use_irope=use_irope,
-        )
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.scale = float(scale)
+        self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
+        self.hidden_size = self.num_heads * self.head_size
+        self.kv_cache_dtype = kv_cache_dtype
+        self.sliding_window = sliding_window
+        if alibi_slopes is not None:
+            alibi_slopes = torch.tensor(alibi_slopes,
+                                        dtype=torch.float32,
+                                        device="npu")
+        self.alibi_slopes = alibi_slopes
+        self.attn_type = attn_type
+
+        assert self.num_heads % self.num_kv_heads == 0
+        self.num_queries_per_kv = self.num_heads // self.num_kv_heads
+        self.key_cache = None
+        self.value_cache = None
 
     def forward(
         self,
@@ -366,7 +368,7 @@ class AscendAttentionTorchairBackendImpl(AscendAttentionBackendImpl):
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
-        attn_metadata: AscendMetadata,
+        attn_metadata: AscendTorchairMetadata,
         output: Optional[torch.Tensor] = None,
         trace_flag: bool = False,
     ) -> torch.Tensor:
