@@ -531,7 +531,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 req_state = self.requests[req_id]
                 num_computed_tokens = req_data.num_computed_tokens[i]
                 new_token_ids = req_data.new_token_ids[i]
-                new_block_ids = req_data.new_token_ids[i]
+                new_block_ids = req_data.new_block_ids[i]
                 resumed_from_preemption = req_data.resumed_from_preemption[i]
 
                 req_state.num_computed_tokens = num_computed_tokens
