@@ -365,12 +365,9 @@ class AscendScheduler(Scheduler):
             for req in scheduled_new_reqs
         ]
         cached_reqs_data = self._make_cached_request_data(
-            scheduled_running_reqs,
-            scheduled_resumed_reqs,
-            num_scheduled_tokens,
-            num_scheduled_spec_tokens,
-            req_to_new_block_ids
-        )
+            scheduled_running_reqs, scheduled_resumed_reqs,
+            num_scheduled_tokens, num_scheduled_spec_tokens,
+            req_to_new_block_ids)
 
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
