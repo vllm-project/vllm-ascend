@@ -139,6 +139,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
+        self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         ascend_config = get_ascend_config()
@@ -155,12 +156,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                            self.block_size)
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
-
-        self.graph_block_tables = np.zeros(
-            (self.vllm_config.scheduler_config.max_num_seqs,
-             (self.model_config.max_model_len + self.block_size - 1) //
-             self.block_size),
-            dtype=np.int32)
 
         # Model-related.
         self.num_attn_layers = self.model_config.get_num_layers_by_block_type(
@@ -354,11 +349,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if ascend_config.torchair_graph_config.graph_batch_sizes_init:
             self.init_torchair_graph_batch_sizes()
 
-        if len(self.torchair_graph_batch_sizes) == 0:
-            # TODO(zzzzwwjj): check torchair_graph_batch_sizes init code
-            self.torchair_graph_batch_sizes = [
-                self.scheduler_config.max_num_seqs
-            ]
+        self.check_torchair_graph_batch_sizes()
+
+        self.graph_block_tables = np.zeros(
+            (self.torchair_graph_batch_sizes[-1],
+             (self.model_config.max_model_len + self.block_size - 1) //
+             self.block_size),
+            dtype=np.int32)
 
         torch._dynamo.cache_size.config.cache_size_limit += len(
             self.torchair_graph_batch_sizes)
@@ -1694,9 +1691,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     m.consumed_memory / float(2**30))
 
     def _get_torchair_lazy_compiled_model(self, batch_size: int):
-        if batch_size < 0 or batch_size > self.max_num_reqs:
+        if batch_size < 0 or batch_size > self.torchair_graph_batch_sizes[-1]:
             raise ValueError(
-                f"Bad graph batch size:{batch_size}! max_num_reqs:{self.max_num_reqs}"
+                f"Bad graph batch size:{batch_size}! max_graph_batch_sizes:{self.torchair_graph_batch_sizes[-1]}"
             )
 
         compiled_model = self.torchair_compiled_models.get(
@@ -2062,8 +2059,36 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             start_graph_batch_size *= 2
 
     def select_torchair_padded_batch_size(self, batch_size: int):
-        selected_batch_size = self.max_num_reqs
         for padded_batch_size in self.torchair_graph_batch_sizes:
-            if batch_size <= padded_batch_size < selected_batch_size:
-                selected_batch_size = padded_batch_size
-        return selected_batch_size
+            if batch_size <= padded_batch_size:
+                return padded_batch_size
+        raise ValueError(
+            f"cur batch_size is invalid, torchair_graph_batch_sizes is "
+            f"{self.torchair_graph_batch_sizes}, but cur batch_size is {batch_size}."
+        )
+
+    def check_torchair_graph_batch_sizes(self):
+        if len(self.torchair_graph_batch_sizes) == 0:
+            self.torchair_graph_batch_sizes = [1, self.max_num_reqs]
+        else:
+            self.torchair_graph_batch_sizes = sorted(
+                self.torchair_graph_batch_sizes)
+            while self.torchair_graph_batch_sizes[-1] > self.max_num_reqs:
+                self.torchair_graph_batch_sizes.pop()
+                if len(self.torchair_graph_batch_sizes) == 0:
+                    logger.warning(
+                        "torch_graph_batch_sizes is invalid, reset it to [1, max_num_seqs]"
+                    )
+                    self.torchair_graph_batch_sizes = [1, self.max_num_reqs]
+            if self.torchair_graph_batch_sizes[-1] < self.max_num_reqs:
+                self.torchair_graph_batch_sizes.append(self.max_num_reqs)
+
+        # NOTE: when enable_expert_parallel, we need to check if `graph_batch_size` is divisible by `tp_size`
+        tp_size = self.parallel_config.tensor_parallel_size
+        if self.parallel_config.enable_expert_parallel:
+            new_graph_batch_sizes = []
+            for graph_batch_size in self.torchair_graph_batch_sizes:
+                cur_graph_batch_size = graph_batch_size + tp_size - graph_batch_size % tp_size
+                if cur_graph_batch_size not in new_graph_batch_sizes:
+                    new_graph_batch_sizes.append(cur_graph_batch_size)
+            self.torchair_graph_batch_sizes = new_graph_batch_sizes
