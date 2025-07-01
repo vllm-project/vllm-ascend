@@ -159,6 +159,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # this feature is supported in A2, and eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", '0'))),
+    "MOONCAKE_CONNECTOR_PROTOCOL":
+    lambda: os.getenv("MOONCAKE_CONNECTOR_PROTOCOL", "ascend"),
 }
 
 # end-env-vars-definition
