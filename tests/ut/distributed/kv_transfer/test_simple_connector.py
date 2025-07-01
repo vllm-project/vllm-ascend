@@ -4,6 +4,7 @@ from unittest.mock import MagicMock, patch
 import torch
 from vllm.config import VllmConfig
 from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
+
 from vllm_ascend.distributed.kv_transfer.simple_buffer import SimpleBuffer
 from vllm_ascend.distributed.kv_transfer.simple_connector import \
     SimpleConnector

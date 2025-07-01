@@ -3,6 +3,7 @@ import zlib
 from unittest.mock import MagicMock
 
 import torch
+
 from vllm_ascend.distributed.kv_transfer.simple_buffer import (SimpleBuffer,
                                                                int32_hash)
 
@@ -68,4 +69,3 @@ class TestSimpleBuffer(unittest.TestCase):
 
     def test_close(self):
         self.buffer.close()
-

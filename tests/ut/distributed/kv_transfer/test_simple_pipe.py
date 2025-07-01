@@ -1,8 +1,8 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-
 import torch
+
 from vllm_ascend.distributed.kv_transfer.simple_pipe import SimplePipe
 
 
@@ -26,27 +26,26 @@ class TestSimplePipe(unittest.TestCase):
 
     @patch('threading.Thread')
     @patch('llm_datadist.LLMDataDist')
-    def test_init_success(self, mock_thread,MockLLMDataDist):
+    def test_init_success(self, mock_thread, MockLLMDataDist):
 
         mock_config = self._create_mock_config()
 
         self.pipe = SimplePipe(rank=5,
-                        local_rank=0,
-                        kv_transfer_config=mock_config,
-                        hostname="127.0.0.1",
-                        port_offset=0)
+                               local_rank=0,
+                               kv_transfer_config=mock_config,
+                               hostname="127.0.0.1",
+                               port_offset=0)
 
         self.pipe.router_socket.close()
 
     @patch('threading.Thread')
     @patch('llm_datadist.LLMDataDist')
-    def test_prepare_data_dist(self, mock_thread,MockLLMDataDist):
-        self.pipe = SimplePipe(
-                rank=5,
-                local_rank=0,
-                kv_transfer_config=self._create_mock_config(),
-                hostname="127.0.0.1",
-                port_offset=0)
+    def test_prepare_data_dist(self, mock_thread, MockLLMDataDist):
+        self.pipe = SimplePipe(rank=5,
+                               local_rank=0,
+                               kv_transfer_config=self._create_mock_config(),
+                               hostname="127.0.0.1",
+                               port_offset=0)
         mock_data_dist = MockLLMDataDist.return_value
         mock_data_dist.init.return_value = None
         self.pipe.router_socket.close()
@@ -91,14 +90,15 @@ class TestSimplePipe(unittest.TestCase):
 
     @patch('threading.Thread')
     @patch('llm_datadist.LLMDataDist')
-    def test_create_register_thread_address_is_empty(self, MockThread,MockLLMDataDist):
+    def test_create_register_thread_address_is_empty(self, MockThread,
+                                                     MockLLMDataDist):
 
         mock_config = self._create_mock_config()
         pipe = SimplePipe(rank=5,
-                    local_rank=0,
-                    kv_transfer_config=mock_config,
-                    hostname="127.0.0.1",
-                    port_offset=0)
+                          local_rank=0,
+                          kv_transfer_config=mock_config,
+                          hostname="127.0.0.1",
+                          port_offset=0)
         self.assertIsNotNone(pipe._register_thread)
         mock_data_dist = MockLLMDataDist.return_value
         mock_data_dist.init.return_value = None
@@ -106,23 +106,24 @@ class TestSimplePipe(unittest.TestCase):
 
     @patch('threading.Thread')
     @patch('llm_datadist.LLMDataDist')
-    def test_create_register_thread_address_is_not_empty(self, MockThread,MockLLMDataDist):
+    def test_create_register_thread_address_is_not_empty(
+            self, MockThread, MockLLMDataDist):
         mock_config = MagicMock()
         mock_config.kv_role = "kv_producer"
         mock_config.kv_connector_extra_config = {
-                "prefill_device_ips": [""],
-                "decode_device_ips": [""],
-                "llmdatadist_comm_port": 26000,
-                "http_port": 8000,
-                "proxy_ip": "127.0.0.1",
-                "proxy_port": "8000",
-                "port": 5500
-            }
+            "prefill_device_ips": [""],
+            "decode_device_ips": [""],
+            "llmdatadist_comm_port": 26000,
+            "http_port": 8000,
+            "proxy_ip": "127.0.0.1",
+            "proxy_port": "8000",
+            "port": 5500
+        }
         pipe = SimplePipe(rank=5,
-                        local_rank=0,
-                        kv_transfer_config=mock_config,
-                        hostname="127.0.0.1",
-                        port_offset=0)
+                          local_rank=0,
+                          kv_transfer_config=mock_config,
+                          hostname="127.0.0.1",
+                          port_offset=0)
         self.assertIsNotNone(pipe._register_thread)
         mock_data_dist = MockLLMDataDist.return_value
         mock_data_dist.init.return_value = None
@@ -130,7 +131,8 @@ class TestSimplePipe(unittest.TestCase):
 
     @patch('vllm_ascend.distributed.kv_transfer.simple_pipe.SimplePipe')
     @patch('llm_datadist.LLMDataDist')
-    def test_should_send_tensor_when_valid_input(self, MockSimplePipe,MockLLMDataDist):
+    def test_should_send_tensor_when_valid_input(self, MockSimplePipe,
+                                                 MockLLMDataDist):
         pipe = MockSimplePipe()
         tensor = torch.randn(3, 3)
         tensor_desc = MockLLMDataDist.CacheDesc(
