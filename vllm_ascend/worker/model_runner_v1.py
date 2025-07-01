@@ -467,8 +467,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             req_state.num_computed_tokens = num_computed_tokens
             # Add the sampled token(s) from the previous step (if any).
             # This doesn't include "unverified" tokens like spec decode tokens.
-            num_new_tokens = (num_computed_tokens +
-                              len(new_token_ids) -
+            num_new_tokens = (num_computed_tokens + len(new_token_ids) -
                               req_state.num_tokens)
             if num_new_tokens == 1:
                 # Avoid slicing list in most common case.
@@ -480,8 +479,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if not resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
                 for block_ids, new_ids in zip(  # type: ignore[call-overload]
-                        req_state.block_ids,
-                        new_block_ids):
+                        req_state.block_ids, new_block_ids):
                     block_ids.extend(new_ids)
             else:
                 # The request is resumed from preemption.
@@ -500,14 +498,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
 
-            self.input_batch.block_table.append_row(new_block_ids,
-                                                    req_index)
+            self.input_batch.block_table.append_row(new_block_ids, req_index)
             # Add new_token_ids to token_ids_cpu.
             start_token_index = num_computed_tokens
             end_token_index = num_computed_tokens + len(new_token_ids)
             self.input_batch.token_ids_cpu[
-                req_index,
-                start_token_index:end_token_index] = new_token_ids
+                req_index, start_token_index:end_token_index] = new_token_ids
             self.input_batch.num_tokens_no_spec[req_index] = end_token_index
             # Add spec_token_ids to token_ids_cpu.
             spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
