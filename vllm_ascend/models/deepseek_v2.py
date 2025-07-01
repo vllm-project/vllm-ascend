@@ -736,7 +736,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                                           config.hidden_size,
                                           quant_config=quant_config,
                                           prefix=maybe_prefix(
-                                               prefix, "lm_head"))
+                                              prefix, "lm_head"))
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)
