@@ -51,6 +51,7 @@ user_guide/sleep_mode
 user_guide/graph_mode.md
 user_guide/quantization.md
 user_guide/release_notes
+user_guide/structured_output
 :::
 
 % How to contribute to the vLLM Ascend project

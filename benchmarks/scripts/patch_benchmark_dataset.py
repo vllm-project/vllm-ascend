@@ -1,3 +1,4 @@
+import os
 from argparse import ArgumentParser
 
 import libcst as cst
@@ -44,16 +45,22 @@ class StreamingFalseTransformer(cst.CSTTransformer):
 
 
 def patch_file(path):
-    with open(path, "r", encoding="utf-8") as f:
+    abs_path = os.path.abspath(path)
+
+    if not os.path.exists(abs_path):
+        print(f"File not found: {abs_path}")
+        return
+
+    with open(abs_path, "r", encoding="utf-8") as f:
         source = f.read()
 
     module = cst.parse_module(source)
     modified = module.visit(StreamingFalseTransformer())
 
-    with open(path, "w", encoding="utf-8") as f:
+    with open(abs_path, "w", encoding="utf-8") as f:
         f.write(modified.code)
 
-    print(f"Patched: {path}")
+    print(f"Patched: {abs_path}")
 
 
 if __name__ == '__main__':
@@ -61,8 +68,10 @@ if __name__ == '__main__':
         description=
         "Patch benchmark_dataset.py to set streaming=False in load_dataset calls"
     )
-    parser.add_argument("--path",
-                        type=str,
-                        help="Path to the benchmark_dataset.py file")
+    parser.add_argument(
+        "--path",
+        type=str,
+        default="/vllm-workspace/vllm/vllm/benchmarks/datasets.py",
+        help="Path to the benchmark_dataset.py file")
     args = parser.parse_args()
     patch_file(args.path)
