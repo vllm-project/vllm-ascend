@@ -364,27 +364,17 @@ class AscendScheduler(Scheduler):
                                         req_to_new_block_ids[req.request_id])
             for req in scheduled_new_reqs
         ]
-        resumed_reqs_data = [
-            self._make_cached_request_data(
-                req,
-                num_scheduled_tokens[req.request_id],
-                len(scheduled_spec_decode_tokens.get(req.request_id, ())),
-                req_to_new_block_ids[req.request_id],
-                resumed_from_preemption=True,
-            ) for req in scheduled_resumed_reqs
-        ]
-        running_reqs_data = [
-            self._make_cached_request_data(
-                req,
-                num_scheduled_tokens[req.request_id],
-                len(scheduled_spec_decode_tokens.get(req.request_id, ())),
-                req_to_new_block_ids[req.request_id],
-                resumed_from_preemption=False,
-            ) for req in scheduled_running_reqs
-        ]
+        cached_reqs_data = self._make_cached_request_data(
+            scheduled_running_reqs,
+            scheduled_resumed_reqs,
+            num_scheduled_tokens,
+            num_scheduled_spec_tokens,
+            req_to_new_block_ids
+        )
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
-            scheduled_cached_reqs=resumed_reqs_data + running_reqs_data,
+            scheduled_cached_reqs=cached_reqs_data,
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
