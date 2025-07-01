@@ -336,30 +336,22 @@ class EplbWorker:
 
         for send_info, recv_info, new_expert_map, layer_id in update_info_generator:
 
-            send_all.append(send_info)
-            recv_all.append(recv_info)
+            send_info_this_rank = send_info[self.rank_id] if self.rank_id in send_info else []
+            recv_info_this_rank = recv_info[self.rank_id] if self.rank_id in recv_info else []
+            send_all.append(send_info_this_rank)
+            recv_all.append(recv_info_this_rank)
 
-            maps.append(new_expert_map[self.rank_id])
+            maps.append(new_expert_map[self.rank_id].numpy().tolist())
 
-            if self.redundant_enable is not None:
+            if self.redundant_enable:
                 log2phy_map = ExpertMapUtils.generate_log2phy_map(new_expert_map)
-                log2phy_all.append(log2phy_map)
+                log2phy_all.append(log2phy_map[self.rank_id].numpy().tolist())
+            else:
+                log2phy_all.append([])
 
             layer_ids.append(layer_id)
 
-        # 把 list of Tensor 堆成一个大 Tensor
-        stacked_maps      = torch.stack(maps,      dim=0)
-        layer_id_tensor   = torch.as_tensor(layer_ids, dtype=torch.int64)
-        stacked_maps.share_memory_()
-        layer_id_tensor.share_memory_()
-
-        if self.redundant_enable:
-            stacked_log2phy = torch.stack(log2phy_all, dim=0)
-            stacked_log2phy.share_memory_()
-        else:
-            stacked_log2phy = None
-
-        return send_all, recv_all, stacked_maps, stacked_log2phy, layer_id_tensor
+        return list(zip(send_all, recv_all, maps, log2phy_all, layer_ids))
 
 class EplbProcess:
     def __init__(self, shared_dict, planner_q, block_update_q, redundant_enable, policy_type: int = 0, enable_d2d: bool = True):
