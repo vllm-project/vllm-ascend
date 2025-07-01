@@ -1169,7 +1169,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             hidden_states, aux_hidden_states = hidden_states
 
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
-                total_num_scheduled_tokens, sample_indices, aux_hidden_states, num_scheduled_tokens, finished_sending, finished_recving)
+                total_num_scheduled_tokens, sample_indices, aux_hidden_states,
+                num_scheduled_tokens, finished_sending, finished_recving)
 
     def _get_cumsum_and_arange(
         self,
@@ -1411,8 +1412,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 return self.kv_connector_no_forward(scheduler_output)
             (attn_metadata, hidden_states, spec_decode_metadata, positions,
              num_scheduled_tokens, sample_indices, aux_hidden_states,
-             num_scheduled_tokens_np, finished_sending, finished_recving) = (self._process_reqs(
-                 scheduler_output, intermediate_tensors))
+             num_scheduled_tokens_np, finished_sending,
+             finished_recving) = (self._process_reqs(scheduler_output,
+                                                     intermediate_tensors))
 
         with ProfileExecuteDuration().capture_async("post process"):
             if self.input_batch.pooling_params:
@@ -2014,7 +2016,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # TODO: remove this after the OOM issue is located and fixed, otherwise, some model may
                 # encounter OOM issue
                 if isinstance(kv_cache_spec, FullAttentionSpec):
-                    if self.vllm_config.additional_config.get("kv_cache_dtype", None) == 'int8':
+                    if self.vllm_config.additional_config.get(
+                            "kv_cache_dtype", None) == 'int8':
                         kv_cache_shape = self.attn_backend.get_bsh_kv_cache_shape(
                             num_blocks, kv_cache_spec.block_size,
                             kv_cache_spec.num_kv_heads,
