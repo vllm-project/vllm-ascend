@@ -138,7 +138,7 @@ def vanilla_chunked_prefill(
 def vanilla_chunked_prefill_mla(
         output: torch.Tensor,  # (num_tokens, num_heads, v_head_dim)
         query: torch.Tensor,  # (num_tokens, num_heads, nope_dim + rope_dim)
-        kv_cache: torch.Tensor,  # (num_blocks, block_size, latent_kv)
+        kv_c_and_k_pe_cache: tuple[torch.Tensor], # (num_blocks, block_size, latent_kv/rope_dim)
         block_tables: torch.Tensor,  # (batch_size, max_num_blocks_per_seq)
         query_lens: torch.Tensor,  # (batch_size)
         context_lens: torch.Tensor,  # (batch_size)
@@ -154,20 +154,21 @@ def vanilla_chunked_prefill_mla(
     batch_size = block_tables.size(0)
     assert query_lens.size(0) == batch_size
     num_heads = query.size(1)
-    block_size = kv_cache.size(1)
-    latent_kv_dim = kv_cache.size(3) - rope_dim
-    max_num_blocks_per_seq = block_tables.size(1)
-    batch_size = query_lens.size(0)
-    kv_cache = kv_cache.squeeze()
-    # select kv_c out as [batch_size, max_context_len, latent_kv + rope_dim]
-    cache_kv_c_pe = kv_cache[block_tables].view(
-        batch_size, max_num_blocks_per_seq * block_size,
-        latent_kv_dim + rope_dim)[:, :max_context_len, :]
-    # get kv_c and k_pe
+    cache_kv_c = kv_c_and_k_pe_cache[0].squeeze()
+    cache_k_pe = kv_c_and_k_pe_cache[1].squeeze()
+    
     # cached_kv_c: [batch_size, max_context_len, latent_kv]
     # cached_k_pe: [batch_size, max_context_len, rope_dim]
-    cache_kv_c = cache_kv_c_pe[:, :, :latent_kv_dim]
-    cache_k_pe = cache_kv_c_pe[:, :, latent_kv_dim:]
+    batch_size = query_lens.size(0)
+    block_size, latent_kv_dim = cache_kv_c.size(1), cache_kv_c.size(-1)
+    max_num_blocks_per_seq = block_tables.size(1)
+    cache_kv_c = cache_kv_c[block_tables].view(
+        batch_size, max_num_blocks_per_seq * block_size,
+        latent_kv_dim)[:, :max_context_len, :]
+    cache_k_pe = cache_k_pe[block_tables].view(
+        batch_size, max_num_blocks_per_seq * block_size,
+        rope_dim)[:, :max_context_len, :]
+
     # get k_rope and v
     # k_nope: [batch_size, max_context_len, num_heads, nope_dim]
     # value:  [batch_size, max_context_len, num_heads, v_head_dim]
