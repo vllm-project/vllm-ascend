@@ -547,17 +547,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if batch_changed:
             self.input_batch.refresh_sampling_metadata()
 
-    def _get_forward_metadata_across_dp(
-            self, total_num_scheduled_tokens: int,
-            with_prefill: bool) -> tuple[int, bool]:
-        forward_metadata = torch.tensor(
-            [total_num_scheduled_tokens, with_prefill],
-            device="cpu",
-            dtype=torch.int32)
-        dist.all_reduce(forward_metadata,
-                        op=ReduceOp.MAX,
-                        group=get_dp_group().cpu_group)
-        return int(forward_metadata[0]), bool(forward_metadata[1] > 0)
+    def _get_forward_metadata_across_dp(self, num_tokens: int,
+                                        with_prefill: bool) -> tuple[int, bool]:
+        local_forward_metadata = torch.tensor([num_tokens, with_prefill],
+                                              device="npu", dtype=torch.int32)
+        global_forward_metadata = get_dp_group().all_gather(
+            local_forward_metadata)
+        num_tokens_across_dp = global_forward_metadata[:, 0].cpu()
+        with_prefill = bool(global_forward_metadata[:, 1].any())
+        return num_tokens_across_dp, with_prefill
 
     def get_eagle_atten_dict(
         self,
@@ -1013,9 +1011,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
 
+        num_tokens_across_dp = None
         if self.dp_size > 1:
-            max_num_tokens, with_prefill = self._get_forward_metadata_across_dp(
-                total_num_scheduled_tokens, with_prefill)
+            num_tokens_across_dp, with_prefill = \
+                self._get_forward_metadata_across_dp(num_input_tokens,
+                                                     with_prefill)
+            max_num_tokens = int(num_tokens_across_dp.max().item())
             extra_builder_kwargs['max_num_tokens_across_dp'] = max_num_tokens
             extra_builder_kwargs['with_prefill_across_dp'] = with_prefill
 
@@ -1024,6 +1025,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.dp_size > 1:
                 padded_batch_size = self.select_torchair_padded_batch_size(
                     max_num_tokens)
+                num_tokens_across_dp.masked_fill_(num_tokens_across_dp == -1,
+                                                  padded_batch_size)
             else:
                 padded_batch_size = self.select_torchair_padded_batch_size(
                     total_num_scheduled_tokens)
@@ -1106,7 +1109,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Run forward pass
         with set_forward_context(attn_metadata,
                                  self.vllm_config,
-                                 num_tokens=num_input_tokens):
+                                 num_tokens=num_input_tokens,
+                                 num_tokens_across_dp=num_tokens_across_dp):
             with ProfileExecuteDuration().capture_async("forward"):
                 model_kwargs = {}
                 if self.torchair_graph_enabled:
@@ -1585,6 +1589,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         num_tokens: int,
         is_compile: bool = False,
         with_prefill: bool = True,
+        num_tokens_across_dp: Optional[int] = None,
     ) -> torch.Tensor:
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
@@ -1628,7 +1633,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             with set_forward_context(None,
                                      self.vllm_config,
-                                     num_tokens=num_tokens):
+                                     num_tokens=num_tokens,
+                                     num_tokens_across_dp=num_tokens_across_dp):
                 if self.torchair_graph_enabled and not with_prefill:
                     attn_metadata = self.attn_metadata_builder.build_dummy(
                         num_reqs=num_tokens, num_actual_tokens=1)
