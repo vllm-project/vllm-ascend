@@ -24,8 +24,10 @@ import jsonschema
 import pytest
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+from vllm.entrypoints.llm import LLM
 
-from tests.conftest import VllmRunner
+from tests.conftest import VllmRunner, cleanup_dist_env_and_memory
+import weakref
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -34,6 +36,17 @@ GuidedDecodingBackendV0 = ["outlines", "lm-format-enforcer", "xgrammar"]
 GuidedDecodingBackendV1 = ["xgrammar", "guidance"]
 GuidedDecodingBackend = list(
     set(GuidedDecodingBackendV0 + GuidedDecodingBackendV1))
+
+@pytest.fixture(scope="module")
+def llm():
+    # pytest caches the fixture so we use weakref.proxy to
+    # enable garbage collection
+    llm = LLM(model=MODEL_NAME, max_model_len=1024, seed=0, enforce_eager=True, dtype="half")
+
+    with llm.deprecate_legacy_api():
+        yield weakref.proxy(llm)
+        del llm
+    cleanup_dist_env_and_memory()
 
 
 @pytest.fixture(scope="module")
@@ -101,25 +114,17 @@ def test_guided_json_completion(guided_decoding_backend: str,
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=500,
-        guided_decoding=GuidedDecodingParams(json=sample_json_schema))
+        guided_decoding=GuidedDecodingParams(json=sample_json_schema, guided_decoding_backend))
 
-    with VllmRunner(
-            MODEL_NAME,
-            seed=0,
-            dtype="auto",
-            guided_decoding_backend=guided_decoding_backend,
-    ) as vllm_model:
-        prompts = [
+    prompts = [
             f"Give an example JSON for an employee profile "
             f"that fits this schema: {sample_json_schema}"
         ] * 2
-        inputs = vllm_model.get_inputs(prompts)
-        outputs = vllm_model.model.generate(inputs,
-                                            sampling_params=sampling_params)
+    outputs = llm.generate(prompts, sampling_params=sampling_params, use_tqdm=True)
 
-        assert outputs is not None
+    assert outputs is not None
 
-        for output in outputs:
+    for output in outputs:
             assert output is not None
             assert isinstance(output, RequestOutput)
             prompt = output.prompt
@@ -139,22 +144,14 @@ def test_guided_regex(guided_decoding_backend: str, sample_regex):
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-        guided_decoding=GuidedDecodingParams(regex=sample_regex))
+        guided_decoding=GuidedDecodingParams(regex=sample_regex, backend=guided_decoding_backend))
 
-    with VllmRunner(
-            MODEL_NAME,
-            seed=0,
-            dtype="auto",
-            guided_decoding_backend=guided_decoding_backend,
-    ) as vllm_model:
-        prompts = [
+    prompts = [
             f"Give an example IPv4 address with this regex: {sample_regex}"
         ] * 2
-        inputs = vllm_model.get_inputs(prompts)
-        outputs = vllm_model.model.generate(inputs,
-                                            sampling_params=sampling_params)
-        assert outputs is not None
-        for output in outputs:
+    outputs = llm.generate(prompts, sampling_params=sampling_params, use_tqdm=True)
+    assert outputs is not None
+    for output in outputs:
             assert output is not None
             assert isinstance(output, RequestOutput)
             prompt = output.prompt
