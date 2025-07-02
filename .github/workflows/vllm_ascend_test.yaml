@@ -373,6 +373,7 @@ jobs:
           pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_ilama_lora_tp2.py \
             --ignore=tests/e2e/multicard/test_offline_inference_distributed.py \
             --ignore=tests/e2e/multicard/test_data_parallel.py
+          pytest -sv tests/e2e/eplb/test_eplb_e2e.py
 
       - name: Run vllm-project/vllm-ascend test on V0 engine
         if: ${{ github.event_name == 'schedule' }}
