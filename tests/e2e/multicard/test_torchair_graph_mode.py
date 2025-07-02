@@ -123,7 +123,7 @@ def _pangu_torchair_test_fixture(
     additional_config.update(**kwargs)
 
     with VllmRunner(
-            "vllm-ascend/pangu-pro-moe-pruning",
+            "vllm-ascend/pangu-pro-moe-pruing",
             dtype="half",
             tensor_parallel_size=tensor_parallel_size,
             distributed_executor_backend="mp",
@@ -133,10 +133,10 @@ def _pangu_torchair_test_fixture(
         # use greedy sampler to make sure the generated results are fix
         vllm_output = vllm_model.generate_greedy(example_prompts, 5)
 
-    # NOTE: vllm-ascend/pangu-pro-moe-pruning is only part of PanguProMoE-72B
+    # NOTE: vllm-ascend/pangu-pro-moe-pruing is only part of PanguProMoE
     # with 2 hidden layers, thus the golden results seems inaccurate.
     # This will only change if accuracy changes with the official weights
-    # of PanguProMoE-72B.
+    # of PanguProMoE.
     golden_results = [
         'Hello, my name is Remempondeprecatedmiot忱',
         'The president of the United States is Remem下的一个 rever ceremoni Segnali',

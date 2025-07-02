@@ -174,7 +174,7 @@ def test_models_distributed_pangu():
     max_tokens = 5
 
     with VllmRunner(
-            snapshot_download("vllm-ascend/pangu-pro-moe-pruning"),
+            snapshot_download("vllm-ascend/pangu-pro-moe-pruing"),
             max_model_len=8192,
             enforce_eager=True,
             dtype="auto",
