@@ -93,13 +93,13 @@ jobs:
       run: |
         python3 -m pip install auditwheel
         python3 -m pip install patchelf
-        mkdir -p dist/repaired
+        sudo mkdir -p dist/repaired
         for whl in dist/*.whl; do
           auditwheel repair "$whl" -w dist/repaired/
         done
-        rm -f dist/*.whl
-        mv dist/repaired/*.whl dist/
-        rmdir dist/repaired
+        sudo rm -f dist/*.whl
+        sudo mv dist/repaired/*.whl dist/
+        sudo rmdir dist/repaired
         ls dist
 
     - name: Verify automatic platform tags
