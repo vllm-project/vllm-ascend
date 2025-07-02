@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch_npu
+import torchair as tng
 from vllm.distributed import GroupCoordinator, get_ep_group, get_tp_group
 from vllm.forward_context import get_forward_context
 
@@ -215,6 +216,8 @@ def fused_experts_with_mc2(
     w2_scale_bias: torch.Tensor = None,
     quantized_x_for_share: Optional[Any] = None,
     dynamic_scale_for_share: Optional[Any] = None,
+    prefix:str = "",
+    use_super_kernel: bool = False,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     if log2phy:
         topk_ids = log2phy[topk_ids]
@@ -226,103 +229,199 @@ def fused_experts_with_mc2(
 
     # NOTE: `global_bs` should be equal to `max_num_tokens_across_dp` * `ep_world_size`,
     # and `max_num_tokens_across_dp` has been split into `tp_world_size` parts before.
-    global_bs = math.ceil(get_forward_context().max_tokens_across_dp /
+    if shared_experts is not None and use_super_kernel:
+        with tng.scope.super_kernel(prefix, 'stream-fusion=1'):
+            global_bs = math.ceil(get_forward_context().max_tokens_across_dp /
+                                tp_world_size) * ep_world_size
+
+            # NOTE: Currently, when in A3 or in torchair graph, we need to pass in some extra param into dispatch & combine
+            need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A3
+                            or is_torchair)
+
+            if (expert_map is not None):
+                moe_expert_num = len(expert_map) + global_redundant_expert_num
+            else:
+                moe_expert_num = global_redundant_expert_num
+            # hidden_states = hidden_states.bfloat16()
+            kwargs_mc2 = {
+                "x": hidden_states,
+                "expert_ids": topk_ids,
+                "expert_shard_type": 0,
+                "shared_expert_rank_num": 0,
+                "moe_expert_num": moe_expert_num,
+                "global_bs": global_bs,
+            }
+
+            stage1_kwargs = {
+                "scales": None,
+                "quant_mode": quant_mode,
+                "group_ep": moe_all_to_all_group_name,
+                "ep_world_size": ep_world_size,
+                "ep_rank_id": ep_rank_id,
+            }
+            if need_extra_args:
+                stage1_kwargs.update({
+                    "group_tp": moe_all_to_all_group_name,
+                    "tp_world_size": 1,
+                    "tp_rank_id": 0,
+                })
+            kwargs_mc2.update(stage1_kwargs)
+
+            output = torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
+            # comm_stream.wait_stream(torch.npu.current_stream())
+            expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[
+                0:5]
+
+           
+            with npu_stream_switch("moe_secondary", 0):
+                npu_wait_tensor(quantized_x_for_share, expand_x)
+                shared_act_out = shared_experts.act_fn(
+                    (quantized_x_for_share, dynamic_scale_for_share))
+                shared_act, swiglu_out_scale = shared_act_out[0], shared_act_out[1]
+
+            # `expand_x` will be disposed in the `apply_mlp` function
+            down_out_list = apply_mlp_decode([expand_x],
+                                            w1,
+                                            w1_scale,
+                                            w2,
+                                            w2_scale,
+                                            expert_token_nums,
+                                            dynamic_scale=dynamic_scale)
+
+            # moeCombine
+            kwargs_mc2 = {
+                "expand_x": down_out_list,
+                "expert_ids": topk_ids,
+                "expand_idx": expand_idx,
+                "expert_scales": topk_weights.to(torch.float32),
+                "expert_shard_type": 0,
+                "shared_expert_rank_num": 0,
+                "moe_expert_num": moe_expert_num,
+                "global_bs": 0,
+            }
+            tp_recv_counts = torch.empty(1,
+                                        dtype=torch.int32,
+                                        device=hidden_states.device)
+            stage3_kwargs = {
+                "ep_send_counts": ep_recv_counts,
+                "group_ep": moe_all_to_all_group_name,
+                "ep_world_size": ep_world_size,
+                "ep_rank_id": ep_rank_id,
+            }
+            if need_extra_args:
+                stage3_kwargs.update({
+                    "tp_send_counts": tp_recv_counts,
+                    "group_tp": moe_all_to_all_group_name,
+                    "tp_world_size": 1,
+                    "tp_rank_id": 0,
+                })
+            kwargs_mc2.update(stage3_kwargs)
+
+            hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
+
+            with npu_stream_switch("moe_secondary", 0):
+                npu_wait_tensor(shared_act, down_out_list)
+                shared_output, _ = shared_experts.down_proj(
+                    (shared_act, swiglu_out_scale))
+            return hidden_states, shared_output
+    else:
+        global_bs = math.ceil(get_forward_context().max_tokens_across_dp /
                           tp_world_size) * ep_world_size
 
-    # NOTE: Currently, when in A3 or in torchair graph, we need to pass in some extra param into dispatch & combine
-    need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A3
-                       or is_torchair)
+        # NOTE: Currently, when in A3 or in torchair graph, we need to pass in some extra param into dispatch & combine
+        need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A3
+                        or is_torchair)
 
-    if (expert_map is not None):
-        moe_expert_num = len(expert_map) + global_redundant_expert_num
-    else:
-        moe_expert_num = global_redundant_expert_num
-    # hidden_states = hidden_states.bfloat16()
-    kwargs_mc2 = {
-        "x": hidden_states,
-        "expert_ids": topk_ids,
-        "expert_shard_type": 0,
-        "shared_expert_rank_num": 0,
-        "moe_expert_num": moe_expert_num,
-        "global_bs": global_bs,
-    }
+        if (expert_map is not None):
+            moe_expert_num = len(expert_map) + global_redundant_expert_num
+        else:
+            moe_expert_num = global_redundant_expert_num
+        # hidden_states = hidden_states.bfloat16()
+        kwargs_mc2 = {
+            "x": hidden_states,
+            "expert_ids": topk_ids,
+            "expert_shard_type": 0,
+            "shared_expert_rank_num": 0,
+            "moe_expert_num": moe_expert_num,
+            "global_bs": global_bs,
+        }
 
-    stage1_kwargs = {
-        "scales": None,
-        "quant_mode": quant_mode,
-        "group_ep": moe_all_to_all_group_name,
-        "ep_world_size": ep_world_size,
-        "ep_rank_id": ep_rank_id,
-    }
-    if need_extra_args:
-        stage1_kwargs.update({
-            "group_tp": moe_all_to_all_group_name,
-            "tp_world_size": 1,
-            "tp_rank_id": 0,
-        })
-    kwargs_mc2.update(stage1_kwargs)
+        stage1_kwargs = {
+            "scales": None,
+            "quant_mode": quant_mode,
+            "group_ep": moe_all_to_all_group_name,
+            "ep_world_size": ep_world_size,
+            "ep_rank_id": ep_rank_id,
+        }
+        if need_extra_args:
+            stage1_kwargs.update({
+                "group_tp": moe_all_to_all_group_name,
+                "tp_world_size": 1,
+                "tp_rank_id": 0,
+            })
+        kwargs_mc2.update(stage1_kwargs)
 
-    output = torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
-    # comm_stream.wait_stream(torch.npu.current_stream())
-    expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[
-        0:5]
+        output = torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
+        # comm_stream.wait_stream(torch.npu.current_stream())
+        expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[
+            0:5]
 
-    if shared_experts is not None:
-        with npu_stream_switch("moe_secondary", 0):
-            npu_wait_tensor(quantized_x_for_share, expand_x)
-            shared_act_out = shared_experts.act_fn(
-                (quantized_x_for_share, dynamic_scale_for_share))
-            shared_act, swiglu_out_scale = shared_act_out[0], shared_act_out[1]
+        if shared_experts is not None:
+            with npu_stream_switch("moe_secondary", 0):
+                npu_wait_tensor(quantized_x_for_share, expand_x)
+                shared_act_out = shared_experts.act_fn(
+                    (quantized_x_for_share, dynamic_scale_for_share))
+                shared_act, swiglu_out_scale = shared_act_out[0], shared_act_out[1]
 
-    # `expand_x` will be disposed in the `apply_mlp` function
-    down_out_list = apply_mlp_decode([expand_x],
-                                     w1,
-                                     w1_scale,
-                                     w2,
-                                     w2_scale,
-                                     expert_token_nums,
-                                     dynamic_scale=dynamic_scale)
+        # `expand_x` will be disposed in the `apply_mlp` function
+        down_out_list = apply_mlp_decode([expand_x],
+                                        w1,
+                                        w1_scale,
+                                        w2,
+                                        w2_scale,
+                                        expert_token_nums,
+                                        dynamic_scale=dynamic_scale)
 
-    # moeCombine
-    kwargs_mc2 = {
-        "expand_x": down_out_list,
-        "expert_ids": topk_ids,
-        "expand_idx": expand_idx,
-        "expert_scales": topk_weights.to(torch.float32),
-        "expert_shard_type": 0,
-        "shared_expert_rank_num": 0,
-        "moe_expert_num": moe_expert_num,
-        "global_bs": global_bs,
-    }
-    tp_recv_counts = torch.empty(1,
-                                 dtype=torch.int32,
-                                 device=hidden_states.device)
-    stage3_kwargs = {
-        "ep_send_counts": ep_recv_counts,
-        "group_ep": moe_all_to_all_group_name,
-        "ep_world_size": ep_world_size,
-        "ep_rank_id": ep_rank_id,
-    }
-    if need_extra_args:
-        stage3_kwargs.update({
-            "tp_send_counts": tp_recv_counts,
-            "group_tp": moe_all_to_all_group_name,
-            "tp_world_size": 1,
-            "tp_rank_id": 0,
-        })
-    kwargs_mc2.update(stage3_kwargs)
+        # moeCombine
+        kwargs_mc2 = {
+            "expand_x": down_out_list,
+            "expert_ids": topk_ids,
+            "expand_idx": expand_idx,
+            "expert_scales": topk_weights.to(torch.float32),
+            "expert_shard_type": 0,
+            "shared_expert_rank_num": 0,
+            "moe_expert_num": moe_expert_num,
+            "global_bs": global_bs,
+        }
+        tp_recv_counts = torch.empty(1,
+                                    dtype=torch.int32,
+                                    device=hidden_states.device)
+        stage3_kwargs = {
+            "ep_send_counts": ep_recv_counts,
+            "group_ep": moe_all_to_all_group_name,
+            "ep_world_size": ep_world_size,
+            "ep_rank_id": ep_rank_id,
+        }
+        if need_extra_args:
+            stage3_kwargs.update({
+                "tp_send_counts": tp_recv_counts,
+                "group_tp": moe_all_to_all_group_name,
+                "tp_world_size": 1,
+                "tp_rank_id": 0,
+            })
+        kwargs_mc2.update(stage3_kwargs)
 
-    hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
+        hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
 
-    if shared_experts is None:
-        return hidden_states
-    else:
-        with npu_stream_switch("moe_secondary", 0):
-            npu_wait_tensor(shared_act, down_out_list)
-            shared_output, _ = shared_experts.down_proj(
-                (shared_act, swiglu_out_scale))
-        return hidden_states, shared_output
-
+        if shared_experts is None:
+            return hidden_states
+        else:
+            with npu_stream_switch("moe_secondary", 0):
+                npu_wait_tensor(shared_act, down_out_list)
+                shared_output, _ = shared_experts.down_proj(
+                    (shared_act, swiglu_out_scale))
+            return hidden_states, shared_output     
+        
 
 # currently expert parallelism implemented with all2all
 # is under-optimized.
@@ -663,6 +762,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_weight_nz_layout = ascend_config.enable_weight_nz_layout
+        self.enable_super_kernel = ascend_config.torchair_graph_config.enable_super_kernel
 
         try:
             device_group = self.ep_group.device_group
@@ -738,6 +838,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         shared_experts: Optional[Any] = None,
         quantized_x_for_share: Optional[Any] = None,
         dynamic_scale_for_share: Optional[Any] = None,
+        prefix:str ="",
         **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
@@ -807,7 +908,9 @@ class AscendW8A8DynamicFusedMoEMethod:
                 shared_experts=shared_experts,
                 is_torchair=self.torchair_graph_enabled,
                 quantized_x_for_share=shared_gate_up,
-                dynamic_scale_for_share=shared_dequant_scale)
+                dynamic_scale_for_share=shared_dequant_scale, 
+                prefix=prefix,
+                use_super_kernel=self.enable_super_kernel)
         elif fused_moe_state == FusedMoEState.AllGather:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,

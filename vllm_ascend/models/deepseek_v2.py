@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 import torch_npu
+import torchair as tng
 import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
@@ -520,6 +521,9 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         nn.Module.__init__(self)
+        ascend_config = get_ascend_config()
+        self.enable_super_kernel = ascend_config.torchair_graph_config.enable_super_kernel
+
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
@@ -529,6 +533,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         # with the layer's index.
         layer_idx = int(prefix.split(sep='.')[-1])
         self.layer_idx = layer_idx
+        self.prefix = prefix
         # TODO: enable mla in vllm-ascend
         if model_config.use_mla:
             attn_cls = CustomDeepseekV2MLAAttention
@@ -560,6 +565,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
+            self.is_moe = True
         else:
             self.mlp = CustomDeepseekV2MLP(
                 hidden_size=config.hidden_size,
@@ -568,6 +574,8 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
+            self.is_moe = False
+
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
@@ -611,10 +619,15 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 # The residual is shared by all layers, we only scale it on
                 # first layer.
                 residual *= 1. / self.routed_scaling_factor
-
+        is_prefill = get_forward_context().with_prefill
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
+        if self.is_moe and not is_prefill and  self.enable_super_kernel:
+            with tng.scope.super_kernel(self.prefix, 'stream-fusion=1'):
+                hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual)
+        else:
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual)
 
         if isinstance(self.mlp, CustomDeepseekV2MoE):
             hidden_states = self.mlp(hidden_states, attn_metadata)

@@ -22,6 +22,7 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch_npu
+import torchair as tng
 from torch import nn
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (GroupCoordinator, get_tensor_model_parallel_rank,
@@ -1021,6 +1022,7 @@ class AscendFusedMoE(FusedMoE):
 
         AscendFusedMoE.moe_counter += 1
         self.moe_instance_id = AscendFusedMoE.moe_counter
+        self.prefix = prefix
 
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
@@ -1077,7 +1079,8 @@ class AscendFusedMoE(FusedMoE):
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_multistream_moe = \
             ascend_config.torchair_graph_config.enable_multistream_moe
-
+        self.enable_super_kernel = \
+            ascend_config.torchair_graph_config.enable_super_kernel
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
@@ -1137,19 +1140,30 @@ class AscendFusedMoE(FusedMoE):
         num_tokens, hidden_size = hidden_states.shape
 
         fused_moe_state = get_forward_context().fused_moe_state
+        is_prefill = get_forward_context().with_prefill
         # For w8a8 dynamic we can do npu_dynamic_quant and gate in parallel.
         quantized_x_for_share, dynamic_scale_for_share = None, None
         from vllm_ascend.quantization.w8a8_dynamic import \
             AscendW8A8DynamicFusedMoEMethod
         if self.enable_multistream_moe:
             assert gate is not None
-            router_logits, _ = gate(hidden_states)
-            if isinstance(self.quant_method.quant_method,
-                          AscendW8A8DynamicFusedMoEMethod
-                          ) and fused_moe_state == FusedMoEState.MC2:
-                with npu_stream_switch("moe_secondary", 0):
-                    quantized_x_for_share, dynamic_scale_for_share = torch_npu.npu_dynamic_quant(
-                        hidden_states)
+            if not is_prefill and self.enable_super_kernel:
+                with tng.scope.super_kernel(self.prefix, 'stream-funsion=1'):
+                    router_logits, _ = gate(hidden_states)
+                    if isinstance(self.quant_method.quant_method,
+                                AscendW8A8DynamicFusedMoEMethod
+                                ) and fused_moe_state == FusedMoEState.MC2:
+                        with npu_stream_switch("moe_secondary", 0):
+                            quantized_x_for_share, dynamic_scale_for_share = torch_npu.npu_dynamic_quant(
+                                hidden_states)
+            else:
+                router_logits, _ = gate(hidden_states)
+                if isinstance(self.quant_method.quant_method,
+                            AscendW8A8DynamicFusedMoEMethod
+                            ) and fused_moe_state == FusedMoEState.MC2:
+                    with npu_stream_switch("moe_secondary", 0):
+                        quantized_x_for_share, dynamic_scale_for_share = torch_npu.npu_dynamic_quant(
+                            hidden_states)
 
         if shared_experts:
             if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
@@ -1209,6 +1223,7 @@ class AscendFusedMoE(FusedMoE):
             and self.enable_multistream_moe and not is_prefill else None,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
+            prefix=self.prefix,
         )
 
         if shared_experts:
