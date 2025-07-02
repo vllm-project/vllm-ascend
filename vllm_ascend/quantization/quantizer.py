@@ -251,7 +251,8 @@ class VLLMAscendQuantizer:
         # Attention
         if '.attn' in prefix and 'fa_quant_type' in quant_description.keys():
             quant_type = quant_description['fa_quant_type']
-        if '.attn' in prefix and 'kv_quant_type' in quant_description.keys():
+        # Use KVCache int8
+        elif '.attn' in prefix and 'kv_quant_type' in quant_description.keys():
             quant_type = quant_description['kv_quant_type']
         # Linear
         else:
