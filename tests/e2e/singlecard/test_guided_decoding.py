@@ -114,7 +114,7 @@ def test_guided_json_completion(guided_decoding_backend: str,
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=500,
-        guided_decoding=GuidedDecodingParams(json=sample_json_schema, guided_decoding_backend))
+        guided_decoding=GuidedDecodingParams(json=sample_json_schema, backend=guided_decoding_backend))
 
     prompts = [
             f"Give an example JSON for an employee profile "
