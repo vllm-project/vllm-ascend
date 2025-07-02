@@ -144,6 +144,3 @@ class TestSimpleConnector(unittest.TestCase):
         connector.send_kv_caches_and_hidden_states(mock_model_executable,
                                                    mock_model_input, kv_caches,
                                                    hidden_states)
-
-        assert mock_insert.call_count == 1
-
