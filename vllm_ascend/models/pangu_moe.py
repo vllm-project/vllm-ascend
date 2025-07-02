@@ -500,8 +500,8 @@ class PanguProMoESparseMoeBlock(nn.Module):
         global _ROUTER_SCALE
         _ROUTER_SCALE = self.router_scale
         if not use_h2p():
-            final_hidden_states = self.experts(hidden_states=hidden_states,
-                                               router_logits=router_logits)
+            final_hidden_states = self.experts.forward_impl(
+                hidden_states=hidden_states, router_logits=router_logits)
         else:
             # TODO: when using h2p, we have to skip communication in vLLM
             # native FusedMoE. here we need to design a better FusedMoE
