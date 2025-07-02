@@ -17,6 +17,7 @@
 #
 
 import dataclasses
+import threading
 from contextlib import ExitStack
 from typing import Any, Callable, Dict, List, Optional, Set
 from unittest.mock import patch
@@ -124,6 +125,38 @@ class NPUPiecewiseBackend:
             self.vllm_backend.compiler_manager.save_to_file()
             end_monitoring_torch_compile(self.vllm_config)
 
+    def update_attn_params(self, graph_params, forward_context, runtime_shape):
+        for layer_idx in range(len(graph_params.handles[runtime_shape])):
+            query, key, value, actual_seq_lens, block_table, num_heads, scale, num_kv_heads, output, softmax_lse = graph_params.attn_params[
+                runtime_shape][layer_idx]
+            block_table = forward_context.attn_metadata.block_tables
+            actual_seq_lens = forward_context.attn_metadata.seq_lens.tolist(
+            ) + [0] * (runtime_shape -
+                       forward_context.attn_metadata.seq_lens.shape[0])
+
+            with torch.npu.stream(self.update_stream):
+                torch.npu.graph_task_update_begin(
+                    self.update_stream,
+                    graph_params.handles[runtime_shape][layer_idx])
+                torch.ops.npu.npu_fused_infer_attention_score.out(
+                    query,
+                    key,
+                    value,
+                    workspace=graph_params.workspaces[runtime_shape],
+                    actual_seq_lengths_kv=actual_seq_lens,
+                    block_table=block_table,
+                    num_heads=num_heads,
+                    scale=scale,
+                    input_layout="BSH",
+                    num_key_value_heads=num_kv_heads,
+                    block_size=128,
+                    out=[output, softmax_lse],
+                )
+                torch.npu.graph_task_update_end(self.update_stream)
+
+                graph_params.events[runtime_shape][layer_idx].record(
+                    self.update_stream)
+
     def __call__(self, *args) -> Any:
         forward_context = get_forward_context()
         graph_params = get_graph_params()
@@ -145,37 +178,13 @@ class NPUPiecewiseBackend:
             # we don't need to do anything for this shape
             return self.compiled_graph_for_general_shape(*args)
 
+        update_thread = None
         if self.compilation_config.full_cuda_graph:
-            for layer_idx in range(len(graph_params.handles[runtime_shape])):
-                query, key, value, actual_seq_lens, block_table, num_heads, scale, num_kv_heads, output, softmax_lse = graph_params.attn_params[
-                    runtime_shape][layer_idx]
-                block_table = forward_context.attn_metadata.block_tables
-                actual_seq_lens = forward_context.attn_metadata.seq_lens.tolist(
-                ) + [0] * (runtime_shape -
-                           forward_context.attn_metadata.seq_lens.shape[0])
-
-                with torch.npu.stream(self.update_stream):
-                    torch.npu.graph_task_update_begin(
-                        self.update_stream,
-                        graph_params.handles[runtime_shape][layer_idx])
-                    torch.ops.npu.npu_fused_infer_attention_score.out(
-                        query,
-                        key,
-                        value,
-                        workspace=graph_params.workspaces[runtime_shape],
-                        actual_seq_lengths_kv=actual_seq_lens,
-                        block_table=block_table,
-                        num_heads=num_heads,
-                        scale=scale,
-                        input_layout="BSH",
-                        num_key_value_heads=num_kv_heads,
-                        block_size=128,
-                        out=[output, softmax_lse],
-                    )
-                    torch.npu.graph_task_update_end(self.update_stream)
-
-                    graph_params.events[runtime_shape][layer_idx].record(
-                        self.update_stream)
+            update_thread = threading.Thread(target=self.update_attn_params,
+                                             args=(graph_params,
+                                                   forward_context,
+                                                   runtime_shape))
+            update_thread.start()
 
         entry = self.concrete_size_entries[runtime_shape]
 
@@ -275,4 +284,6 @@ class NPUPiecewiseBackend:
             )
 
         entry.aclgraph.replay()
+        if update_thread is not None:
+            update_thread.join()
         return entry.output
