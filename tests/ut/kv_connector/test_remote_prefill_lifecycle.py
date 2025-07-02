@@ -55,7 +55,10 @@ def test_basic_lifecycle():
     # Nothing running and empty scheduler output.
     assert len(scheduler.running) == 0
     assert len(scheduler_output.scheduled_new_reqs) == 0
-    assert len(scheduler_output.scheduled_cached_reqs) == 0
+    if vllm_version_is("0.9.1"):
+        assert len(scheduler_output.scheduled_cached_reqs) == 0
+    else:
+        assert scheduler_output.scheduled_cached_reqs.num_reqs == 0
     assert len(scheduler_output.num_scheduled_tokens) == 0
     assert scheduler_output.total_num_scheduled_tokens == 0
 
