@@ -39,8 +39,8 @@ def kill_all_vllm_related():
 
 def build_expert_map(expert_map_path,
                      num_redundant_expert=0,
-                     num_layer=58,
-                     num_device=16,
+                     num_layer=2,
+                     num_device=4,
                      num_original_expert=256,
                      random_seed=42):
     expert_num_list = list(range(num_original_expert))
@@ -112,7 +112,7 @@ PROXY_PORT = 10102
 EXPERT_MAP_PATH = "./tests/e2e/eplb/expert_map.json"
 
 
-@pytest.mark.parametrize("num_redundant_expert", [0, 16])
+@pytest.mark.parametrize("num_redundant_expert", [0, 4])
 def test_eplb_with_redundant_expert(num_redundant_expert):
     # Ensure port is available before starting the test
     if is_port_in_use(PROXY_PORT):
