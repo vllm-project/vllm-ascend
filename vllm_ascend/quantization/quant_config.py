@@ -53,6 +53,7 @@ class AscendQuantConfig(QuantizationConfig):
 
     def __init__(self, quant_config: Dict[str, Any]):
         self.quant_description = quant_config
+        self.packed_modules_mapping = dict()
 
     def __repr__(self) -> str:
         return "AscendQuantConfig:\n" + super().__repr__()
