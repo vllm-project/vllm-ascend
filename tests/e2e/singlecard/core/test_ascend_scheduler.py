@@ -201,7 +201,10 @@ def test_schedule(enable_prefix_caching: Optional[bool],
     # Test initial scheduling
     output = scheduler.schedule()
     assert len(output.scheduled_new_reqs) == len(requests)
-    assert len(output.scheduled_cached_reqs) == 0
+    if vllm_version_is("0.9.1"):
+        assert len(output.scheduled_cached_reqs) == 0
+    else:
+        assert output.scheduled_cached_reqs.num_reqs == 0
     assert len(output.finished_req_ids) == 0
     # Verify all requests are scheduled.
     for req_id, num_tokens in output.num_scheduled_tokens.items():
@@ -238,7 +241,10 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
 
     output = scheduler.schedule()
     assert len(output.scheduled_new_reqs) == 3
-    assert len(output.scheduled_cached_reqs) == 0
+    if vllm_version_is("0.9.1"):
+        assert len(output.scheduled_cached_reqs) == 0
+    else:
+        assert output.scheduled_cached_reqs.num_reqs == 0
     assert len(output.finished_req_ids) == 0
 
     # The first request is scheduled partially - 400.
@@ -268,7 +274,10 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     output1 = scheduler.schedule()
     assert len(scheduler.running) == 3
     assert len(output1.scheduled_new_reqs) == 0
-    assert len(output1.scheduled_cached_reqs) == 3
+    if vllm_version_is("0.9.1"):
+        assert len(output1.scheduled_cached_reqs) == 3
+    else:
+        assert output1.scheduled_cached_reqs.num_reqs == 3
     assert len(output1.finished_req_ids) == 0
     assert output1.num_scheduled_tokens[requests[0].request_id] == 400
     assert output1.num_scheduled_tokens[requests[1].request_id] == 400
@@ -292,7 +301,10 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     output2 = scheduler.schedule()
     assert len(scheduler.running) == 3
     assert len(output2.scheduled_new_reqs) == 0
-    assert len(output2.scheduled_cached_reqs) == 3
+    if vllm_version_is("0.9.1"):
+        assert len(output2.scheduled_cached_reqs) == 3
+    else:
+        assert output2.scheduled_cached_reqs.num_reqs == 3
     assert len(output2.finished_req_ids) == 0
     assert output2.num_scheduled_tokens[requests[0].request_id] == 1
     assert output2.num_scheduled_tokens[requests[1].request_id] == 1
@@ -762,7 +774,6 @@ def assert_scheduler_empty(scheduler: AscendScheduler):
     assert len(scheduler.waiting) == 0
     assert len(scheduler.running) == 0
     assert len(scheduler.finished_req_ids) == 0
-    assert len(scheduler._cached_reqs_data) == 0
 
     # EncoderCacheManager.
     assert len(scheduler.encoder_cache_manager.freed) == 0
