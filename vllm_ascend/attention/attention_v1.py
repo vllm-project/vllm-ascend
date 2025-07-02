@@ -29,6 +29,7 @@ from vllm.utils import direct_register_custom_op
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
+from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
 
 
@@ -134,6 +135,18 @@ class AscendMetadata:
     num_input_tokens: int = 0  # Number of tokens including padding.
 
     enable_dbo_across_dp: bool = False
+
+    def split_metadata_for_multistream(
+            self,
+            ms_split_config: MSAttentionMetadataSplitConfig,
+    ) -> list["AscendMetadata"]:
+        """Split metadata for multi-stream with AscendMetadata"""
+        from vllm_ascend.multistream.ms_split import model_input_split_v1_attn
+        return model_input_split_v1_attn(
+            ms_split_config=ms_split_config,
+            attn_metadata=self,
+            _metadata_cls=AscendMetadata,
+        )
 
 
 class AscendAttentionMetadataBuilder:
