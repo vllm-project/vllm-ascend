@@ -10,7 +10,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.quantization.w8a8 import (AscendC8KVCacheMethod,
                                            AscendW8A8FusedMoEMethod,
                                            AscendW8A8LinearMethod,
-                                           fused_experts, native_grouped_topk,
+                                           fused_experts, fused_experts_310p,
+                                           native_grouped_topk,
                                            quant_per_tensor, select_experts)
 
 
@@ -525,6 +526,67 @@ class TestFusedExperts(TestBase):
                 global_num_experts=num_experts,
                 expert_map=None,
             )
+
+
+class TestFusedExperts310(TestBase):
+
+    @patch('torch_npu.npu_quant_grouped_matmul_dequant')
+    @patch("vllm_ascend.quantization.w8a8.quant_per_tensor")
+    @patch('vllm_ascend.quantization.w8a8.get_ep_group')
+    @patch('torch_npu.npu_swiglu')
+    def test_fused_experts_310p_with_expert_map(self, mock_swiglu,
+                                                mock_get_ep_group,
+                                                mock_quant_per_tensor,
+                                                mock_matmul_dequant):
+        num_tokens = 32
+        hidden_size = 128
+        intermediate_size = 256
+        num_experts = 4
+        top_k = 1
+
+        hidden_states = torch.randn(num_tokens, hidden_size)
+
+        w1 = torch.randn(num_experts, intermediate_size * 2, hidden_size)
+        w1_scale = torch.tensor([0.1])
+        w1_input_scale = torch.tensor([[0.2, 0.2], [0.2, 0.2]])
+
+        w2 = torch.randn(num_experts, hidden_size, intermediate_size)
+        w2_scale = torch.tensor([0.1])
+        w2_input_scale = torch.tensor([0.2])
+
+        topk_weights = torch.rand(num_tokens, top_k)
+        topk_ids = torch.randint(0, num_experts, (num_tokens, top_k))
+        expert_map = torch.arange(num_experts)
+
+        mock_get_ep_group.return_value.world_size = 1
+
+        mock_quant_per_tensor.return_value = torch.randint(-128,
+                                                           127,
+                                                           hidden_states.shape,
+                                                           dtype=torch.int8)
+
+        mock_swiglu.return_value = torch.randn(num_tokens * top_k,
+                                               intermediate_size)
+
+        mock_matmul_dequant.return_value = hidden_states
+
+        output = fused_experts_310p(
+            hidden_states=hidden_states,
+            w1=w1,
+            w1_scale=w1_scale,
+            w1_input_scale=w1_input_scale,
+            w2=w2,
+            w2_scale=w2_scale,
+            w2_input_scale=w2_input_scale,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            top_k=top_k,
+            global_num_experts=num_experts,
+            expert_map=expert_map,
+        )
+
+        self.assertEqual(output.shape, (num_tokens, hidden_size))
+        self.assertEqual(mock_matmul_dequant.call_count, 2)
 
 
 class TestSelectExperts(TestBase):

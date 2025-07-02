@@ -77,6 +77,7 @@ from vllm_ascend.pool.metadata import PoolingMetadata
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                ProfileExecuteDuration, is_310p,
+                               maybe_converting_weight_acl_format,
                                vllm_version_is)
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
@@ -1196,6 +1197,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     model_kwargs["kv_caches"] = self.kv_caches
                     model_kwargs["attn_metadata"] = attn_metadata
                 if self.torchair_graph_enabled and not with_prefill:
+                    maybe_converting_weight_acl_format(self.model,
+                                                       ACL_FORMAT_FRACTAL_NZ)
+
                     compiled_model = self._get_torchair_lazy_compiled_model(
                         padded_batch_size)
                     hidden_states = compiled_model(
@@ -1207,6 +1211,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     )
                 else:
                     assert self.model is not None
+                    maybe_converting_weight_acl_format(self.model,
+                                                       ACL_FORMAT_FRACTAL_ND)
+
                     hidden_states = self.model(
                         input_ids=input_ids,
                         positions=positions,
@@ -1878,6 +1885,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                 kv, tuple), "kv_cache must be a tuple"
                             torch._dynamo.mark_static(kv[0])
                             torch._dynamo.mark_static(kv[1])
+
+                    maybe_converting_weight_acl_format(self.model,
+                                                       ACL_FORMAT_FRACTAL_NZ)
+
                     compiled_model = self._get_torchair_lazy_compiled_model(
                         num_tokens)
                     hidden_states = compiled_model(
@@ -1889,6 +1900,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         attn_metadata=attn_metadata,
                     )
                 else:
+                    maybe_converting_weight_acl_format(self.model,
+                                                       ACL_FORMAT_FRACTAL_ND)
+
                     hidden_states = model(
                         input_ids=input_ids,
                         positions=positions,
