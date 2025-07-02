@@ -20,6 +20,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.compilation.decorators import support_torch_compile
 
 
 
@@ -361,6 +362,7 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
         return hidden_states, residual
 
 
+@support_torch_compile
 class CustomQwen3DBOMoEModel(Qwen3MoeModel):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
