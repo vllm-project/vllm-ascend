@@ -59,7 +59,7 @@ online example:
 vllm serve Qwen/Qwen2-7B-Instruct --additional-config='{"torchair_graph_config": {"enabled": true},"ascend_scheduler_config": {"enabled": true,}}'
 ```
 
-You can find more detail about additional config [here](./additional_config.md)
+You can find more detail about additional config [here](../configuration/additional_config.md).
 
 ## Fallback to Eager Mode
 

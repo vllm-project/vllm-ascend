@@ -1,4 +1,4 @@
-# LoRA Adapters
+# LoRA Adapters Guide
 
 Like vLLM, vllm-ascend supports LoRA as well. The usage and more details can be found in [vLLM official document](https://docs.vllm.ai/en/latest/features/lora.html).
 
