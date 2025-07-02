@@ -28,8 +28,12 @@ from vllm.compilation.backends import VllmBackend
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import end_monitoring_torch_compile
 from vllm.config import VllmConfig
+from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 from vllm.utils import weak_ref_tensors
+
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.utils import get_graph_params, set_graph_params
 
 
 @dataclasses.dataclass
@@ -95,6 +99,10 @@ class NPUPiecewiseBackend:
 
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
 
+        if self.compilation_config.full_cuda_graph:
+            self.update_stream = torch.npu.Stream()
+            set_graph_params(self.aclgraph_capture_sizes)
+
         # the entries for different shapes that we need to either
         # compile or capture aclgraph
         self.concrete_size_entries: Dict[int, ConcreteSizeEntry] = {}
@@ -116,7 +124,40 @@ class NPUPiecewiseBackend:
             self.vllm_backend.compiler_manager.save_to_file()
             end_monitoring_torch_compile(self.vllm_config)
 
+    def update_attn_params(self, graph_params, forward_context, runtime_shape):
+        for layer_idx in range(len(graph_params.handles[runtime_shape])):
+            query, key, value, actual_seq_lens, block_table, num_heads, scale, num_kv_heads, output, softmax_lse = graph_params.attn_params[
+                runtime_shape][layer_idx]
+            block_table = forward_context.attn_metadata.block_tables
+            actual_seq_lens = forward_context.attn_metadata.seq_lens_list
+
+            with torch.npu.stream(self.update_stream):
+                torch.npu.graph_task_update_begin(
+                    self.update_stream,
+                    graph_params.handles[runtime_shape][layer_idx])
+                torch.ops.npu.npu_fused_infer_attention_score.out(
+                    query,
+                    key,
+                    value,
+                    workspace=graph_params.workspaces[runtime_shape],
+                    actual_seq_lengths_kv=actual_seq_lens,
+                    block_table=block_table,
+                    num_heads=num_heads,
+                    scale=scale,
+                    input_layout="BSH",
+                    num_key_value_heads=num_kv_heads,
+                    block_size=128,
+                    out=[output, softmax_lse],
+                )
+                torch.npu.graph_task_update_end(self.update_stream)
+
+                graph_params.events[runtime_shape][layer_idx].record(
+                    self.update_stream)
+
     def __call__(self, *args) -> Any:
+        forward_context = get_forward_context()
+        graph_params = get_graph_params()
+
         if not self.first_run_finished:
             self.first_run_finished = True
             self.check_for_ending_compilation()
@@ -125,6 +166,11 @@ class NPUPiecewiseBackend:
         runtime_shape = args[self.sym_shape_indices[0]]
         if runtime_shape not in self.concrete_size_entries:
             # we don't need to do anything for this shape
+            return self.compiled_graph_for_general_shape(*args)
+
+        if (getattr(forward_context.attn_metadata, "attn_state",
+                    None) != AscendAttentionState.DecodeOnly
+                and self.compilation_config.full_cuda_graph):
             return self.compiled_graph_for_general_shape(*args)
 
         entry = self.concrete_size_entries[runtime_shape]
@@ -189,6 +235,7 @@ class NPUPiecewiseBackend:
                         patch("torch.npu.empty_cache", lambda: None))
 
                 # mind-exploding: carefully manage the reference and memory.
+                forward_context.capturing = True
                 with torch.npu.graph(aclgraph, pool=self.graph_pool):
                     # `output` is managed by pytorch's aclgraph pool
                     output = entry.runnable(*args)
@@ -222,4 +269,9 @@ class NPUPiecewiseBackend:
             )
 
         entry.aclgraph.replay()
+
+        if self.compilation_config.full_cuda_graph:
+            self.update_attn_params(graph_params, forward_context,
+                                    runtime_shape)
+
         return entry.output

@@ -34,7 +34,9 @@ import torch
 import torch._dynamo.cache_size
 import torch.distributed as dist
 import torch.nn as nn
+import torchair
 from torch.distributed import ReduceOp
+from torchair import patch_for_hcom
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
@@ -77,7 +79,8 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.mla_v1 import CommonAttentionMetadata
+from vllm_ascend.attention.utils import \
+    AscendCommonAttentionMetadata as CommonAttentionMetadata
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
@@ -210,8 +213,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Set up speculative decoding.
         self.use_spec_decode = False
         self.spec_attn_mask = None
+        self.actual_seq_q_lens = []
+        self.spec_token_num = 0
+        self.decode_token_per_req = 1
         if self.speculative_config:
             self.use_spec_decode = True
+            self.spec_token_num = self.speculative_config.num_speculative_tokens
+            assert self.spec_token_num > 0
             self.spec_attn_mask = torch.triu(torch.ones(2048,
                                                         2048,
                                                         dtype=torch.bool),
@@ -224,6 +232,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                  self.device)  # type: ignore
                 elif self.speculative_config.method == 'deepseek_mtp':
                     self.drafter = MtpProposer(self.vllm_config, self)
+                    self.decode_token_per_req = 1 + self.spec_token_num
+                    self.actual_seq_q_lens = [
+                        len for len in
+                        range(self.decode_token_per_req, self.max_num_tokens +
+                              1, self.decode_token_per_req)
+                    ]
                 else:
                     raise ValueError("Unknown speculative decoding method: "
                                      f"{self.speculative_config.method}")
@@ -245,6 +259,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.seq_lens = torch.zeros(self.max_num_reqs,
                                     dtype=torch.int32,
                                     device=self.device)
+        self.slot_mapping = torch.zeros(self.max_num_tokens,
+                                        dtype=torch.int32,
+                                        device=self.device)
+        self.query_lens = torch.zeros(self.max_num_reqs,
+                                      dtype=torch.int32,
+                                      device=self.device)
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: Optional[IntermediateTensors] = None
 
@@ -352,8 +372,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         self.check_torchair_graph_batch_sizes()
 
+        # graph_block_tables shape: [num_request, cell(max_model_len / block_size)]
         self.graph_block_tables = np.zeros(
-            (self.torchair_graph_batch_sizes[-1],
+            (self.torchair_graph_batch_sizes[-1] // self.decode_token_per_req,
              (self.model_config.max_model_len + self.block_size - 1) //
              self.block_size),
             dtype=np.int32)
@@ -568,6 +589,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # Append to the end.
                 req_index = None
             self.input_batch.add_request(req_state, req_index)
+            spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
+                req_id, ())
+            if spec_token_ids:
+                req_index = self.input_batch.num_reqs - 1
+                start_index = len(req_state.prompt_token_ids) + len(
+                    req_state.output_token_ids)
+                end_token_index = start_index + len(spec_token_ids)
+                self.input_batch.token_ids_cpu[
+                    req_index, start_index:end_token_index] = spec_token_ids
+                self.input_batch.num_tokens[req_index] = end_token_index
 
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
@@ -902,6 +933,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
             attn_state = AscendAttentionState.DecodeOnly
+            if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
+                # SpecDecoding now supports seq_len=1 and seq_len=2
+                attn_state = AscendAttentionState.SpecDecoding
         # Speculative decoding.
         elif np.all(num_valid_tokens == 1):
             attn_state = AscendAttentionState.SpecDecoding
@@ -929,15 +963,21 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.query_start_loc_cpu[:num_reqs + 1], non_blocking=True)
         self.seq_lens[:num_reqs].copy_(self.seq_lens_cpu[:num_reqs],
                                        non_blocking=True)
+        self.slot_mapping[:total_num_scheduled_tokens].copy_(
+            self.slot_mapping_cpu[:total_num_scheduled_tokens],
+            non_blocking=True)
 
         # Fill unused with -1. Needed for reshape_and_cache
+        self.slot_mapping[total_num_scheduled_tokens:].fill_(-1)
         self.seq_lens[num_reqs:].fill_(0)
         self.query_start_loc[num_reqs + 1:].fill_(-1)
 
         query_start_loc = self.query_start_loc[:num_reqs + 1]
-        seq_lens = self.seq_lens[:num_reqs]
+        # Use host tensor, other wise error: tensor.hostData is null
         common_attn_metadata = CommonAttentionMetadata(
-            query_start_loc=query_start_loc, seq_lens=seq_lens)
+            query_start_loc=query_start_loc,
+            seq_lens=self.seq_lens_cpu[:num_reqs])
+        self.seq_lens_list = self.seq_lens_np.tolist()[:num_input_tokens]
         with_prefill = attn_state not in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
@@ -956,11 +996,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         extra_builder_kwargs['enable_dbo_across_dp'] = enable_dbo
 
         # TODO(zzzzwwjj): this code need to refactor afterwards.
-        # Add graph_pad_size here
+        self.with_prefill = with_prefill
+        # Add num_token_pad_size and num_reqs_pad_size here for torchair graph mode
         if self.torchair_graph_enabled and not with_prefill:
-            graph_pad_size = padded_num_tokens_across_dp - total_num_scheduled_tokens
+            num_token_pad_size = padded_num_tokens_across_dp - total_num_scheduled_tokens
+            num_reqs_pad_size = (
+                padded_num_tokens_across_dp // self.decode_token_per_req -
+                num_reqs)
+            assert num_token_pad_size >= 0 and num_reqs_pad_size >= 0
 
-            extra_builder_kwargs['graph_pad_size'] = graph_pad_size
+            extra_builder_kwargs['num_token_pad_size'] = num_token_pad_size
+            extra_builder_kwargs['num_reqs_pad_size'] = num_reqs_pad_size
+            self.num_reqs_pad_size = num_reqs_pad_size
+        self.extra_builder_kwargs = extra_builder_kwargs
 
         if self.vllm_config.model_config.use_mla:
             attn_metadata = self.attn_metadata_builder.build(  # type: ignore
@@ -976,6 +1024,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
+                common_attn_metadata=common_attn_metadata,
                 common_prefix_len=None,
                 **extra_builder_kwargs,
             )
@@ -1524,6 +1573,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         skip_attn: bool = True,
         with_prefill: bool = False,
         is_torchair_compile: bool = False,
+        attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
     ) -> torch.Tensor:
         if self.torchair_graph_enabled and not with_prefill:
             num_tokens = self.select_torchair_padded_batch_size(num_tokens)
@@ -1541,7 +1591,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # has num_tokens in total.
         assert num_tokens <= self.scheduler_config.max_num_batched_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
-        num_reqs = min(num_tokens, max_num_reqs)
+        num_reqs = math.ceil(num_tokens / self.decode_token_per_req)
+        if with_prefill:
+            num_reqs = min(num_tokens, max_num_reqs)
+        else:
+            num_reqs = (num_tokens + self.decode_token_per_req -
+                        1) // self.decode_token_per_req
         min_tokens_per_req = num_tokens // num_reqs
         num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
         num_scheduled_tokens_list[-1] += num_tokens % num_reqs
@@ -1554,12 +1609,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # we can't skip_attn, it will cause graph recompile.
         if self.torchair_graph_enabled and not with_prefill:
             attn_metadata = self.attn_metadata_builder.build_torchair_graph_dummy(
-                num_reqs=num_tokens, num_actual_tokens=1)
+                num_reqs=num_reqs, num_actual_tokens=1)
         elif skip_attn:
             attn_metadata = None
         else:
-            # TODO(zzzzwwjj): when aclgraph and full graph mode, we need build attn_metadata
-            attn_metadata = None
+            attn_metadata = self.attn_metadata_builder.build_dummy_metadata(
+                num_actual_tokens=num_tokens,
+                num_reqs=num_reqs,
+                num_scheduled_tokens=num_scheduled_tokens,
+                attn_state=attn_state,
+            )
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
@@ -1635,7 +1694,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=inputs_embeds,
                         **model_kwargs)
-                return hidden_states
+            if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
+                assert isinstance(self.drafter, MtpProposer)
+                self.drafter.dummy_run(num_reqs, with_prefill=with_prefill)
+            return hidden_states
 
     @contextmanager
     def set_in_profile_run(self):
@@ -1715,9 +1777,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         if compiled_model:
             return compiled_model
-
-        import torchair  # type: ignore
-        from torchair import patch_for_hcom  # type: ignore
 
         patch_for_hcom()
         config = torchair.CompilerConfig()
@@ -1942,11 +2001,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # can reuse the memory pool allocated for the large shapes.
             # TODO(zzzzwwjj): Check dummy_run with ACL Graph and full graph mode
             with graph_capture(device=self.device):
+                skip_attn = not self.vllm_config.compilation_config.full_cuda_graph
+                # TODO: Make sure passing attn_state to _dummy_run in the future
                 for num_tokens in reversed(self.aclgraph_batch_sizes):
                     for _ in range(self.vllm_config.compilation_config.
                                    cudagraph_num_of_warmups):
-                        self._dummy_run(num_tokens)
-                    self._dummy_run(num_tokens)
+                        self._dummy_run(num_tokens, skip_attn=skip_attn)
+                    self._dummy_run(num_tokens, skip_attn=skip_attn)
         else:
             logger.info("Skipping NPU graph capture for eager mode.")
             return
@@ -2075,6 +2136,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def select_torchair_padded_batch_size(self, batch_size: int):
         for padded_batch_size in self.torchair_graph_batch_sizes:
             if batch_size <= padded_batch_size:
+                # we treat batch_size as num of requests
                 return padded_batch_size
         raise ValueError(
             f"cur batch_size is invalid, torchair_graph_batch_sizes is "
@@ -2082,6 +2144,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         )
 
     def check_torchair_graph_batch_sizes(self):
+        # return graph_batch_sizes according to the number of tokens
+        # first pad according to the number of requests
         if len(self.torchair_graph_batch_sizes) == 0:
             self.torchair_graph_batch_sizes = [1, self.max_num_reqs]
         else:
@@ -2104,6 +2168,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             for graph_batch_size in self.torchair_graph_batch_sizes:
                 cur_graph_batch_size = (graph_batch_size + tp_size -
                                         1) // tp_size * tp_size
+                # `graph_batch_size` need to be divisible by `self.decode_token_per_req`
+                cur_graph_batch_size = cur_graph_batch_size * self.decode_token_per_req
                 if cur_graph_batch_size not in new_graph_batch_sizes and \
                     cur_graph_batch_size <= self.scheduler_config.max_num_batched_tokens:
                     new_graph_batch_sizes.append(cur_graph_batch_size)
