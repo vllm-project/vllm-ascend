@@ -23,12 +23,17 @@ Run 'pytest tests/multicard/test_fused_moe_allgather_ep.py'.
 import os
 from unittest.mock import patch
 
+import pytest
 from modelscope import snapshot_download  # type: ignore
 from vllm import SamplingParams
 
 from tests.conftest import VllmRunner
 
 
+@pytest.mark.skipif(
+    True,
+    "Current disaggregated pd implementation may cause memory pulse, which will cause this test OOM, skip this test until the ringmla is ready "
+)
 @patch.dict(
     os.environ, {
         "VLLM_USE_V1": "1",
