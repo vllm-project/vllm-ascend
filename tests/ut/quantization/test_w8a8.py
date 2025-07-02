@@ -112,6 +112,25 @@ class TestAscendW8A8LinearMethod(TestBase):
         expected_y_output += bias
         self.assertTrue(torch.equal(output, expected_y_output))
 
+    @patch("vllm_ascend.quantization.w8a8.is_310p", return_value=True)
+    @patch("torch_npu.npu_quant_matmul")
+    def test_apply_with_x_is_310p(self, mock_npu_quant_matmul, mock_is_310p):
+        layer = MagicMock()
+        layer.aclnn_input_scale = 0.1
+        layer.aclnn_input_offset = 0.2
+        layer.weight = torch.randn(128, 256)
+        layer.deq_scale = 0.3
+
+        x = torch.randint(-128, 127, (32, 128), dtype=torch.int8)
+        bias = torch.randn(256)
+
+        expected_y_output = torch.randn(32, 256)
+        mock_npu_quant_matmul.return_value = expected_y_output
+
+        output = self.method.apply(layer, x, bias)
+        expected_y_output += bias
+        self.assertTrue(torch.equal(output, expected_y_output))
+
     @patch('torch_npu.npu_format_cast')
     def test_process_weights_after_loading(self, mock_npu_format_cast):
         layer = MagicMock()
@@ -222,6 +241,36 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         mock_fused_experts.assert_called_once()
         self.assertEqual(result.shape, (32, self.hidden_size))
 
+    @patch("vllm_ascend.quantization.w8a8.is_310p", return_value=True)
+    @patch('vllm_ascend.quantization.w8a8.select_experts')
+    @patch('vllm_ascend.quantization.w8a8.fused_experts_310p')
+    def test_apply_is_310p(self, mock_fused_experts_310p, mock_select_experts,
+                           mock_is_310p):
+        # Setup
+        mock_layer = MagicMock()
+        x = torch.randn(32, self.hidden_size)
+        router_logits = torch.randn(32, 128)  # 128 experts
+        top_k = 2
+
+        # Mock return values
+        mock_select_experts.return_value = (torch.randn(32, top_k),
+                                            torch.randint(0, 128, (32, top_k)))
+        mock_fused_experts_310p.return_value = torch.randn(
+            32, self.hidden_size)
+
+        # Test
+        result = self.moe_method.apply(layer=mock_layer,
+                                       x=x,
+                                       router_logits=router_logits,
+                                       top_k=top_k,
+                                       renormalize=True,
+                                       global_num_experts=128)
+
+        # Assertions
+        mock_select_experts.assert_called_once()
+        mock_fused_experts_310p.assert_called_once()
+        self.assertEqual(result.shape, (32, self.hidden_size))
+
 
 class TestAscendC8KVCacheMethod(TestBase):
 
@@ -256,7 +305,22 @@ class TestAscendC8KVCacheMethod(TestBase):
             expected_shape = (self.layer.num_kv_heads * self.layer.head_size, )
             self.assertEqual(param.shape, expected_shape)
 
-    def test_process_weights_after_loading(self):
+    @patch("vllm_ascend.quantization.w8a8.is_310p", return_value=False)
+    def test_process_weights_after_loading_not_310p(self, mock_is_310p):
+        key_data = torch.ones(4 * 64)
+        value_data = torch.ones(4 * 64) * 2
+
+        self.layer.key_antiquant_scale.data = key_data
+        self.layer.value_antiquant_scale.data = value_data
+
+        self.method.process_weights_after_loading(self.layer)
+
+        self.assertEqual(self.method.antiquant_scale_comb.shape, (2, 256))
+        self.assertTrue(torch.all(self.method.antiquant_scale_comb[0] == 1))
+        self.assertTrue(torch.all(self.method.antiquant_scale_comb[1] == 2))
+
+    @patch("vllm_ascend.quantization.w8a8.is_310p", return_value=True)
+    def test_process_weights_after_loading_is_310p(self, mock_is_310p):
         key_data = torch.ones(4 * 64)
         value_data = torch.ones(4 * 64) * 2
 
