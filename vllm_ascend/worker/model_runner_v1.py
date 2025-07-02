@@ -545,10 +545,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if batch_changed:
             self.input_batch.refresh_sampling_metadata()
 
-    def _get_forward_metadata_across_dp(self, num_tokens: int,
-                                        with_prefill: bool) -> tuple[int, bool]:
+    def _get_forward_metadata_across_dp(
+            self, num_tokens: int,
+            with_prefill: bool) -> tuple[torch.Tensor, bool]:
         local_forward_metadata = torch.tensor([num_tokens, with_prefill],
-                                              device="npu", dtype=torch.int32)
+                                              device="npu",
+                                              dtype=torch.int32)
         global_forward_metadata = get_dp_group().all_gather(
             local_forward_metadata)
         num_tokens_across_dp = global_forward_metadata[:, 0].cpu()
@@ -1629,10 +1631,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     for k, v in self.intermediate_tensors.items()
                 })
 
-            with set_forward_context(None,
-                                     self.vllm_config,
-                                     num_tokens=num_tokens,
-                                     num_tokens_across_dp=num_tokens_across_dp):
+            with set_forward_context(
+                    None,
+                    self.vllm_config,
+                    num_tokens=num_tokens,
+                    num_tokens_across_dp=num_tokens_across_dp):
                 if self.torchair_graph_enabled and not with_prefill:
                     attn_metadata = self.attn_metadata_builder.build_dummy(
                         num_reqs=num_tokens, num_actual_tokens=1)
