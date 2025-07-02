@@ -117,8 +117,6 @@ def test_eagle_correctness(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using eagle speculative decoding.
     '''
-    if not use_eagle3:
-        pytest.skip("Not current support for the test.")
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 

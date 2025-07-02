@@ -15,7 +15,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
-#
 
 import gc
 import os
@@ -1410,86 +1409,77 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             assert isinstance(self.drafter, NgramProposer)
             spec_token_ids = self._generate_draft_token_ids(
                 valid_sampled_token_ids, sampling_metadata)
-        elif self.speculative_config.method == "eagle":
-            raise NotImplementedError("Eagle Is Not Supported Yet.")
-        elif self.speculative_config.method == "eagle3":
+        elif self.use_eagle:
             assert isinstance(self.drafter, EagleProposer)
-            if self.speculative_config.use_eagle():
-                next_token_ids: list[int] = []
-                for i, token_ids in enumerate(valid_sampled_token_ids):
-                    if token_ids:
-                        # Common case.
-                        next_token_id = token_ids[-1]
-                    else:
-                        # Partial prefill (rare case).
-                        # Get the next token id from the request state.
-                        req_id = self.input_batch.req_ids[i]
-                        req_state = self.requests[req_id]
-                        seq_len = (
-                            req_state.num_computed_tokens +
-                            scheduler_output.num_scheduled_tokens[req_id])
-
-                        next_token_id = req_state.get_token_id(seq_len)
-                    next_token_ids.append(next_token_id)
-                next_token_ids = torch.tensor(next_token_ids,
-                                              dtype=torch.int32,
-                                              device=self.device)
-                eagle_attn_metadata = attn_metadata[
-                    self.drafter.attn_layer_name]
-                num_input_tokens = scheduler_output.total_num_scheduled_tokens
-                if spec_decode_metadata is None:
-                    # input_ids can be None for multimodal models.
-                    target_token_ids = self.input_ids[:num_scheduled_tokens]
-                    target_positions = positions[:num_scheduled_tokens]
-                    if self.use_aux_hidden_state_outputs:
-                        target_hidden_states = torch.cat([
-                            h[:num_scheduled_tokens] for h in aux_hidden_states
-                        ],
-                                                         dim=-1)
-                    else:
-                        target_hidden_states = hidden_states[:
-                                                             num_scheduled_tokens]
-                    target_slot_mapping = eagle_attn_metadata.slot_mapping
-                    cu_num_tokens = eagle_attn_metadata.query_start_loc
+            next_token_ids: list[int] = []
+            for i, token_ids in enumerate(valid_sampled_token_ids):
+                if token_ids:
+                    # Common case.
+                    next_token_id = token_ids[-1]
                 else:
-                    num_draft_tokens = spec_decode_metadata.num_draft_tokens
-                    num_rejected_tokens = [
-                        n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
-                        for i, n in enumerate(num_draft_tokens)
-                    ]
-                    num_rejected_tokens = torch.tensor(
-                        num_rejected_tokens,
-                        dtype=torch.int32,
-                        device=self.device,
-                    )
-                    num_tokens = num_scheduled_tokens - sum(
-                        num_rejected_tokens)
-                    cu_num_tokens, token_indices = self.drafter.prepare_inputs(
-                        eagle_attn_metadata.query_start_loc,
-                        num_rejected_tokens, num_tokens)
-                    target_token_ids = self.input_ids[token_indices]
-                    target_positions = positions[token_indices]
-                    if self.use_aux_hidden_state_outputs:
-                        target_hidden_states = torch.cat(
-                            [h[token_indices] for h in aux_hidden_states],
-                            dim=-1)
-                    else:
-                        target_hidden_states = hidden_states[token_indices]
-                    target_slot_mapping = eagle_attn_metadata.slot_mapping[
-                        token_indices]
+                    # Partial prefill (rare case).
+                    # Get the next token id from the request state.
+                    req_id = self.input_batch.req_ids[i]
+                    req_state = self.requests[req_id]
+                    seq_len = (req_state.num_computed_tokens +
+                               scheduler_output.num_scheduled_tokens[req_id])
 
-                positions = self.positions[:num_input_tokens]
-                draft_token_ids = self.drafter.propose(
-                    target_token_ids=target_token_ids,
-                    target_positions=target_positions,
-                    target_hidden_states=target_hidden_states,
-                    target_slot_mapping=target_slot_mapping,
-                    next_token_ids=next_token_ids,
-                    cu_num_tokens=cu_num_tokens,
-                    block_table=eagle_attn_metadata.block_tables,
-                    sampling_metadata=sampling_metadata,
+                    next_token_id = req_state.get_token_id(seq_len)
+                next_token_ids.append(next_token_id)
+            next_token_ids = torch.tensor(next_token_ids,
+                                          dtype=torch.int32,
+                                          device=self.device)
+            eagle_attn_metadata = attn_metadata[self.drafter.attn_layer_name]
+            num_input_tokens = scheduler_output.total_num_scheduled_tokens
+            if spec_decode_metadata is None:
+                # input_ids can be None for multimodal models.
+                target_token_ids = self.input_ids[:num_scheduled_tokens]
+                target_positions = positions[:num_scheduled_tokens]
+                if self.use_aux_hidden_state_outputs:
+                    target_hidden_states = torch.cat(
+                        [h[:num_scheduled_tokens] for h in aux_hidden_states],
+                        dim=-1)
+                else:
+                    target_hidden_states = hidden_states[:num_scheduled_tokens]
+                target_slot_mapping = eagle_attn_metadata.slot_mapping
+                cu_num_tokens = eagle_attn_metadata.query_start_loc
+            else:
+                num_draft_tokens = spec_decode_metadata.num_draft_tokens
+                num_rejected_tokens = [
+                    n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
+                    for i, n in enumerate(num_draft_tokens)
+                ]
+                num_rejected_tokens = torch.tensor(
+                    num_rejected_tokens,
+                    dtype=torch.int32,
+                    device=self.device,
                 )
-                spec_token_ids = draft_token_ids.tolist()
+                num_tokens = num_scheduled_tokens - sum(num_rejected_tokens)
+                cu_num_tokens, token_indices = self.drafter.prepare_inputs(
+                    eagle_attn_metadata.query_start_loc, num_rejected_tokens,
+                    num_tokens)
+                target_token_ids = self.input_ids[token_indices]
+                target_positions = positions[token_indices]
+                if self.use_aux_hidden_state_outputs:
+                    target_hidden_states = torch.cat(
+                        [h[token_indices] for h in aux_hidden_states], dim=-1)
+                else:
+                    target_hidden_states = hidden_states[token_indices]
+                target_slot_mapping = eagle_attn_metadata.slot_mapping[
+                    token_indices]
+
+            positions = self.positions[:num_input_tokens]
+            draft_token_ids = self.drafter.propose(
+                target_token_ids=target_token_ids,
+                target_positions=target_positions,
+                target_hidden_states=target_hidden_states,
+                target_slot_mapping=target_slot_mapping,
+                next_token_ids=next_token_ids,
+                cu_num_tokens=cu_num_tokens,
+                block_table=eagle_attn_metadata.block_tables,
+                sampling_metadata=sampling_metadata,
+            )
+            spec_token_ids = draft_token_ids.tolist()
         elif self.speculative_config.method == 'deepseek_mtp':
             assert isinstance(self.drafter, MtpProposer)
             spec_token_ids = self._generate_mtp_token_ids(
@@ -2001,10 +1991,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 pass
             if self.drafter:
                 logger.info("Loading drafter model...")
-                if self.use_aux_hidden_state_outputs:
+                if self.use_eagle:
                     self.drafter.load_model(self.model)
-                    self.model.set_aux_hidden_state_layers(
-                        self.model.get_eagle3_aux_hidden_state_layers())
+                    if self.use_aux_hidden_state_outputs:
+                        self.model.set_aux_hidden_state_layers(
+                            self.model.get_eagle3_aux_hidden_state_layers())
                 else:
                     self.drafter.load_model()
             if self.lora_config:
