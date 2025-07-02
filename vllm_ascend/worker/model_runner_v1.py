@@ -2131,35 +2131,39 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             num_blocks, kv_cache_spec.block_size,
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size)
-                    if self.torchair_graph_enabled:
-                        layer_kv_cache_nope = torch.zeros(
-                            kv_cache_shape[:-1] +
-                            (self.model_config.hf_text_config.kv_lora_rank, ),
-                            dtype=self.dtype,
-                            pin_memory=True,
-                            device=self.device)
-                        layer_kv_cache_pe = torch.zeros(
-                            kv_cache_shape[:-1] +
-                            (self.model_config.hf_text_config.qk_rope_head_dim,
-                             ),
-                            dtype=self.dtype,
-                            pin_memory=True,
-                            device=self.device)
-                        kv_caches[layer_name] = (layer_kv_cache_nope,
-                                                 layer_kv_cache_pe)
+                    dtype = kv_cache_spec.dtype
+                    if self.model_config.is_deepseek_mla:
+                        num_blocks, block_size, num_kv_heads, head_dim = kv_cache_shape
+                        rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
+                        nope_dim = self.model_config.hf_text_config.kv_lora_rank
+                        assert head_dim == rope_dim + nope_dim, \
+                            f"head_dim({head_dim}) != rope_dim({rope_dim}) + nope_dim({nope_dim})"
+                        nope_cache_shape = (num_blocks, block_size, 
+                                            num_kv_heads, nope_dim)
+                        rope_cache_shape = (num_blocks, block_size, 
+                                            num_kv_heads, rope_dim)
+                        nope_cache = torch.zeros(
+                            nope_cache_shape, dtype=dtype, device=self.device, 
+                            pin_memory=True)
+                        rope_cache = torch.zeros(
+                            rope_cache_shape, dtype=dtype, device=self.device, 
+                            pin_memory=True)
                         kv_caches[layer_name] = (
-                            torch_npu.npu_format_cast(kv_caches[layer_name][0],
-                                                      acl_format),
-                            torch_npu.npu_format_cast(kv_caches[layer_name][1],
-                                                      acl_format),
+                            torch_npu.npu_format_cast(nope_cache, acl_format),
+                            torch_npu.npu_format_cast(rope_cache, acl_format),
                         )
                     else:
-                        kv_caches[layer_name] = torch.zeros(
-                            kv_cache_shape,
-                            dtype=self.kv_cache_dtype,
-                            device=self.device)
-                        kv_caches[layer_name] = \
-                            torch_npu.npu_format_cast(kv_caches[layer_name], acl_format)
+                        num_caches = kv_cache_shape[0]
+                        kv_cache_list = []
+                        for i in range(num_caches):
+                            cache_shape = kv_cache_shape[1:]
+                            kv_cache = torch.zeros(cache_shape,
+                                                   dtype=dtype,
+                                                   device=self.device)
+                            kv_cache = torch_npu.npu_format_cast(kv_cache,
+                                                                 acl_format)
+                            kv_cache_list.append(kv_cache)
+                        kv_caches[layer_name] = kv_cache_list
                 else:
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
