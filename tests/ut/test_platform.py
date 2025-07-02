@@ -4,12 +4,12 @@ from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import torch
-from base import TestBase
 from torch.distributed import ProcessGroup
 from torch.distributed.distributed_c10d import PrefixStore
 from vllm.config import CompilationLevel
 from vllm.platforms import PlatformEnum
 
+from tests.ut.base import TestBase
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD
 
@@ -399,7 +399,6 @@ class TestNPUPlatform(TestBase):
         from vllm_ascend import platform
 
         importlib.reload(platform)
-
         self.platform.check_and_update_config(self.mock_vllm_config)
 
         self.assertEqual(
