@@ -33,6 +33,7 @@ from vllm.logger import logger
 from vllm.utils import weak_ref_tensors
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.utils import get_graph_params, set_graph_params
 
 
 @dataclasses.dataclass
@@ -98,6 +99,10 @@ class NPUPiecewiseBackend:
 
         self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
 
+        if self.compilation_config.full_cuda_graph:
+            self.update_stream = torch.npu.Stream()
+            set_graph_params(self.aclgraph_capture_sizes)
+
         # the entries for different shapes that we need to either
         # compile or capture aclgraph
         self.concrete_size_entries: Dict[int, ConcreteSizeEntry] = {}
@@ -121,8 +126,11 @@ class NPUPiecewiseBackend:
 
     def __call__(self, *args) -> Any:
         forward_context = get_forward_context()
+        graph_params = get_graph_params()
+        forward_context.current_stream = torch.npu.Stream()
+        forward_context.capturing = False
 
-        if (getattr(forward_context.attn_metadata, 'attn_state',
+        if (getattr(forward_context.attn_metadata, "attn_state",
                     None) != AscendAttentionState.DecodeOnly
                 and self.compilation_config.full_cuda_graph):
             return self.compiled_graph_for_general_shape(*args)
@@ -136,6 +144,38 @@ class NPUPiecewiseBackend:
         if runtime_shape not in self.concrete_size_entries:
             # we don't need to do anything for this shape
             return self.compiled_graph_for_general_shape(*args)
+
+        if self.compilation_config.full_cuda_graph:
+            for layer_idx in range(len(graph_params.handles[runtime_shape])):
+                query, key, value, actual_seq_lens, block_table, num_heads, scale, num_kv_heads, output, softmax_lse = graph_params.attn_params[
+                    runtime_shape][layer_idx]
+                block_table = forward_context.attn_metadata.block_tables
+                actual_seq_lens = forward_context.attn_metadata.seq_lens.tolist(
+                ) + [0] * (runtime_shape -
+                           forward_context.attn_metadata.seq_lens.shape[0])
+
+                with torch.npu.stream(self.update_stream):
+                    torch.npu.graph_task_update_begin(
+                        self.update_stream,
+                        graph_params.handles[runtime_shape][layer_idx])
+                    torch.ops.npu.npu_fused_infer_attention_score.out(
+                        query,
+                        key,
+                        value,
+                        workspace=graph_params.workspaces[runtime_shape],
+                        actual_seq_lengths_kv=actual_seq_lens,
+                        block_table=block_table,
+                        num_heads=num_heads,
+                        scale=scale,
+                        input_layout="BSH",
+                        num_key_value_heads=num_kv_heads,
+                        block_size=128,
+                        out=[output, softmax_lse],
+                    )
+                    torch.npu.graph_task_update_end(self.update_stream)
+
+                    graph_params.events[runtime_shape][layer_idx].record(
+                        self.update_stream)
 
         entry = self.concrete_size_entries[runtime_shape]
 
@@ -199,7 +239,10 @@ class NPUPiecewiseBackend:
                         patch("torch.npu.empty_cache", lambda: None))
 
                 # mind-exploding: carefully manage the reference and memory.
-                with torch.npu.graph(aclgraph, pool=self.graph_pool):
+                forward_context.capturing = True
+                with torch.npu.graph(aclgraph,
+                                     pool=self.graph_pool,
+                                     stream=forward_context.current_stream):
                     # `output` is managed by pytorch's aclgraph pool
                     output = entry.runnable(*args)
                     if self.is_last_graph:
