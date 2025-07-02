@@ -503,9 +503,10 @@ class TestNPUPlatform(TestBase):
         )
         self.assertEqual(result,
                          "vllm_ascend.attention.mla_v1.AscendMLABackend")
-    
+
     @patch('vllm_ascend.platform.get_ascend_config')
-    def test_get_attn_backend_cls_use_v1_and_torchair(self, mock_get_ascend_config):
+    def test_get_attn_backend_cls_use_v1_and_torchair(self,
+                                                      mock_get_ascend_config):
         mock_config = MagicMock()
         mock_config.torchair_graph_config.enabled = True
 
@@ -522,7 +523,8 @@ class TestNPUPlatform(TestBase):
         )
         self.assertEqual(
             result,
-            "vllm_ascend.attention.attention_v1_torchair.AscendAttentionTorchairBackend")
+            "vllm_ascend.attention.attention_v1_torchair.AscendAttentionTorchairBackend"
+        )
 
     @patch('vllm_ascend.platform.get_ascend_config')
     def test_get_attn_backend_cls_use_v1_only(self, mock_get_ascend_config):
