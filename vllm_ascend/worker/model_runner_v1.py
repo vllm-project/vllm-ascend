@@ -1037,6 +1037,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             dummy_num_tokens = 1
 
         if self.dp_size > 1:
+            assert num_tokens_across_dp is not None
             num_tokens_across_dp.masked_fill_(num_tokens_across_dp == -1,
                                               dummy_num_tokens)
 
