@@ -96,10 +96,16 @@ jobs:
         python3 -m pip install patchelf
         mkdir -p dist/repaired
         for whl in dist/*.whl; do
-          auditwheel repair "$whl" -w dist/repaired/
-          --exclude libtorch_cpu.so \
+          auditwheel repair "$whl" -w dist/repaired/ \
+          --exclude libplatform.so \
+          --exclude libregister.so \
           --exclude libtorch.so \
+          --exclude libge_common_base.so \
+          --exclude libtorch_npu.so \
+          --exclude libc10.so \
+          --exclude libc_sec.so \
           --exclude libascendcl.so \
+          --exclude libtorch_cpu.so
         done
         rm -f dist/*.whl
         mv dist/repaired/*.whl dist/
