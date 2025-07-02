@@ -294,9 +294,10 @@ class NPUWorker(WorkerBase):
 
     def execute_dummy_batch(self) -> None:
         runner = self.model_runner
-        assert runner.dp_size > 1, "Dummy batch execution should only be " \
-            "performed with data parallelism enabled, but got " \
-            f"dp_size={runner.dp_size}."
+        if runner.dp_size <= 1:
+            raise ValueError("Dummy batch execution should only be "
+                             "performed with data parallelism enabled, but got "
+                             f"dp_size={runner.dp_size}.")
 
         # If torchair graph is enabled, notify the other DP ranks that this is a
         # dummy run by using '-1' as a flag for num_tokens. This will be
