@@ -169,7 +169,6 @@ class MtpProposer:
             common_attn_metadata=common_attn_metadata,
         )
         # When proposing, we set the prefill query_lens to 1.
-        # TODO: Restructure funtion vanilla_chunked_prefill_mla logic.
         if attn_metadata.prefill is not None:
             attn_metadata.prefill.query_lens[:] = 1
         with set_ascend_forward_context(attn_metadata, self.vllm_config):
