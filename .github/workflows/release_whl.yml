@@ -78,6 +78,7 @@ jobs:
         --build-arg PY_VERSION=${{ matrix.python-version }} \
         -t wheel:v1 .
         docker run --rm \
+        -u $(id -u):$(id -g) \
         -v $(pwd):/outpwd \
         wheel:v1 \
         bash -c "cp -r /workspace/vllm-ascend/dist /outpwd"
@@ -93,13 +94,16 @@ jobs:
       run: |
         python3 -m pip install auditwheel
         python3 -m pip install patchelf
-        sudo mkdir -p dist/repaired
+        mkdir -p dist/repaired
         for whl in dist/*.whl; do
           auditwheel repair "$whl" -w dist/repaired/
+          --exclude libtorch_cpu.so \
+          --exclude libtorch.so \
+          --exclude libascendcl.so \
         done
-        sudo rm -f dist/*.whl
-        sudo mv dist/repaired/*.whl dist/
-        sudo rmdir dist/repaired
+        rm -f dist/*.whl
+        mv dist/repaired/*.whl dist/
+        rmdir dist/repaired
         ls dist
 
     - name: Verify automatic platform tags
