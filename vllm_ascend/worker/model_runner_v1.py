@@ -1026,14 +1026,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                               if self.dp_size > 1 else num_input_tokens)
             padded_batch_size = self.select_torchair_padded_batch_size(
                 max_num_tokens)
-            num_tokens_across_dp.masked_fill_(num_tokens_across_dp == -1,
-                                              padded_batch_size)
             graph_pad_size = padded_batch_size - total_num_scheduled_tokens
             extra_builder_kwargs['graph_pad_size'] = graph_pad_size
+            # If torchair graph is enabled and in decode mode, the dummy run
+            # batch size is set to the selected graph size.
+            dummy_num_tokens = padded_batch_size
         else:
             # If torchair graph is not enabled, or if with_prefill is True, the
             # dummy run batch size is set to 1.
-            num_tokens_across_dp.masked_fill_(num_tokens_across_dp == -1, 1)
+            dummy_num_tokens = 1
+
+        if self.dp_size > 1:
+            num_tokens_across_dp.masked_fill_(num_tokens_across_dp == -1,
+                                              dummy_num_tokens)
 
         if self.vllm_config.model_config.use_mla:
             query_start_loc = self.query_start_loc[:num_reqs + 1]
