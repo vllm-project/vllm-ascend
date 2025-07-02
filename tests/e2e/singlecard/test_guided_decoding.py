@@ -107,7 +107,7 @@ def check_backend(guided_decoding_backend: str):
 
 
 @pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
-def test_guided_json_completion(guided_decoding_backend: str,
+def test_guided_json_completion(guided_decoding_backend: str, llm
                                 sample_json_schema):
     check_backend(guided_decoding_backend)
 
@@ -138,7 +138,7 @@ def test_guided_json_completion(guided_decoding_backend: str,
 
 
 @pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
-def test_guided_regex(guided_decoding_backend: str, sample_regex):
+def test_guided_regex(guided_decoding_backend: str, sample_regex, llm):
     check_backend(guided_decoding_backend)
 
     sampling_params = SamplingParams(
