@@ -24,6 +24,9 @@ from vllm.attention.backends.abstract import AttentionType
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.distributed.parallel_state import get_ep_group
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
+
 
 def quant_per_tensor(in_tensor: torch.Tensor,
                      input_scale: torch.Tensor,
@@ -43,6 +46,8 @@ class AscendW8A8LinearMethod:
     def __init__(self) -> None:
         # aclnn quant matmul requires to transpose matrix B, set to true by default.
         self.transpose_weight = True
+        ascend_config = get_ascend_config()
+        self.enable_weight_nz_layout = ascend_config.enable_weight_nz_layout
 
     @staticmethod
     def get_weight(
@@ -114,7 +119,10 @@ class AscendW8A8LinearMethod:
             requires_grad=False).to(layer.aclnn_input_scale.dtype)
         if self.transpose_weight:
             layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, 29)
+        if self.enable_weight_nz_layout:
+            # cast quantized weight tensors in NZ layout for higher inference speed
+            layer.weight.data = torch_npu.npu_format_cast(
+                layer.weight.data, ACL_FORMAT_FRACTAL_NZ)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
 
