@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-
 import vllm
 from vllm.lora.request import LoRARequest
 
