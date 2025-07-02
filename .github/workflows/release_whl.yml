@@ -54,6 +54,7 @@ on:
 
 jobs:
   build:
+    if: false
     name: build and release wheel
     strategy:
       matrix:
