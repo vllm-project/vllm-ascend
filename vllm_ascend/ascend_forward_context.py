@@ -59,8 +59,13 @@ def set_ascend_forward_context(
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
             forward_context.max_tokens_across_dp = forward_context.dp_metadata.max_tokens_across_dp_cpu.item(
             )
+        elif num_tokens is not None:
+            forward_context.max_tokens_across_dp = num_tokens
         elif attn_metadata is not None:
-            forward_context.max_tokens_across_dp = num_tokens or attn_metadata.num_actual_tokens
+            if hasattr(attn_metadata, 'num_actual_tokens'):
+                forward_context.max_tokens_across_dp = attn_metadata.num_actual_tokens
+            else:
+                forward_context.max_tokens_across_dp = attn_metadata.num_prefill_tokens + attn_metadata.num_decode_tokens
         else:
             forward_context.max_tokens_across_dp = None
 
