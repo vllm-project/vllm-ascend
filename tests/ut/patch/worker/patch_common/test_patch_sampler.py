@@ -1,17 +1,20 @@
 import importlib
 import os
-import unittest
 from unittest import mock
 
 import torch
 from vllm.v1.sample.ops import topk_topp_sampler
 
+from tests.ut.base import TestBase
 
-class TestTopKTopPSamplerOptimize(unittest.TestCase):
+
+class TestTopKTopPSamplerOptimize(TestBase):
 
     @mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "1"})
     @mock.patch("torch_npu.npu_top_k_top_p")
     def test_npu_topk_topp_called_when_optimized(self, mock_npu_op):
+        # We have to patch and reload because the patch will take effect
+        # only after VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE is set.
         import vllm_ascend.patch.worker.patch_0_9_1.patch_sampler
         importlib.reload(vllm_ascend.patch.worker.patch_0_9_1.patch_sampler)
 
