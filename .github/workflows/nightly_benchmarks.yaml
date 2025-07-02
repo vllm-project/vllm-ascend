@@ -198,7 +198,7 @@ jobs:
             --commit_title "$commit_title" \
             --created_at "$commit_time_no_tz" \
             --res_dir ./benchmarks/results \
-            --error $ERROR_MSG \
+            --error "$ERROR_MSG" \
             --extra_feat '{"VLLM_USE_V1": "${{ matrix.vllm_use_v1 }}"}'
             rm -rf ./benchmarks/results
             cd -
