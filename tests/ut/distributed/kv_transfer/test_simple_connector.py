@@ -177,12 +177,12 @@ class TestSimpleConnector(unittest.TestCase):
         mock_model_input.attn_metadata.num_prefill_tokens = 5
         mock_model_input.request_ids_to_seq_ids = {"req1": [0]}
 
-        kv_caches = [torch.randn(2, 100, 1, 96).npu() for _ in range(3)]
+        kv_caches = [torch.randn(2, 100, 1, 96) for _ in range(3)]
 
         mock_select.return_value = [
-            torch.randn(3, 5, 1, 96).npu(),
-            torch.randn(3, 5, 1, 96).npu(),
-            torch.randn(5, 768).npu()
+            torch.randn(3, 5, 1, 96),
+            torch.randn(3, 5, 1, 96),
+            torch.randn(5, 768)
         ]
 
         result = connector.recv_kv_caches_and_hidden_states(
