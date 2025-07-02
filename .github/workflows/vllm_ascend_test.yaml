@@ -277,6 +277,7 @@ jobs:
           VLLM_USE_V1: 0
           VLLM_USE_MODELSCOPE: True
         run: |
+          pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           # pytest -sv tests/e2e/singlecard/test_offline_inference.py
           # # TODO: switch hf to modelscope
           # VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
