@@ -532,6 +532,7 @@ class CustomDeepseekDBODecoderLayer(DeepseekV2DecoderLayer):
                 router_logits[i] = get_dp_group().all_gather(
                     router_logits[i], 0)
 
+            # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
             if global_num_experts == 256:
                 topk_weight, topk_id, _ = torch_npu.npu_moe_gating_top_k(
                     router_logits[i],
