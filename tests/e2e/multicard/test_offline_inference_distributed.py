@@ -24,7 +24,7 @@ import os
 from unittest.mock import patch
 
 from modelscope import snapshot_download  # type: ignore
-from vllm import SamplingParams
+from vllm import LLM, SamplingParams
 from vllm.model_executor.models.registry import ModelRegistry
 
 from tests.conftest import VllmRunner
@@ -165,3 +165,37 @@ def test_models_distributed_DeepSeek_W8A8():
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+def test_models_distributed_Qwen3_W4A8() -> None:
+    prompts = [
+        "Hello, my name is",
+        "The future of AI is",
+    ]
+    max_tokens = 16
+
+    messages = [[{"role": "user", "content": prompt}] for prompt in prompts]
+    sampling_params = SamplingParams(
+        max_tokens=max_tokens,
+        temperature=0.0,
+    )
+    llm = LLM(
+        model=snapshot_download("vllm-ascend/Qwen3-8B-W4A8"),
+        max_model_len=1024,
+        tensor_parallel_size=2,
+        enforce_eager=True,
+        quantization="ascend",
+    )
+    vllm_outputs = llm.chat(
+        messages,
+        sampling_params,
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    golden_outputs = [
+        "Hello! My name is Qwen, and I'm a large language model developed",
+        "The future of AI is a topic of great interest and debate, with many possibilities",
+    ]
+    assert len(vllm_outputs) == len(golden_outputs)
+    for vllm_output, golden_output in zip(vllm_outputs, golden_outputs):
+        assert vllm_output.outputs[0].text == golden_output
+        print(f"Generated text: {vllm_output.outputs[0].text!r}")
