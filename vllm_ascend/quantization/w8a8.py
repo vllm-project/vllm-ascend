@@ -406,10 +406,12 @@ class AscendC8KVCacheMethod:
                                       "implemented for "
                                       "PrefillCacheHit")
         elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:  # changed attn_metadata.attn_state == AscendAttentionState.DecodeOnly
-            # torch_air
-            # decode_meta = attn_metadata.decode
-            # seq_lens = decode_meta.seq_lens_list
-            seq_lens = attn_metadata.seq_lens
+            if hasattr(attn_metadata, "decode"):
+                # torch_air
+                decode_meta = attn_metadata.decode
+                seq_lens = decode_meta.seq_lens_list
+            else:
+                seq_lens = attn_metadata.seq_lens
             block_size = key_cache.shape[1]
             query = query.view(num_tokens, 1, layer.num_heads *
                                layer.head_size).contiguous()  # changed

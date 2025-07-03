@@ -27,7 +27,8 @@ from torch.distributed.distributed_c10d import PrefixStore
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
-from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
+                                       init_ascend_config)
 from vllm_ascend.utils import (ASCEND_QUATIZATION_METHOD, is_310p,
                                update_aclgraph_sizes)
 
@@ -154,14 +155,6 @@ class NPUPlatform(Platform):
         else:
             enforce_eager = getattr(model_config, "enforce_eager", False)
 
-        if ascend_config.torchair_graph_config.enabled and envs.VLLM_MLA_DISABLE:
-            # torchair_graph is not supported for V1 without mla currently.
-            logger.warning(
-                "Torchair graph mode is still experimental and not supported for V1 without mla currently, "
-                "Fallback to eager mode.")
-            ascend_config.torchair_graph_config.enabled = False
-            enforce_eager = True
-
         check_ascend_config(vllm_config, enforce_eager)
 
         if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:
@@ -229,6 +222,9 @@ class NPUPlatform(Platform):
                              kv_cache_dtype, block_size, use_v1, use_mla):
         if use_v1 and use_mla:
             return "vllm_ascend.attention.mla_v1.AscendMLABackend"
+        use_torchair = get_ascend_config().torchair_graph_config.enabled
+        if use_v1 and use_torchair:
+            return "vllm_ascend.attention.attention_v1_torchair.AscendAttentionTorchairBackend"
         if use_v1:
             return "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
         if use_mla:
