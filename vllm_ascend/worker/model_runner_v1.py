@@ -811,8 +811,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
-        if (self.use_aclgraph and
-                total_num_scheduled_tokens <= self.aclgraph_batch_sizes[-1]):
+        if (self.use_aclgraph and total_num_scheduled_tokens
+                <= self.aclgraph_batch_sizes[-1]):
             # Add padding to the batch size.
             num_input_tokens = self.vllm_config.pad_for_cudagraph(
                 total_num_scheduled_tokens)
@@ -2041,6 +2041,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             cu_num_tokens, token_indices = self.drafter.prepare_inputs(
                 attn_metadata.query_start_loc,
                 num_rejected_tokens,
+                enforce_one_tokens=True,  # Always enforce one token for MTP.
             )
             target_token_ids = self.input_ids[token_indices]
             target_positions = positions[token_indices]
