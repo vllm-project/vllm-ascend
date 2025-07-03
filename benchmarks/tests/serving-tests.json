@@ -75,7 +75,7 @@
     }
   },
   {
-    "test_name": "serving_qwen3_30B_A3B_tp1",
+    "test_name": "serving_qwen3_30B_A3B_tp4",
     "qps_list": [
       1,
       4,
@@ -99,7 +99,7 @@
     }
   },
   {
-    "test_name": "serving_qwen3_32B_tp1",
+    "test_name": "serving_qwen3_32B_tp4",
     "qps_list": [
       1,
       4,

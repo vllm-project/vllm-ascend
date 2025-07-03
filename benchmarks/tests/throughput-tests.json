@@ -35,7 +35,7 @@
     }
   },
   {
-    "test_name": "throughput_qwen3_30B_A3B_tp1",
+    "test_name": "throughput_qwen3_30B_A3B_tp4",
     "parameters": {
       "model": "Qwen/Qwen3-30B-A3B",
       "tensor_parallel_size": 4,
@@ -46,7 +46,7 @@
     }
   },
   {
-    "test_name": "throughput_qwen3_32B_tp1",
+    "test_name": "throughput_qwen3_32B_tp4",
     "parameters": {
       "model": "Qwen/Qwen3-32B",
       "tensor_parallel_size": 4,
