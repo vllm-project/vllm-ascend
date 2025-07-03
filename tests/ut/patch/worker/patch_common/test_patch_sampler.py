@@ -12,8 +12,8 @@ class TestTopKTopPSamplerOptimize(unittest.TestCase):
     @mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "1"})
     @mock.patch("torch_npu.npu_top_k_top_p")
     def test_npu_topk_topp_called_when_optimized(self, mock_npu_op):
-        import vllm_ascend.patch.worker.patch_common.patch_sampler
-        importlib.reload(vllm_ascend.patch.worker.patch_common.patch_sampler)
+        import vllm_ascend.patch.worker.patch_0_9_1.patch_sampler
+        importlib.reload(vllm_ascend.patch.worker.patch_0_9_1.patch_sampler)
 
         mock_npu_op.return_value = (torch.randn(1, 3))
         sampler = topk_topp_sampler.TopKTopPSampler()
