@@ -40,20 +40,20 @@ class EplbUpdator:
 
     def init_eplb(self, expert_map_path):
         self.num_expert_load_gather = 10
-        self.redundant_enable = (expert_map_path != None)
-        self.num_iterations: torch.int64 = 130
+        self.periodic_load_gather = True
+        self.redundant_enable = (expert_map_path is not None)
+        self.num_iterations_eplb_update: torch.int64 = 130
         self.expert_map_path = expert_map_path
 
         try:
             if not envs.VLLM_ALLOW_EXPERT_LOAD_COLLECTING:
-                self.num_expert_load_gather = self.num_iterations
+                self.num_expert_load_gather = self.num_iterations_eplb_update
+                self.periodic_load_gather = False
         except Exception as e:
-                self.num_expert_load_gather = self.num_iterations
+                self.num_expert_load_gather = self.num_iterations_eplb_update
+                self.periodic_load_gather = False
 
-        self.weight_update_counter = 0
         self.expert_map_initialized = False
-        self.update_in_flight = False
-
         self.gate_eplb = True
 
         self.reqs = []
@@ -61,7 +61,6 @@ class EplbUpdator:
 
         self.cur_iterations: torch.int64 = 0
 
-        self.wait_worker_iterations: torch.int64 = 0
         self.num_wait_worker_iterations: torch.int64 = 20
 
         self.planner_block_queue = Queue()
@@ -90,11 +89,22 @@ class EplbUpdator:
 
         logger.info(f"[ModelRunner] Launched EPLB process (pid={self.eplb_process.pid})")
 
-    def get_update_iteration(self):
-        self.cur_iterations = self.cur_iterations + 1
-        load_gather_iteration = self.cur_iterations % self.num_expert_load_gather == 0 if not self.gate_eplb else self.cur_iterations == self.num_iterations
-        upate_iteration = self.cur_iterations % self.num_iterations == 0 if not self.gate_eplb else self.cur_iterations == self.num_iterations
-        return load_gather_iteration, upate_iteration
+    def update_iteration(self):
+        self.cur_iterations += 1
+        if self.cur_iterations == (self.num_iterations_eplb_update +\
+            self.num_wait_worker_iterations + self.num_moe_layers):
+            if not self.gate_eplb:
+                self.cur_iterations = 0
+
+    def get_update_info_flag(self):
+        return self.cur_iterations == (self.num_iterations_eplb_update + self.num_wait_worker_iterations)
+
+    def wakeup_eplb_worker_flag(self):
+        return self.cur_iterations == (self.num_iterations_eplb_update - 1)
+
+    def update_expert_weight_flag(self):
+        weight_update_counter = self.cur_iterations - (self.num_iterations_eplb_update + self.num_wait_worker_iterations)
+        return (weight_update_counter >= 0 and weight_update_counter < self.num_moe_layers)
 
     def get_init_expert_map(self):
         try:
@@ -108,14 +118,11 @@ class EplbUpdator:
         self.planner_block_queue.put(1)
 
     def forward_before(self):
-
         # Batch after eplb process being triggered, get update info provided by eplb process
-        if self.update_in_flight and self.weight_update_counter == 0 and self.wait_worker_iterations == self.num_wait_worker_iterations:
-            self.wait_worker_iterations = 0
+        if self.get_update_info_flag():
             self.update_info_all = self.block_update_queue.get()
-            self.weight_loading = True
 
-        if self.update_in_flight and self.weight_loading and self.weight_update_counter < self.num_moe_layers:
+        if self.update_expert_weight_flag():
             (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = self.update_info_all.pop(0)
             rank_id = torch.distributed.get_rank()
             if self.redundant_enable:
@@ -125,34 +132,22 @@ class EplbUpdator:
             #logger.info(f"check update info, layer = {layer_id}, send = {expert_send_info_this_rank}, recv = {expert_recv_info_this_rank}")
             self.eplb_loader.generate_expert_d2d_transfer_task(expert_send_info, expert_recv_info,
                 updated_expert_map_this_rank, layer_id + self.adaptor.num_dense_layers)
-            self.weight_update_counter += 1
-            if self.weight_update_counter == self.num_moe_layers:
-                self.weight_update_counter = 0
-                self.update_in_flight = False
-                self.update_info_all = []
-        # set asynchronous stream for d2d expert weight update
-        self.reqs = []
-        self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
+            # set asynchronous stream for d2d expert weight update
+            self.reqs = []
+            self.eplb_loader.asyn_expert_weight_transfer(self.reqs)
 
-    def forward_end(self,dummy_run=False):
-        if not self.update_in_flight:
-            load_gather_iteration, update_iteration = self.get_update_iteration()
-            if load_gather_iteration:
-                moe_load = self.compute_and_set_moe_load()
-                self.get_expert_load()
-            if update_iteration:
-                self.wakeup_eplb_worker()
-                self.update_in_flight = True
-                self.wait_worker_iterations = 0
-                self.weight_loading = False
+    def forward_end(self):
+        if self.wakeup_eplb_worker_flag():
+            moe_load = self.compute_and_set_moe_load(is_clear=True)
+            self.wakeup_eplb_worker()
 
-        if self.update_in_flight:
-            self.wait_worker_iterations = self.wait_worker_iterations + 1
+        if self.update_expert_weight_flag():
+            self.eplb_loader.update_expert_map_and_weight(self.reqs, self.redundant_enable)
 
-        self.eplb_loader.update_expert_map_and_weight(self.reqs, self.redundant_enable)
+        self.update_iteration()
 
-    def compute_and_set_moe_load(self,dummy_run=False):
+    def compute_and_set_moe_load(self, is_clear=False):
         local_load = self.adaptor.get_rank_expert_workload()
 
         self._gather_buffer = None
@@ -241,10 +236,10 @@ class EplbUpdator:
         return  moe_load, expert_maps, num_local_experts
 
     def update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
-        logger.info(f" start update {self.num_expert_load_gather=}, {self.num_iterations}...")
+        logger.info(f" start update {self.num_expert_load_gather=}, {self.num_iterations_eplb_update}...")
         self.num_expert_load_gather = num_expert_load_gather
-        self.num_iterations = num_iterations
-        logger.info(f" update {self.num_expert_load_gather=}, {self.num_iterations} success...")
+        self.num_iterations_eplb_update = num_iterations
+        logger.info(f" update {self.num_expert_load_gather=}, {self.num_iterations_eplb_update} success...")
 
     def shutdown(self):
         """

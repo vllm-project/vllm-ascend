@@ -1547,8 +1547,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if is_profile_run and self.dynamic_eplb:
                     self.model.clear_all_moe_loads()
                 if not is_compile and not is_profile_run and self.dynamic_eplb:
-                    dummy_run = True
-                    self.eplb_updator.forward_end(dummy_run)
+                    self.eplb_updator.forward_end()
                 return hidden_states
 
     def profile_run(self) -> None:
