@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from vllm.logger import logger
 
+from .faquant import AscendFAQuantAttentionMethod
 from .func_wrapper import (wrapper_load_model, wrapper_rmsnorm_forward_oot,
                            wrapper_rmsnorm_init)
 from .w8a8 import (AscendC8KVCacheMethod, AscendW8A8FusedMoEMethod,
@@ -293,8 +294,16 @@ class W8A8DYNAMICQuantizer(VLLMAscendQuantizer):
         return AscendW8A8DynamicFusedMoEMethod()
 
 
+class FAQuantizer(VLLMAscendQuantizer):
+
+    @staticmethod
+    def build_attention_method():
+        return AscendFAQuantAttentionMethod()
+
+
 SUPPORT_ASCEND_QUANTIZER_TYPE = {
     "W8A8": W8A8Quantizer,
     "W8A8_DYNAMIC": W8A8DYNAMICQuantizer,
     "C8": W8A8Quantizer,
+    "FAQuant": FAQuantizer
 }

@@ -23,14 +23,7 @@ from vllm.attention.backends.abstract import AttentionType
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.distributed.parallel_state import get_ep_group
-
-
-def quant_per_tensor(in_tensor: torch.Tensor,
-                     input_scale: torch.Tensor,
-                     input_offset: torch.Tensor,
-                     function=False):
-    return torch_npu.npu_quantize(in_tensor, input_scale, input_offset,
-                                  torch.qint8, -1, function)
+from .quant_utils import quant_per_tensor
 
 
 class AscendW8A8LinearMethod:
