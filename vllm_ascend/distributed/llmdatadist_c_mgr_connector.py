@@ -39,6 +39,7 @@ TORCH_DTYPE_TO_NPU_DTYPE = {
     torch.int32: llm_datadist.DataType.DT_INT32
 }
 
+
 class LLMDataDistCMgrEvent(Enum):
     ReqForMetadata = 0
     ReqForFinished = 1
@@ -307,7 +308,6 @@ class LLMDataDistCMgrConnectorWorker():
         self.executor = ThreadPoolExecutor(1)
         self.thread_lock = threading.Lock()
 
-
         self.llm_datadist_role = None
         self.llm_datadist_remote_role = None
         if self.kv_transfer_config.kv_role == "kv_producer":
@@ -368,11 +368,14 @@ class LLMDataDistCMgrConnectorWorker():
                 elif event_msg == LLMDataDistCMgrEvent.ReqForFinished:
                     finished_req_id = decode_msg[0]
                     with self.thread_lock:
-                        logger.debug(f"LLMDataDistCMgrConnectorWorker: Receiving request {finished_req_id} finished")
+                        logger.debug(
+                            f"LLMDataDistCMgrConnectorWorker: Receiving request {finished_req_id} finished"
+                        )
                         self.finished_reqs.add(finished_req_id)
                 else:
-                    raise RuntimeError(f"LLMDataDistCMgrConnectorWorker: Receiving unexpected request event {event_msg} from remote !")
-
+                    raise RuntimeError(
+                        f"LLMDataDistCMgrConnectorWorker: Receiving unexpected request event {event_msg} from remote !"
+                    )
 
     def init_llm_datadist(self):
         assert self.local_agent_metadata is not None
@@ -705,7 +708,8 @@ class LLMDataDistCMgrConnectorWorker():
         url = f"tcp://{host}:{port}"
         logger.debug(f"Querying metadata from url: {url}")
         msg_encoder = msgspec.msgpack.Encoder()
-        msg_send = msg_encoder.encode([LLMDataDistCMgrEvent.ReqForMetadata, self.local_agent_metadata])
+        msg_send = msg_encoder.encode(
+            [LLMDataDistCMgrEvent.ReqForMetadata, self.local_agent_metadata])
         with zmq_ctx(zmq.REQ, url) as sock:  # type: ignore[attr-defined]
             logger.info("Try request remote metadata from socket......")
             sock.send(msg_send)
@@ -717,19 +721,21 @@ class LLMDataDistCMgrConnectorWorker():
             cluster_id = self.add_remote_agent(metadata)
         return cluster_id
 
-
     def send_finsih_to_remote(self, host: str, port: int, request_id):
         url = f"tcp://{host}:{port}"
         logger.debug(f"Sending finished to remote: {url}")
         msg_encoder = msgspec.msgpack.Encoder()
-        msg_send = msg_encoder.encode([LLMDataDistCMgrEvent.ReqForFinished, [request_id]])
+        msg_send = msg_encoder.encode(
+            [LLMDataDistCMgrEvent.ReqForFinished, [request_id]])
         with zmq_ctx(zmq.REQ, url) as sock:
             try:
                 sock.send(msg_send)
-                logger.debug(f"Request id {request_id} finished message send to remote {url}")
+                logger.debug(
+                    f"Request id {request_id} finished message send to remote {url}"
+                )
             except Exception as e:
-                logger.error(f"Failed to send reqest_id {request_id} to prefill: {e}")
-
+                logger.error(
+                    f"Failed to send reqest_id {request_id} to prefill: {e}")
 
     def _read_blocks(
         self,
@@ -796,7 +802,8 @@ class LLMDataDistCMgrConnectorWorker():
                 raise RuntimeError(
                     "LLMDataDistCMgrConnectorWorker: Timeout during pull_blocks, you can try to increase the sync_kv_timeout config or checking your connect status"
                 )
-        self.send_finsih_to_remote(remote_ip, remote_port + tp_offset, request_id)
+        self.send_finsih_to_remote(remote_ip, remote_port + tp_offset,
+                                   request_id)
         with self.thread_lock:
             self.finished_reqs.add(request_id)
 
