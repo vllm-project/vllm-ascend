@@ -110,9 +110,9 @@ class TestUtils(unittest.TestCase):
                 new=mock.MagicMock)
     @mock.patch('vllm_ascend.utils.is_310p')
     @mock.patch('vllm_ascend.utils.get_ascend_config')
-    def test_aybe_converting_weight_acl_format(self, mock_get_config,
-                                               mock_310p, mock_npu_cast,
-                                               mock_get_format):
+    def test_maybe_converting_weight_acl_format(self, mock_get_config,
+                                                mock_310p, mock_npu_cast,
+                                                mock_get_format):
         ACL_FORMAT_FRACTAL_NZ = 29
         mock_310p.return_value = True
 
@@ -126,8 +126,8 @@ class TestUtils(unittest.TestCase):
         fused_moe = mock.MagicMock()
         fused_moe.w13_weight = mock.MagicMock()
         fused_moe.w2_weight = mock.MagicMock()
-        fused_moe.w13_weight.data = torch.randn(128, 256).npu()
-        fused_moe.w2_weight.data = torch.randn(256, 128).npu()
+        fused_moe.w13_weight.data = torch.randn(128, 256)
+        fused_moe.w2_weight.data = torch.randn(256, 128)
         model = mock.MagicMock()
         model.modules.return_value = [fused_moe]
 
@@ -140,7 +140,7 @@ class TestUtils(unittest.TestCase):
                 new=mock.MagicMock)
     @mock.patch('vllm_ascend.utils.is_310p')
     @mock.patch('vllm_ascend.utils.get_ascend_config')
-    def test_aybe_converting_weight_acl_format_format_true(
+    def test_maybe_converting_weight_acl_format_format_true(
             self, mock_get_config, mock_310p, mock_npu_cast, mock_get_format):
         ACL_FORMAT_FRACTAL_NZ = 29
         mock_310p.return_value = True
@@ -155,8 +155,8 @@ class TestUtils(unittest.TestCase):
         fused_moe = mock.MagicMock()
         fused_moe.w13_weight = mock.MagicMock()
         fused_moe.w2_weight = mock.MagicMock()
-        fused_moe.w13_weight.data = torch.randn(128, 256).npu()
-        fused_moe.w2_weight.data = torch.randn(256, 128).npu()
+        fused_moe.w13_weight.data = torch.randn(128, 256)
+        fused_moe.w2_weight.data = torch.randn(256, 128)
         model = mock.MagicMock()
         model.modules.return_value = [fused_moe]
 
