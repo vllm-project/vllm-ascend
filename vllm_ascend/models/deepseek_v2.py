@@ -74,6 +74,7 @@ from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.utils import (dispose_tensor, npu_stream_switch,
                                npu_wait_tensor, vllm_version_is)
 
@@ -794,6 +795,13 @@ class CustomDeepseekV2Model(nn.Module):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
+        
+        ascend_config = get_ascend_config()
+        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+        self.max_position_embeddings = self.layers[0].self_attn.rotary_emb.max_position_embeddings
+        self.scaling_factor = self.layers[0].self_attn.rotary_emb.scaling_factor
+        self.cos_cached = self.layers[0].self_attn.rotary_emb.cos_cached
+        self.sin_cached = self.layers[0].self_attn.rotary_emb.sin_cached
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -819,6 +827,33 @@ class CustomDeepseekV2Model(nn.Module):
             residual = intermediate_tensors["residual"]
 
         replace_allreduce = hidden_states.shape[0] % self.tp_size == 0
+        # get cos, sin before layers
+        self.running_in_graph = self.torchair_graph_enabled and \
+                                attn_metadata and \
+                                attn_metadata.attn_state in [
+                                    AscendAttentionState.DecodeOnly, 
+                                    AscendAttentionState.SpecDecoding
+                                ]
+        if attn_metadata.num_decodes > 0 and self.running_in_graph:
+            seq_len = self.max_position_embeddings * self.scaling_factor
+            cos = self.cos_cached[:seq_len].to(
+                dtype=hidden_states.dtype)
+            sin = self.sin_cached[:seq_len].to(
+                dtype=hidden_states.dtype)
+            cos = cos[attn_metadata.decode.input_positions]
+            sin = sin[attn_metadata.decode.input_positions]
+            attn_metadata.decode.cos = cos[:, None, None, :]
+            attn_metadata.decode.sin = sin[:, None, None, :]
+        if attn_metadata.num_prefills > 0 and self.torchair_graph_enabled:
+            seq_len = self.max_position_embeddings * self.scaling_factor
+            cos = self.cos_cached[:seq_len].to(
+                dtype=hidden_states.dtype)
+            sin = self.sin_cached[:seq_len].to(
+                dtype=hidden_states.dtype)
+            cos = cos[attn_metadata.prefill.input_positions]
+            sin = sin[attn_metadata.prefill.input_positions]
+            attn_metadata.prefill.cos = cos[:, None, None, :]
+            attn_metadata.prefill.sin = sin[:, None, None, :]
 
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
