@@ -159,11 +159,6 @@ class NPUPiecewiseBackend:
         graph_params = get_graph_params()
         forward_context.capturing = False
 
-        if (getattr(forward_context.attn_metadata, "attn_state",
-                    None) != AscendAttentionState.DecodeOnly
-                and self.compilation_config.full_cuda_graph):
-            return self.compiled_graph_for_general_shape(*args)
-
         if not self.first_run_finished:
             self.first_run_finished = True
             self.check_for_ending_compilation()
@@ -172,6 +167,11 @@ class NPUPiecewiseBackend:
         runtime_shape = args[self.sym_shape_indices[0]]
         if runtime_shape not in self.concrete_size_entries:
             # we don't need to do anything for this shape
+            return self.compiled_graph_for_general_shape(*args)
+
+        if (getattr(forward_context.attn_metadata, "attn_state",
+                    None) != AscendAttentionState.DecodeOnly
+                and self.compilation_config.full_cuda_graph):
             return self.compiled_graph_for_general_shape(*args)
 
         entry = self.concrete_size_entries[runtime_shape]
