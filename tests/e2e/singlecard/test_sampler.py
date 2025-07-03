@@ -18,8 +18,11 @@
 #
 from typing import Optional
 
+import pytest
 import torch
 from vllm.v1.sample.sampler import Sampler  # noqa: F401
+
+from vllm_ascend.utils import vllm_version_is
 
 # Set tolerance to 1 for quant ops
 DEFAULT_ATOL = 1e-3
@@ -118,6 +121,8 @@ def apply_top_k_top_p_new(
 
 
 # test with leading dimension and merge seqlen and batch_size as num_tokens
+@pytest.mark.skipif(not vllm_version_is("0.9.1"),
+                    reason="apply_min_p has been removed after vllm 0.9.1")
 @torch.inference_mode()
 def test_apply_min_p() -> None:
     logits = torch.randn((128, 7168)).npu()
