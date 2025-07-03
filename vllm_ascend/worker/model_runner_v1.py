@@ -72,6 +72,7 @@ from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
 from vllm_ascend.attention.mla_v1 import CommonAttentionMetadata
+from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.pool.metadata import PoolingMetadata
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
@@ -622,16 +623,38 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.refresh_sampling_metadata()
 
     def _get_forward_metadata_across_dp(
-            self, total_num_scheduled_tokens: int,
-            with_prefill: bool) -> tuple[int, bool]:
+            self, total_num_scheduled_tokens: int, with_prefill: bool,
+            enable_dbo: bool) -> tuple[int, bool, bool]:
         forward_metadata = torch.tensor(
-            [total_num_scheduled_tokens, with_prefill],
+            [total_num_scheduled_tokens, with_prefill, not enable_dbo],
             device="cpu",
             dtype=torch.int32)
         dist.all_reduce(forward_metadata,
                         op=ReduceOp.MAX,
                         group=get_dp_group().cpu_group)
-        return int(forward_metadata[0]), bool(forward_metadata[1] > 0)
+        return int(forward_metadata[0]), bool(
+            forward_metadata[1] > 0), not bool(forward_metadata[2] > 0)
+
+    def _check_dbo_is_valid(self, query_lens: torch.Tensor,
+                            attn_state: AscendAttentionState,
+                            num_tokens: int) -> bool:
+        # do the checks for dp + dbo
+        if attn_state in [
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding
+        ]:
+            return False
+        # considering the case that one dp rank may enable dbo while others may not
+        if not self.vllm_config.model_config.use_mla or not envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+            return False
+        # TODO: remove it if token-level microbatch is enabled
+        [token_index,
+         seq_index] = compute_split_seq_index(query_lens, attn_state,
+                                              num_tokens)
+        if token_index == 0 or seq_index == 0 or seq_index == len(
+                query_lens) or num_tokens < 256:
+            return False
+        return True
 
     def get_eagle_atten_dict(
         self,
@@ -1100,11 +1123,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
 
+        enable_dbo = self._check_dbo_is_valid(self.query_lens.tolist(),
+                                              attn_state,
+                                              total_num_scheduled_tokens)
+
         if self.dp_size > 1:
-            max_num_tokens, with_prefill = self._get_forward_metadata_across_dp(
-                total_num_scheduled_tokens, with_prefill)
+            max_num_tokens, with_prefill, enable_dbo = self._get_forward_metadata_across_dp(
+                total_num_scheduled_tokens, with_prefill, enable_dbo)
             extra_builder_kwargs['max_num_tokens_across_dp'] = max_num_tokens
             extra_builder_kwargs['with_prefill_across_dp'] = with_prefill
+        extra_builder_kwargs['enable_dbo_across_dp'] = enable_dbo
 
         # Add graph_pad_size here
         if self.torchair_graph_enabled and not with_prefill:
@@ -1195,6 +1223,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if self.torchair_graph_enabled:
                     model_kwargs["kv_caches"] = self.kv_caches
                     model_kwargs["attn_metadata"] = attn_metadata
+                if envs_ascend.VLLM_ASCEND_ENABLE_DBO and with_prefill:
+                    model_kwargs["graph_enable"] = False  # type: ignore
                 if self.torchair_graph_enabled and not with_prefill:
                     compiled_model = self._get_torchair_lazy_compiled_model(
                         padded_batch_size)
@@ -1861,6 +1891,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             with set_forward_context(None,
                                      self.vllm_config,
                                      num_tokens=num_tokens):
+                model_kwargs = {}
                 if self.torchair_graph_enabled and not with_prefill:
                     attn_metadata = self.attn_metadata_builder.build_dummy(
                         num_reqs=num_tokens, num_actual_tokens=1)
@@ -1880,20 +1911,26 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             torch._dynamo.mark_static(kv[1])
                     compiled_model = self._get_torchair_lazy_compiled_model(
                         num_tokens)
+                    model_kwargs["kv_caches"] = self.kv_caches
+                    model_kwargs["attn_metadata"] = attn_metadata
+                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+                        model_kwargs["graph_enable"] = True  # type: ignore
                     hidden_states = compiled_model(
                         input_ids=input_ids,
                         positions=positions,
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=None,
-                        kv_caches=self.kv_caches,
-                        attn_metadata=attn_metadata,
+                        **model_kwargs,
                     )
                 else:
+                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+                        model_kwargs["graph_enable"] = False  # type: ignore
                     hidden_states = model(
                         input_ids=input_ids,
                         positions=positions,
                         intermediate_tensors=intermediate_tensors,
-                        inputs_embeds=inputs_embeds)
+                        inputs_embeds=inputs_embeds,
+                        **model_kwargs)
                     if self.use_aux_hidden_state_outputs:
                         hidden_states, _ = hidden_states
                     else:

@@ -111,16 +111,19 @@ def test_models_distributed_topk() -> None:
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DBO": "1"})
-def test_models_distributed_DeepSeek_dbo():
-    example_prompts = ["The president of the United States is"] * 41
-    dtype = "half"
+def test_models_distributed_DeepSeek_w8a8_tp_dbo():
+    example_prompts = ["The president of the United States is"] * 100
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
     with VllmRunner(
-            "deepseek-ai/DeepSeek-V2-Lite",
-            dtype=dtype,
+            snapshot_download("vllm-ascend/DeepSeek-V2-Lite-W8A8"),
+            dtype="auto",
+            quantization="ascend",
             tensor_parallel_size=4,
+            enforce_eager=True,
             distributed_executor_backend="mp",
-    ) as vllm_model:
+            additional_config={"ascend_scheduler_config": {
+                "enabled": True,
+            }}) as vllm_model:
         model_arch = 'DeepseekV2ForCausalLM'
         registed_models = ModelRegistry.models
         assert registed_models[
@@ -131,17 +134,21 @@ def test_models_distributed_DeepSeek_dbo():
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DBO": "1"})
-def test_models_distributed_DeepSeekV3_dbo():
-    example_prompts = ["The president of the United States is"] * 41
-    dtype = "half"
+def test_models_distributed_DeepSeek_w8a8_ep_dbo():
+    example_prompts = ["The president of the United States is"] * 100
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
     with VllmRunner(
-            "vllm-ascend/DeepSeek-V3-Pruning",
-            dtype=dtype,
+            snapshot_download("vllm-ascend/DeepSeek-V2-Lite-W8A8"),
+            dtype="auto",
+            quantization="ascend",
             tensor_parallel_size=4,
+            enforce_eager=True,
+            enable_expert_parallel=True,
             distributed_executor_backend="mp",
-    ) as vllm_model:
-        model_arch = 'DeepseekV3ForCausalLM'
+            additional_config={"ascend_scheduler_config": {
+                "enabled": True,
+            }}) as vllm_model:
+        model_arch = 'DeepseekV2ForCausalLM'
         registed_models = ModelRegistry.models
         assert registed_models[
             model_arch].module_name == "vllm_ascend.models.deepseek_dbo"
