@@ -1961,19 +1961,23 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         nope_dim = self.model_config.hf_text_config.kv_lora_rank
                         assert head_dim == rope_dim + nope_dim, \
                             f"head_dim({head_dim}) != rope_dim({rope_dim}) + nope_dim({nope_dim})"
-                        nope_cache_shape = (num_blocks, block_size, 
-                                            num_kv_heads, nope_dim)
-                        rope_cache_shape = (num_blocks, block_size, 
-                                            num_kv_heads, rope_dim)
-                        nope_cache = torch.zeros(
-                            nope_cache_shape, dtype=dtype, device=self.device, 
-                            pin_memory=True)
-                        rope_cache = torch.zeros(
-                            rope_cache_shape, dtype=dtype, device=self.device, 
-                            pin_memory=True)
+                        layer_kv_cache_nope_shape = (num_blocks, block_size,
+                                                     num_kv_heads, nope_dim)
+                        layer_kv_cache_pe_shape = (num_blocks, block_size,
+                                                   num_kv_heads, rope_dim)
+                        layer_kv_cache_nope = torch.zeros(
+                            layer_kv_cache_nope_shape,
+                            dtype=dtype,
+                            device=self.device)
+                        layer_kv_cache_pe = torch.zeros(
+                            layer_kv_cache_pe_shape,
+                            dtype=dtype,
+                            device=self.device)
                         kv_caches[layer_name] = (
-                            torch_npu.npu_format_cast(nope_cache, acl_format),
-                            torch_npu.npu_format_cast(rope_cache, acl_format),
+                            torch_npu.npu_format_cast(layer_kv_cache_nope,
+                                                      acl_format),
+                            torch_npu.npu_format_cast(layer_kv_cache_pe,
+                                                      acl_format),
                         )
 >>>>>>> c848786 (use tuple as kv cache instead of tensor)
                     else:
@@ -1984,8 +1988,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             kv_cache = torch.zeros(cache_shape,
                                                    dtype=dtype,
                                                    device=self.device)
-                            kv_cache = torch_npu.npu_format_cast(kv_cache,
-                                                                 acl_format)
+                            kv_cache = torch_npu.npu_format_cast(
+                                kv_cache, acl_format)
                             kv_cache_list.append(kv_cache)
                         kv_caches[layer_name] = kv_cache_list
                 else:

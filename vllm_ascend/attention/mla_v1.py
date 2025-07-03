@@ -1022,8 +1022,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 num_kv_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
                 scale_value=self.scale,
-                block_table=attn_metadata.decode.
-                block_table,  # type:ignore
+                block_table=attn_metadata.decode.block_table,  # type:ignore
                 context_lens=attn_metadata.decode.seq_lens,  # type:ignore
                 mla_vheadsize=self.kv_lora_rank,
                 out=attn_output)
