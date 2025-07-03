@@ -17,7 +17,6 @@
 #
 
 import dataclasses
-import threading
 from contextlib import ExitStack
 from typing import Any, Callable, Dict, List, Optional, Set
 from unittest.mock import patch
@@ -175,13 +174,6 @@ class NPUPiecewiseBackend:
             # we don't need to do anything for this shape
             return self.compiled_graph_for_general_shape(*args)
 
-        update_thread = None
-        if self.compilation_config.full_cuda_graph:
-            update_thread = threading.Thread(target=self.update_attn_params,
-                                             args=(graph_params,
-                                                   forward_context,
-                                                   runtime_shape))
-
         entry = self.concrete_size_entries[runtime_shape]
 
         if entry.runnable is None:
@@ -278,7 +270,9 @@ class NPUPiecewiseBackend:
             )
 
         entry.aclgraph.replay()
-        if update_thread is not None:
-            update_thread.start()
-            update_thread.join()
+
+        if self.compilation_config.full_cuda_graph:
+            self.update_attn_params(graph_params, forward_context,
+                                    runtime_shape)
+
         return entry.output
