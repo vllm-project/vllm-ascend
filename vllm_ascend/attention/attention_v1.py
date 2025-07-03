@@ -380,7 +380,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             num_tokens, self.num_heads,
                             self.head_size)[:, :, :]
                     else:
-                        stream = forward_context.current_stream
+                        stream = torch_npu.npu.current_stream()
                         workspace = graph_params.workspaces.get(num_tokens)
                         if workspace is None:
                             workspace = (
