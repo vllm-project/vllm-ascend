@@ -117,6 +117,7 @@ class AscendMetadata:
     query_start_loc: torch.Tensor
     query_lens: torch.Tensor
     seq_lens: torch.Tensor
+    seq_lens_list: list
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int] = None
     # (num_tokens,). The indices of the token slots that input tokens will be
@@ -164,6 +165,7 @@ class AscendAttentionMetadataBuilder:
 
         query_lens = self.runner.query_lens
         seq_lens = common_attn_metadata.seq_lens
+        seq_lens_list = self.runner.seq_lens_list
         slot_mapping = self.runner.slot_mapping[:num_actual_tokens]
         attn_mask = self.runner.attn_mask
         attn_state = self.runner.attn_state
@@ -175,6 +177,7 @@ class AscendAttentionMetadataBuilder:
             query_start_loc=query_start_loc,
             query_lens=query_lens,
             seq_lens=seq_lens,
+            seq_lens_list=seq_lens_list,
             max_query_len=max_query_len,
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
@@ -334,8 +337,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                             self.num_kv_heads * self.head_size)
                     v = self.value_cache.view(
                         -1, 128, self.num_kv_heads * self.head_size)
-                    actual_seq_lens = attn_metadata.seq_lens.tolist() + [0] * (
-                        num_tokens - attn_metadata.seq_lens.shape[0])
+                    actual_seq_lens = attn_metadata.seq_lens_list
 
                     forward_context = get_forward_context()
                     if not forward_context.capturing:

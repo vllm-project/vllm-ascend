@@ -130,9 +130,7 @@ class NPUPiecewiseBackend:
             query, key, value, actual_seq_lens, block_table, num_heads, scale, num_kv_heads, output, softmax_lse = graph_params.attn_params[
                 runtime_shape][layer_idx]
             block_table = forward_context.attn_metadata.block_tables
-            actual_seq_lens = forward_context.attn_metadata.seq_lens.tolist(
-            ) + [0] * (runtime_shape -
-                       forward_context.attn_metadata.seq_lens.shape[0])
+            actual_seq_lens = forward_context.attn_metadata.seq_lens_list
 
             with torch.npu.stream(self.update_stream):
                 torch.npu.graph_task_update_begin(
@@ -183,7 +181,6 @@ class NPUPiecewiseBackend:
                                              args=(graph_params,
                                                    forward_context,
                                                    runtime_shape))
-            update_thread.start()
 
         entry = self.concrete_size_entries[runtime_shape]
 
@@ -282,5 +279,6 @@ class NPUPiecewiseBackend:
 
         entry.aclgraph.replay()
         if update_thread is not None:
+            update_thread.start()
             update_thread.join()
         return entry.output
