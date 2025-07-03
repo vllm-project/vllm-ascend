@@ -23,6 +23,7 @@ from vllm.attention.backends.abstract import AttentionType
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.distributed.parallel_state import get_ep_group
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p
 
 
 def quant_per_tensor(in_tensor: torch.Tensor,
@@ -42,7 +43,7 @@ class AscendW8A8LinearMethod:
 
     def __init__(self) -> None:
         # aclnn quant matmul requires to transpose matrix B, set to true by default.
-        self.transpose_weight = True
+        self.transpose_weight = not is_310p()
 
     @staticmethod
     def get_weight(
@@ -95,13 +96,24 @@ class AscendW8A8LinearMethod:
             x = quant_per_tensor(x, layer.aclnn_input_scale,
                                  layer.aclnn_input_offset)
         quant_bias = layer.quant_bias if tp_rank == 0 else None
-        output = torch_npu.npu_quant_matmul(
-            x,
-            layer.weight,
-            layer.deq_scale,
-            bias=quant_bias,
-            output_dtype=original_dtype,
-        )
+        if is_310p():
+            # On 300I Duo platform, we need transpose again if
+            # using nz. This transpose can be skipped in torchair.
+            output = torch_npu.npu_quant_matmul(
+                x,
+                layer.weight.data.transpose(1, 0),
+                layer.deq_scale,
+                bias=quant_bias,
+                output_dtype=original_dtype,
+            )
+        else:
+            output = torch_npu.npu_quant_matmul(
+                x,
+                layer.weight,
+                layer.deq_scale,
+                bias=quant_bias,
+                output_dtype=original_dtype,
+            )
         return output
 
     def process_weights_after_loading(self, layer):
@@ -114,7 +126,8 @@ class AscendW8A8LinearMethod:
             requires_grad=False).to(layer.aclnn_input_scale.dtype)
         if self.transpose_weight:
             layer.weight.data = layer.weight.data.transpose(0, 1).contiguous()
-        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data, 29)
+        layer.weight.data = torch_npu.npu_format_cast(layer.weight.data,
+                                                      ACL_FORMAT_FRACTAL_NZ)
         layer.weight_scale.data = torch.flatten(layer.weight_scale.data)
         layer.weight_offset.data = torch.flatten(layer.weight_offset.data)
 
@@ -232,6 +245,19 @@ class AscendW8A8FusedMoEMethod:
             global_num_experts=global_num_experts,
         )
 
+        if is_310p():
+            return fused_experts_310p(hidden_states=x,
+                                      w1=layer.w13_weight,
+                                      w1_scale=layer.w13_weight_scale,
+                                      w1_input_scale=layer.w13_input_scale,
+                                      w2=layer.w2_weight,
+                                      w2_scale=layer.w2_weight_scale,
+                                      w2_input_scale=layer.w2_input_scale,
+                                      topk_weights=topk_weights,
+                                      topk_ids=topk_ids,
+                                      top_k=top_k,
+                                      global_num_experts=global_num_experts,
+                                      expert_map=expert_map)
         return fused_experts(hidden_states=x,
                              w1=layer.w13_weight,
                              w1_scale=layer.w13_weight_scale,
@@ -248,41 +274,48 @@ class AscendW8A8FusedMoEMethod:
                              expert_map=expert_map)
 
     def process_weights_after_loading(self, layer):
-        # torch.npu.config.allow_internal_format = True
-        layer.w13_weight.data = layer.w13_weight.data.transpose(
-            1, 2).contiguous()
-        layer.w2_weight.data = layer.w2_weight.data.transpose(1,
-                                                              2).contiguous()
+        if not is_310p():
+            layer.w13_weight.data = layer.w13_weight.data.transpose(
+                1, 2).contiguous()
+            layer.w2_weight.data = layer.w2_weight.data.transpose(
+                1, 2).contiguous()
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
-            layer.w13_weight_scale.data.shape[0], -1).to(torch.float32)
+            layer.w13_weight_scale.data.shape[0], -1)
 
         layer.w13_weight_offset.data = layer.w13_weight_offset.data.view(
-            layer.w13_weight_offset.data.shape[0], -1).to(torch.float16)
+            layer.w13_weight_offset.data.shape[0], -1)
         layer.w2_weight_scale.data = layer.w2_weight_scale.data.view(
-            layer.w2_weight_scale.data.shape[0], -1).to(torch.float32)
+            layer.w2_weight_scale.data.shape[0], -1)
         layer.w2_weight_offset.data = layer.w2_weight_offset.data.view(
-            layer.w2_weight_offset.data.shape[0], -1).to(torch.float16)
+            layer.w2_weight_offset.data.shape[0], -1)
         expanding_factor_w13 = layer.w13_weight.data.shape[1]
         expanding_factor_w2 = layer.w2_weight.data.shape[1]
-        layer.w13_input_scale.data = torch.nn.Parameter(
-            layer.w13_input_scale.data.repeat(
-                1, expanding_factor_w13)[0:1]).to(torch.float16)
 
-        layer.w2_input_scale.data = torch.nn.Parameter(
-            layer.w2_input_scale.data.repeat(1, expanding_factor_w2)[0:1]).to(
-                torch.float16)
+        if is_310p():
+            layer.w13_input_scale.data = torch.nn.Parameter(
+                layer.w13_input_scale.data.max())
+            layer.w2_input_scale.data = torch.nn.Parameter(
+                layer.w2_input_scale.data.max())
+        else:
+            layer.w13_input_scale.data = torch.nn.Parameter(
+                layer.w13_input_scale.data.repeat(1,
+                                                  expanding_factor_w13)[0:1])
+            layer.w2_input_scale.data = torch.nn.Parameter(
+                layer.w2_input_scale.data.repeat(1, expanding_factor_w2)[0:1])
+
         layer.w13_input_offset.data = torch.nn.Parameter(
-            layer.w13_input_scale.data.repeat(
-                1, expanding_factor_w13)[0:1]).to(torch.int8)
+            layer.w13_input_scale.data.repeat(1, expanding_factor_w13)[0:1])
         layer.w2_input_offset.data = torch.nn.Parameter(
-            layer.w2_input_scale.data.repeat(1, expanding_factor_w2)[0:1]).to(
-                torch.int8)
+            layer.w2_input_scale.data.repeat(1, expanding_factor_w2)[0:1])
 
-        # NZ
-        layer.w13_weight.data = torch_npu.npu_format_cast(
-            layer.w13_weight.data, 29).contiguous()
-        layer.w2_weight.data = torch_npu.npu_format_cast(
-            layer.w2_weight.data, 29).contiguous()
+        # converting ACL_FORMAT_FRACTAL_NZ.
+        # npu_quant_grouped_matmul_dequant in eager mode does not accept
+        # ACL_FORMAT_FRACTAL_NZ.
+        if not is_310p():
+            layer.w13_weight.data = torch_npu.npu_format_cast(
+                layer.w13_weight.data, ACL_FORMAT_FRACTAL_NZ).contiguous()
+            layer.w2_weight.data = torch_npu.npu_format_cast(
+                layer.w2_weight.data, ACL_FORMAT_FRACTAL_NZ).contiguous()
 
 
 class AscendC8KVCacheMethod:
@@ -405,6 +438,69 @@ class AscendC8KVCacheMethod:
                                       "implemented for "
                                       "other case")
         return output
+
+
+def fused_experts_310p(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w1_input_scale: torch.Tensor,
+    w2: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w2_input_scale: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    top_k: int,
+    global_num_experts: int,
+    expert_map: torch.Tensor = None,
+) -> torch.Tensor:
+    ep_size = get_ep_group().world_size
+    local_num_experts = global_num_experts // ep_size
+    local_num_group = top_k // ep_size
+
+    bsz, _ = hidden_states.shape
+    flatten_topk_ids = topk_ids.view(-1)
+    sorted_topk_ids = torch.argsort(flatten_topk_ids.float())
+    sorted_topk_ids = sorted_topk_ids.to(torch.int32)
+    sorted_hidden_states = hidden_states.index_select(
+        0, sorted_topk_ids // local_num_group)
+
+    experts_id = torch.arange(0,
+                              local_num_experts,
+                              dtype=topk_ids.dtype,
+                              device=topk_ids.device)
+    num_tokens_per_expert = (flatten_topk_ids.unsqueeze(-1) == experts_id).to(
+        torch.float32).sum(0)
+    topk_scales = topk_weights.view(-1).index_select(
+        0, sorted_topk_ids).unsqueeze(-1)
+    group_list = num_tokens_per_expert.cumsum(dim=0).to(torch.int64)
+
+    gate_up_out = torch_npu.npu_quant_grouped_matmul_dequant(
+        x=sorted_hidden_states,
+        quantized_weight=w1,
+        weight_scale=w1_scale,
+        group_list=group_list,
+        x_scale=w1_input_scale,
+        quant_mode="pertensor")
+
+    gate_up_out = torch_npu.npu_swiglu(gate_up_out.to(torch.float32)).to(
+        torch.float16)
+    gate_up_out *= topk_scales
+
+    down_out = torch_npu.npu_quant_grouped_matmul_dequant(
+        x=gate_up_out,
+        quantized_weight=w2,
+        weight_scale=w2_scale,
+        group_list=group_list,
+        x_scale=w2_input_scale,
+        quant_mode="pertensor")
+
+    unsorted_topk_ids = torch.argsort(sorted_topk_ids.float()).to(torch.int32)
+    unsorted_hidden_states = down_out.index_select(0, unsorted_topk_ids)
+    final_hidden_states = unsorted_hidden_states.reshape(
+        bsz, top_k // ep_size, -1).sum(1)
+
+    return final_hidden_states
 
 
 def fused_experts(
