@@ -969,11 +969,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.query_start_loc[num_reqs + 1:].fill_(-1)
 
         query_start_loc = self.query_start_loc[:num_reqs + 1]
-        seq_lens = self.seq_lens[:num_reqs]
         # Use host tensor, other wise error: tensor.hostData is null
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start_loc,
             seq_lens=self.seq_lens_cpu[:num_reqs])
+        self.seq_lens_list = self.seq_lens_np.tolist()[:num_input_tokens]
         with_prefill = attn_state not in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
@@ -1614,8 +1614,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 device=query_start_loc.device,
                 dtype=query_start_loc.dtype,
             )
-            seq_lens = self.seq_lens_cpu[:num_reqs]
+            seq_lens = self.seq_lens_np[:num_reqs]
             seq_lens[:] = seq_lens + 2
+            self.seq_lens_list = self.seq_lens_np.tolist()[:num_tokens]
 
             common_attn_metadata = CommonAttentionMetadata(
                 query_start_loc=query_start_loc, seq_lens=seq_lens)
