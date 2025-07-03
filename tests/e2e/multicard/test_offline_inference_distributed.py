@@ -165,3 +165,20 @@ def test_models_distributed_DeepSeek_W8A8():
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+def test_models_distributed_pangu():
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+
+    with VllmRunner(
+            snapshot_download("vllm-ascend/pangu-pro-moe-pruing"),
+            max_model_len=8192,
+            enforce_eager=True,
+            dtype="auto",
+            tensor_parallel_size=4,
+            distributed_executor_backend="mp",
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)

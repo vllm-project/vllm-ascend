@@ -132,19 +132,6 @@ def communication_adaptation_310p():
     torch.distributed.distributed_c10d.all_reduce = all_reduce_wrapper_310p(
         torch.distributed.distributed_c10d.all_reduce)
 
-    def reduce_scatter_310p(output_tensor, input_tensor, group=None):
-        rank = torch.distributed.get_rank(group)
-        world_size = torch.distributed.get_world_size(group)
-        torch.distributed.all_reduce(input_tensor,
-                                     torch.distributed.ReduceOp.SUM,
-                                     group,
-                                     async_op=False)
-        interval = input_tensor.shape[0] // world_size
-        output_tensor[:] = input_tensor[rank * interval:(rank + 1) * interval]
-
-    torch.distributed._reduce_scatter_base = reduce_scatter_310p
-    torch.distributed.distributed_c10d._reduce_scatter_base = reduce_scatter_310p
-
 
 if is_310p():
     communication_adaptation_310p()

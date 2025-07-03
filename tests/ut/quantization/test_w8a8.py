@@ -381,6 +381,58 @@ class TestAscendC8KVCacheMethod(TestBase):
             self.assertEqual(mock_scatter.call_count, 2)
             self.assertTrue(torch.equal(result, expected_output))
 
+    @patch('torch_npu.npu_scatter_nd_update_')
+    @patch("vllm_ascend.quantization.w8a8.quant_per_tensor")
+    def test_apply_attn_metadata_without_decode(self, mock_quant,
+                                                mock_scatter):
+
+        num_tokens = 2
+        query = torch.randn(num_tokens,
+                            self.layer.num_heads * self.layer.head_size)
+        key = torch.randn(num_tokens,
+                          self.layer.num_kv_heads * self.layer.head_size)
+        value = torch.randn(num_tokens,
+                            self.layer.num_kv_heads * self.layer.head_size)
+        output = torch.empty_like(query)
+
+        attn_metadata = MagicMock(spec=[
+            'attn_state', 'seq_lens', 'block_tables', 'slot_mapping',
+            'attn_mask'
+        ])
+        attn_metadata.attn_state = AscendAttentionState.DecodeOnly
+        attn_metadata.seq_lens = [10, 10]
+        attn_metadata.block_tables = torch.tensor([[0, 1], [1, 2]])
+        attn_metadata.slot_mapping = torch.tensor([0, 1])
+        attn_metadata.attn_mask = None
+
+        block_size = 16
+        key_cache = torch.empty(2, block_size, self.layer.num_kv_heads,
+                                self.layer.head_size)
+        value_cache = torch.empty(2, block_size, self.layer.num_kv_heads,
+                                  self.layer.head_size)
+        kv_cache = (key_cache, value_cache)
+
+        mock_quant.side_effect = [key, value]
+
+        self.layer.key_antiquant_scale.data = torch.ones(
+            self.layer.num_kv_heads * self.layer.head_size)
+        self.layer.value_antiquant_scale.data = torch.ones(
+            self.layer.num_kv_heads * self.layer.head_size)
+        self.method.process_weights_after_loading(self.layer)
+
+        expected_output = torch.randn(
+            num_tokens, self.layer.num_heads * self.layer.head_size)
+        with patch('torch_npu.npu_incre_flash_attention',
+                   return_value=expected_output):
+            result = self.method.apply(self.layer, query, key, value, kv_cache,
+                                       attn_metadata,
+                                       self.attention_type.DECODER, 1.0,
+                                       output)
+
+            self.assertEqual(mock_quant.call_count, 2)
+            self.assertEqual(mock_scatter.call_count, 2)
+            self.assertTrue(torch.equal(result, expected_output))
+
     @patch("vllm_ascend.quantization.w8a8.quant_per_tensor")
     @patch('torch_npu._npu_flash_attention')
     def test_apply_prefill_no_cache(self, mock_flash, mock_quant):
