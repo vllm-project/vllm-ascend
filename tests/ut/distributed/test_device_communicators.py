@@ -2,8 +2,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-import torch.distributed as dist
-from torch.distributed import ReduceOp
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm_ascend.distributed.device_communicators.pyhccl import \
     PyHcclCommunicator
