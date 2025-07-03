@@ -37,8 +37,11 @@ from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group,
+                                          is_v1_kv_transfer_group)
 from vllm.distributed.parallel_state import get_dp_group, get_pp_group
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -1207,6 +1210,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     )
                 else:
                     assert self.model is not None
+                    if has_kv_transfer_group() and is_v1_kv_transfer_group():
+                        kvconnector = get_kv_transfer_group()
+                        kvconnector.bind_connector_metadata(
+                            scheduler_output.kv_connector_metadata)
+                        kvconnector.start_load_kv(get_forward_context())
                     hidden_states = self.model(
                         input_ids=input_ids,
                         positions=positions,
@@ -1214,6 +1222,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         inputs_embeds=inputs_embeds,
                         **model_kwargs,
                     )
+                    if has_kv_transfer_group() and is_v1_kv_transfer_group():
+                        get_kv_transfer_group().wait_for_save()
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
