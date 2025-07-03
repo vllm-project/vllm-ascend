@@ -165,7 +165,7 @@ class NPUPlatform(Platform):
             if not compilation_config.full_cuda_graph:
                 compilation_config.splitting_ops.extend(
                     ["vllm.unified_ascend_attention_with_output"])
-                update_aclgraph_sizes(vllm_config)
+            update_aclgraph_sizes(vllm_config)
 
         if parallel_config and parallel_config.worker_cls == "auto":
             if envs.VLLM_USE_V1:
