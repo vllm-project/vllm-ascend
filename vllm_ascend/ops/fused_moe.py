@@ -26,11 +26,11 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import (GroupCoordinator, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.distributed.parallel_state import get_dp_group, get_tp_group
+from vllm.distributed.parallel_state import (get_dp_group, get_tp_group,
+                                             get_world_group)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEParallelConfig, MoEConfig, UnquantizedFusedMoEMethod,
-    determine_expert_map)
+    FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 
@@ -40,7 +40,16 @@ from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
                                get_fused_moe_state, is_310p, npu_stream_switch,
-                               npu_wait_tensor)
+                               npu_wait_tensor, vllm_version_is)
+
+if vllm_version_is("0.9.1"):
+    from vllm.model_executor.layers.fused_moe.layer import \
+        FusedMoEParallelConfig
+    from vllm.model_executor.layers.fused_moe.layer import \
+        MoEConfig as FusedMoEConfig
+else:
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig, FusedMoEParallelConfig)
 
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
 
@@ -933,7 +942,7 @@ def select_experts(
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
-    def __init__(self, moe: MoEConfig = None):
+    def __init__(self, moe: FusedMoEConfig = None):
 
         super().__init__(moe=moe)
         vllm_config = get_current_vllm_config()
@@ -1110,13 +1119,21 @@ class AscendFusedMoE(FusedMoE):
 
         vllm_config = get_current_vllm_config()
 
-        self.moe_parallel_config: FusedMoEParallelConfig = (
-            FusedMoEParallelConfig.make(
+        if vllm_version_is("0.9.1"):
+            self.moe_parallel_config = FusedMoEParallelConfig.make(
                 tp_size_=(tp_size if tp_size is not None else
                           get_tensor_model_parallel_world_size()),
                 dp_size_=(dp_size if dp_size is not None else
                           get_dp_group().world_size),
-                vllm_parallel_config=vllm_config.parallel_config))
+                vllm_parallel_config=vllm_config.parallel_config)
+        else:
+            self.moe_parallel_config = FusedMoEParallelConfig.make(
+                tp_size_=(tp_size if tp_size is not None else
+                          get_tensor_model_parallel_world_size()),
+                dp_size_=(dp_size if dp_size is not None else
+                          get_dp_group().world_size),
+                world_size_=get_world_group().world_size,
+                vllm_parallel_config=vllm_config.parallel_config)
 
         self.top_k = top_k
         self.num_experts = num_experts
@@ -1167,15 +1184,26 @@ class AscendFusedMoE(FusedMoE):
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
 
-        moe = MoEConfig(
-            num_experts=self.global_num_experts,
-            experts_per_token=top_k,
-            hidden_dim=hidden_size,
-            num_local_experts=self.local_num_experts,
-            moe_parallel_config=self.moe_parallel_config,
-            # TODO (bnell): this needs to be fixed for quantized types.
-            in_dtype=params_dtype,
-        )
+        if vllm_version_is("0.9.1"):
+            moe = FusedMoEConfig(
+                num_experts=self.global_num_experts,
+                experts_per_token=top_k,
+                hidden_dim=hidden_size,
+                num_local_experts=self.local_num_experts,
+                moe_parallel_config=self.moe_parallel_config,
+                # TODO (bnell): this needs to be fixed for quantized types.
+                in_dtype=params_dtype,
+            )
+        else:
+            moe = FusedMoEConfig.make(
+                num_experts=self.global_num_experts,
+                experts_per_token=top_k,
+                hidden_dim=hidden_size,
+                num_local_experts=self.local_num_experts,
+                moe_parallel_config=self.moe_parallel_config,
+                # TODO (bnell): this needs to be fixed for quantized types.
+                in_dtype=params_dtype,
+                quant_config=quant_config)
 
         if quant_config is None:
             self.quant_method = AscendUnquantizedFusedMoEMethod(moe)
