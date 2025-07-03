@@ -1,4 +1,4 @@
-# Supported Models
+# Model Support
 
 ## Text-only Language Models
 
