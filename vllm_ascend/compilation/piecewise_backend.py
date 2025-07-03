@@ -160,7 +160,6 @@ class NPUPiecewiseBackend:
     def __call__(self, *args) -> Any:
         forward_context = get_forward_context()
         graph_params = get_graph_params()
-        forward_context.current_stream = torch.npu.Stream()
         forward_context.capturing = False
 
         if (getattr(forward_context.attn_metadata, "attn_state",
@@ -249,9 +248,7 @@ class NPUPiecewiseBackend:
 
                 # mind-exploding: carefully manage the reference and memory.
                 forward_context.capturing = True
-                with torch.npu.graph(aclgraph,
-                                     pool=self.graph_pool,
-                                     stream=forward_context.current_stream):
+                with torch.npu.graph(aclgraph, pool=self.graph_pool):
                     # `output` is managed by pytorch's aclgraph pool
                     output = entry.runnable(*args)
                     if self.is_last_graph:
