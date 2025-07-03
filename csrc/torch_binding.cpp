@@ -181,7 +181,6 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
         fe::PlatFormInfos platform_infos;
         int device_id = 0;
         fe::PlatformInfoManager::GeInstance().GetRuntimePlatformInfosByDevice(device_id, platform_infos);
-        platform_ascendc::PlatformAscendC plate_form_c = platform_ascendc::PlatformAscendC(&platform_infos);
         uint32_t aivNum = platform_infos.GetCoreNum();
         uint32_t loop_cnt = (size + aivNum - 1) / aivNum;
 
