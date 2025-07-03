@@ -2101,7 +2101,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.parallel_config.enable_expert_parallel:
             new_graph_batch_sizes = []
             for graph_batch_size in self.torchair_graph_batch_sizes:
-                cur_graph_batch_size = graph_batch_size + tp_size - graph_batch_size % tp_size
-                if cur_graph_batch_size not in new_graph_batch_sizes:
+                cur_graph_batch_size = (graph_batch_size + tp_size -
+                                        1) // tp_size * tp_size
+                if cur_graph_batch_size not in new_graph_batch_sizes and \
+                    cur_graph_batch_size <= self.scheduler_config.max_num_batched_tokens:
                     new_graph_batch_sizes.append(cur_graph_batch_size)
             self.torchair_graph_batch_sizes = new_graph_batch_sizes
