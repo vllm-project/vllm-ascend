@@ -73,5 +73,53 @@
       "dataset_path": "/github/home/.cache/datasets/ShareGPT_V3_unfiltered_cleaned_split.json",
       "num_prompts": 200
     }
+  },
+  {
+    "test_name": "serving_qwen3_30B_A3B_tp1",
+    "qps_list": [
+      1,
+      4,
+      16,
+      "inf"
+    ],
+    "server_parameters": {
+      "model": "Qwen/Qwen3-30B-A3B",
+      "tensor_parallel_size": 4,
+      "swap_space": 16,
+      "disable_log_stats": "",
+      "disable_log_requests": "",
+      "load_format": "dummy"
+    },
+    "client_parameters": {
+      "model": "Qwen/Qwen3-30B-A3B",
+      "endpoint_type": "vllm",
+      "dataset_name": "sharegpt",
+      "dataset_path": "/github/home/.cache/datasets/ShareGPT_V3_unfiltered_cleaned_split.json",
+      "num_prompts": 200
+    }
+  },
+  {
+    "test_name": "serving_qwen3_32B_tp1",
+    "qps_list": [
+      1,
+      4,
+      16,
+      "inf"
+    ],
+    "server_parameters": {
+      "model": "Qwen/Qwen3-32B",
+      "tensor_parallel_size": 4,
+      "swap_space": 16,
+      "disable_log_stats": "",
+      "disable_log_requests": "",
+      "load_format": "dummy"
+    },
+    "client_parameters": {
+      "model": "Qwen/Qwen3-32B",
+      "endpoint_type": "vllm",
+      "dataset_name": "sharegpt",
+      "dataset_path": "/github/home/.cache/datasets/ShareGPT_V3_unfiltered_cleaned_split.json",
+      "num_prompts": 200
+    }
   }
 ]
