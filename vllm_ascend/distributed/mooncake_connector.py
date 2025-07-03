@@ -355,6 +355,7 @@ class KVCacheRecvingThread(threading.Thread):
         num_blocks = len(local_block_ids)
 
         session_id = f"{remote_host}:{remote_transfer_port}"
+        src_list, dst_list, length_list = [], [], []
         for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
                 zip(local_kv_caches_base_addrs, remote_kv_caches_base_addrs)):
             block_len = (self.block_len[k % 2]
@@ -364,14 +365,15 @@ class KVCacheRecvingThread(threading.Thread):
                 src = src_layer_base_addr + local_block_ids[0] * block_len
                 dst = dst_layer_base_addr + remote_block_id[0] * block_len
                 length = len(local_block_ids) * block_len
-                ret = self.engine.transfer_sync_read(session_id, src, dst,
-                                                     length)
-                if ret < 0:
-                    logger.error(
-                        "Mooncake transfer failed for request %s: "
-                        "src=%x, dst=%x, length=%s", req_meta["request_id"],
-                        src, dst, length)
-                    raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
+                src_list.append(src)
+                dst_list.append(dst)
+                length_list.append(length)
+        ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list,
+                                             length_list)
+        if ret < 0:
+            logger.error(
+                "Mooncake transfer failed for request %s", req_meta["request_id"])
+            raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
 
         req_end_time = time.perf_counter()
         req_transfer_elapsed = (req_end_time - req_start_time) * 1000
