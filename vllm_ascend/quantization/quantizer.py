@@ -219,11 +219,6 @@ class VLLMAscendQuantizer:
             "Attention method is not implemented for the current quant type.")
 
     @staticmethod
-    def build_shareHead_method():
-        raise NotImplementedError(
-            "shareHead method is not implemented for the current quant type.")
-
-    @staticmethod
     def get_linear_quant_type(quant_description: Dict[str, Any], prefix: str,
                               packed_modules_mapping: Dict[str, Any]):
         proj_name = prefix.split(".")[-1]
@@ -285,10 +280,6 @@ class W8A8Quantizer(VLLMAscendQuantizer):
 
     @staticmethod
     def build_linear_method():
-        return AscendW8A8LinearMethod()
-
-    @staticmethod
-    def build_shareHead_method():
         return AscendW8A8LinearMethod()
 
 

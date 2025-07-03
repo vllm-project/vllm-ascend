@@ -376,4 +376,4 @@ class AscendEmbeddingMethod(AscendLinearMethod):
                  packed_modules_mapping: Dict[str, Any]) -> None:
         self.quantizer = AscendQuantizer.get_quantizer(
             quant_config.quant_description, prefix, packed_modules_mapping)
-        self.quant_method = self.quantizer.build_shareHead_method()
+        self.quant_method = self.quantizer.build_linear_method()
