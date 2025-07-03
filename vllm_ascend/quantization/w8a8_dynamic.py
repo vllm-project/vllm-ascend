@@ -279,7 +279,9 @@ def fused_experts_with_all2all(
                                                scatter_size_list,
                                                gather_size_list)
 
-        sorted_local_expert_idx, sorted_idx = torch.sort(local_expert_idx)
+        # Workaround: Convert to float so that sort runs on AI Core instead of slower AICPU
+        sorted_local_expert_idx, sorted_idx = torch.sort(local_expert_idx.float())
+        sorted_local_expert_idx = sorted_local_expert_idx.to(local_expert_idx.dtype)
 
         expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
             sorted_local_expert_idx, local_num_experts).to(torch.int64)
@@ -315,7 +317,8 @@ def fused_experts_with_all2all(
         group_list_type=group_list_type)
 
     if expert_map is not None:
-        resorted_idx = torch.argsort(sorted_idx)
+        # Workaround: Convert to float so that argsort runs on AI Core instead of slower AICPU
+        resorted_idx = torch.argsort(sorted_idx.float()).to(sorted_idx.dtype)
         hidden_states = hidden_states[resorted_idx]
         hidden_states = ep_group.all_to_all(hidden_states, 0, 0,
                                             gather_size_list,

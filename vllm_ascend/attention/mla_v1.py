@@ -15,7 +15,7 @@ from vllm.model_executor.layers.linear import (LinearBase,
 from vllm.utils import cdiv, round_down
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention import _ALLOWED_NUM_QUERIES_PER_KV
+from vllm_ascend.attention.attention import _ALLOWED_NUM_QUERIES_PER_KV, AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
@@ -312,6 +312,61 @@ class AscendMLAMetadataBuilder:
                                                           max_blocks]
 
         return graph_block_tables[:num_seqs, :max_blocks]
+
+    def build_dummy_prefill(self, num_reqs: int,
+            num_actual_tokens: int) -> AscendMLAMetadata:
+        device = self.runner.device
+        _, max_blocks = self.runner.graph_block_tables.shape
+        block_table = torch.zeros((num_reqs, max_blocks),
+                                  dtype=torch.int32,
+                                  device=device)
+        block_table = self._get_graph_runner_block_tables(
+            num_reqs, block_table)
+        seq_lens = torch.ones(num_reqs, dtype=torch.int32)
+        input_positions = torch.zeros(num_reqs,
+                                      dtype=torch.int32,
+                                      device=device).long()
+        slot_mapping = torch.full((num_reqs, ),
+                                  PAD_SLOT_ID,
+                                  dtype=torch.int32,
+                                  device=device)
+        query_start_loc = torch.full((num_reqs, ),
+                                     -1,
+                                     dtype=torch.int32,
+                                     device=device)
+
+        query_lens = torch.tensor([1024], dtype=torch.int32)
+        max_query_len = query_lens.max().item()
+
+        mask_builder = AttentionMaskBuilder.initialize_from_len(128, torch.bfloat16)
+        attn_mask = mask_builder.get_attn_mask(num_actual_tokens, torch.bfloat16, 'npu')
+        prefill_metadata = AscendMLAPrefillMetadata(
+            attn_mask=attn_mask,
+            query_lens=query_lens,
+            seq_lens=seq_lens,
+            context_lens=seq_lens,
+            input_positions=input_positions,
+            block_table=block_table,
+            max_query_len=max_query_len,
+            max_seq_lens=num_actual_tokens,
+            query_start_loc=query_start_loc,
+        )
+        return self.metadata_cls(  # type: ignore
+            num_input_tokens=num_actual_tokens,
+            num_actual_tokens=num_actual_tokens,
+            slot_mapping=slot_mapping,
+            head_dim=self.runner.model_config.get_head_size(),
+            num_decodes=0,
+            num_decode_tokens=0,
+            num_prefills=1,
+            attn_mask=attn_mask,
+            attn_state=AscendAttentionState.PrefillNoCache,
+            prefill=prefill_metadata,
+            decode=None,
+            query_start_loc=query_start_loc,
+            seq_lens=seq_lens,
+            block_tables=block_table,
+        )
 
     def build_dummy(self, num_reqs: int,
                     num_actual_tokens: int) -> AscendMLAMetadata:

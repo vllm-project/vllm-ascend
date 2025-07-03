@@ -1858,7 +1858,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     for k, v in self.intermediate_tensors.items()
                 })
 
-            with set_forward_context(None,
+            attn_metadata = self.attn_metadata_builder.build_dummy_prefill(
+                num_reqs=1, num_actual_tokens=input_ids.shape[0])
+
+            with set_forward_context(attn_metadata,
                                      self.vllm_config,
                                      num_tokens=num_tokens):
                 if self.torchair_graph_enabled and not with_prefill:
@@ -1893,7 +1896,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         input_ids=input_ids,
                         positions=positions,
                         intermediate_tensors=intermediate_tensors,
-                        inputs_embeds=inputs_embeds)
+                        inputs_embeds=inputs_embeds,
+                        attn_metadata=attn_metadata)
                     if self.use_aux_hidden_state_outputs:
                         hidden_states, _ = hidden_states
                     else:
