@@ -63,7 +63,10 @@ def test_mtp_correctness(
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
-        ref_llm = LLM(model=model_name, max_model_len=256, gpu_memory_utilization=0.8, enforce_eager=True)
+        ref_llm = LLM(model=model_name,
+                      max_model_len=256,
+                      gpu_memory_utilization=0.8,
+                      enforce_eager=True)
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
 
