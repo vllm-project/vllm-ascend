@@ -10,7 +10,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.quantization.w8a8 import (AscendC8KVCacheMethod,
                                            AscendW8A8FusedMoEMethod,
                                            AscendW8A8LinearMethod,
-                                           fused_experts, native_grouped_topk,
+                                           fused_experts, fused_experts_310p,
+                                           native_grouped_topk,
                                            quant_per_tensor, select_experts)
 
 
@@ -95,6 +96,25 @@ class TestAscendW8A8LinearMethod(TestBase):
 
     @patch("torch_npu.npu_quant_matmul")
     def test_apply_with_x_is_int8(self, mock_npu_quant_matmul):
+        layer = MagicMock()
+        layer.aclnn_input_scale = 0.1
+        layer.aclnn_input_offset = 0.2
+        layer.weight = torch.randn(128, 256)
+        layer.deq_scale = 0.3
+
+        x = torch.randint(-128, 127, (32, 128), dtype=torch.int8)
+        bias = torch.randn(256)
+
+        expected_y_output = torch.randn(32, 256)
+        mock_npu_quant_matmul.return_value = expected_y_output
+
+        output = self.method.apply(layer, x, bias)
+        expected_y_output += bias
+        self.assertTrue(torch.equal(output, expected_y_output))
+
+    @patch("vllm_ascend.quantization.w8a8.is_310p", return_value=True)
+    @patch("torch_npu.npu_quant_matmul")
+    def test_apply_with_x_is_310p(self, mock_npu_quant_matmul, mock_is_310p):
         layer = MagicMock()
         layer.aclnn_input_scale = 0.1
         layer.aclnn_input_offset = 0.2
@@ -221,6 +241,36 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         mock_fused_experts.assert_called_once()
         self.assertEqual(result.shape, (32, self.hidden_size))
 
+    @patch("vllm_ascend.quantization.w8a8.is_310p", return_value=True)
+    @patch('vllm_ascend.quantization.w8a8.select_experts')
+    @patch('vllm_ascend.quantization.w8a8.fused_experts_310p')
+    def test_apply_is_310p(self, mock_fused_experts_310p, mock_select_experts,
+                           mock_is_310p):
+        # Setup
+        mock_layer = MagicMock()
+        x = torch.randn(32, self.hidden_size)
+        router_logits = torch.randn(32, 128)  # 128 experts
+        top_k = 2
+
+        # Mock return values
+        mock_select_experts.return_value = (torch.randn(32, top_k),
+                                            torch.randint(0, 128, (32, top_k)))
+        mock_fused_experts_310p.return_value = torch.randn(
+            32, self.hidden_size)
+
+        # Test
+        result = self.moe_method.apply(layer=mock_layer,
+                                       x=x,
+                                       router_logits=router_logits,
+                                       top_k=top_k,
+                                       renormalize=True,
+                                       global_num_experts=128)
+
+        # Assertions
+        mock_select_experts.assert_called_once()
+        mock_fused_experts_310p.assert_called_once()
+        self.assertEqual(result.shape, (32, self.hidden_size))
+
 
 class TestAscendC8KVCacheMethod(TestBase):
 
@@ -255,7 +305,22 @@ class TestAscendC8KVCacheMethod(TestBase):
             expected_shape = (self.layer.num_kv_heads * self.layer.head_size, )
             self.assertEqual(param.shape, expected_shape)
 
-    def test_process_weights_after_loading(self):
+    @patch("vllm_ascend.quantization.w8a8.is_310p", return_value=False)
+    def test_process_weights_after_loading_not_310p(self, mock_is_310p):
+        key_data = torch.ones(4 * 64)
+        value_data = torch.ones(4 * 64) * 2
+
+        self.layer.key_antiquant_scale.data = key_data
+        self.layer.value_antiquant_scale.data = value_data
+
+        self.method.process_weights_after_loading(self.layer)
+
+        self.assertEqual(self.method.antiquant_scale_comb.shape, (2, 256))
+        self.assertTrue(torch.all(self.method.antiquant_scale_comb[0] == 1))
+        self.assertTrue(torch.all(self.method.antiquant_scale_comb[1] == 2))
+
+    @patch("vllm_ascend.quantization.w8a8.is_310p", return_value=True)
+    def test_process_weights_after_loading_is_310p(self, mock_is_310p):
         key_data = torch.ones(4 * 64)
         value_data = torch.ones(4 * 64) * 2
 
@@ -525,6 +590,67 @@ class TestFusedExperts(TestBase):
                 global_num_experts=num_experts,
                 expert_map=None,
             )
+
+
+class TestFusedExperts310(TestBase):
+
+    @patch('torch_npu.npu_quant_grouped_matmul_dequant')
+    @patch("vllm_ascend.quantization.w8a8.quant_per_tensor")
+    @patch('vllm_ascend.quantization.w8a8.get_ep_group')
+    @patch('torch_npu.npu_swiglu')
+    def test_fused_experts_310p_with_expert_map(self, mock_swiglu,
+                                                mock_get_ep_group,
+                                                mock_quant_per_tensor,
+                                                mock_matmul_dequant):
+        num_tokens = 32
+        hidden_size = 128
+        intermediate_size = 256
+        num_experts = 4
+        top_k = 1
+
+        hidden_states = torch.randn(num_tokens, hidden_size)
+
+        w1 = torch.randn(num_experts, intermediate_size * 2, hidden_size)
+        w1_scale = torch.tensor([0.1])
+        w1_input_scale = torch.tensor([[0.2, 0.2], [0.2, 0.2]])
+
+        w2 = torch.randn(num_experts, hidden_size, intermediate_size)
+        w2_scale = torch.tensor([0.1])
+        w2_input_scale = torch.tensor([0.2])
+
+        topk_weights = torch.rand(num_tokens, top_k)
+        topk_ids = torch.randint(0, num_experts, (num_tokens, top_k))
+        expert_map = torch.arange(num_experts)
+
+        mock_get_ep_group.return_value.world_size = 1
+
+        mock_quant_per_tensor.return_value = torch.randint(-128,
+                                                           127,
+                                                           hidden_states.shape,
+                                                           dtype=torch.int8)
+
+        mock_swiglu.return_value = torch.randn(num_tokens * top_k,
+                                               intermediate_size)
+
+        mock_matmul_dequant.return_value = hidden_states
+
+        output = fused_experts_310p(
+            hidden_states=hidden_states,
+            w1=w1,
+            w1_scale=w1_scale,
+            w1_input_scale=w1_input_scale,
+            w2=w2,
+            w2_scale=w2_scale,
+            w2_input_scale=w2_input_scale,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            top_k=top_k,
+            global_num_experts=num_experts,
+            expert_map=expert_map,
+        )
+
+        self.assertEqual(output.shape, (num_tokens, hidden_size))
+        self.assertEqual(mock_matmul_dequant.call_count, 2)
 
 
 class TestSelectExperts(TestBase):
