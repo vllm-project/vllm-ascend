@@ -18,12 +18,10 @@
 #
 
 import os
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
 
 import torch
 from vllm import LLM
-
-os.environ["VLLM_USE_MODELSCOPE"] = "True"
-
 
 def get_detailed_instruct(task_description: str, query: str) -> str:
     return f'Instruct: {task_description}\nQuery:{query}'
