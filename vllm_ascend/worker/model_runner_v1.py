@@ -61,7 +61,6 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.spec_decode.utils import is_spec_decode_supported
 from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (gather_mm_placeholders,
@@ -92,6 +91,9 @@ else:
 import vllm.envs as envs_vllm
 
 import vllm_ascend.envs as envs_ascend
+
+if vllm_version_is("0.9.1"):
+    from vllm.v1.spec_decode.utils import is_spec_decode_supported
 
 
 @dataclass
@@ -2093,6 +2095,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             pin_memory=True,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.block_size],
+            is_spec_decode=bool(self.vllm_config.speculative_config),
         )
 
         kv_cache_sizes = {}
@@ -2272,9 +2275,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             # Skip requests that require top-p, top-k, etc.
             req_id = self.input_batch.req_ids[i]
-            if not is_spec_decode_supported(req_id, self.input_batch):
-                draft_token_ids.append([])
-                continue
+            if vllm_version_is("0.9.1"):
+                if not is_spec_decode_supported(req_id, self.input_batch):
+                    draft_token_ids.append([])
+                    continue
+            else:
+                if req_id in self.input_batch.spec_decode_unsupported_reqs:
+                    draft_token_ids.append([])
+                    continue
 
             # Add sampled_token_ids to token_ids_cpu.
             start_idx = self.input_batch.num_tokens_no_spec[i]
