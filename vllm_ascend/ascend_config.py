@@ -21,7 +21,7 @@ from vllm.logger import logger
 TORCHAIR_MODEL_LIST = ["deepseek", "pangu"]
 
 
-def check_torchair_supported(model_type: str):
+def _check_torchair_supported(model_type: str):
     for supported_model in TORCHAIR_MODEL_LIST:
         if supported_model in model_type.lower():
             return True
@@ -147,10 +147,10 @@ def check_ascend_config(vllm_config, enforce_eager):
         else:
             # torchair_graph case
             if ascend_config.torchair_graph_config.enabled:
-                # torchair_graph is supported for deepseek model only currently.
+                # torchair_graph is supported for deepseek/pangu model only.
                 if vllm_config.model_config:
                     model_type = vllm_config.model_config.hf_config.model_type
-                    if not check_torchair_supported(model_type):
+                    if not _check_torchair_supported(model_type):
                         raise NotImplementedError(
                             "Torchair graph mode only works with following model types:"
                             f"{TORCHAIR_MODEL_LIST}.")

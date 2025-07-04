@@ -27,7 +27,6 @@ from vllm.attention.backends.utils import PAD_SLOT_ID, CommonAttentionState
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d)
@@ -160,8 +159,6 @@ class AscendAttentionTorchairMetadataBuilder:
 
     def __init__(self, runner):
         self.runner = runner
-        self.torchair_graph_enabled = get_ascend_config(
-        ).torchair_graph_config.enabled
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
