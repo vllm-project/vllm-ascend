@@ -19,7 +19,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 import zmq
-from mooncake.engine import TransferEngine
+from mooncake.engine import TransferEngine  # type: ignore
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1, KVConnectorMetadata, KVConnectorRole)
@@ -78,19 +78,21 @@ class KVCacheTaskTracker:
             self.listener.start()
             self.socket = None
         else:
-            self.listener = None
-            self.socket = make_zmq_socket(ctx=zmq.Context(),
-                                          path=self.socket_path,
-                                          socket_type=zmq.PUSH,
-                                          bind=False)
+            self.listener = None  # type: ignore
+            self.socket = make_zmq_socket(
+                ctx=zmq.Context(),  # type: ignore
+                path=self.socket_path,
+                socket_type=zmq.PUSH,  # type: ignore
+                bind=False)
             logger.info("Connecting to transfer socket at %s",
                         self.socket_path)
 
     def _listen_for_completion_signals(self):
-        socket = make_zmq_socket(ctx=zmq.Context(),
-                                 path=self.socket_path,
-                                 socket_type=zmq.PULL,
-                                 bind=True)
+        socket = make_zmq_socket(
+            ctx=zmq.Context(),  # type: ignore
+            path=self.socket_path,
+            socket_type=zmq.PULL,  # type: ignore
+            bind=True)
         logger.info("Listening for completion signals on %s", self.socket_path)
 
         while True:
@@ -106,7 +108,7 @@ class KVCacheTaskTracker:
         if self.tp_rank == 0:
             self._increment_task_count(request_id, tp_rank)
         else:
-            self.socket.send_pyobj((request_id, tp_rank))
+            self.socket.send_pyobj((request_id, tp_rank))  # type: ignore
             logger.debug("Sent done signal for request %s to tp 0", request_id)
 
     def _increment_task_count(self, request_id: str, tp_rank: int):
@@ -180,7 +182,7 @@ class KVCacheSendingThread(threading.Thread):
         handshake_port = self.side_channel_port + self.tp_rank
         path = make_zmq_path("tcp", self.side_channel_host, handshake_port)
         logger.info("Starting listening on path: %s", path)
-        with zmq_ctx(zmq.ROUTER, path) as sock:
+        with zmq_ctx(zmq.ROUTER, path) as sock:  # type: ignore
             self.ready_event.set()
             decoder = msgspec.msgpack.Decoder(type=tuple)
             while True:
@@ -209,10 +211,11 @@ class KVCacheSendingThread(threading.Thread):
                         while True:
                             try:
                                 # Send ACK to the sender.
-                                sock.send_multipart((identity, b"", b"ACK"),
-                                                    flags=zmq.NOBLOCK)
+                                sock.send_multipart(
+                                    (identity, b"", b"ACK"),
+                                    flags=zmq.NOBLOCK)  # type: ignore
                                 break
-                            except zmq.Again:
+                            except zmq.Again:  # type: ignore
                                 # If the socket is not ready, retry sending.
                                 logger.debug(
                                     "Socket not ready, retrying to send ACK for "
@@ -250,7 +253,7 @@ class KVCacheRecvingThread(threading.Thread):
         # TODO(jianzs): find a better way to detect MLA.
         self.use_mla = len(block_len) == 2
 
-        self.request_queue = queue.Queue()
+        self.request_queue: queue.Queue[Any] = queue.Queue()
         # TODO(jianzs): make this configurable
         self.executor = ThreadPoolExecutor(max_workers=32)
 
@@ -261,8 +264,9 @@ class KVCacheRecvingThread(threading.Thread):
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeAgentMetadata)
         self.remote_sockets_lock = threading.Lock()
-        self.remote_sockets: dict[str, deque[zmq.Socket]] = defaultdict(deque)
-        self.remote_poller = zmq.Poller()
+        self.remote_sockets: dict[str, deque[zmq.Socket]] = defaultdict(
+            deque)  # type: ignore
+        self.remote_poller = zmq.Poller()  # type: ignore
         self.timeout = 1.0  # seconds
 
     def add_request(self, request_id: str, local_block_ids: list[int],
@@ -388,7 +392,7 @@ class KVCacheRecvingThread(threading.Thread):
     def _get_remote_metadata(self, remote_host: str,
                              remote_handshake_port: int) -> None:
         """Get the metadata from the remote host."""
-        sock: Optional[zmq.Socket] = None
+        sock: Optional[zmq.Socket] = None  # type: ignore
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
             ensure_zmq_send(sock, self.encoder.encode((GET_META_MSG, "")))
@@ -411,7 +415,7 @@ class KVCacheRecvingThread(threading.Thread):
                                remote_handshake_port: int):
         logger.debug("Sending done recving signal for request %s to %s:%d",
                      request_id, remote_host, remote_handshake_port)
-        sock: Optional[zmq.Socket] = None
+        sock: Optional[zmq.Socket] = None  # type: ignore
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
             data_bytes = self.encoder.encode(
@@ -440,17 +444,22 @@ class KVCacheRecvingThread(threading.Thread):
             if self.remote_sockets[remote_path]:
                 return self.remote_sockets[remote_path].popleft()
 
-            ctx = zmq.Context()
-            sock = make_zmq_socket(ctx=ctx,
-                                   path=remote_path,
-                                   socket_type=zmq.REQ,
-                                   bind=False)
-            sock.setsockopt(zmq.SNDTIMEO, int(self.timeout * 1000))
-            self.remote_poller.register(sock, zmq.POLLIN)
+            ctx = zmq.Context()  # type: ignore
+            sock = make_zmq_socket(
+                ctx=ctx,
+                path=remote_path,
+                socket_type=zmq.REQ,  # type: ignore
+                bind=False)
+            sock.setsockopt(zmq.SNDTIMEO,
+                            int(self.timeout * 1000))  # type: ignore
+            self.remote_poller.register(sock, zmq.POLLIN)  # type: ignore
             return sock
 
-    def _return_remote_socket(self, sock: zmq.Socket, remote_host: str,
-                              remote_handshake_port: int) -> None:
+    def _return_remote_socket(
+            self,
+            sock: zmq.Socket,
+            remote_host: str,  # type: ignore
+            remote_handshake_port: int) -> None:
         """Return the remote socket to the pool."""
         remote_path = make_zmq_path("tcp", remote_host, remote_handshake_port)
         with self.remote_sockets_lock:
@@ -939,12 +948,12 @@ class MooncakeConnectorWorker:
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
 
-    if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):
+    if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):  # type: ignore
         raise ValueError(f"Unexpected socket type: {socket_type}")
 
-    ctx: Optional[zmq.Context] = None
+    ctx: Optional[zmq.Context] = None  # type: ignore
     try:
-        ctx = zmq.Context()
+        ctx = zmq.Context()  # type: ignore
         yield make_zmq_socket(ctx=ctx,
                               path=addr,
                               socket_type=socket_type,
@@ -985,13 +994,15 @@ def string_to_int64_hash(input_str):
     return uint64_value
 
 
-def ensure_zmq_send(socket: zmq.Socket, data: bytes, max_retries: int = 3):
+def ensure_zmq_send(socket: zmq.Socket,
+                    data: bytes,
+                    max_retries: int = 3):  # type: ignore
     retries_left = max_retries
     while True:
         try:
             socket.send(data)
             return
-        except zmq.ZMQError as e:
+        except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:
                 logger.warning(
@@ -1004,10 +1015,11 @@ def ensure_zmq_send(socket: zmq.Socket, data: bytes, max_retries: int = 3):
                                    f"retries: {e}")
 
 
-def ensure_zmq_recv(socket: zmq.Socket,
-                    poller: zmq.Poller,
-                    timeout: float = 1.0,
-                    max_retries: int = 3) -> bytes:
+def ensure_zmq_recv(
+        socket: zmq.Socket,  # type: ignore
+        poller: zmq.Poller,  # type: ignore
+        timeout: float = 1.0,
+        max_retries: int = 3) -> bytes:
     retries_left = max_retries
     while True:
         try:
@@ -1015,8 +1027,8 @@ def ensure_zmq_recv(socket: zmq.Socket,
                 data = socket.recv()
                 return data
             else:
-                raise zmq.ZMQError("Receive timeout")
-        except zmq.ZMQError as e:
+                raise zmq.ZMQError("Receive timeout")  # type: ignore
+        except zmq.ZMQError as e:  # type: ignore
             retries_left -= 1
             if retries_left > 0:
                 logger.warning(f"Receive failed: {e}, retrying... "
