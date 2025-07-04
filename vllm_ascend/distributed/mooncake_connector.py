@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 import contextlib
 import hashlib
-import json
 import math
 import os
 import queue
 import random
-import socket
 import struct
 import threading
 import time
