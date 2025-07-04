@@ -899,10 +899,14 @@ class MooncakeConnectorWorker:
             raise RuntimeError("Mooncake memory registration failed.")
 
     def get_finished(self) -> tuple[set[str], set[str]]:
-        done_sending = (self.kv_send_thread.get_and_clear_finished_requests()  # type: ignore[attr-defined]
-                        if self.kv_role == 'kv_producer' else set())
-        done_recving = (self.kv_recv_thread.get_and_clear_finished_requests()  # type: ignore[attr-defined]
-                        if self.kv_role == 'kv_consumer' else set())
+        done_sending = (
+            self.kv_send_thread.
+            get_and_clear_finished_requests(  # type: ignore[attr-defined]
+            ) if self.kv_role == 'kv_producer' else set())
+        done_recving = (
+            self.kv_recv_thread.
+            get_and_clear_finished_requests(  # type: ignore[attr-defined]
+            ) if self.kv_role == 'kv_consumer' else set())
         if self.tp_rank == 0:
             logger.debug(
                 "Number of completed KV cache send requests: %d, receive "
@@ -947,7 +951,8 @@ class MooncakeConnectorWorker:
 
 
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignore
+def zmq_ctx(socket_type: Any,
+            addr: str) -> Iterator[zmq.Socket]:  # type: ignore
     """Context manager for a ZMQ socket"""
 
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):  # type: ignore
