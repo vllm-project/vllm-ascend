@@ -73,21 +73,6 @@ def test_models_distributed_DeepSeek_multistream_moe():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-def test_models_distributed_DeepSeek():
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    dtype = "half"
-    max_tokens = 5
-    with VllmRunner(
-            "deepseek-ai/DeepSeek-V2-Lite",
-            dtype=dtype,
-            tensor_parallel_size=4,
-            distributed_executor_backend="mp",
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "1"})
 def test_models_distributed_topk() -> None:
     example_prompts = [

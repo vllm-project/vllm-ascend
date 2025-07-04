@@ -314,7 +314,7 @@ class InputBatch:
         self.block_table.add_row(request.block_ids, req_index)
 
         if sampling_params := request.sampling_params:
-            if (self.is_spec_decode
+            if ((not vllm_version_is("0.9.1")) and self.is_spec_decode
                     and is_spec_decode_unsupported(sampling_params)):
                 self.spec_decode_unsupported_reqs.add(req_id)
             if sampling_params.sampling_type == SamplingType.GREEDY:

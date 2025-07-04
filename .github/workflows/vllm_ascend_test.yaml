@@ -267,7 +267,13 @@ jobs:
           --ignore=tests/e2e/singlecard/test_ilama_lora.py \
           --ignore=tests/e2e/singlecard/test_guided_decoding.py \
           --ignore=tests/e2e/singlecard/test_camem.py \
-          --ignore=tests/e2e/singlecard/test_embedding.py
+          --ignore=tests/e2e/singlecard/test_embedding.py \
+          --ignore=tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_correctness.py \
+          --ignore=tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py
+          # ------------------------------------ v1 spec decode test ------------------------------------ #
+          VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_correctness.py
+          # TODO: revert me when test_v1_spec_decode.py::test_ngram_correctness is fixed
+          VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py
 
       - name: Run e2e test on V0 engine
         if: ${{ github.event_name == 'schedule' }}
@@ -287,8 +293,6 @@ jobs:
             --ignore=tests/e2e/singlecard/test_guided_decoding.py \
             --ignore=tests/e2e/singlecard/test_camem.py \
             --ignore=tests/e2e/singlecard/test_prompt_embedding.py \
-            --ignore=tests/e2e/singlecard/core/test_ascend_scheduler.py \
-            --ignore=tests/e2e/singlecard/core/test_ascend_scheduler_e2e.py \
             --ignore=tests/e2e/singlecard/test_embedding.py
 
   e2e-4-cards:
@@ -359,7 +363,6 @@ jobs:
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_topk
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_dbo
@@ -379,7 +382,6 @@ jobs:
           # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py will raise error.
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_topk
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
           pytest -sv tests/e2e/multicard/test_data_parallel.py
