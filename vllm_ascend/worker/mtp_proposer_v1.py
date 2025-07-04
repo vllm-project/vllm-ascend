@@ -1,4 +1,5 @@
 import torch
+import vllm.envs as envs_vllm
 from vllm.attention.layer import Attention
 from vllm.config import (VllmConfig, get_layers_from_vllm_config,
                          set_current_vllm_config)
@@ -8,8 +9,10 @@ from vllm.model_executor.model_loader.utils import (
 from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import CommonAttentionMetadata
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
+from vllm_ascend.utils import ProfileExecuteDuration
 
 
 # FIXME(woosuk): The logic here is duplicated with the main sampling code.
@@ -61,6 +64,18 @@ class MtpProposer:
             vllm_config.speculative_config.num_speculative_tokens)
         self.block_size = vllm_config.cache_config.block_size
         self.runner = runner
+        # persistent buffers for graph
+        self.input_ids = torch.zeros(self.runner.max_num_tokens,
+                                     dtype=torch.int32,
+                                     device=self.runner.device)
+        self.positions = torch.zeros(self.runner.max_num_tokens,
+                                     dtype=torch.int64,
+                                     device=self.runner.device)
+        self.hidden_states = torch.zeros(
+            (self.runner.max_num_tokens, self.runner.hidden_size),
+            dtype=self.runner.dtype,
+            device=self.runner.device)
+        self.is_mtp_torchair_ready = False
 
     @staticmethod
     def prepare_inputs(
@@ -134,13 +149,12 @@ class MtpProposer:
         batch_size = next_token_ids.shape[0]
         last_token_indices = cu_num_tokens[1:] - 1
 
-        input_ids = torch.empty_like(target_token_ids)
         # Shift the input ids by one token.
         # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
-        input_ids[:-1] = target_token_ids[1:]
+        self.input_ids[:num_tokens - 1] = target_token_ids[1:]
         # Replace the last token with the next token.
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
-        input_ids[last_token_indices] = next_token_ids
+        self.input_ids[last_token_indices] = next_token_ids
 
         query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
         max_query_len = query_lens.max().item()
@@ -160,6 +174,23 @@ class MtpProposer:
         #     input_batch=self.runner.input_batch,
         #     scheduler_output=self.runner.scheduler_output,
         # )
+        extra_builder_kwargs = self.runner.extra_builder_kwargs
+
+        is_running_torchair = self.runner.torchair_graph_enabled and \
+            not self.runner.with_prefill and self.is_mtp_torchair_ready
+
+        if is_running_torchair:
+            if num_tokens == 1:
+                self.runner.attn_state = AscendAttentionState.DecodeOnly
+            num_reqs_pad_size = self.runner.num_reqs_pad_size
+            extra_builder_kwargs['num_reqs_pad_size'] = num_reqs_pad_size
+            # Assume num token per request is one
+            extra_builder_kwargs['num_token_pad_size'] = num_reqs_pad_size
+            num_input_tokens = self.runner.num_reqs_pad_size
+        else:
+            extra_builder_kwargs['num_token_pad_size'] = -1
+            extra_builder_kwargs['num_reqs_pad_size'] = 0
+            num_input_tokens = num_tokens
 
         attn_metadata = self.runner.attn_metadata_builder.build(
             num_reqs=batch_size,
@@ -167,16 +198,52 @@ class MtpProposer:
             max_query_len=max_query_len,
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
-        )
-        # When proposing, we set the prefill query_lens to 1.
+            is_mtp_model=True,
+            **extra_builder_kwargs)
+
+        self.positions[:num_tokens] = target_positions
+        self.hidden_states[:num_tokens] = target_hidden_states
+
+        # Assuming force_one_token is on, so each perfill request query_lens is 1
         if attn_metadata.prefill is not None:
             attn_metadata.prefill.query_lens[:] = 1
-        with set_ascend_forward_context(attn_metadata, self.vllm_config):
-            hidden_states = self.model(
-                input_ids=input_ids,
-                positions=target_positions,
-                previous_hidden_states=target_hidden_states,
-            )
+
+        with set_ascend_forward_context(attn_metadata,
+                                        self.vllm_config,
+                                        num_tokens=num_input_tokens):
+            with ProfileExecuteDuration().capture_async('mtp_forward'):
+                model_kwargs = {}
+                model_kwargs["attn_metadata"] = attn_metadata
+                if self.runner.torchair_graph_enabled:
+                    model_kwargs["kv_caches"] = self.runner.kv_caches[-1:]
+                if is_running_torchair:
+                    torch._dynamo.mark_static(self.input_ids)
+                    torch._dynamo.mark_static(self.positions)
+                    torch._dynamo.mark_static(attn_metadata.decode.block_table)
+                    torch._dynamo.mark_static(
+                        attn_metadata.decode.input_positions)
+                    torch._dynamo.mark_static(attn_metadata.slot_mapping)
+                    torch._dynamo.mark_static(attn_metadata.decode.attn_mask)
+                    for kv in self.runner.kv_caches:
+                        assert isinstance(kv,
+                                          tuple), "kv_cache must be a tuple"
+                        torch._dynamo.mark_static(kv[0])
+                        torch._dynamo.mark_static(kv[1])
+                    hidden_states = self.torchair_compiled_model(
+                        input_ids=self.input_ids[:num_input_tokens],
+                        positions=self.positions[:num_input_tokens],
+                        previous_hidden_states=self.
+                        hidden_states[:num_input_tokens],
+                        inputs_embeds=None,
+                        **model_kwargs)
+                else:
+                    hidden_states = self.model(
+                        input_ids=self.input_ids[:num_input_tokens],
+                        positions=self.positions[:num_input_tokens],
+                        previous_hidden_states=self.
+                        hidden_states[:num_input_tokens],
+                        attn_metadata=attn_metadata,
+                        kv_caches=self.runner.kv_caches[-1:])
         sample_hidden_states = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
         draft_token_ids = logits.argmax(dim=-1)
@@ -212,6 +279,49 @@ class MtpProposer:
                 self.model))
         process_weights_after_loading(self.model, draft_model_config,
                                       target_device)
+        if self.runner.torchair_graph_enabled and self.is_mtp_torchair_ready:
+            import torchair  # type: ignore
+            from torchair import patch_for_hcom  # type: ignore
+
+            patch_for_hcom()
+            config = torchair.CompilerConfig()
+            config.experimental_config.frozen_parameter = True
+            config.experimental_config.tiling_schedule_optimize = True
+            torch.npu.set_compile_mode(jit_compile=False)
+            if not self.runner.use_cached_npu_graph:
+                npu_backend = torchair.get_npu_backend(compiler_config=config)
+                self.torchair_compiled_model = torch.compile(
+                    self.model,
+                    dynamic=True,
+                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    backend=npu_backend)
+            else:
+                self.torchair_compiled_model = torchair.inference.cache_compile(
+                    self.model.forward,
+                    dynamic=True,
+                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    config=config,
+                    ge_cache=False)
+
+    @torch.inference_mode()
+    def dummy_run(
+        self,
+        num_tokens: int,
+        with_prefill: bool = False,
+    ) -> None:
+        if self.runner.torchair_graph_enabled and not with_prefill:
+            attn_metadata = self.runner.attn_metadata_builder.build_torchair_graph_dummy(
+                num_reqs=num_tokens, num_actual_tokens=1, is_mtp_model=True)
+        else:
+            attn_metadata = self.runner.attn_metadata_builder.build_torchair_graph_dummy(
+                num_reqs=num_tokens, num_actual_tokens=1, is_mtp_model=True)
+        with set_ascend_forward_context(None,
+                                        self.vllm_config,
+                                        num_tokens=num_tokens):
+            self.model(input_ids=self.input_ids[:num_tokens],
+                       positions=self.positions[:num_tokens],
+                       previous_hidden_states=self.hidden_states[:num_tokens],
+                       attn_metadata=attn_metadata)
 
 
 # TODO Using torch instead of triton may result in poor performance
