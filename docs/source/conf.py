@@ -118,7 +118,7 @@ html_theme_options = {
 }
 
 singlehtml_sidebars = {
-    'user_guide/environment_variables': [],  # disable the side bar
+    'user_guide/environment_variables': ['globaltoc.html']  # disable the side bar
 }
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
