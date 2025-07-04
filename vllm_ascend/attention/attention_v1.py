@@ -273,6 +273,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
         Returns:
             shape = [batch_size * seq_len, num_heads, head_size]
         """
+        if len(kv_cache) == 0:
+            return query
         assert len(kv_cache) > 1
         num_tokens = query.shape[0]
         use_kv_cache_int8 = kv_cache[0].numel(
