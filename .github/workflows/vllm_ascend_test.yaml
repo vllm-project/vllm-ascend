@@ -135,8 +135,7 @@ jobs:
     needs: [lint]
     name: unit test
     # only trigger e2e test on [pull request after lint passed] and [merged commit]
-    # if: ${{ needs.lint.result == 'success' || github.event_name == 'push' }}
-    if: false
+    if: ${{ needs.lint.result == 'success' || github.event_name == 'push' }}
     runs-on: ubuntu-latest
     container:
       image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
