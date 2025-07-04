@@ -264,8 +264,9 @@ class KVCacheRecvingThread(threading.Thread):
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeAgentMetadata)
         self.remote_sockets_lock = threading.Lock()
-        self.remote_sockets: dict[str, deque[zmq.Socket]] = defaultdict(
-            deque)  # type: ignore
+        self.remote_sockets: dict[
+            str, deque[zmq.Socket]] = defaultdict(  # type: ignore
+                deque)
         self.remote_poller = zmq.Poller()  # type: ignore
         self.timeout = 1.0  # seconds
 
@@ -424,11 +425,14 @@ class KVCacheRecvingThread(threading.Thread):
             resp = ensure_zmq_recv(sock,
                                    self.remote_poller,
                                    timeout=self.timeout)
-            logger.debug(f"Received response for request {request_id}: {resp}")
+            logger.debug(
+                f"Received response for request {request_id}: {resp.decode('utf-8')}"
+            )
             if resp != b"ACK":
                 logger.error("Failed to receive ACK for request %s from %s:%d",
                              request_id, remote_host, remote_handshake_port)
-                raise RuntimeError(f"Failed to receive ACK, resp: {resp}")
+                raise RuntimeError(
+                    f"Failed to receive ACK, resp: {resp.decode('utf-8')}")
         finally:
             if sock is not None:
                 self._return_remote_socket(sock, remote_host,
@@ -901,11 +905,11 @@ class MooncakeConnectorWorker:
     def get_finished(self) -> tuple[set[str], set[str]]:
         done_sending = (
             self.kv_send_thread.
-            get_and_clear_finished_requests(  # type: ignore[attr-defined]
+            get_and_clear_finished_requests(  # type: ignore[union-attr]
             ) if self.kv_role == 'kv_producer' else set())
         done_recving = (
             self.kv_recv_thread.
-            get_and_clear_finished_requests(  # type: ignore[attr-defined]
+            get_and_clear_finished_requests(  # type: ignore[union-attr]
             ) if self.kv_role == 'kv_consumer' else set())
         if self.tp_rank == 0:
             logger.debug(
@@ -926,7 +930,7 @@ class MooncakeConnectorWorker:
                                     self._get_remote_tp_rank(req_id)
             remote_transfer_port = remote_handshake_port + \
                                    self._prefill_dp_size * self._prefill_tp_size
-            self.kv_recv_thread.add_request(  # type: ignore[attr-defined]
+            self.kv_recv_thread.add_request(  # type: ignore[union-attr]
                 request_id=req_id,
                 local_block_ids=meta.local_block_ids,
                 remote_block_ids=meta.remote_block_ids,
