@@ -544,8 +544,7 @@ class TestNPUPlatform(TestBase):
     @patch("torch.distributed.is_hccl_available", return_value=True)
     @patch("torch_npu._C._distributed_c10d.ProcessGroupHCCL")
     @patch("torch.distributed.ProcessGroup")
-    def test_successful_initialization(self, mock_pg,
-                                       mock_pg_hccl, _):
+    def test_successful_initialization(self, mock_pg, mock_pg_hccl, _):
         mock_prefix = MagicMock(spec=PrefixStore)
         mock_backend = MagicMock()
         mock_pg_hccl.return_value = mock_backend
