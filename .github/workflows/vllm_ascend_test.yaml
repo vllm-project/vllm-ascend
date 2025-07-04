@@ -248,8 +248,8 @@ jobs:
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
           pip install -v -e .
+          pip install -r requirements-dev.txt
 
       - name: Run e2e test for V1 Engine
         env:
@@ -345,9 +345,8 @@ jobs:
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install -r requirements-dev.txt
           pip install -v -e .
-
+          pip install -r requirements-dev.txt
       - name: Run vllm-project/vllm-ascend test for V1 Engine
         env:
           VLLM_USE_V1: 1
