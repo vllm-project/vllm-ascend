@@ -436,8 +436,9 @@ class KVCacheRecvingThread(threading.Thread):
                 logger.debug("Returned socket to pool for %s:%d", remote_host,
                              remote_handshake_port)
 
-    def _get_remote_socket(self, remote_host: str,
-                           remote_handshake_port: int) -> zmq.Socket:
+    def _get_remote_socket(
+            self, remote_host: str,
+            remote_handshake_port: int) -> zmq.Socket:  # type: ignore
         """Get a socket to the remote host."""
         remote_path = make_zmq_path("tcp", remote_host, remote_handshake_port)
         with self.remote_sockets_lock:
@@ -450,15 +451,16 @@ class KVCacheRecvingThread(threading.Thread):
                 path=remote_path,
                 socket_type=zmq.REQ,  # type: ignore
                 bind=False)
-            sock.setsockopt(zmq.SNDTIMEO,
-                            int(self.timeout * 1000))  # type: ignore
+            sock.setsockopt(
+                zmq.SNDTIMEO,  # type: ignore
+                int(self.timeout * 1000))
             self.remote_poller.register(sock, zmq.POLLIN)  # type: ignore
             return sock
 
     def _return_remote_socket(
             self,
-            sock: zmq.Socket,
-            remote_host: str,  # type: ignore
+            sock: zmq.Socket,  # type: ignore
+            remote_host: str,
             remote_handshake_port: int) -> None:
         """Return the remote socket to the pool."""
         remote_path = make_zmq_path("tcp", remote_host, remote_handshake_port)
@@ -757,9 +759,9 @@ class MooncakeConnectorWorker:
                 range(self.dp_rank * self.tp_size,
                       (self.dp_rank + 1) * self.tp_size))
         else:
-            device_ids = list(map(int, device_ids.split(',')))
-        assert len(device_ids) > self.tp_rank
-        self.device_id = device_ids[self.tp_rank]
+            device_ids = list(map(int, device_ids.split(',')))  # type: ignore
+        assert len(device_ids) > self.tp_rank  # type: ignore
+        self.device_id = device_ids[self.tp_rank]  # type: ignore
 
         te_port = str(self.side_channel_port + self.tp_rank +
                       self.max_device_id)
@@ -897,9 +899,9 @@ class MooncakeConnectorWorker:
             raise RuntimeError("Mooncake memory registration failed.")
 
     def get_finished(self) -> tuple[set[str], set[str]]:
-        done_sending = (self.kv_send_thread.get_and_clear_finished_requests()
+        done_sending = (self.kv_send_thread.get_and_clear_finished_requests()  # type: ignore[attr-defined]
                         if self.kv_role == 'kv_producer' else set())
-        done_recving = (self.kv_recv_thread.get_and_clear_finished_requests()
+        done_recving = (self.kv_recv_thread.get_and_clear_finished_requests()  # type: ignore[attr-defined]
                         if self.kv_role == 'kv_consumer' else set())
         if self.tp_rank == 0:
             logger.debug(
@@ -920,7 +922,7 @@ class MooncakeConnectorWorker:
                                     self._get_remote_tp_rank(req_id)
             remote_transfer_port = remote_handshake_port + \
                                    self._prefill_dp_size * self._prefill_tp_size
-            self.kv_recv_thread.add_request(
+            self.kv_recv_thread.add_request(  # type: ignore[attr-defined]
                 request_id=req_id,
                 local_block_ids=meta.local_block_ids,
                 remote_block_ids=meta.remote_block_ids,
@@ -945,7 +947,7 @@ class MooncakeConnectorWorker:
 
 
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
+def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:  # type: ignore
     """Context manager for a ZMQ socket"""
 
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):  # type: ignore
@@ -957,7 +959,7 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
         yield make_zmq_socket(ctx=ctx,
                               path=addr,
                               socket_type=socket_type,
-                              bind=socket_type == zmq.ROUTER)
+                              bind=socket_type == zmq.ROUTER)  # type: ignore
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
@@ -994,9 +996,10 @@ def string_to_int64_hash(input_str):
     return uint64_value
 
 
-def ensure_zmq_send(socket: zmq.Socket,
-                    data: bytes,
-                    max_retries: int = 3):  # type: ignore
+def ensure_zmq_send(
+        socket: zmq.Socket,  # type: ignore
+        data: bytes,
+        max_retries: int = 3):
     retries_left = max_retries
     while True:
         try:
