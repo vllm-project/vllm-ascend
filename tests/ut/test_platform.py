@@ -570,8 +570,7 @@ class TestNPUPlatform(TestBase):
             timeout=timedelta(seconds=30),
         )
 
-        mock_pg.assert_called_once_with(mock_prefix, group_rank, group_size,
-                                        unittest.mock.ANY)
+        mock_pg.assert_called_once_with(mock_prefix, group_rank, group_size)
         mock_pg_hccl.assert_called_once_with(mock_prefix, group_rank,
                                              group_size, unittest.mock.ANY)
         mock_backend._set_sequence_number_for_group.assert_called_once()
