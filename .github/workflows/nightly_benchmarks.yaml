@@ -69,8 +69,7 @@ jobs:
         --device /dev/devmm_svm
         --device /dev/hisi_hdc
       env:
-        HF_ENDPOINT: https://hf-mirror.com
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        VLLM_USE_MODELSCOPE: True
         ES_OM_DOMAIN: ${{ secrets.ES_OM_DOMAIN }}
         ES_OM_AUTHORIZATION: ${{ secrets.ES_OM_AUTHORIZATION }}
         VLLM_USE_V1: ${{ matrix.vllm_use_v1 }}

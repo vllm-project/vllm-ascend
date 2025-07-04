@@ -25,7 +25,7 @@ from typing import Any, List, Optional, Tuple, TypeVar, Union
 import numpy as np
 import pytest
 import torch
-from huggingface_hub import snapshot_download
+from modelscope import snapshot_download  # type: ignore[import-untyped]
 from PIL import Image
 from torch import nn
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
@@ -387,7 +387,7 @@ def example_prompts() -> list[str]:
 
 @pytest.fixture(scope="session")
 def ilama_lora_files():
-    return snapshot_download(repo_id="jeeejeee/ilama-text2sql-spider")
+    return snapshot_download(repo_id="vllm-ascend/ilama-text2sql-spider")
 
 
 class HfRunner:
