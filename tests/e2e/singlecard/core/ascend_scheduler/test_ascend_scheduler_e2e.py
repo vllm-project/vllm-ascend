@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import os
-from typing import Generator
 
 import pytest
 import torch
@@ -16,7 +15,7 @@ PROMPT = "Hello my name is Robert and I"
 
 
 @pytest.fixture(scope="module")
-def model() -> Generator[LLM]:
+def model():
     llm = LLM(
         MODEL,
         enforce_eager=True,
