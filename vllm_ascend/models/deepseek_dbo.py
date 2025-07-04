@@ -630,7 +630,8 @@ class CustomDeepseekDBODecoderLayer(DeepseekV2DecoderLayer):
                 context.after_comm_event.record()
 
         for i in range(num_micro_batchs):
-            context.after_comm_event.wait()
+            ms_metadata.try_wait_event(layer_index, i,
+                                       MSEventKey.MOE_ALL_TO_ALL_FINISH)
             expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
                 sorted_local_expert_idx[i], local_num_experts).to(torch.int64)
             group_list_type = 0
