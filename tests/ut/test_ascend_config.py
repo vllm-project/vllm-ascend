@@ -5,8 +5,8 @@ from unittest import mock
 from transformers import PretrainedConfig
 from vllm.config import ModelConfig, VllmConfig
 
-from vllm_ascend.ascend_config import (check_ascend_config,
-                                       check_torchair_supported,
+from vllm_ascend.ascend_config import (_check_torchair_supported,
+                                       check_ascend_config,
                                        clear_ascend_config, get_ascend_config,
                                        init_ascend_config)
 
@@ -248,5 +248,5 @@ class TestAscendConfig(unittest.TestCase):
         test_cases = [('deepseek_v3', True), ('PanguProMoE', True),
                       ('qwen', False), ('llama', False)]
         for model_type, expected_output in test_cases:
-            self.assertEqual(check_torchair_supported(model_type),
+            self.assertEqual(_check_torchair_supported(model_type),
                              expected_output)
