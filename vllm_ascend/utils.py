@@ -20,9 +20,10 @@
 import atexit
 import math
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from enum import Enum
 from threading import Lock
-from typing import TYPE_CHECKING, List, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 import torch
 import torch_npu
@@ -171,6 +172,27 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     original_sizes, compilation_config.cudagraph_capture_sizes = \
         compilation_config.cudagraph_capture_sizes, None
 
+    if compilation_config.full_cuda_graph:
+        max_num_seqs = vllm_config.scheduler_config.max_num_seqs
+        truncated_sizes = [x for x in original_sizes if x <= max_num_seqs]
+        compilation_config.init_with_cudagraph_sizes(truncated_sizes)
+
+        warning_message = """\033[91m
+        **********************************************************************************
+        * WARNING: You have enabled the *full graph* feature.
+        * This is an early experimental stage and may involve various unknown issues.
+        * A known problem is that capturing too many batch sizes can lead to OOM
+        * (Out of Memory) errors or inference hangs. If you encounter such issues,
+        * consider reducing `gpu_memory_utilization` or manually specifying a smaller
+        * batch size for graph capture.
+        * For more details, please refer to:
+        * https://docs.vllm.ai/en/stable/configuration/conserving_memory.html#reduce-cuda-graphs
+        **********************************************************************************\033[0m
+        """
+
+        logger.warning(warning_message)
+        return
+
     # Calculate parallel configuration factor
     num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
     parallel_config = vllm_config.parallel_config
@@ -305,3 +327,34 @@ def get_ascend_soc_version():
     global _ascend_soc_version
     assert _ascend_soc_version is not None
     return _ascend_soc_version
+
+
+@dataclass
+class GraphParams:
+    events: dict[int, list[torch.npu.ExternalEvent]]
+    workspaces: dict[int, torch.Tensor]
+    handles: dict[int, list[torch_npu._C._NPUTaskGroupHandle]]
+    attn_params: dict[int, list[tuple]]
+
+
+_graph_params: Optional[GraphParams] = None
+
+
+def set_graph_params(aclgraph_capture_sizes: set[int]):
+    global _graph_params
+    if _graph_params is not None:
+        raise ValueError("Graph parameters have already been set!")
+    _graph_params = GraphParams(
+        {size: []
+         for size in aclgraph_capture_sizes},
+        {size: None
+         for size in aclgraph_capture_sizes},
+        {size: []
+         for size in aclgraph_capture_sizes},
+        {size: []
+         for size in aclgraph_capture_sizes},
+    )
+
+
+def get_graph_params():
+    return _graph_params
