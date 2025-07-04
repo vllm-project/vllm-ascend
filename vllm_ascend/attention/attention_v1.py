@@ -256,6 +256,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         vllm_config = get_current_vllm_config()
         self.full_graph = vllm_config.compilation_config.full_cuda_graph
+        self.block_size = vllm_config.cache_config.block_size
 
     def forward(
         self,
@@ -268,21 +269,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: Optional[torch.Tensor] = None,
         trace_flag: bool = True,
     ) -> torch.Tensor:
-        """Forward pass with Ascend attention.
-        Args:
-            query: shape = [batch_size, seq_len, num_heads * head_size]
-            key: shape = [batch_size, seq_len, num_kv_heads * head_size]
-            value: shape = [batch_size, seq_len, num_kv_heads * head_size]
-            kv_cache: shape = [2, num_blocks, block_size,
-                               num_kv_heads, head_size]
-                      key_cache = [num_blocks, block_size,
-                                   num_kv_heads, head_size]
-                      value_cache = [num_blocks, block_size,
-                                     num_kv_heads, head_size]
-            attn_metadata: Metadata for attention.
-        Returns:
-            shape = [batch_size * seq_len, num_heads, head_size]
-        """
+        """Forward pass with Ascend attention."""
         num_tokens = query.shape[0]
         if output is None:
             output = torch.empty(num_tokens,
@@ -365,136 +352,77 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 if self.full_graph:
                     graph_params = get_graph_params()
                     q = query.view(num_tokens, -1, self.hidden_size)
-                    k = self.key_cache.view(-1, 128,
+                    k = self.key_cache.view(-1, self.block_size,
                                             self.num_kv_heads * self.head_size)
                     v = self.value_cache.view(
-                        -1, 128, self.num_kv_heads * self.head_size)
+                        -1, self.block_size,
+                        self.num_kv_heads * self.head_size)
                     actual_seq_lens = attn_metadata.seq_lens_list
+                    attn_args = {
+                        "query": q,
+                        "key": k,
+                        "value": v,
+                        "actual_seq_lengths_kv": actual_seq_lens,
+                        "block_table": attn_metadata.block_tables,
+                        "num_heads": self.num_heads,
+                        "scale": self.scale,
+                        "input_layout": "BSH",
+                        "num_key_value_heads": self.num_kv_heads,
+                        "block_size": self.block_size,
+                    }
+
+                    # Prepare tensors for attention output
+                    # TODO: Refactor this to step-level instead of layer-level
+                    attn_output = torch.empty(num_tokens,
+                                              1,
+                                              self.hidden_size,
+                                              dtype=output.dtype,
+                                              device=output.device)
+                    softmax_lse = torch.empty(num_tokens,
+                                              dtype=output.dtype,
+                                              device=output.device)
+
+                    # Get workspace from cache or calculate it if not present.
+                    workspace = graph_params.workspaces.get(num_tokens)
+                    if workspace is None:
+                        workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+                            **attn_args)
+                        graph_params.workspaces[num_tokens] = workspace
 
                     forward_context = get_forward_context()
                     if not forward_context.capturing:
-                        workspace = (
-                            torch_npu.
-                            _npu_fused_infer_attention_score_get_max_workspace(
-                                q,
-                                k,
-                                v,
-                                actual_seq_lengths_kv=actual_seq_lens,
-                                block_table=attn_metadata.block_tables,
-                                num_heads=self.num_heads,
-                                scale=self.scale,
-                                input_layout="BSH",
-                                num_key_value_heads=self.num_kv_heads,
-                                block_size=128,
-                            ))
-                        graph_params.workspaces[num_tokens] = workspace
-                        softmax_lse = torch.empty(num_tokens,
-                                                  dtype=output.dtype,
-                                                  device=output.device)
-                        attn_output = torch.empty(num_tokens,
-                                                  1,
-                                                  self.hidden_size,
-                                                  dtype=output.dtype,
-                                                  device=output.device)
+                        # Execute attention kernel directly in non-capturing mode
                         torch.ops.npu.npu_fused_infer_attention_score.out(
-                            q,
-                            k,
-                            v,
                             workspace=workspace,
-                            actual_seq_lengths_kv=actual_seq_lens,
-                            block_table=attn_metadata.block_tables,
-                            num_heads=self.num_heads,
-                            scale=self.scale,
-                            input_layout="BSH",
-                            num_key_value_heads=self.num_kv_heads,
-                            block_size=128,
                             out=[attn_output, softmax_lse],
-                        )
-                        output[:, :, :] = attn_output.view(
-                            num_tokens, self.num_heads,
-                            self.head_size)[:, :, :]
+                            **attn_args)
                     else:
+                        # Handle graph capturing mode
                         stream = torch_npu.npu.current_stream()
-                        workspace = graph_params.workspaces.get(num_tokens)
-                        if workspace is None:
-                            workspace = (
-                                torch_npu.
-                                _npu_fused_infer_attention_score_get_max_workspace(
-                                    q,
-                                    k,
-                                    v,
-                                    actual_seq_lengths_kv=actual_seq_lens,
-                                    block_table=attn_metadata.block_tables,
-                                    num_heads=self.num_heads,
-                                    scale=self.scale,
-                                    input_layout="BSH",
-                                    num_key_value_heads=self.num_kv_heads,
-                                    block_size=128,
-                                ))
-                            graph_params.workspaces[num_tokens] = workspace
-                        softmax_lse = torch.empty(num_tokens,
-                                                  dtype=output.dtype,
-                                                  device=output.device)
 
                         event = torch.npu.ExternalEvent()
                         event.wait(stream)
                         event.reset(stream)
                         graph_params.events[num_tokens].append(event)
 
-                        attn_output = torch.empty(num_tokens,
-                                                  1,
-                                                  self.hidden_size,
-                                                  dtype=output.dtype,
-                                                  device=output.device)
                         graph_params.attn_params[num_tokens].append(
                             (q, k, v, actual_seq_lens,
                              attn_metadata.block_tables, self.num_heads,
                              self.scale, self.num_kv_heads, attn_output,
                              softmax_lse))
+
                         torch.npu.graph_task_group_begin(stream)
                         torch.ops.npu.npu_fused_infer_attention_score.out(
-                            q,
-                            k,
-                            v,
                             workspace=workspace,
-                            actual_seq_lengths_kv=actual_seq_lens,
-                            block_table=attn_metadata.block_tables,
-                            num_heads=self.num_heads,
-                            scale=self.scale,
-                            input_layout="BSH",
-                            num_key_value_heads=self.num_kv_heads,
-                            block_size=128,
                             out=[attn_output, softmax_lse],
-                        )
+                            **attn_args)
                         handle = torch.npu.graph_task_group_end(stream)
-                        output[:, :, :] = attn_output.view(
-                            num_tokens, self.num_heads,
-                            self.head_size)[:, :, :]
                         graph_params.handles[num_tokens].append(handle)
 
-                    # output = torch_npu.npu_incre_flash_attention(
-                    #     q, k, v,
-                    #     num_key_value_heads=self.num_kv_heads,
-                    #     num_heads=self.num_heads,
-                    #     actual_seq_lengths=attn_metadata.seq_lens,
-                    #     scale_value=self.scale,
-                    #     block_table=attn_metadata.block_tables,
-                    #     input_layout="BSH",
-                    #     block_size=128
-                    # )
-                    # attn_output, _ = torch.ops.npu.npu_fused_infer_attention_score(
-                    #     q,
-                    #     k,
-                    #     v,
-                    #     actual_seq_lengths_kv=actual_seq_lens,
-                    #     block_table=attn_metadata.block_tables,
-                    #     num_heads=self.num_heads,
-                    #     scale=self.scale,
-                    #     input_layout="BSH",
-                    #     num_key_value_heads=self.num_kv_heads,
-                    #     block_size=128,
-                    # )
-                    # output[:, :, :] = attn_output.view(num_tokens, self.num_heads, self.head_size)[:, :, :]
+                    # Reshape output to match the expected format
+                    output.copy_(
+                        attn_output.view(num_tokens, self.num_heads,
+                                         self.head_size))
                 else:
                     torch_npu._npu_paged_attention(
                         query=query,
