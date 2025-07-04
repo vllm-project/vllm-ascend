@@ -15,6 +15,9 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+SERVICE_TYPE_PREFILL = "prefill"
+SERVICE_TYPE_DECODE = "decode"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -27,7 +30,7 @@ async def lifespan(app: FastAPI):
 
     # Create prefill clients
     for i, (host, port) in enumerate(global_args.prefiller_instances):
-        prefiller_base_url = f'http://{host}:{port}/v1'
+        prefiller_base_url = f'http://{host}:{port}'
         app.state.prefill_clients.append({
             'client':
             httpx.AsyncClient(timeout=None, base_url=prefiller_base_url),
@@ -41,7 +44,7 @@ async def lifespan(app: FastAPI):
 
     # Create decode clients
     for i, (host, port) in enumerate(global_args.decoder_instances):
-        decoder_base_url = f'http://{host}:{port}/v1'
+        decoder_base_url = f'http://{host}:{port}'
         app.state.decode_clients.append({
             'client':
             httpx.AsyncClient(timeout=None, base_url=decoder_base_url),
@@ -136,10 +139,10 @@ def get_next_client(app, service_type: str):
     Returns:
         The next client to use
     """
-    if service_type == 'prefill':
+    if service_type == SERVICE_TYPE_PREFILL:
         client_idx = next(app.state.prefill_iterator)
         return app.state.prefill_clients[client_idx]
-    elif service_type == 'decode':
+    elif service_type == SERVICE_TYPE_DECODE:
         client_idx = next(app.state.decode_iterator)
         return app.state.decode_clients[client_idx]
     else:
@@ -198,17 +201,30 @@ async def stream_service_response(client_info: dict, endpoint: str,
 
 @app.post("/v1/completions")
 async def handle_completions(request: Request):
+    response = await handle_request(request, "/v1/completions")
+
+    return response
+
+
+@app.post("/v1/chat/completions")
+async def handle_chat_completions(request: Request):
+    response = await handle_request(request, "/v1/chat/completions")
+
+    return response
+
+
+async def handle_request(request: Request, endpoint: str):
     try:
         req_data = await request.json()
         request_id = str(uuid.uuid4())
 
         # Get the next prefill client in round-robin fashion
-        prefill_client_info = get_next_client(request.app, 'prefill')
+        prefill_client_info = get_next_client(request.app,
+                                              SERVICE_TYPE_PREFILL)
 
         # Send request to prefill service
-        response = await send_request_to_service(prefill_client_info,
-                                                 "/completions", req_data,
-                                                 request_id)
+        response = await send_request_to_service(prefill_client_info, endpoint,
+                                                 req_data, request_id)
 
         # Extract the needed fields
         response_json = response.json()
@@ -217,14 +233,14 @@ async def handle_completions(request: Request):
             req_data["kv_transfer_params"] = kv_transfer_params
 
         # Get the next decode client in round-robin fashion
-        decode_client_info = get_next_client(request.app, 'decode')
+        decode_client_info = get_next_client(request.app, SERVICE_TYPE_DECODE)
 
         logger.debug("Using %s %s", prefill_client_info, decode_client_info)
 
         # Stream response from decode service
         async def generate_stream():
             async for chunk in stream_service_response(decode_client_info,
-                                                       "/completions",
+                                                       endpoint,
                                                        req_data,
                                                        request_id=request_id):
                 yield chunk
@@ -236,8 +252,9 @@ async def handle_completions(request: Request):
         import sys
         import traceback
         exc_info = sys.exc_info()
-        print("Error occurred in disagg prefill proxy server"
-              " - completions endpoint")
+        print(
+            f"Error occurred in disagg prefill proxy server with {endpoint} endpoint"
+        )
         print(e)
         print("".join(traceback.format_exception(*exc_info)))
         raise
@@ -251,6 +268,36 @@ async def healthcheck():
         "prefill_instances": len(app.state.prefill_clients),
         "decode_instances": len(app.state.decode_clients)
     }
+
+
+@app.post("/start_profile")
+async def start_profile():
+    """Simple endpoint to start profiling."""
+    for client_info in app.state.prefill_clients:
+        async with client_info['client'].stream("POST",
+                                                "/start_profile") as response:
+            response.raise_for_status()
+
+    for client_info in app.state.decode_clients:
+        async with client_info['client'].stream("POST",
+                                                "/start_profile") as response:
+            response.raise_for_status()
+    return {"status": "ok"}
+
+
+@app.post("/stop_profile")
+async def stop_profile():
+    """Simple endpoint to stop profiling."""
+    for client_info in app.state.prefill_clients:
+        async with client_info['client'].stream("POST",
+                                                "/stop_profile") as response:
+            response.raise_for_status()
+
+    for client_info in app.state.decode_clients:
+        async with client_info['client'].stream("POST",
+                                                "/stop_profile") as response:
+            response.raise_for_status()
+    return {"status": "ok"}
 
 
 if __name__ == '__main__':
