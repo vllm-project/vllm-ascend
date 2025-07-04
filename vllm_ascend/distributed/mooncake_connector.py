@@ -57,6 +57,7 @@ class ReqMeta:
 
 
 class KVCacheTaskTracker:
+
     def __init__(self, tp_rank: int, local_engine_id: str, target_count: int):
         super().__init__()
         self.tp_rank = tp_rank
@@ -78,16 +79,18 @@ class KVCacheTaskTracker:
             self.socket = None
         else:
             self.listener = None
-            self.socket = make_zmq_socket(
-                ctx=zmq.Context(),
-                path=self.socket_path,
-                socket_type=zmq.PUSH,
-                bind=False)
-            logger.info("Connecting to transfer socket at %s", self.socket_path)
+            self.socket = make_zmq_socket(ctx=zmq.Context(),
+                                          path=self.socket_path,
+                                          socket_type=zmq.PUSH,
+                                          bind=False)
+            logger.info("Connecting to transfer socket at %s",
+                        self.socket_path)
 
     def _listen_for_completion_signals(self):
-        socket = make_zmq_socket(ctx=zmq.Context(), path=self.socket_path,
-                                 socket_type=zmq.PULL, bind=True)
+        socket = make_zmq_socket(ctx=zmq.Context(),
+                                 path=self.socket_path,
+                                 socket_type=zmq.PULL,
+                                 bind=True)
         logger.info("Listening for completion signals on %s", self.socket_path)
 
         while True:
@@ -149,8 +152,9 @@ class KVCacheSendingThread(threading.Thread):
         self.metadata = metadata
         self.ready_event = ready_event
 
-        self.task_tracker = KVCacheTaskTracker(
-            self.tp_rank, self.local_engine_id, self.decode_tp_size)
+        self.task_tracker = KVCacheTaskTracker(self.tp_rank,
+                                               self.local_engine_id,
+                                               self.decode_tp_size)
 
     def get_and_clear_finished_requests(self) -> set[str]:
         """
@@ -199,8 +203,8 @@ class KVCacheSendingThread(threading.Thread):
                         logger.debug("Got DONE_RECVING_MSG for request %s",
                                      msg[1])
                         request_id, decode_tp_rank = msg[1], msg[2]
-                        self.task_tracker.update_done_task_count(request_id,
-                                                                 decode_tp_rank)
+                        self.task_tracker.update_done_task_count(
+                            request_id, decode_tp_rank)
                         # Acknowledge the request completion.
                         while True:
                             try:
@@ -250,8 +254,9 @@ class KVCacheRecvingThread(threading.Thread):
         # TODO(jianzs): make this configurable
         self.executor = ThreadPoolExecutor(max_workers=32)
 
-        self.task_tracker = KVCacheTaskTracker(
-            self.tp_rank, self.local_engine_id, self.tp_size)
+        self.task_tracker = KVCacheTaskTracker(self.tp_rank,
+                                               self.local_engine_id,
+                                               self.tp_size)
 
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeAgentMetadata)
@@ -366,18 +371,19 @@ class KVCacheRecvingThread(threading.Thread):
                 src_list.append(src)
                 dst_list.append(dst)
                 length_list.append(length)
-        ret = self.engine.batch_transfer_sync_read(session_id, src_list, dst_list,
-                                             length_list)
+        ret = self.engine.batch_transfer_sync_read(session_id, src_list,
+                                                   dst_list, length_list)
         if ret < 0:
-            logger.error(
-                "Mooncake transfer failed for request %s", req_meta["request_id"])
+            logger.error("Mooncake transfer failed for request %s",
+                         req_meta["request_id"])
             raise RuntimeError(f"Mooncake transfer failed, ret: {ret}")
 
         req_end_time = time.perf_counter()
         req_transfer_elapsed = (req_end_time - req_start_time) * 1000
-        logger.info("KV cache transfer for request %s took %.2f ms (%d groups,"
-                    " %d blocks).", request_id, req_transfer_elapsed,
-                    num_transfer_groups, num_blocks)
+        logger.info(
+            "KV cache transfer for request %s took %.2f ms (%d groups,"
+            " %d blocks).", request_id, req_transfer_elapsed,
+            num_transfer_groups, num_blocks)
 
     def _get_remote_metadata(self, remote_host: str,
                              remote_handshake_port: int) -> None:
@@ -398,8 +404,8 @@ class KVCacheRecvingThread(threading.Thread):
             if sock is not None:
                 self._return_remote_socket(sock, remote_host,
                                            remote_handshake_port)
-                logger.debug("Returned socket to pool for %s:%d",
-                             remote_host, remote_handshake_port)
+                logger.debug("Returned socket to pool for %s:%d", remote_host,
+                             remote_handshake_port)
 
     def _send_done_recv_signal(self, request_id: str, remote_host: str,
                                remote_handshake_port: int):
@@ -408,10 +414,11 @@ class KVCacheRecvingThread(threading.Thread):
         sock: Optional[zmq.Socket] = None
         try:
             sock = self._get_remote_socket(remote_host, remote_handshake_port)
-            data_bytes = self.encoder.encode((DONE_RECVING_MSG, request_id,
-                                              self.tp_rank))
+            data_bytes = self.encoder.encode(
+                (DONE_RECVING_MSG, request_id, self.tp_rank))
             ensure_zmq_send(sock, data_bytes)
-            resp = ensure_zmq_recv(sock, self.remote_poller,
+            resp = ensure_zmq_recv(sock,
+                                   self.remote_poller,
                                    timeout=self.timeout)
             logger.debug(f"Received response for request {request_id}: {resp}")
             if resp != b"ACK":
@@ -422,8 +429,8 @@ class KVCacheRecvingThread(threading.Thread):
             if sock is not None:
                 self._return_remote_socket(sock, remote_host,
                                            remote_handshake_port)
-                logger.debug("Returned socket to pool for %s:%d",
-                             remote_host, remote_handshake_port)
+                logger.debug("Returned socket to pool for %s:%d", remote_host,
+                             remote_handshake_port)
 
     def _get_remote_socket(self, remote_host: str,
                            remote_handshake_port: int) -> zmq.Socket:
@@ -456,10 +463,10 @@ class MooncakeConnectorMetadata(KVConnectorMetadata):
         self.requests: dict[str, ReqMeta] = {}
 
     def add_new_req(
-            self,
-            request_id: str,
-            local_block_ids: list[int],
-            kv_transfer_params: dict[str, Any],
+        self,
+        request_id: str,
+        local_block_ids: list[int],
+        kv_transfer_params: dict[str, Any],
     ):
         self.requests[request_id] = ReqMeta(
             local_block_ids=local_block_ids,
@@ -504,16 +511,16 @@ class MooncakeConnector(KVConnectorBase_V1):
             request, blocks, num_external_tokens)
 
     def build_connector_meta(
-            self,
-            scheduler_output: SchedulerOutput,
+        self,
+        scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.build_connector_meta(scheduler_output)
 
     def request_finished(
-            self,
-            request: "Request",
-            block_ids: list[int],
+        self,
+        request: "Request",
+        block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.request_finished(request, block_ids)
@@ -566,9 +573,9 @@ class MooncakeConnectorScheduler:
 
         # Handshake base port
         self.side_channel_port = (
-                vllm_config.kv_transfer_config.kv_port +
-                vllm_config.parallel_config.data_parallel_rank_local *
-                vllm_config.parallel_config.tensor_parallel_size)
+            vllm_config.kv_transfer_config.kv_port +
+            vllm_config.parallel_config.data_parallel_rank_local *
+            vllm_config.parallel_config.tensor_parallel_size)
 
         # Requests that need to start recv.
         # New requests are added by update_state_after_alloc in
@@ -640,8 +647,8 @@ class MooncakeConnectorScheduler:
             params["do_remote_prefill"] = False
 
     def build_connector_meta(
-            self,
-            scheduler_output: SchedulerOutput,
+        self,
+        scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
         meta = MooncakeConnectorMetadata()
 
@@ -663,9 +670,9 @@ class MooncakeConnectorScheduler:
         return meta
 
     def request_finished(
-            self,
-            request: "Request",
-            block_ids: list[int],
+        self,
+        request: "Request",
+        block_ids: list[int],
     ) -> tuple[bool, Optional[dict[str, Any]]]:
         """
         Once a request is finished, determine whether request blocks
@@ -726,9 +733,9 @@ class MooncakeConnectorWorker:
 
         # Handshake base port
         self.side_channel_port = (
-                vllm_config.kv_transfer_config.kv_port +
-                vllm_config.parallel_config.data_parallel_rank_local *
-                vllm_config.parallel_config.tensor_parallel_size)
+            vllm_config.kv_transfer_config.kv_port +
+            vllm_config.parallel_config.data_parallel_rank_local *
+            vllm_config.parallel_config.tensor_parallel_size)
         self.handshake_port = self.side_channel_port + self.tp_rank
         self.sockets: dict = {}
 
@@ -763,7 +770,7 @@ class MooncakeConnectorWorker:
         # get prefill tp and dp size from extra config
         prefill_parallel_config: dict[
             str, Any] = vllm_config.kv_transfer_config.get_from_extra_config(
-            "prefill", {})
+                "prefill", {})
 
         assert "tp_size" in prefill_parallel_config.keys()
         self._prefill_tp_size = prefill_parallel_config["tp_size"]
@@ -774,22 +781,22 @@ class MooncakeConnectorWorker:
         # get decode tp and dp size from extra config
         decode_parallel_config: dict[
             str, Any] = vllm_config.kv_transfer_config.get_from_extra_config(
-            "decode", {})
+                "decode", {})
         assert "tp_size" in decode_parallel_config.keys()
         self._decode_tp_size = decode_parallel_config["tp_size"]
         assert "dp_size" in decode_parallel_config.keys()
         self._decode_dp_size = decode_parallel_config["dp_size"]
 
     def _initialize(
-            self,
-            hostname: str,
-            device_name: Optional[str],
+        self,
+        hostname: str,
+        device_name: Optional[str],
     ) -> None:
         """Initialize the mooncake instance."""
         device_name = device_name if device_name is not None else ""
-        ret_value = self.engine.initialize(hostname, "P2PHANDSHAKE",
-                                           envs_ascend.MOONCAKE_CONNECTOR_PROTOCOL,
-                                           device_name)
+        ret_value = self.engine.initialize(
+            hostname, "P2PHANDSHAKE", envs_ascend.MOONCAKE_CONNECTOR_PROTOCOL,
+            device_name)
         if ret_value != 0:
             raise RuntimeError(
                 f"Mooncake initialization failed with ret_value: {ret_value}")
@@ -857,10 +864,12 @@ class MooncakeConnectorWorker:
 
         ready_event = threading.Event()
         if self.kv_role == 'kv_producer':
-            self.kv_send_thread = KVCacheSendingThread(
-                self.tp_rank, self._decode_tp_size, self.engine_id,
-                self.side_channel_host, self.side_channel_port, metadata,
-                ready_event)
+            self.kv_send_thread = KVCacheSendingThread(self.tp_rank,
+                                                       self._decode_tp_size,
+                                                       self.engine_id,
+                                                       self.side_channel_host,
+                                                       self.side_channel_port,
+                                                       metadata, ready_event)
             self.kv_send_thread.start()
         else:
             self.kv_recv_thread = KVCacheRecvingThread(
@@ -946,7 +955,7 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
 
 
 def group_concurrent_contiguous(
-        src: List[int], dst: List[int]
+    src: List[int], dst: List[int]
 ) -> Tuple[List[npt.NDArray[np.int64]], List[npt.NDArray[np.int64]]]:
     """Vectorised NumPy implementation."""
     src_indices: npt.NDArray[np.int64] = np.array(src, dtype=np.int64)
@@ -985,8 +994,9 @@ def ensure_zmq_send(socket: zmq.Socket, data: bytes, max_retries: int = 3):
         except zmq.ZMQError as e:
             retries_left -= 1
             if retries_left > 0:
-                logger.warning(f"Send failed: {e}, retrying... ({retries_left} "
-                               "attempts left)")
+                logger.warning(
+                    f"Send failed: {e}, retrying... ({retries_left} "
+                    "attempts left)")
                 time.sleep(0.1)
             else:
                 logger.error(f"Send failed after all retries: {e}")
@@ -994,8 +1004,10 @@ def ensure_zmq_send(socket: zmq.Socket, data: bytes, max_retries: int = 3):
                                    f"retries: {e}")
 
 
-def ensure_zmq_recv(socket: zmq.Socket, poller: zmq.Poller,
-                    timeout: float = 1.0, max_retries: int = 3) -> bytes:
+def ensure_zmq_recv(socket: zmq.Socket,
+                    poller: zmq.Poller,
+                    timeout: float = 1.0,
+                    max_retries: int = 3) -> bytes:
     retries_left = max_retries
     while True:
         try:
@@ -1012,5 +1024,6 @@ def ensure_zmq_recv(socket: zmq.Socket, poller: zmq.Poller,
                 time.sleep(0.1)
             else:
                 logger.error(f"Receive failed after all retries: {e}")
-                raise RuntimeError(f"Failed to receive data after {max_retries} "
-                                   f"retries: {e}")
+                raise RuntimeError(
+                    f"Failed to receive data after {max_retries} "
+                    f"retries: {e}")
