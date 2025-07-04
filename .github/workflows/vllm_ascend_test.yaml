@@ -301,8 +301,8 @@ jobs:
             --ignore=tests/e2e/singlecard/test_embedding.py
 
   e2e-4-cards:
-    needs: [e2e]
-    if: ${{ needs.e2e.result == 'success' }}
+    # needs: [e2e]
+    if: true
     strategy:
       max-parallel: 1
       matrix:
