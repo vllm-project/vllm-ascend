@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import os
+from typing import Generator
 
 import pytest
+import torch
 from vllm import LLM
 
 if os.getenv("VLLM_USE_V1", "0") != "1":
@@ -13,8 +16,8 @@ PROMPT = "Hello my name is Robert and I"
 
 
 @pytest.fixture(scope="module")
-def model() -> LLM:
-    return LLM(
+def model() -> Generator[LLM]:
+    llm = LLM(
         MODEL,
         enforce_eager=True,
         enable_prefix_caching=True,
@@ -23,6 +26,10 @@ def model() -> LLM:
         additional_config={"ascend_scheduler_config": {
             "enabled": True,
         }})
+    yield llm
+    del llm
+    torch.npu.empty_cache()
+    gc.collect()
 
 
 def test_concurrent_partial_prefill(model):
