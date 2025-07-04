@@ -1699,6 +1699,35 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Cache the dummy encoder outputs.
         self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
 
+    @contextmanager
+    def maybe_randomize_inputs(self, input_ids: torch.Tensor):
+        """
+        Randomize input_ids if VLLM_RANDOMIZE_DP_DUMMY_INPUTS is set.
+        This is to help balance expert-selection
+         - during profile_run
+         - during DP rank dummy run 
+        """
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        randomize_inputs = envs_vllm.VLLM_RANDOMIZE_DP_DUMMY_INPUTS and dp_size > 1
+        if not randomize_inputs:
+            yield
+        else:
+            import functools
+
+            @functools.cache
+            def rand_input_ids() -> torch.Tensor:
+                return torch.randint_like(
+                    self.input_ids,
+                    low=0,
+                    high=self.model_config.get_vocab_size(),
+                    dtype=input_ids.dtype)
+
+            logger.debug("Randomizing dummy data for DP Rank")
+            input_ids.copy_(rand_input_ids()[:input_ids.size(0)],
+                            non_blocking=True)
+            yield
+            input_ids.fill_(0)
+
     @torch.inference_mode()
     def _dummy_run(
         self,
@@ -1758,9 +1787,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     for k, v in self.intermediate_tensors.items()
                 })
 
-            with set_forward_context(None,
-                                     self.vllm_config,
-                                     num_tokens=num_tokens):
+            with self.maybe_randomize_inputs(input_ids), set_forward_context(
+                    None, self.vllm_config, num_tokens=num_tokens):
                 if self.torchair_graph_enabled and not with_prefill:
                     attn_metadata = self.attn_metadata_builder.build_dummy(
                         num_reqs=num_tokens, num_actual_tokens=1)
