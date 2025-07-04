@@ -352,9 +352,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 if self.full_graph:
                     graph_params = get_graph_params()
                     q = query.view(num_tokens, -1, self.hidden_size)
-                    k = self.key_cache.view(-1, self.block_size,
-                                            self.num_kv_heads * self.head_size)
-                    v = self.value_cache.view(
+                    k = self.key_cache.view(  # type: ignore
+                        -1, self.block_size,
+                        self.num_kv_heads * self.head_size)
+                    v = self.value_cache.view(  # type: ignore
                         -1, self.block_size,
                         self.num_kv_heads * self.head_size)
                     actual_seq_lens = attn_metadata.seq_lens_list

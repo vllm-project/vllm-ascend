@@ -11,7 +11,7 @@ class AscendCommonAttentionMetadata:
     cache groups and thus having different block table.
     """
 
-    query_start_loc: Optional[torch.Tensor] = None
+    query_start_loc: torch.Tensor = None
     """(batch_size + 1,), the start location of each request in query Tensor"""
     seq_lens: Optional[torch.Tensor] = None
     """(batch_size,), the length of each request including both computed tokens

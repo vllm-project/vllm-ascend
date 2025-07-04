@@ -36,9 +36,11 @@ MODELS = ["Qwen/Qwen2.5-0.5B-Instruct"]
                     reason="aclgraph only support on v1")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("full_graph", [False])
 def test_models(
     model: str,
     max_tokens: int,
+    full_graph: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with monkeypatch.context() as m:
@@ -54,7 +56,15 @@ def test_models(
                                          temperature=0.0)
         # TODO: change to use vllmrunner when the registry of custom op is solved
         # while running pytest
-        vllm_model = LLM(model)
+        if full_graph:
+            vllm_model = LLM(model,
+                             compilation_config={
+                                 "full_cuda_graph": True,
+                                 "cudagraph_capture_sizes":
+                                 [1, 4, 16, 64, 256]
+                             })
+        else:
+            vllm_model = LLM(model)
         vllm_aclgraph_outputs = vllm_model.generate(prompts, sampling_params)
         del vllm_model
         torch.npu.empty_cache()
