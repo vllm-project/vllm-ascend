@@ -16,6 +16,8 @@ from vllm.utils import cdiv, round_down
 from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.utils import \
+    AscendCommonAttentionMetadata as CommonAttentionMetadata
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
@@ -26,20 +28,6 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, npu_stream_switch,
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
-
-
-@dataclass
-class CommonAttentionMetadata:
-    """
-    Attention metadata attributes that can be shared by layers in different KV
-    cache groups and thus having different block table.
-    """
-
-    query_start_loc: torch.Tensor
-    """(batch_size + 1,), the start location of each request in query Tensor"""
-    seq_lens: torch.Tensor
-    """(batch_size,), the length of each request including both computed tokens
-    and newly scheduled tokens"""
 
 
 class AscendMLABackend(AttentionBackend):

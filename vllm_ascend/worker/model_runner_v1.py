@@ -79,7 +79,8 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.mla_v1 import CommonAttentionMetadata
+from vllm_ascend.attention.utils import \
+    AscendCommonAttentionMetadata as CommonAttentionMetadata
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
@@ -261,6 +262,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.slot_mapping = torch.zeros(self.max_num_tokens,
                                         dtype=torch.int32,
                                         device=self.device)
+        self.query_lens = torch.zeros(self.max_num_reqs,
+                                      dtype=torch.int32,
+                                      device=self.device)
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: Optional[IntermediateTensors] = None
 
@@ -1569,6 +1573,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         skip_attn: bool = True,
         with_prefill: bool = False,
         is_torchair_compile: bool = False,
+        attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
     ) -> torch.Tensor:
         if self.torchair_graph_enabled and not with_prefill:
             num_tokens = self.select_torchair_padded_batch_size(num_tokens)
@@ -1608,42 +1613,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         elif skip_attn:
             attn_metadata = None
         else:
-            query_start_loc = self.query_start_loc[:num_reqs + 1]
-            query_start_loc[:] = torch.arange(
-                query_start_loc.numel(),
-                device=query_start_loc.device,
-                dtype=query_start_loc.dtype,
-            )
-            seq_lens = self.seq_lens_np[:num_reqs]
-            seq_lens[:] = seq_lens + 2
-            self.seq_lens_list = self.seq_lens_np.tolist()[:num_tokens]
-
-            common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=query_start_loc, seq_lens=seq_lens)
-
-            self.query_lens = torch.from_numpy(num_scheduled_tokens)
-
-            block_table = self.input_batch.block_table[0].block_table
-            block_table[:num_reqs, 0] = torch.arange(1,
-                                                     num_reqs + 1,
-                                                     device=block_table.device,
-                                                     dtype=block_table.dtype)
-
-            self.slot_mapping[:num_tokens] = torch.arange(
-                1,
-                num_tokens + 1,
-                device=self.slot_mapping.device,
-                dtype=self.slot_mapping.dtype) * self.block_size + 1
-
-            attn_metadata = self.attn_metadata_builder.build(
-                num_reqs=num_reqs,
+            attn_metadata = self.attn_metadata_builder.build_dummy_metadata(
                 num_actual_tokens=num_tokens,
-                max_query_len=num_tokens,
-                common_prefix_len=0,
-                common_attn_metadata=common_attn_metadata,
+                num_reqs=num_reqs,
+                num_scheduled_tokens=num_scheduled_tokens,
+                attn_state=attn_state,
             )
-
-            attn_metadata.attn_state = AscendAttentionState.DecodeOnly
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
@@ -2027,6 +2002,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # TODO(zzzzwwjj): Check dummy_run with ACL Graph and full graph mode
             with graph_capture(device=self.device):
                 skip_attn = not self.vllm_config.compilation_config.full_cuda_graph
+                # TODO: Make sure passing attn_state to _dummy_run in the future
                 for num_tokens in reversed(self.aclgraph_batch_sizes):
                     for _ in range(self.vllm_config.compilation_config.
                                    cudagraph_num_of_warmups):
