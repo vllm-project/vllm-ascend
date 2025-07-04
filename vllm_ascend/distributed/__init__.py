@@ -24,6 +24,5 @@ KVConnectorFactory.register_connector(
     "LLMDataDistCMgrConnector")
 
 KVConnectorFactory.register_connector(
-    "MooncakeConnector",
-    "vllm_ascend.distributed.mooncake_connector",
+    "MooncakeConnector", "vllm_ascend.distributed.mooncake_connector",
     "MooncakeConnector")
