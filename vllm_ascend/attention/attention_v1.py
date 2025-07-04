@@ -27,10 +27,11 @@ from vllm.attention.backends.utils import CommonAttentionState
 from vllm.config import get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import direct_register_custom_op
-from vllm.v1.attention.backends.utils import CommonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
+from vllm_ascend.attention.utils import \
+    AscendCommonAttentionMetadata as CommonAttentionMetadata
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
 from vllm_ascend.utils import get_graph_params
 
@@ -163,13 +164,16 @@ class AscendAttentionMetadataBuilder:
         block_table[:num_reqs, :self.runner.max_num_blocks_per_req] = (
             block_table[:num_reqs])
 
-        query_lens = self.runner.query_lens
+        query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
-        seq_lens_list = self.runner.seq_lens_list
+        # TODO: Refactor these two param to common metadata in runners,
+        # preparing for the hybrid KV groups feature
+        query_lens = common_attn_metadata.query_lens if common_attn_metadata.query_lens is not None else self.runner.query_lens
+        seq_lens_list = common_attn_metadata.seq_lens_list if common_attn_metadata.seq_lens_list is not None else self.runner.seq_lens_list
+
         slot_mapping = self.runner.slot_mapping[:num_actual_tokens]
         attn_mask = self.runner.attn_mask
         attn_state = self.runner.attn_state
-        query_start_loc = common_attn_metadata.query_start_loc
 
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -183,6 +187,34 @@ class AscendAttentionMetadataBuilder:
             attn_mask=attn_mask,
             attn_state=attn_state,
             enable_dbo_across_dp=enable_dbo_across_dp)
+        return attn_metadata
+
+    def build_dummy_metadata(self, num_actual_tokens, num_reqs,
+                             num_scheduled_tokens, attn_state):
+        if attn_state == AscendAttentionState.DecodeOnly:
+            # NOTE: We only need to pay attention to seq_lens_list and block_table here
+            common_attn_metadata = CommonAttentionMetadata(seq_lens_list=[2] *
+                                                           num_reqs)
+
+            block_table = self.runner.input_batch.block_table[0].block_table
+            block_table[:num_reqs, 0] = torch.arange(1,
+                                                     num_reqs + 1,
+                                                     device=block_table.device,
+                                                     dtype=block_table.dtype)
+
+            attn_metadata = self.build(
+                num_reqs=num_reqs,
+                num_actual_tokens=num_actual_tokens,
+                max_query_len=num_scheduled_tokens.max(),
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            )
+        else:
+            raise NotImplementedError(
+                "Currently we only support building dummy metadata for DecodeOnly state"
+            )
+
+        attn_metadata.attn_state = attn_state
         return attn_metadata
 
 

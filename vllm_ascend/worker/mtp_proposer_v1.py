@@ -8,7 +8,8 @@ from vllm.model_executor.model_loader.utils import (
 from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
-from vllm_ascend.attention.mla_v1 import CommonAttentionMetadata
+from vllm_ascend.attention.utils import \
+    AscendCommonAttentionMetadata as CommonAttentionMetadata
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
 
 
