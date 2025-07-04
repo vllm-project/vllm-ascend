@@ -26,8 +26,7 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import (GroupCoordinator, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.distributed.parallel_state import (get_dp_group, get_tp_group,
-                                             get_world_group)
+from vllm.distributed.parallel_state import get_dp_group, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
@@ -1119,21 +1118,12 @@ class AscendFusedMoE(FusedMoE):
 
         vllm_config = get_current_vllm_config()
 
-        if vllm_version_is("0.9.1"):
-            self.moe_parallel_config = FusedMoEParallelConfig.make(
-                tp_size_=(tp_size if tp_size is not None else
-                          get_tensor_model_parallel_world_size()),
-                dp_size_=(dp_size if dp_size is not None else
-                          get_dp_group().world_size),
-                vllm_parallel_config=vllm_config.parallel_config)
-        else:
-            self.moe_parallel_config = FusedMoEParallelConfig.make(
-                tp_size_=(tp_size if tp_size is not None else
-                          get_tensor_model_parallel_world_size()),
-                dp_size_=(dp_size if dp_size is not None else
-                          get_dp_group().world_size),
-                world_size_=get_world_group().world_size,
-                vllm_parallel_config=vllm_config.parallel_config)
+        self.moe_parallel_config = FusedMoEParallelConfig.make(
+            tp_size_=(tp_size if tp_size is not None else
+                      get_tensor_model_parallel_world_size()),
+            dp_size_=(dp_size
+                      if dp_size is not None else get_dp_group().world_size),
+            vllm_parallel_config=vllm_config.parallel_config)
 
         self.top_k = top_k
         self.num_experts = num_experts
