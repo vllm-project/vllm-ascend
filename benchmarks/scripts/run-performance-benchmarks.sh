@@ -295,7 +295,7 @@ main() {
   export VLLM_LOG_LEVEL="WARNING"
   
   # set env
-  export HF_ENDPOINT="https://hf-mirror.com"
+  export VLLM_USE_MODELSCOPE=True
 
   # prepare for benchmarking
   cd benchmarks || exit 1

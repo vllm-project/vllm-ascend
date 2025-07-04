@@ -209,6 +209,7 @@ jobs:
       image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
       env:
         VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
     steps:
       - name: Check npu and CANN info
         run: |
@@ -257,9 +258,7 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         run: |
           pytest -sv tests/e2e/singlecard/test_offline_inference.py
-          # TODO: switch hf to modelscope
-          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
-            pytest -sv tests/e2e/singlecard/test_ilama_lora.py
+          pytest -sv tests/e2e/singlecard/test_ilama_lora.py
           pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv tests/e2e/singlecard/test_camem.py
           pytest -sv tests/e2e/singlecard/test_embedding.py
@@ -277,9 +276,7 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         run: |
           pytest -sv tests/e2e/singlecard/test_offline_inference.py
-          # TODO: switch hf to modelscope
-          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
-            pytest -sv tests/e2e/singlecard/test_ilama_lora.py
+          pytest -sv tests/e2e/singlecard/test_ilama_lora.py
           pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv tests/e2e/singlecard/test_camem.py
           pytest -sv tests/e2e/singlecard/test_prompt_embedding.py
@@ -357,9 +354,7 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
         run: |
-          # TODO: switch hf to modelscope
-          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
-            pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
+          pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
           # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py will raise error.
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
@@ -380,9 +375,7 @@ jobs:
           VLLM_USE_V1: 0
           VLLM_USE_MODELSCOPE: True
         run: |
-          # TODO: switch hf to modelscope
-          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
-            pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
+          pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
           # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py will raise error.
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ

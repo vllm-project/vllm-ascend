@@ -50,9 +50,8 @@ jobs:
       # TODO(yikun): Remove m.daocloud.io prefix when infra proxy ready
       image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
       env:
-        HF_ENDPOINT: https://hf-mirror.com
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
         VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
     steps:
       - name: Check npu and CANN info
         run: |
