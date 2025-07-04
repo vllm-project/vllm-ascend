@@ -42,7 +42,7 @@ class EnvVar:
     @property
     def doc(self) -> str:
         """Generate doc for this environment variable."""
-        return f"| {self.name} | {self.type} | {self.default} | {self.description} |\n"
+        return f"| `{self.name}` | {self.type} | `{self.default}` | {self.description} |\n"
 
 
 # NOTE: Run `python generate_env_var_doc.py` after updating this dict.

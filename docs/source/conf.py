@@ -25,6 +25,8 @@
 #
 import json
 import os
+import vllm_ascend.envs as envs
+from vllm_ascend.envs import environment_variables
 
 # import sys
 # sys.path.insert(0, os.path.abspath('.'))
@@ -117,9 +119,6 @@ html_theme_options = {
     'use_edit_page_button': True,
 }
 
-singlehtml_sidebars = {
-    'user_guide/environment_variables': ['globaltoc.html']  # disable the side bar
-}
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
@@ -136,9 +135,28 @@ if READTHEDOCS_VERSION_TYPE == "tag":
         os.remove(header_file)
 
 
+def update_env_var_doc():
+    lines = [
+        "# Environment Variables\n",
+        "\n",
+        "vllm-ascend uses the following environment variables to configure the system:\n",
+        "\n",
+        "| Name | Type | Default | Description |\n",
+        "| ---- | ---- | ------- | ----------- |\n",
+    ]
+    variable_names = dir(envs)
+    for name in variable_names:
+        lines.append(environment_variables[name].doc)
+    with open("./docs/source/user_guide/environment_variables.md",
+              "w",
+              encoding="utf-8") as file:
+        file.writelines(lines)
+
+
 def setup(app):
     pass
 
 
 if __name__ == "__main__":
     print(json.dumps(myst_substitutions))
+    update_env_var_doc()
