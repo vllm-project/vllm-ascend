@@ -19,5 +19,25 @@
       "num_iters_warmup": 5,
       "num_iters": 15
     }
+  },
+  {
+    "test_name": "latency_qwen3_30B_A3B_tp4",
+    "parameters": {
+      "model": "Qwen/Qwen3-30B-A3B",
+      "tensor_parallel_size": 4,
+      "load_format": "dummy",
+      "num_iters_warmup": 5,
+      "num_iters": 15
+    }
+  },
+  {
+    "test_name": "latency_qwen3_32B_tp4",
+    "parameters": {
+      "model": "Qwen/Qwen3-32B",
+      "tensor_parallel_size": 4,
+      "load_format": "dummy",
+      "num_iters_warmup": 5,
+      "num_iters": 15
+    }
   }
 ]

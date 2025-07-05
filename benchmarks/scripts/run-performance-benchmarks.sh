@@ -187,6 +187,15 @@ run_serving_tests() {
 
   local serving_test_file
   serving_test_file=$1
+  cleanup() {
+    if [[ -n "$server_pid" ]]; then
+      echo "Cleaning up server process $server_pid..."
+      kill -9 "$server_pid" 2>/dev/null || true
+    fi
+    kill_npu_processes
+  }
+
+  trap cleanup EXIT INT TERM
 
   # Iterate over serving tests
   jq -c '.[]' "$serving_test_file" | while read -r params; do
@@ -267,11 +276,9 @@ run_serving_tests() {
     kill -9 $server_pid
     kill_npu_processes
   done
+  trap - EXIT INT TERM
 }
 
-cleanup() {
-  rm -rf ./vllm_benchmarks
-}
 
 cleanup_on_error() {
   echo "An error occurred. Cleaning up results folder..."

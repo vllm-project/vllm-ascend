@@ -6,6 +6,8 @@ import libcst.matchers as m
 
 # Patch the benchmark_dataset.py file to set streaming=False in load_dataset calls
 
+VLLM_EDITABLE_PATH = "/_w/vllm-ascend/vllm-ascend/vllm-empty/vllm/benchmarks/datasets.py"
+
 
 # TDOO(Potabk): Remove this patch when the issue is fixed in the upstream
 class StreamingFalseTransformer(cst.CSTTransformer):
@@ -68,10 +70,9 @@ if __name__ == '__main__':
         description=
         "Patch benchmark_dataset.py to set streaming=False in load_dataset calls"
     )
-    parser.add_argument(
-        "--path",
-        type=str,
-        default="/vllm-workspace/vllm/vllm/benchmarks/datasets.py",
-        help="Path to the benchmark_dataset.py file")
+    parser.add_argument("--path",
+                        type=str,
+                        default=VLLM_EDITABLE_PATH,
+                        help="Path to the benchmark_dataset.py file")
     args = parser.parse_args()
     patch_file(args.path)
