@@ -264,7 +264,7 @@ class KVCacheRecvingThread(threading.Thread):
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(MooncakeAgentMetadata)
         self.remote_sockets_lock = threading.Lock()
-        self.remote_sockets: dict[
+        self.remote_sockets: dict[  # type: ignore
             str, deque[zmq.Socket]] = defaultdict(  # type: ignore
                 deque)
         self.remote_poller = zmq.Poller()  # type: ignore
