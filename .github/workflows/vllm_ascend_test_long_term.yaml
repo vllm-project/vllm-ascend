@@ -101,8 +101,8 @@ jobs:
             # VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/long_term/spec_decode_v0/e2e/test_mtp_correctness.py  # it needs a clean process
             pytest -sv tests/e2e/long_term/spec_decode_v0 --ignore=tests/e2e/long_term/spec_decode_v0/e2e/test_mtp_correctness.py
             # accuracy test single card
-            pytest -sv tests/e2e/long_term/test_accuracy.py
+            pytest -sv tests/e2e/long_term/accuracy/accuracy_singlecard.py
           else
             # accuracy test multi card
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/long_term/test_deepseek_v2_lite_tp2_accuracy.py
+            VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/long_term/accuracy/accuracy_multicard.py
           fi

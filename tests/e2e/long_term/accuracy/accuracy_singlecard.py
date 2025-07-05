@@ -45,7 +45,7 @@ RTOL = 0.03
 # Baseline accuracy after VLLM optimization.
 EXPECTED_VALUE = {
     "Qwen/Qwen2.5-0.5B-Instruct": 0.316,
-    "Qwen/Qwen2.5-VL-3B-Instruct": 0.541
+    "Qwen/Qwen2.5-VL-3B-Instruct": 0.566
 }
 # Maximum context length configuration for each model.
 MAX_MODEL_LEN = {
@@ -61,21 +61,28 @@ MODEL_TYPE = {
 APPLY_CHAT_TEMPLATE = {"vllm": False, "vllm-vlm": True}
 # Few-shot examples handling as multi-turn dialogues.
 FEWSHOT_AS_MULTITURN = {"vllm": False, "vllm-vlm": True}
+# batch_size
+BATCH_SIZE = {
+    "Qwen/Qwen2.5-0.5B-Instruct": "auto",
+    "Qwen/Qwen2.5-VL-3B-Instruct": 1
+}
+
+multiprocessing.set_start_method("spawn", force=True)
 
 
 def run_test(queue, model, max_model_len, model_type):
     try:
         if model_type == "vllm-vlm":
             model_args = (f"pretrained={model},max_model_len={max_model_len},"
-                          "dtype=auto,max_images=2")
+                          "tensor_parallel_size=1,dtype=auto,max_images=2")
         else:
             model_args = (f"pretrained={model},max_model_len={max_model_len},"
-                          "dtype=auto")
+                          "tensor_parallel_size=1,dtype=auto")
         results = lm_eval.simple_evaluate(
             model=model_type,
             model_args=model_args,
             tasks=TASK[model],
-            batch_size="auto",
+            batch_size=BATCH_SIZE[model],
             apply_chat_template=APPLY_CHAT_TEMPLATE[model_type],
             fewshot_as_multiturn=FEWSHOT_AS_MULTITURN[model_type],
         )
@@ -93,9 +100,6 @@ def run_test(queue, model, max_model_len, model_type):
 @pytest.mark.parametrize("model", MODEL_NAME)
 @pytest.mark.parametrize("VLLM_USE_V1", ["0", "1"])
 def test_lm_eval_accuracy(monkeypatch: pytest.MonkeyPatch, model, VLLM_USE_V1):
-    if model == "Qwen/Qwen2.5-VL-3B-Instruct" and VLLM_USE_V1 == "1":
-        pytest.skip(
-            "Qwen2.5-VL-3B-Instruct is not supported when VLLM_USE_V1=1")
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", VLLM_USE_V1)
         result_queue: Queue[float] = multiprocessing.Queue()
@@ -106,6 +110,8 @@ def test_lm_eval_accuracy(monkeypatch: pytest.MonkeyPatch, model, VLLM_USE_V1):
         p.start()
         p.join()
         result = result_queue.get()
+        if isinstance(result, Exception):
+            pytest.fail(f"Subprocess failed with exception: {str(result)}")
         print(result)
         assert (EXPECTED_VALUE[model] - RTOL < result < EXPECTED_VALUE[model] + RTOL), \
             f"Expected: {EXPECTED_VALUE[model]}±{RTOL} | Measured: {result}"
