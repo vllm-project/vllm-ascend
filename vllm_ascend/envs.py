@@ -121,6 +121,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value to False to disable the optimized model.
     "USE_OPTIMIZED_MODEL":
     lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
+    "MOONCAKE_CONNECTOR_PROTOCOL":
+    lambda: os.getenv("MOONCAKE_CONNECTOR_PROTOCOL", "ascend"),
 }
 
 # end-env-vars-definition
