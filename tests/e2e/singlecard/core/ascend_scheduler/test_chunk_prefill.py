@@ -17,7 +17,6 @@ MODELS = [
 ]
 
 
-@pytest.mark.skipif(True, reason="oom in 910B4, fix me please")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens",
                          [4])  # cannot align results when max_tokens > 4
