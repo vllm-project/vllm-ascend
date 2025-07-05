@@ -757,13 +757,13 @@ class MooncakeConnectorWorker:
         # get tp device id
         # TODO(kw): https://github.com/vllm-project/vllm-ascend/pull/940
         # introducing some changes
-        device_ids = os.getenv("ASCEND_RT_VISIBLE_DEVICES", None)
-        if device_ids is None:
+        device_ids_str = os.getenv("ASCEND_RT_VISIBLE_DEVICES", None)
+        if device_ids_str is None:
             device_ids = list(
                 range(self.dp_rank * self.tp_size,
                       (self.dp_rank + 1) * self.tp_size))
         else:
-            device_ids = list(map(int, device_ids.split(',')))  # type: ignore
+            device_ids = list(map(int, device_ids_str.split(',')))  # type: ignore
         assert len(device_ids) > self.tp_rank  # type: ignore
         self.device_id = device_ids[self.tp_rank]  # type: ignore
 
