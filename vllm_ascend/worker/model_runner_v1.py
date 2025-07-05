@@ -2016,10 +2016,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 from vllm.model_executor.layers.linear import (
                     MergedColumnParallelLinear, QKVParallelLinear,
                     RowParallelLinear)
+
+                from vllm_ascend.models.pangu_moe import (
+                    CustomMergedColumnParallelLinear, CustomRowParallelLinear)
                 for module in self.model.modules():
-                    if isinstance(module,
-                                  (MergedColumnParallelLinear,
-                                   QKVParallelLinear, RowParallelLinear)):
+                    if isinstance(
+                            module,
+                        (MergedColumnParallelLinear, QKVParallelLinear,
+                         RowParallelLinear, CustomMergedColumnParallelLinear,
+                         CustomRowParallelLinear)):
                         module.weight.data = torch_npu.npu_format_cast(
                             module.weight.data, ACL_FORMAT_FRACTAL_NZ)
 
