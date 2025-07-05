@@ -1677,7 +1677,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         **model_kwargs)
             if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
                 assert isinstance(self.drafter, MtpProposer)
-                self.drafter.dummy_run(num_reqs, with_prefill=with_prefill)
+                self.drafter.dummy_run(num_reqs)
             return hidden_states
 
     @contextmanager
