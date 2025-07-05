@@ -198,7 +198,7 @@ jobs:
     # only trigger e2e test on pull request after lint passed
     if: ${{ needs.lint.result == 'success' && github.event_name == 'pull_request' }}
     strategy:
-      max-parallel: 2
+      max-parallel: 1
       matrix:
         os: [linux-arm64-npu-1]
         vllm_version: [main, v0.9.1]
