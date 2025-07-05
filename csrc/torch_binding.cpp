@@ -88,7 +88,7 @@ std::tuple<at::Tensor, at::Tensor> rotary_embedding(at::Tensor &positions, at::T
         fe::PlatFormInfos platform_infos;
         int device_id = 0;
         fe::PlatformInfoManager::GeInstance().GetRuntimePlatformInfosByDevice(device_id, platform_infos);
-        uint32_t aivNum = platform_infos.GetCoreNumByType("aiv");
+        uint32_t aivNum = platform_infos.GetCoreNum();
         uint32_t loop_cnt = (num_tokens + aivNum - 1) / aivNum;
         rotary_embedding_impl(dtype_num, is_neox, stream, position_ids_ptr, query_dst_ptr, key_dst_ptr, query_ptr,
                                 key_ptr, cos_sin_cache_ptr, rot_dim, query_stride, key_stride, dst_query_stride,
@@ -181,9 +181,9 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
         fe::PlatFormInfos platform_infos;
         int device_id = 0;
         fe::PlatformInfoManager::GeInstance().GetRuntimePlatformInfosByDevice(device_id, platform_infos);
-        uint32_t aivNum = platform_infos.GetCoreNumByType("aiv");
+        uint32_t aivNum = platform_infos.GetCoreNum();
         uint32_t loop_cnt = (size + aivNum - 1) / aivNum;
-        
+
         // Call implementation
         get_masked_input_and_mask_impl(
             stream,
