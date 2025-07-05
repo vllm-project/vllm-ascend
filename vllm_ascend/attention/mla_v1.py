@@ -1082,15 +1082,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             decode_k_nope = None
             assert attn_metadata.decode is not None
             if self.running_in_graph:
-                seq_len = self.rotary_emb.max_position_embeddings * self.rotary_emb.scaling_factor
-                cos = self.rotary_emb.cos_cached[:seq_len].to(
-                    dtype=decode_hs_or_q_c.dtype)
-                sin = self.rotary_emb.sin_cached[:seq_len].to(
-                    dtype=decode_hs_or_q_c.dtype)
-                cos = cos[attn_metadata.decode.input_positions]
-                sin = sin[attn_metadata.decode.input_positions]
-                cos = cos[:, None, None, :]
-                sin = sin[:, None, None, :]
+                cos = attn_metadata.decode.cos
+                sin = attn_metadata.decode.sin
                 # Without explicitly controlling the order, IndexByTensor operations
                 # would be placed after `matmul W_KV_T` hindering the overlapping of
                 # KvRmsNormRopeCache and SingleRope.
@@ -1127,15 +1120,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             prefill_q_nope = prefill_q[..., :self.qk_nope_head_dim]
             if self.torchair_graph_enabled:
                 num_tokens = prefill_hs_or_q_c.shape[0]
-                seq_len = self.rotary_emb.max_position_embeddings * self.rotary_emb.scaling_factor
-                cos = self.rotary_emb.cos_cached[:seq_len].to(
-                    dtype=prefill_q_pe.dtype)
-                sin = self.rotary_emb.sin_cached[:seq_len].to(
-                    dtype=prefill_q_pe.dtype)
-                cos = cos[attn_metadata.prefill.input_positions]
-                sin = sin[attn_metadata.prefill.input_positions]
-                cos = cos[:, None, None, :]
-                sin = sin[:, None, None, :]
+                cos = attn_metadata.prefill.cos
+                sin = attn_metadata.prefill.sin
 
                 prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
                 prefill_k_pe, prefill_k_nope = self.exec_kv_prefill(
