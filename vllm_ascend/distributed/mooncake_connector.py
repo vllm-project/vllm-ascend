@@ -763,7 +763,7 @@ class MooncakeConnectorWorker:
                 range(self.dp_rank * self.tp_size,
                       (self.dp_rank + 1) * self.tp_size))
         else:
-            device_ids = list(map(int, device_ids_str.split(',')))  # type: ignore
+            device_ids = list(map(int, device_ids_str.split(',')))
         assert len(device_ids) > self.tp_rank  # type: ignore
         self.device_id = device_ids[self.tp_rank]  # type: ignore
 
