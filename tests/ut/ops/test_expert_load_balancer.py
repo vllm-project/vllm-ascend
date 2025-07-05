@@ -1,7 +1,3 @@
-# fused moe ops test will hit the infer_schema error, we need add the patch
-# here to make the test pass.
-import vllm_ascend.patch.worker.patch_common.patch_utils  # type: ignore[import]  # isort: skip  # noqa
-
 import json
 import unittest
 from typing import List, TypedDict

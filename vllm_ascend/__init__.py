@@ -23,9 +23,5 @@ def register():
 
 
 def register_model():
-    # fix pytorch schema check error, remove this line after pytorch
-    # is upgraded to 2.7.0
-    import vllm_ascend.patch.worker.patch_common.patch_utils  # noqa: F401
-
     from .models import register_model
     register_model()
