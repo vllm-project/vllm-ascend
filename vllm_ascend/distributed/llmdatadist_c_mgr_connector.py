@@ -4,15 +4,15 @@ import math
 import threading
 import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple
 from enum import Enum
+from typing import Any, Optional, Tuple
 
 import llm_datadist  # type: ignore
 import msgspec
 import torch
 import zmq
-from concurrent.futures import ThreadPoolExecutor
 from llm_datadist import (BlocksCacheKey, CacheDesc, LLMConfig, LLMDataDist,
                           LLMException, LLMRole)
 from vllm.config import KVTransferConfig, VllmConfig
@@ -353,6 +353,7 @@ class LLMDataDistCMgrConnectorWorker():
             while True:
                 identity, _, msg = sock.recv_multipart()
                 event_msg, decode_msg = msg_decoder.decode(msg)
+                event_msg = LLMDataDistCMgrEvent(event_msg)
                 if event_msg == LLMDataDistCMgrEvent.ReqForMetadata:
                     if "cluster_id" in decode_msg:
                         decode_msg = LLMDataDistCMgrAgentMetadata(**decode_msg)
