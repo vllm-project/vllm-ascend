@@ -9,8 +9,52 @@ The fastest way to setup test environment is to use the main branch container im
 :::::{tab-set}
 :sync-group: e2e
 
-::::{tab-item} Single card
+::::{tab-item} Local (CPU)
 :selected:
+:sync: cpu
+
+You can run the unit tests on CPU with the following steps:
+
+```{code-block} bash
+   :substitutions:
+
+cd ~/vllm-project/
+# ls
+# vllm  vllm-ascend
+
+# Use mirror to speedup download
+# docker pull quay.nju.edu.cn/ascend/cann:|cann_image_tag|
+export IMAGE=quay.io/ascend/cann:|cann_image_tag|
+docker run --rm --name vllm-ascend-ut \
+    -v $(pwd):/vllm-project \
+    -v ~/.cache:/root/.cache \
+    -ti $IMAGE bash
+
+# (Optional) Configure mirror to speedup download
+sed -i 's|ports.ubuntu.com|mirrors.huaweicloud.com|g' /etc/apt/sources.list
+pip config set global.index-url https://mirrors.huaweicloud.com/repository/pypi/simple/
+
+# For torch-npu dev version or x86 machine
+export PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
+
+apt-get update -y
+apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
+
+# Install vllm
+cd /vllm-project/vllm
+VLLM_TARGET_DEVICE=empty python3 -m pip -v install .
+
+# Install vllm-ascend
+cd /vllm-project/vllm-ascend
+# [IMPORTANT] Import LD_LIBRARY_PATH to enumerate the CANN environment under CPU
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -m)-linux/devlib
+python3 -m pip install -r requirements-dev.txt
+python3 -m pip install -v .
+```
+
+::::
+
+::::{tab-item} Single card
 :sync: single
 
 ```{code-block} bash
@@ -34,6 +78,16 @@ docker run --rm \
     -v /root/.cache:/root/.cache \
     -p 8000:8000 \
     -it $IMAGE bash
+```
+
+After starting the container, you should install the required packages:
+
+```bash
+# Prepare
+pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+
+# Install required packages
+pip install -r requirements-dev.txt
 ```
 
 ::::
@@ -63,19 +117,22 @@ docker run --rm \
     -p 8000:8000 \
     -it $IMAGE bash
 ```
-::::
-
-:::::
 
 After starting the container, you should install the required packages:
 
 ```bash
+cd /vllm-workspace/vllm-ascend/
+
 # Prepare
 pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 
 # Install required packages
 pip install -r requirements-dev.txt
 ```
+
+::::
+
+:::::
 
 ## Running tests
 
@@ -89,14 +146,48 @@ There are several principles to follow when writing unit tests:
 - Example: [tests/ut/test_ascend_config.py](https://github.com/vllm-project/vllm-ascend/blob/main/tests/ut/test_ascend_config.py).
 - You can run the unit tests using `pytest`:
 
-    ```bash
-    cd /vllm-workspace/vllm-ascend/
-    # Run all single card the tests
-    pytest -sv tests/ut
+:::::{tab-set}
+:sync-group: e2e
 
-    # Run 
-    pytest -sv tests/ut/test_ascend_config.py
-    ```
+::::{tab-item} Local (CPU)
+:selected:
+:sync: cpu
+
+```bash
+# Run unit tests
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -m)-linux/devlib
+VLLM_USE_V1=1 TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest -sv tests/ut
+```
+
+::::
+
+::::{tab-item} Single card
+:sync: single
+
+```bash
+cd /vllm-workspace/vllm-ascend/
+# Run all single card the tests
+pytest -sv tests/ut
+
+# Run single test
+pytest -sv tests/ut/test_ascend_config.py
+```
+::::
+
+::::{tab-item} Multi cards test
+:sync: multi
+
+```bash
+cd /vllm-workspace/vllm-ascend/
+# Run all single card the tests
+pytest -sv tests/ut
+
+# Run single test
+pytest -sv tests/ut/test_ascend_config.py
+```
+::::
+
+:::::
 
 ### E2E test
 
@@ -105,6 +196,12 @@ locally.
 
 :::::{tab-set}
 :sync-group: e2e
+
+::::{tab-item} Local (CPU)
+:sync: cpu
+
+You can't run e2e test on CPU.
+::::
 
 ::::{tab-item} Single card
 :selected:
