@@ -1,11 +1,10 @@
-import unittest
-
 import numpy as np
 import torch
 from vllm.sampling_params import SamplingParams
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 
+from tests.ut.base import TestBase
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 
@@ -24,7 +23,7 @@ def mock_cached_request_state(req_id="1", prompt=[1, 2, 3], output=[4, 5, 6]):
     )
 
 
-class TestInputBatch(unittest.TestCase):
+class TestInputBatch(TestBase):
 
     def setUp(self):
         self.max_num_reqs = 10

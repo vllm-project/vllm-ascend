@@ -15,7 +15,6 @@
 
 import math
 import os
-import unittest
 from threading import Lock
 from unittest import mock
 
@@ -309,7 +308,7 @@ class TestUtils(TestBase):
         self.assertEqual(mock_customop.register_oot.call_count, 2)
 
 
-class TestProfileExecuteDuration(unittest.TestCase):
+class TestProfileExecuteDuration(TestBase):
 
     def setUp(self):
         utils.ProfileExecuteDuration._instance = None
