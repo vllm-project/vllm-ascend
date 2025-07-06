@@ -53,9 +53,9 @@ on:
         type: choice
         options:
           - all
-          - Qwen/Qwen2.5-7B-Instruct
           - Qwen/Qwen2.5-VL-7B-Instruct
           - Qwen/Qwen3-8B-Base
+          - Qwen/Qwen3-30B-A3B
         default: 'all'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
@@ -77,48 +77,48 @@ jobs:
       ${{
       (contains(github.event.pull_request.labels.*.name, 'accuracy-test') ||
       contains(github.event.pull_request.labels.*.name, 'vl-accuracy-test') ||
+      contains(github.event.pull_request.labels.*.name, 'moe-accuracy-test') ||
       contains(github.event.pull_request.labels.*.name, 'dense-accuracy-test')) &&
       contains(github.event.pull_request.labels.*.name, 'ready-for-test') ||
       github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
       }}
     runs-on: >-
       ${{
-          (matrix.model_name == 'Qwen/Qwen2.5-VL-7B-Instruct' && 'linux-arm64-npu-4') ||
+          (matrix.model_name == 'Qwen/Qwen3-30B-A3B' && 'linux-arm64-npu-4') ||
           'linux-arm64-npu-2'
       }}
     strategy:
       matrix:
-        vllm_use_version: [0, 1]
+        vllm_use_version: [1]
         # the accuracy test will run:
         # 1. workflow_dispatch with models input
-        #   - all: Qwen/Qwen2.5-7B-Instruct, Qwen/Qwen2.5-VL-7B-Instruct, Qwen/Qwen3-8B-Base
-        #   - specified but not all: Qwen/Qwen2.5-7B-Instruct, Qwen/Qwen2.5-VL-7B-Instruct, Qwen/Qwen3-8B-Base
+        #   - all: Qwen/Qwen3-30B-A3B, Qwen/Qwen2.5-VL-7B-Instruct, Qwen/Qwen3-8B-Base
+        #   - specified but not all: Qwen/Qwen3-30B-A3B, Qwen/Qwen2.5-VL-7B-Instruct, Qwen/Qwen3-8B-Base
         # 2. PR labeled with "*-accuracy-test"
-        #   - accuracy-test: Qwen/Qwen2.5-7B-Instruct, Qwen/Qwen2.5-VL-7B-Instruct
-        #   - dense-accuracy-test: Qwen/Qwen2.5-7B-Instruct
+        #   - accuracy-test: Qwen/Qwen3-8B-Base, Qwen/Qwen2.5-VL-7B-Instruct, Qwen/Qwen3-30B-A3B
+        #   - dense-accuracy-test: Qwen/Qwen3-8B-Base
         #   - vl-accuracy-test: Qwen/Qwen2.5-VL-7B-Instruct
+        #   - moe-accuracy-test: Qwen/Qwen3-30B-A3B
         model_name: ${{ fromJSON(
           (github.event_name == 'schedule' &&
-            '["Qwen/Qwen2.5-7B-Instruct","Qwen/Qwen2.5-VL-7B-Instruct","Qwen/Qwen3-8B-Base"]') ||
+            '["Qwen/Qwen3-30B-A3B","Qwen/Qwen2.5-VL-7B-Instruct","Qwen/Qwen3-8B-Base"]') ||
           (github.event.inputs.models == 'all' &&
-            '["Qwen/Qwen2.5-7B-Instruct","Qwen/Qwen2.5-VL-7B-Instruct","Qwen/Qwen3-8B-Base"]') ||
-          (github.event.inputs.models == 'Qwen/Qwen2.5-7B-Instruct' &&
-            '["Qwen/Qwen2.5-7B-Instruct"]') ||
+            '["Qwen/Qwen3-30B-A3B","Qwen/Qwen2.5-VL-7B-Instruct","Qwen/Qwen3-8B-Base"]') ||
+          (github.event.inputs.models == 'Qwen/Qwen3-30B-A3B' &&
+            '["Qwen/Qwen3-30B-A3B"]') ||
           (github.event.inputs.models == 'Qwen/Qwen2.5-VL-7B-Instruct' &&
             '["Qwen/Qwen2.5-VL-7B-Instruct"]') ||
           (github.event.inputs.models == 'Qwen/Qwen3-8B-Base' &&
             '["Qwen/Qwen3-8B-Base"]') ||
           contains(github.event.pull_request.labels.*.name, 'accuracy-test') &&
-            '["Qwen/Qwen3-8B-Base","Qwen/Qwen2.5-VL-7B-Instruct"]' ||
+            '["Qwen/Qwen3-8B-Base","Qwen/Qwen2.5-VL-7B-Instruct", "Qwen/Qwen3-30B-A3B"]' ||
           contains(github.event.pull_request.labels.*.name, 'dense-accuracy-test') &&
             '["Qwen/Qwen3-8B-Base"]' ||
           contains(github.event.pull_request.labels.*.name, 'vl-accuracy-test') &&
-            '["Qwen/Qwen2.5-VL-7B-Instruct"]'
+            '["Qwen/Qwen2.5-VL-7B-Instruct"]' ||
+          contains(github.event.pull_request.labels.*.name, 'moe-accuracy-test') &&
+            '["Qwen/Qwen3-30B-A3B"]'
          ) }}
-        # Remove exclude after https://github.com/vllm-project/vllm-ascend/issues/1044 resolved
-        exclude:
-          - model_name: Qwen/Qwen2.5-VL-7B-Instruct
-            vllm_use_version: 1
 
       fail-fast: false
     name: ${{ matrix.model_name }} accuracy V${{ matrix.vllm_use_version }}
@@ -187,23 +187,19 @@ jobs:
       - name: Get vLLM commit hash and URL
         working-directory: ./vllm-empty
         run: |
-          VLLM_COMMIT=$(git rev-parse HEAD)
+          VLLM_COMMIT=$(git rev-parse --short=7 HEAD)
           echo "VLLM_COMMIT=$VLLM_COMMIT" >> $GITHUB_ENV
-          echo "VLLM_COMMIT_URL=https://github.com/vllm-project/vllm/commit/$VLLM_COMMIT" >> $GITHUB_ENV
 
       - name: Get vLLM-Ascend commit hash and URL
         working-directory: ./vllm-ascend
         run: |
-          VLLM_ASCEND_COMMIT=$(git rev-parse HEAD)
+          VLLM_ASCEND_COMMIT=$(git rev-parse --short=7 HEAD)
           echo "VLLM_ASCEND_COMMIT=$VLLM_ASCEND_COMMIT" >> $GITHUB_ENV
-          echo "VLLM_ASCEND_COMMIT_URL=https://github.com/vllm-project/vllm-ascend/commit/$VLLM_ASCEND_COMMIT" >> $GITHUB_ENV
 
-      - name: Print resolved hashes and URLs
+      - name: Print resolved hashes
         run: |
           echo "vLLM       : ${{ env.VLLM_COMMIT }}"
-          echo "vLLM link  : ${{ env.VLLM_COMMIT_URL }}"
           echo "vLLM-Ascend: ${{ env.VLLM_ASCEND_COMMIT }}"
-          echo "Ascend link: ${{ env.VLLM_ASCEND_COMMIT_URL }}" 
 
       - name: Install lm-eval, ray, and datasets
         run: |
@@ -262,8 +258,6 @@ jobs:
             --vllm_version "${{ env.GHA_VLLM_VERSION }}" \
             --vllm_commit "${{ env.VLLM_COMMIT }}" \
             --vllm_ascend_commit "${{ env.VLLM_ASCEND_COMMIT }}" \
-            --vllm_commit_url "${{ env.VLLM_COMMIT_URL }}" \
-            --vllm_ascend_commit_url "${{ env.VLLM_ASCEND_COMMIT_URL }}" \
             --vllm_use_v1 "$VLLM_USE_V1"
 
       - name: Generate step summary
@@ -385,7 +379,7 @@ jobs:
               body: `The accuracy results running on NPU Altlas A2 have changed, updating reports for:
             ${{ 
               github.event.inputs.models == 'all' 
-                && 'All models (Qwen2.5-7B-Instruct, Qwen2.5-VL-7B-Instruct, Qwen3-8B-Base)' 
+                && 'All models (Qwen/Qwen3-30B-A3B, Qwen2.5-VL-7B-Instruct, Qwen3-8B-Base)' 
                 || github.event.inputs.models 
             }}
             
