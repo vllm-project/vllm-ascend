@@ -1,5 +1,3 @@
-import vllm_ascend.patch.worker.patch_common.patch_utils  # type: ignore[import]  # isort: skip  # noqa
-
 import unittest
 from unittest.mock import MagicMock, patch
 
