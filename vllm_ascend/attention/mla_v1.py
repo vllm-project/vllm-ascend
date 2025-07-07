@@ -11,6 +11,7 @@ from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
+from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
 
 from vllm_ascend import envs
@@ -94,6 +95,7 @@ class AscendMLADecodeMetadata:
     seq_lens_list: list[int]
     actual_seq_q_lens: Optional[list[int]] = None
     attn_mask: Optional[torch.Tensor] = None
+    mc2_mask: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -205,6 +207,11 @@ class AscendMLAMetadataBuilder:
             )
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+
+    def generate_active_mask(self, actual_seqs_num, batch_size):
+        mc2_mask = torch.zeros(batch_size, dtype=torch.bool, device=current_platform.device_type)
+        mc2_mask[:actual_seqs_num].fill_(True)
+        return mc2_mask
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -336,6 +343,7 @@ class AscendMLAMetadataBuilder:
         else:
             attn_state = AscendAttentionState.DecodeOnly
             num_decode_tokens = 1
+        mc2_mask = self.generate_active_mask(num_actual_tokens, num_reqs)
         decode_metadata = AscendMLADecodeMetadata(
             input_positions=input_positions,
             block_table=block_table,
@@ -344,6 +352,7 @@ class AscendMLAMetadataBuilder:
             max_seq_lens=1,
             attn_mask=self.runner.spec_attn_mask,
             actual_seq_q_lens=self.runner.actual_seq_q_lens[:num_reqs],
+            mc2_mask=mc2_mask,
         )
         return self.metadata_cls(  # type: ignore
             num_input_tokens=num_actual_tokens,
@@ -500,6 +509,7 @@ class AscendMLAMetadataBuilder:
                                                   num_reqs_pad_size]
             else:
                 seq_lens_list = seq_lens.tolist()
+            mc2_mask = self.generate_active_mask(num_actual_tokens, num_reqs)
 
             decode_metadata = AscendMLADecodeMetadata(
                 input_positions=input_positions,
@@ -509,6 +519,7 @@ class AscendMLAMetadataBuilder:
                 max_seq_lens=max_seq_lens,
                 attn_mask=self.runner.spec_attn_mask,
                 actual_seq_q_lens=actual_seq_q_lens,
+                mc2_mask=mc2_mask,
             )
 
         return self.metadata_cls(  # type: ignore

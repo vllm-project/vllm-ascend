@@ -215,6 +215,7 @@ def fused_experts_with_mc2(
     w2_scale_bias: torch.Tensor = None,
     quantized_x_for_share: Optional[Any] = None,
     dynamic_scale_for_share: Optional[Any] = None,
+    mc2_mask: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     if log2phy:
         topk_ids = log2phy[topk_ids]
@@ -232,6 +233,9 @@ def fused_experts_with_mc2(
     # NOTE: Currently, when in A3 or in torchair graph, we need to pass in some extra param into dispatch & combine
     need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A3
                        or is_torchair)
+    
+    # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
+    a3_need_extra_args = get_ascend_soc_version() == AscendSocVersion.A3
 
     if (expert_map is not None):
         moe_expert_num = len(expert_map) + global_redundant_expert_num
@@ -259,6 +263,10 @@ def fused_experts_with_mc2(
             "group_tp": moe_all_to_all_group_name,
             "tp_world_size": 1,
             "tp_rank_id": 0,
+        })
+    if a3_need_extra_args:
+        stage1_kwargs.update({
+            "x_active_mask": mc2_mask,
         })
     kwargs_mc2.update(stage1_kwargs)
 
@@ -309,6 +317,10 @@ def fused_experts_with_mc2(
             "group_tp": moe_all_to_all_group_name,
             "tp_world_size": 1,
             "tp_rank_id": 0,
+        })
+    if a3_need_extra_args:
+        stage3_kwargs.update({
+            "x_active_mask": mc2_mask,
         })
     kwargs_mc2.update(stage3_kwargs)
 
