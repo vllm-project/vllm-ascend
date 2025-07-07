@@ -26,7 +26,7 @@ class TestPoolingModelRunner(unittest.TestCase):
         self.attn_backend = "npu"
 
         model_runner = self._create_model_runner(
-            "/deepseek-r1-distill-qwen-1.5b",
+            "../fake_weight",
             trust_remote_code=True,
             enable_chunked_prefill=False,
         )
