@@ -6,11 +6,12 @@ This guide aims to help users to improve vllm-ascend performance on system level
 
 Run the container:
 
-```bash
+```{code-block} bash
+   :substitutions:
 # Update DEVICE according to your device (/dev/davinci[0-7])
 export DEVICE=/dev/davinci0
 # Update the cann base image
-export IMAGE=m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
+export IMAGE=m.daocloud.io/quay.io/ascend/cann:|cann_image_tag|
 docker run --rm \
 --name performance-test \
 --device $DEVICE \
@@ -28,7 +29,8 @@ docker run --rm \
 
 Configure your environment:
 
-```bash
+```{code-block} bash
+   :substitutions:
 # Configure the mirror
 echo "deb https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ jammy main restricted universe multiverse" > /etc/apt/sources.list && \
 echo "deb-src https://mirrors.tuna.tsinghua.edu.cn/ubuntu-ports/ jammy main restricted universe multiverse" >> /etc/apt/sources.list && \
@@ -45,19 +47,20 @@ apt update && apt install wget gcc g++ libnuma-dev git vim -y
 
 Install vllm and vllm-ascend:
 
-```bash
+```{code-block} bash
+   :substitutions:
 # Install necessary dependencies
 pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
-pip install "modelscope<1.23.0" pandas datasets gevent sacrebleu rouge_score pybind11 pytest
+pip install modelscope pandas datasets gevent sacrebleu rouge_score pybind11 pytest
 
 # Configure this var to speed up model download
 VLLM_USE_MODELSCOPE=true
 ```
 
-Please follow the [Installation Guide](https://vllm-ascend.readthedocs.io/en/v0.7.3/installation.html#setup-vllm-and-vllm-ascend) to make sure vllm, vllm-ascend and mindie-turbo is installed correctly.
+Please follow the [Installation Guide](https://vllm-ascend.readthedocs.io/en/latest/installation.html) to make sure vllm, vllm-ascend and mindie-turbo is installed correctly.
 
 :::{note}
-Make sure your vllm, vllm-ascend and mindie-turbo is installed after your python configuration completed, because these packages will build binary files using the python in current environment. If you install vllm, vllm-ascend and mindie-turbo before chapter 1.1, the binary files will not use the optimized python. 
+Make sure your vllm and vllm-ascend are installed after your python configuration completed, because these packages will build binary files using the python in current environment. If you install vllm, vllm-ascend and mindie-turbo before chapter 1.1, the binary files will not use the optimized python.
 :::
 
 ## Optimizations
@@ -68,7 +71,8 @@ Make sure your vllm, vllm-ascend and mindie-turbo is installed after your python
 
 Python supports **LTO** and **PGO** optimization starting from version `3.6` and above, which can be enabled at compile time. And we have offered compilation optimized `python` packages directly to users for the sake of convenience. You can also reproduce the `python` build follow this [tutorial](https://www.hiascend.com/document/detail/zh/Pytorch/600/ptmoddevg/trainingmigrguide/performance_tuning_0063.html) according to your specific scenarios.
 
-```bash
+```{code-block} bash
+   :substitutions:
 mkdir -p /workspace/tmp
 cd /workspace/tmp
 
@@ -99,7 +103,8 @@ export PATH=/usr/bin:/usr/local/python/bin:$PATH
 
 **jemalloc** is a memory allocator that improves performance for multi-threads scenario and can reduce memory fragment. jemalloc use thread local memory manager to allocate variables, which can avoid lock competition between multi-threads and can hugely optimize performance.
 
-```bash
+```{code-block} bash
+   :substitutions:
 # Install jemalloc
 sudo apt update
 sudo apt install libjemalloc2
@@ -112,7 +117,8 @@ export LD_PRELOAD=/usr/lib/"$(uname -i)"-linux-gnu/libjemalloc.so.2 $LD_PRELOAD
 
 **Tcmalloc (Thread Counting Malloc)** is a universal memory allocator that improves overall performance while ensuring low latency by introducing a multi-level cache structure, reducing mutex competition and optimizing large object processing flow. Find more details [here](https://www.hiascend.com/document/detail/zh/Pytorch/700/ptmoddevg/trainingmigrguide/performance_tuning_0068.html).
 
-```bash
+```{code-block} bash
+   :substitutions:
 # Install tcmalloc
 sudo apt update
 sudo apt install libgoogle-perftools4 libgoogle-perftools-dev
@@ -136,7 +142,8 @@ Some performance tuning features in `torch_npu` are controlled by environment va
 
 Memory optimization:
 
-```bash
+```{code-block} bash
+   :substitutions:
 # Upper limit of memory block splitting allowed (MB), Setting this parameter can prevent large memory blocks from being split.
 export PYTORCH_NPU_ALLOC_CONF="max_split_size_mb:250"
 
@@ -146,7 +153,8 @@ export PYTORCH_NPU_ALLOC_CONF="expandable_segments:True"
 
 Schedule optimization:
 
-```bash
+```{code-block} bash
+   :substitutions:
 # Optimize operator delivery queue, this will affect the memory peak value, and may degrade if the memory is tight.
 export TASK_QUEUE_ENABLE=2
 
@@ -162,7 +170,8 @@ There are some performance tuning features in HCCL, which are controlled by envi
 
 You can configure HCCL to use "AIV" mode to optimize performance by setting the environment variable shown below. In "AIV" mode, the communication is scheduled by AI vector core directly with ROCE, instead of being scheduled by AI cpu.
 
-```bash
+```{code-block} bash
+   :substitutions:
 export HCCL_OP_EXPANSION_MODE="AIV"
 ```
 
