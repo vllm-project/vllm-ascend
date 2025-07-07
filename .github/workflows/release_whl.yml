@@ -114,7 +114,7 @@ jobs:
       run: |
         cd dist
         for wheel in *.whl; do
-          echo "验证文件: $wheel"
+          echo "verification file: $wheel"
           auditwheel show "$wheel"
         done
 
