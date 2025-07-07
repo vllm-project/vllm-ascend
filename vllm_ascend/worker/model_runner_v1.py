@@ -24,7 +24,7 @@ import types
 import weakref
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -37,6 +37,9 @@ from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed.kv_transfer import (get_kv_transfer_group,
+                                          has_kv_transfer_group)
+from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import get_dp_group, get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
@@ -1116,24 +1119,31 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             extra_builder_kwargs['graph_pad_size'] = graph_pad_size
 
-        if self.vllm_config.model_config.use_mla:
-            attn_metadata = self.attn_metadata_builder.build(  # type: ignore
-                num_reqs=num_reqs,
-                num_actual_tokens=total_num_scheduled_tokens,
-                max_query_len=max_num_scheduled_tokens,
-                common_attn_metadata=common_attn_metadata,
-                common_prefix_len=None,
-                **extra_builder_kwargs,
-            )
-        else:
-            attn_metadata = self.attn_metadata_builder.build(  # type: ignore
-                num_reqs=num_reqs,
-                num_actual_tokens=total_num_scheduled_tokens,
-                max_query_len=max_num_scheduled_tokens,
-                common_prefix_len=None,
-                **extra_builder_kwargs,
-            )
-        attn_metadata.num_input_tokens = num_input_tokens
+        attn_metadata: dict[str, Any] = {}
+        # Prepare the attention metadata for each KV cache group and make layers
+        # in the same group share the same metadata.
+        for kv_cache_group_id, kv_cache_group_spec in enumerate(
+                self.kv_cache_config.kv_cache_groups):
+            if self.vllm_config.model_config.use_mla:
+                attn_metadata_i = self.attn_metadata_builder.build(  # type: ignore
+                    num_reqs=num_reqs,
+                    num_actual_tokens=total_num_scheduled_tokens,
+                    max_query_len=max_num_scheduled_tokens,
+                    common_attn_metadata=common_attn_metadata,
+                    common_prefix_len=None,
+                    **extra_builder_kwargs,
+                )
+            else:
+                attn_metadata_i = self.attn_metadata_builder.build(  # type: ignore
+                    num_reqs=num_reqs,
+                    num_actual_tokens=total_num_scheduled_tokens,
+                    max_query_len=max_num_scheduled_tokens,
+                    common_prefix_len=None,
+                    **extra_builder_kwargs,
+                )
+            attn_metadata_i.num_input_tokens = num_input_tokens
+            for layer_name in kv_cache_group_spec.layer_names:
+                attn_metadata[layer_name] = attn_metadata_i
 
         # Prepare input_ids
         token_indices = (positions_np +
@@ -1400,7 +1410,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         positions: torch.Tensor,
         num_scheduled_tokens: int,
         hidden_states: torch.Tensor,
-        attn_metadata: SpecDecodeMetadata,
+        attn_metadata: dict[str, SpecDecodeMetadata],
         aux_hidden_states: torch.Tensor = None,
     ) -> Optional[list[list[int]]]:
         if not self.use_spec_decode:
@@ -1682,6 +1692,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 attn_metadata,
                 aux_hidden_states,
             )
+            
+            # Clear KVConnector state after all KVs are generated.
+            if has_kv_transfer_group():
+                get_kv_transfer_group().clear_connector_metadata()
+            
             if vllm_version_is("0.9.1"):
                 model_runner_output = ModelRunnerOutput(
                     req_ids=self.input_batch.req_ids,
@@ -1860,8 +1875,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                      self.vllm_config,
                                      num_tokens=num_tokens):
                 if self.torchair_graph_enabled and not with_prefill:
-                    attn_metadata = self.attn_metadata_builder.build_dummy(
-                        num_reqs=num_tokens, num_actual_tokens=1)
+                    attn_metadata: dict[str, Any] = {}
+                    # Prepare the attention metadata for each KV cache group and make layers
+                    # in the same group share the same metadata.
+                    for kv_cache_group_spec in self.kv_cache_config.kv_cache_groups:
+                        attn_metadata_i = self.attn_metadata_builder.build_dummy(
+                            num_reqs=num_tokens, num_actual_tokens=1)
+                        for layer_name in kv_cache_group_spec.layer_names:
+                            attn_metadata[layer_name] = attn_metadata_i
                     # Only mark static while compiling
                     if is_compile:
                         torch._dynamo.mark_static(input_ids)
@@ -2298,7 +2319,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         positions: torch.Tensor,
         num_scheduled_tokens: int,
         hidden_states: torch.Tensor,
-        attn_metadata: SpecDecodeMetadata,
+        attn_metadata: dict[str, SpecDecodeMetadata],
     ):
         next_token_ids: list[int] = []
         for i, token_ids in enumerate(valid_sampled_token_ids):
@@ -2317,14 +2338,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         next_token_ids = torch.tensor(next_token_ids,
                                       dtype=torch.int32,
                                       device=self.device)
+        
+        # At this moment, we assume all eagle layers belong to the same KV
+        # cache group, thus using the same attention metadata.
+        eagle_attn_metadata = attn_metadata[self.drafter.attn_layer_names[0]]
 
         if spec_decode_metadata is None:
             # input_ids can be None for multimodal models.
             target_token_ids = self.input_ids[:num_scheduled_tokens]
             target_positions = positions[:num_scheduled_tokens]
             target_hidden_states = hidden_states[:num_scheduled_tokens]
-            target_slot_mapping = attn_metadata.slot_mapping
-            cu_num_tokens = attn_metadata.query_start_loc
+            target_slot_mapping = eagle_attn_metadata.slot_mapping
+            cu_num_tokens = eagle_attn_metadata.query_start_loc
         else:
             # TODO(woosuk): Refactor this.
             num_draft_tokens = spec_decode_metadata.num_draft_tokens
@@ -2339,13 +2364,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             )
             assert self.drafter is not None
             cu_num_tokens, token_indices = self.drafter.prepare_inputs(
-                attn_metadata.query_start_loc,
+                eagle_attn_metadata.query_start_loc,
                 num_rejected_tokens,
             )
             target_token_ids = self.input_ids[token_indices]
             target_positions = positions[token_indices]
             target_hidden_states = hidden_states[token_indices]
-            target_slot_mapping = attn_metadata.slot_mapping[token_indices]
+            target_slot_mapping = eagle_attn_metadata.slot_mapping[token_indices]
         assert self.drafter is not None
         draft_token_ids = self.drafter.propose(
             target_token_ids=target_token_ids,
@@ -2354,7 +2379,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             target_slot_mapping=target_slot_mapping,
             next_token_ids=next_token_ids,
             cu_num_tokens=cu_num_tokens,
-            block_table=attn_metadata.block_tables,
+            block_table=eagle_attn_metadata.block_tables,
             sampling_metadata=sampling_metadata,
         )
         spec_token_ids = draft_token_ids.tolist()

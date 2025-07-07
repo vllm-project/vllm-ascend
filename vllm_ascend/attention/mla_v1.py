@@ -10,6 +10,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.attention.layer import (wait_for_kv_layer_from_connector,
+                                  maybe_save_kv_layer_to_connector)
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.utils import cdiv, round_down
@@ -1078,6 +1080,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 prefill_k_pe = k_pe[num_decode_tokens:]
         else:
             decode_hs_or_q_c = hidden_states_or_q_c
+        if has_prefill:
+            wait_for_kv_layer_from_connector(layer.layer_name)
         if has_decode:
             decode_k_nope = None
             assert attn_metadata.decode is not None
@@ -1208,5 +1212,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     current_ms_metadata.after_comm_event.record()
             else:
                 output[:num_decode_tokens] = output_decode
+        if has_prefill:
+            maybe_save_kv_layer_to_connector(layer.layer_name, kv_cache)
 
         return output_padded
