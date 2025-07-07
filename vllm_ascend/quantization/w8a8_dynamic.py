@@ -141,8 +141,8 @@ def fused_experts_with_mc2(
     local_rank = torch.distributed.get_rank(group=ep_group)
     all_to_all_group_size = torch.distributed.get_world_size(ep_group)
 
-    world_szie = torch.distributed.get_world_size()
-    tp_size = world_szie // all_to_all_group_size
+    world_size = torch.distributed.get_world_size()
+    tp_size = world_size // all_to_all_group_size
     tp_rank = rank % tp_size
 
     stage1_kwargs = {
