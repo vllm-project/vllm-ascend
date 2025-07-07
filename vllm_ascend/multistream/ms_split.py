@@ -72,11 +72,12 @@ def model_input_split_v1_mla_attn(
             attn_metadata.query_lens):
         return [attn_metadata]
 
-    query_start_loc_cpu = np.zeros(shape=(len(attn_metadata.query_lens) + 1, ),
-                                   dtype=int)
+    query_start_loc_cpu: Any = np.zeros(shape=(len(attn_metadata.query_lens) +
+                                               1, ),
+                                        dtype=int)
     np.cumsum(attn_metadata.query_lens, out=query_start_loc_cpu[1:])
     if attn_metadata.num_prefills > 0:
-        prefill_query_start_loc = np.zeros(
+        prefill_query_start_loc: Any = np.zeros(
             shape=(len(attn_metadata.prefill.query_lens) + 1, ), dtype=int)
         np.cumsum(attn_metadata.prefill.query_lens,
                   out=prefill_query_start_loc[1:])
