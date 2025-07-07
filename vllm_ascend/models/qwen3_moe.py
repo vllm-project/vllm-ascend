@@ -111,7 +111,7 @@ class AscendQwen3MoeSparseMoeBlock(nn.Module):
     def forward(
             self,
             hidden_states: torch.Tensor,
-            attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
+            attn_metadata: Optional[AttentionMetadata] = None, not_Dummy = False, sp_prefill = False) -> torch.Tensor:
         if attn_metadata is None:
             attn_metadata = get_forward_context().attn_metadata
         # when profile runs, force experts to load balanced tokens
@@ -137,6 +137,8 @@ class AscendQwen3MoeSparseMoeBlock(nn.Module):
             top_k=self.top_k,
             enable_force_load_balance=enable_force_load_balance,
             shared_experts=None,
+            not_Dummy=not_Dummy,
+            sp_prefill=sp_prefill
         )
 
         return hidden_states

@@ -282,11 +282,20 @@ class FusedMoEState(Enum):
     AllGather = 0
     All2All = 1
     MC2 = 2
+    NO_OP = 3
 
-
+# from vllm.model_executor.models import qwen3_moe 
+import os
 # TODO(zzzzwwjj): add soc_version to choose branch
-def get_fused_moe_state(ep_size: int, with_prefill: bool):
-    if ep_size == 1:
+def get_fused_moe_state(ep_size: int, with_prefill: bool, not_Dummy=False, sp_prefill=False):
+    enable_sp = int(os.getenv("VLLM_ENABLE_SP", "0"))
+    # print(f"666666666666 _qwen3_moe.dp_metadata_for_padding.not_Dummy {not_Dummy} ")
+    # print(f"666666666666 sp_prefill {sp_prefill} ")
+    # print(f"666666666666 enable_sp {enable_sp} ")
+    if enable_sp == 1 and sp_prefill and not_Dummy:
+        return FusedMoEState.NO_OP
+    elif ep_size == 1:
+    # if ep_size == 1:
         return FusedMoEState.AllGather
     # NOTE: mc2 need ep_size >= 16 & all2all can't use in torchair graph.
     elif ep_size < 16 or with_prefill:
