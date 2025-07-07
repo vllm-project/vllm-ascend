@@ -76,9 +76,10 @@ from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.pool.metadata import PoolingMetadata
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               ProfileExecuteDuration, is_310p,
+                               ProfileExecuteDuration,
+                               check_torchair_cache_exist, is_310p,
                                maybe_converting_weight_acl_format,
-                               vllm_version_is)
+                               vllm_version_is, write_kv_cache_bytes_to_file)
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
@@ -329,6 +330,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.attn_mask_builder = AttentionMaskBuilder.initialize_from_len(
             attn_mask_len, self.dtype)
 
+        self.new_kv_cache_bytes = -1
         self.torchair_compiled_model = None  # type: ignore
         self.torchair_compiled_models = {}  # type: ignore
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
@@ -2274,6 +2276,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         return kv_cache_spec
 
+    def _compile_torchair_graph(self, torchair_graph_batch_sizes) -> None:
+        # Trigger torchair graph capture for specific shapes.
+        # Capture the large shapes first so that the smaller shapes
+        # can reuse the memory pool allocated for the large shapes.
+        for idx, num_tokens in enumerate(reversed(torchair_graph_batch_sizes)):
+            for _ in range(self.vllm_config.compilation_config.
+                           cudagraph_num_of_warmups):
+                self._dummy_run(num_tokens,
+                                is_compile=True,
+                                with_prefill=False)
+            self._dummy_run(num_tokens, is_compile=True, with_prefill=False)
+            logger.info("Batchsize %d is compiled successfully: %d/%d.",
+                        num_tokens, idx + 1, len(torchair_graph_batch_sizes))
+
     def capture_model(self) -> None:
         start_time = time.perf_counter()
         start_free_npu_memory = torch.npu.mem_get_info()[0]
@@ -2283,24 +2299,32 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.torchair_graph_enabled:
             torchair_graph_batch_sizes = self.torchair_graph_batch_sizes
             graph_num = len(torchair_graph_batch_sizes)
-            logger.info(
-                "Capturing torchair graph, this usually takes %.1f~%.1f mins.",
-                0.5 * graph_num, 1.5 * graph_num)
-            # Trigger torchair graph capture for specific shapes.
-            # Capture the large shapes first so that the smaller shapes
-            # can reuse the memory pool allocated for the large shapes.
-            for idx, num_tokens in enumerate(
-                    reversed(torchair_graph_batch_sizes)):
-                for _ in range(self.vllm_config.compilation_config.
-                               cudagraph_num_of_warmups):
-                    self._dummy_run(num_tokens,
-                                    is_compile=True,
-                                    with_prefill=False)
-                self._dummy_run(num_tokens,
-                                is_compile=True,
-                                with_prefill=False)
-                logger.info("Batchsize %d is compiled successfully: %d/%d.",
-                            num_tokens, idx + 1, graph_num)
+
+            if self.use_cached_npu_graph and not check_torchair_cache_exist():
+                # If caching is enabled but does not exist, we will compile the model twice. The first
+                # time is used to generate the cache, and the second time is used to load the cache to
+                # skip the overhead caused by Dynamo guard mechanism.
+                logger.info(
+                    "Use cached npu graph but cache doesn't exist! Now we compile graph to genetate torchair cache, this usually takes %.1f~%.1f mins.",
+                    0.5 * graph_num, 1.5 * graph_num)
+                self._compile_torchair_graph(torchair_graph_batch_sizes)
+                NPUPlatform.synchronize()
+                torch._dynamo.reset()
+                self.torchair_compiled_models.clear()
+            if self.use_cached_npu_graph:
+                logger.info(
+                    "Loading torchair graph cache, this usually takes %.1f~%.1f mins.",
+                    0.3 * graph_num, 0.5 * graph_num)
+                self._compile_torchair_graph(torchair_graph_batch_sizes)
+            else:
+                logger.info(
+                    "Capturing torchair graph, this usually takes %.1f~%.1f mins.",
+                    0.5 * graph_num, 1.5 * graph_num)
+                self._compile_torchair_graph(torchair_graph_batch_sizes)
+
+            if self.new_kv_cache_bytes > 0:
+                write_kv_cache_bytes_to_file(torch.distributed.get_rank(),
+                                             self.new_kv_cache_bytes)
         elif self.use_aclgraph:
             # Trigger ACL graph capture for specific shapes.
             # Capture the large shapes first so that the smaller shapes
