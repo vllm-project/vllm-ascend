@@ -728,7 +728,7 @@ class LLMDataDistCMgrConnectorWorker():
         msg_encoder = msgspec.msgpack.Encoder()
         msg_send = msg_encoder.encode(
             [LLMDataDistCMgrEvent.ReqForFinished, [request_id]])
-        with zmq_ctx(zmq.REQ, url) as sock:
+        with zmq_ctx(zmq.REQ, url) as sock:  # type: ignore[attr-defined]
             try:
                 sock.send(msg_send)
                 logger.debug(
