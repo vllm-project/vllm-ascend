@@ -81,7 +81,8 @@ from vllm.model_executor.models.deepseek_v2 import (
     get_spec_layer_idx_from_weight_name)
 from vllm.model_executor.models.utils import (
     PPMissingLayer, is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory, make_layers, maybe_prefix, set_weight_attrs)
+    make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
