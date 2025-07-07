@@ -30,33 +30,29 @@ MODELS = ["deepseek-ai/DeepSeek-V2-Lite"]
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [1])
 def test_models(
+    example_prompts,
     model: str,
     max_tokens: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     return
 
-    prompts = "The president of the United States is"
-
-    sampling_params = SamplingParams(
-        max_tokens=max_tokens,
-        temperature=0.0,
-    )
-
-    vllm_model = LLM(model, long_prefill_token_threshold=4, enforce_eager=True)
-    output_chunked = vllm_model.generate(prompts, sampling_params)
+    vllm_model = LLM(model,
+                        long_prefill_token_threshold=4,
+                        enforce_eager=True)
+    output_chunked = vllm_model.generate(example_prompts, sampling_params)
     logprobs_chunked = output_chunked.outputs[0].logprobs
     del vllm_model
     torch.npu.empty_cache()
 
     vllm_model = LLM(model,
-                     enforce_eager=True,
-                     additional_config={
-                         'ascend_scheduler_config': {
-                             'enabled': True
-                         },
-                     })
-    output = vllm_model.generate(prompts, sampling_params)
+                        enforce_eager=True,
+                        additional_config={
+                            'ascend_scheduler_config': {
+                                'enabled': True
+                            },
+                        })
+    output = vllm_model.generate(example_prompts, sampling_params)
     logprobs = output.outputs[0].logprobs
     del vllm_model
     torch.npu.empty_cache()

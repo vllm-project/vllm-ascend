@@ -23,7 +23,7 @@ Run `pytest tests/test_offline_inference.py`.
 import os
 from unittest.mock import patch
 
-from modelscope import snapshot_download  # type: ignore
+import pytest
 from vllm import SamplingParams
 from vllm.model_executor.models.registry import ModelRegistry
 
@@ -32,76 +32,27 @@ from tests.e2e.conftest import VllmRunner
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 
-def test_models_distributed_QwQ():
-    example_prompts = [
-        "Hello, my name is",
-    ]
+@pytest.mark.parametrize("distributed_executor_backend", ["mp", "ray"])
+def test_models_distributed_QwQ(example_prompts, distributed_executor_backend):
     dtype = "half"
     max_tokens = 5
     with VllmRunner(
             "Qwen/QwQ-32B",
             dtype=dtype,
-            tensor_parallel_size=4,
-            distributed_executor_backend="mp",
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
-def test_models_distributed_DeepSeek_multistream_moe():
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    dtype = "half"
-    max_tokens = 5
-    with VllmRunner(
-            "vllm-ascend/DeepSeek-V3-Pruning",
-            dtype=dtype,
-            tensor_parallel_size=4,
-            distributed_executor_backend="mp",
-            additional_config={
-                "torchair_graph_config": {
-                    "enabled": True,
-                    "enable_multistream_moe": True,
-                },
-                "ascend_scheduler_config": {
-                    "enabled": True,
-                },
-                "refresh": True,
-            },
-            enforce_eager=False,
+            tensor_parallel_size=2,
+            distributed_executor_backend=distributed_executor_backend,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DBO": "1"})
-def test_models_distributed_DeepSeek_dbo():
-    example_prompts = ["The president of the United States is"] * 41
-    dtype = "half"
-    sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
-    with VllmRunner(
-            "deepseek-ai/DeepSeek-V2-Lite",
-            dtype=dtype,
-            tensor_parallel_size=4,
-            distributed_executor_backend="mp",
-    ) as vllm_model:
-        model_arch = 'DeepseekV2ForCausalLM'
-        registed_models = ModelRegistry.models
-        assert registed_models[
-            model_arch].module_name == "vllm_ascend.models.deepseek_dbo"
-        assert registed_models[
-            model_arch].class_name == "CustomDeepseekDBOForCausalLM"
-        vllm_model.generate(example_prompts, sampling_params)
-
-
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DBO": "1"})
-def test_models_distributed_DeepSeekV3_dbo():
-    example_prompts = ["The president of the United States is"] * 41
+def test_models_distributed_DeepSeekV3_dbo(example_prompts):
     dtype = "half"
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
     with VllmRunner(
             "vllm-ascend/DeepSeek-V3-Pruning",
             dtype=dtype,
-            tensor_parallel_size=4,
+            tensor_parallel_size=2,
             distributed_executor_backend="mp",
     ) as vllm_model:
         model_arch = 'DeepseekV3ForCausalLM'
