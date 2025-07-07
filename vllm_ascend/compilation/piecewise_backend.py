@@ -157,7 +157,6 @@ class NPUPiecewiseBackend:
     def __call__(self, *args) -> Any:
         forward_context = get_forward_context()
         graph_params = get_graph_params()
-        forward_context.capturing = False
 
         if not self.first_run_finished:
             self.first_run_finished = True

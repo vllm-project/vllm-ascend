@@ -55,6 +55,10 @@ def set_ascend_forward_context(
 
         forward_context.in_profile_run = in_profile_run
 
+        # NOTE: This cannot be set using set_forward_context
+        # due to multiple warmups before actual capturing
+        forward_context.capturing = False
+
         dp_world_size = get_dp_group().world_size
         if dp_world_size > 1 and forward_context.dp_metadata is not None:
             forward_context.max_tokens_across_dp = forward_context.dp_metadata.max_tokens_across_dp_cpu.item(
