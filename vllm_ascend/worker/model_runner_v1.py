@@ -1623,7 +1623,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             attn_metadata = None
 
 
-        if not is_compile and not is_profile_run and self.dynamic_eplb:
+        if not is_torchair_compile and not is_profile_run and self.dynamic_eplb:
             self.eplb_updator.forward_before()
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
@@ -1705,7 +1705,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.drafter.dummy_run(num_reqs, with_prefill=with_prefill)
             if is_profile_run and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()
-            if not is_compile and not is_profile_run and self.dynamic_eplb:
+            if not is_torchair_compile and not is_profile_run and self.dynamic_eplb:
                 self.eplb_updator.forward_end()
             return hidden_states
 
@@ -1868,14 +1868,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             block_sizes=[self.cache_config.block_size],
         )
 
-        if not vllm_version_is("0.9.0"):
-            kv_cache_sizes = {}
-            for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
-                assert len(kv_cache_tensor.shared_by) == 1, (
-                    "KV cache tensor shared by multiple layers is not supported in "
-                    "NPU.")
-                kv_cache_sizes[
-                    kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
+        kv_cache_sizes = {}
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            assert len(kv_cache_tensor.shared_by) == 1, (
+                "KV cache tensor shared by multiple layers is not supported in "
+                "NPU.")
+            kv_cache_sizes[
+                kv_cache_tensor.shared_by[0]] = kv_cache_tensor.size
 
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             kv_cache_spec = kv_cache_group.kv_cache_spec
