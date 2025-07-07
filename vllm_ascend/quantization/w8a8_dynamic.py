@@ -233,7 +233,7 @@ def fused_experts_with_mc2(
     # NOTE: Currently, when in A3 or in torchair graph, we need to pass in some extra param into dispatch & combine
     need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A3
                        or is_torchair)
-    
+
     # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
     a3_need_extra_args = get_ascend_soc_version() == AscendSocVersion.A3
 
@@ -803,6 +803,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         topk_weights = topk_weights.to(x.dtype)
 
         if fused_moe_state == FusedMoEState.MC2:
+            mc2_mask = kwargs.get("mc2_mask", None)
             return fused_experts_with_mc2(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -819,7 +820,8 @@ class AscendW8A8DynamicFusedMoEMethod:
                 shared_experts=shared_experts,
                 is_torchair=self.torchair_graph_enabled,
                 quantized_x_for_share=shared_gate_up,
-                dynamic_scale_for_share=shared_dequant_scale)
+                dynamic_scale_for_share=shared_dequant_scale,
+                mc2_mask=mc2_mask)
         elif fused_moe_state == FusedMoEState.AllGather:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
