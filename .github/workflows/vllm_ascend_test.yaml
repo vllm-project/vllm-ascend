@@ -103,10 +103,6 @@ jobs:
           pip install yapf==0.32.0
           yapf --diff --recursive .
 
-      - name: Install dependencies
-        run: |
-          pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
-
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v4
         with:
@@ -125,6 +121,10 @@ jobs:
         run: |
           pip install -r requirements/build.txt --extra-index-url https://download.pytorch.org/whl/cpu
           VLLM_TARGET_DEVICE=empty pip install .
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
       - name: Mypy Check
         run: |
