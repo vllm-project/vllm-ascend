@@ -36,9 +36,12 @@ MODELS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
+@pytest.mark.parametrize("full_graph", [False])
 def test_models_with_aclgraph(
     model: str,
     max_tokens: int,
+    full_graph: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     prompts = [
         "Hello, my name is", "The president of the United States is",
@@ -48,7 +51,15 @@ def test_models_with_aclgraph(
     sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
     # TODO: change to use vllmrunner when the registry of custom op is solved
     # while running pytest
-    vllm_model = LLM(model, max_model_len=1024)
+    if full_graph:
+        vllm_model = LLM(model,
+                            compilation_config={
+                                "full_cuda_graph": True,
+                                "cudagraph_capture_sizes":
+                                [1, 4, 16, 64, 256]
+                            })
+    else:
+        vllm_model = LLM(model, max_model_len=1024)
     vllm_aclgraph_outputs = vllm_model.generate(prompts, sampling_params)
     del vllm_model
     torch.npu.empty_cache()
