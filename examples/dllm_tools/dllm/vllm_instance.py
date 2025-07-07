@@ -109,7 +109,6 @@ class VllmInstance:
         self._vllm_instance_config.exec_cmd.extend(
             ["--tensor-parallel-size",
              str(self._vllm_instance_config.tp)])
-        self._add_pd_command_options()
         self._add_dp_command_options()
         self._add_ep_command_options()
         self._add_env()
@@ -146,55 +145,6 @@ class VllmInstance:
             map(str, sorted(device_ids)))
         self._env["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(
             map(str, sorted(device_ids)))
-
-    def _add_pd_command_options(self):
-        enable_prefix_connector = os.environ.get("USING_PREFIX_CONNECTOR",
-                                                 0) == "1"
-        pd_config = self._vllm_instance_config.pd_config
-        if (pd_config
-                and not pd_config.is_pd_dist()) and enable_prefix_connector:
-            self._vllm_instance_config.exec_cmd.extend([
-                "--kv-transfer-config",
-                json.dumps({
-                    "kv_connector": "DLLMPrefixConnector",
-                    "kv_role": ("kv_both"),
-                    "kv_connector_extra_config": {
-                        "device_ids": [
-                            int(i) for i in
-                            os.environ["ASCEND_RT_VISIBLE_DEVICES"].split(",")
-                        ]
-                    },
-                }),
-            ])
-        elif pd_config and pd_config.is_pd_dist():
-            self._vllm_instance_config.exec_cmd.extend([
-                "--kv-transfer-config",
-                json.dumps({
-                    "kv_connector":
-                    "DLLMDsConnector",
-                    "kv_role": ("kv_producer" if pd_config.role is Role.PREFILL
-                                else "kv_consumer"),
-                    "kv_rank":
-                    0 if pd_config.role is Role.PREFILL else 1,
-                    "kv_parallel_size":
-                    2,
-                    "kv_connector_extra_config": {
-                        "device_ids": [
-                            int(i) for i in
-                            os.environ["ASCEND_RT_VISIBLE_DEVICES"].split(",")
-                        ]
-                    },
-                }),
-            ])
-        else:
-            return
-
-        # NOTE
-        # If using disaggregated prefill, the DLLM connector must access all NPUs to transfer KV cache normally.
-        # The actual device IDs are set by `DLLMConnector.kv_transfer_config.kv_connector_extra_config.device_ids`,
-        # they have been retrieved from the `ASCEND_RT_VISIBLE_DEVICES` environment variable as code above
-        self._env["ASCEND_RT_VISIBLE_DEVICES"] = ",".join(
-            map(str, range(get_num_npus())))
 
     def _add_dp_command_options(self):
         assert self._vllm_instance_config.dp_config is not None, "vllm instance DP config is None, abort"

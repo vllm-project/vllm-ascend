@@ -22,7 +22,7 @@ def cli():
 
 @cli.command(name="deploy", context_settings={"show_default": True})
 @click.option("--head-ip", type=str, help='IP of Ray head node (e.g. "10.2.3.4")', default="auto")
-@click.option("--prefill-instances-num", type=int, help="the num of Prefill instances", default=1)
+@click.option("--prefill-instances-num", type=int, help="the num of Prefill instances", default=0)
 @click.option(
     "--prefill-startup-params",
     type=str,
@@ -45,7 +45,7 @@ def cli():
     help="the ep of Prefill instances, should be equal to dp*tp, 0 means disable expert parallelism",
     default=0,
 )
-@click.option("--decode-instances-num", type=int, help="the num of Decode instances", default=1)
+@click.option("--decode-instances-num", type=int, help="the num of Decode instances", default=0)
 @click.option(
     "--decode-startup-params",
     type=str,
