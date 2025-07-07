@@ -273,10 +273,10 @@ class AscendAttentionTorchairMetadataBuilder:
             if use_torchair_graph and self.runner.attn_state in [
                     AscendAttentionState.DecodeOnly,
             ]:
-                max_num_tokens_across_dp += graph_pad_size
                 pad_value = 1
                 padded_seq_lens = seq_lens.tolist() + [pad_value
                                                        ] * graph_pad_size
+                max_num_tokens_across_dp = len(padded_seq_lens)
 
                 seq_lens = torch.from_numpy(
                     np.array(padded_seq_lens).astype(np.int32))
