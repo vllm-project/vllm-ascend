@@ -173,7 +173,7 @@ class TestPoolingModelRunner(unittest.TestCase):
         """Test case with empty sequence group"""
         # Setup empty group
         mock_pooling_metadata.return_value = None
-        empty_seq_data = {}
+        empty_seq_data:dict[int, SequenceData] = {}
         pooling_params = MagicMock(spec=PoolingParams)
         empty_group = MagicMock(spec=SequenceGroupMetadata)
         empty_group.seq_data = empty_seq_data
