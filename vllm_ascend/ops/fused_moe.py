@@ -1144,9 +1144,11 @@ class AscendFusedMoE(FusedMoE):
         if self.enable_multistream_moe:
             assert gate is not None
             router_logits, _ = gate(hidden_states)
-            if isinstance(self.quant_method.quant_method,
-                          AscendW8A8DynamicFusedMoEMethod
-                          ) and fused_moe_state == FusedMoEState.MC2:
+            if not isinstance(self.quant_method,
+                              AscendUnquantizedFusedMoEMethod) and isinstance(
+                                  self.quant_method.quant_method,
+                                  AscendW8A8DynamicFusedMoEMethod
+                              ) and fused_moe_state == FusedMoEState.MC2:
                 with npu_stream_switch("moe_secondary", 0):
                     quantized_x_for_share, dynamic_scale_for_share = torch_npu.npu_dynamic_quant(
                         hidden_states)
