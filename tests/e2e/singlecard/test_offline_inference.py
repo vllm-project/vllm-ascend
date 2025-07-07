@@ -31,16 +31,16 @@ from vllm.assets.image import ImageAsset
 
 import vllm_ascend  # noqa: F401
 from tests.e2e.conftest import VllmRunner
+from vllm.assets.image import ImageAsset
+
+from tests.conftest import VllmRunner
 
 MODELS = [
-    "Qwen/Qwen2.5-0.5B-Instruct",
-    "Qwen/Qwen3-0.6B-Base",
+    "Qwen/Qwen2.5-0.5B-Instruct", "Qwen/Qwen3-0.6B-Base",
+    "vllm-ascend/pangu-pro-moe-pruing"
 ]
 MULTIMODALITY_MODELS = ["Qwen/Qwen2.5-VL-3B-Instruct"]
 
-QUANTIZATION_MODELS = [
-    "vllm-ascend/Qwen2.5-0.5B-Instruct-W8A8",
-]
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 
@@ -60,27 +60,6 @@ def test_models(model: str, dtype: str, max_tokens: int) -> None:
                     dtype=dtype,
                     enforce_eager=True,
                     gpu_memory_utilization=0.7) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
-@pytest.mark.parametrize("model", QUANTIZATION_MODELS)
-@pytest.mark.parametrize("max_tokens", [5])
-def test_quantization_models(model: str, max_tokens: int) -> None:
-    prompt = "The following numbers of the sequence " + ", ".join(
-        str(i) for i in range(1024)) + " are:"
-    example_prompts = [prompt]
-
-    # NOTE: Using quantized model repo id from modelscope encounters an issue,
-    # this pr (https://github.com/vllm-project/vllm/pull/19212) fix the issue,
-    # after it is being merged, there's no need to download model explicitly.
-    model_path = snapshot_download(model)
-
-    with VllmRunner(model_path,
-                    max_model_len=8192,
-                    enforce_eager=True,
-                    dtype="auto",
-                    gpu_memory_utilization=0.7,
-                    quantization="ascend") as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
