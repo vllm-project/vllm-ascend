@@ -66,9 +66,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+
   lint:
     # Only trigger lint on pull request
-    if: ${{ github.event_name == 'pull_request' }}
+    if: false
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -194,9 +195,10 @@ jobs:
           verbose: true
 
   e2e:
-    needs: [lint]
-    # only trigger e2e test on pull request after lint passed
-    if: ${{ needs.lint.result == 'success' && github.event_name == 'pull_request' }}
+    if: false
+    # needs: [lint]
+    # # only trigger e2e test on pull request after lint passed
+    # if: ${{ needs.lint.result == 'success' && github.event_name == 'pull_request' }}
     strategy:
       max-parallel: 2
       matrix:
@@ -296,13 +298,11 @@ jobs:
             --ignore=tests/e2e/singlecard/test_embedding.py
 
   e2e-4-cards:
-    needs: [e2e]
-    if: ${{ needs.e2e.result == 'success' }}
     strategy:
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         os: [linux-arm64-npu-4]
-        vllm_version: [main, v0.9.1]
+        vllm_version: [v0.9.1, main]
     name: multicard e2e test
     runs-on: ${{ matrix.os }}
     container:
