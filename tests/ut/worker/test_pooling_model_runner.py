@@ -1,21 +1,15 @@
-import pytest
 import unittest
-import vllm_ascend
 from vllm.distributed.parallel_state import (GroupCoordinator)
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm_ascend.worker.pooling_model_runner import NPUPoolingModelRunner,ModelInputForNPUWithPoolingMetadata
-from vllm.sequence import (IntermediateTensors, SequenceData,
+from vllm.sequence import (SequenceData,
                            SequenceGroupMetadata)
 from unittest.mock import patch,MagicMock
 from vllm.engine.arg_utils import EngineArgs
 
 import torch
 from dataclasses import dataclass
-from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.pooling_params import PoolingParams
 
-from vllm.distributed import get_pp_group
-from vllm.forward_context import set_forward_context
 
 @dataclass
 class ModelInputForNPUWithPoolingMetadata:
@@ -173,7 +167,7 @@ class TestPoolingModelRunner(unittest.TestCase):
         seq_group.pooling_params = pooling_params
         
         # Call the function
-        result = self.runner._prepare_pooling([seq_group], [10, 20])
+        self.runner._prepare_pooling([seq_group], [10, 20])
         
         # Verify results
         mock_pooling_metadata.assert_called_once_with(
@@ -193,7 +187,7 @@ class TestPoolingModelRunner(unittest.TestCase):
         empty_group.pooling_params = pooling_params
         
         # Call the function
-        result = self.runner._prepare_pooling([empty_group], [])
+        self.runner._prepare_pooling([empty_group], [])
         
         # Verify results
         mock_pooling_metadata.assert_called_once_with(
@@ -214,7 +208,7 @@ class TestPoolingModelRunner(unittest.TestCase):
         single_group.pooling_params = pooling_params
         
         # Call the function
-        result = self.runner._prepare_pooling([single_group], [5])
+        self.runner._prepare_pooling([single_group], [5])
         
         # Verify results
         mock_pooling_metadata.assert_called_once_with(
@@ -242,7 +236,7 @@ class TestPoolingModelRunner(unittest.TestCase):
         group2.pooling_params = params2
         
         # Call the function
-        result = self.runner._prepare_pooling([group1, group2], [10, 20])
+        self.runner._prepare_pooling([group1, group2], [10, 20])
         
         # Verify results
         mock_pooling_metadata.assert_called_once_with(
@@ -255,7 +249,7 @@ class TestPoolingModelRunner(unittest.TestCase):
         """Test case with empty input lists"""
         # Call the function with empty inputs
         mock_pooling_metadata.return_value=None
-        result = self.runner._prepare_pooling([], [])
+        self.runner._prepare_pooling([], [])
         
         # Verify results
         mock_pooling_metadata.assert_called_once_with(
