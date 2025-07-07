@@ -1246,6 +1246,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
              sample_indices) = (self._process_reqs(scheduler_output,
                                                    intermediate_tensors))
 
+            if self.dynamic_eplb:
+                self.eplb_updator.take_update_info_from_eplb_process()
+
         with ProfileExecuteDuration().capture_async("post process"):
             logits = self.model.compute_logits(hidden_states[sample_indices],
                                                None)
@@ -1547,6 +1550,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if is_profile_run and self.dynamic_eplb:
                     self.model.clear_all_moe_loads()
                 if not is_compile and not is_profile_run and self.dynamic_eplb:
+                    self.eplb_updator.take_update_info_from_eplb_process()
                     self.eplb_updator.forward_end()
                 return hidden_states
 
