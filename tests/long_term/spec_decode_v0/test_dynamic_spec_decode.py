@@ -30,7 +30,6 @@ from tests.long_term.spec_decode_v0.test_utils import mock_spec_decode_sampler
 from tests.long_term.spec_decode_v0.utils import create_batch, mock_worker
 
 
-
 @pytest.mark.parametrize('queue_size', [4])
 @pytest.mark.parametrize('batch_size', [1])
 @pytest.mark.parametrize('k', [1])
