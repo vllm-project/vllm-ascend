@@ -7,14 +7,9 @@ from unittest.mock import patch,MagicMock
 from vllm.engine.arg_utils import EngineArgs
 
 import torch
-from dataclasses import dataclass
 from vllm.pooling_params import PoolingParams
 
 
-@dataclass
-class ModelInputForNPUWithPoolingMetadata:
-    seq_lens: list
-    pooling_metadata: object = None
 class TestPoolingModelRunner(unittest.TestCase):
     """Unit tests for the NPUPoolingModelRunner class."""
     def _create_model_runner(self,model: str, *args, **kwargs) -> NPUPoolingModelRunner:
