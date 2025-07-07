@@ -143,6 +143,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Batch MC2 in prefill: The number of tokens in each batch
     "VLLM_ASCEND_FUSED_MOE_MC2_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_ASCEND_FUSED_MOE_MC2_CHUNK_SIZE", "128")),
+    "VLLM_ENABLE_FC":
+    lambda: int(os.getenv("VLLM_ENABLE_FC", 0))
 }
 
 # end-env-vars-definition
