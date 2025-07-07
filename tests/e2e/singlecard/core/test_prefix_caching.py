@@ -64,7 +64,6 @@ def test_prefix_cache_with_v1_scheduler(model: str, max_tokens: int) -> None:
     with VllmRunner(model,
                     enforce_eager=True,
                     max_model_len=2048,
-                    tensor_parallel_size=1,
                     gpu_memory_utilization=0.7) as vllm_model:
         prefix_cache_output = vllm_model.generate_greedy(
             INPUT_PROMPTS, max_tokens)
@@ -73,7 +72,6 @@ def test_prefix_cache_with_v1_scheduler(model: str, max_tokens: int) -> None:
                     enable_prefix_caching=False,
                     enforce_eager=True,
                     max_model_len=2048,
-                    tensor_parallel_size=1,
                     gpu_memory_utilization=0.7) as vllm_model:
         vllm_output = vllm_model.generate_greedy(INPUT_PROMPTS, max_tokens)
 
@@ -98,7 +96,6 @@ def test_prefix_cache_with_ascend_scheduler(model: str,
                     },
                     enforce_eager=True,
                     max_model_len=2048,
-                    tensor_parallel_size=1,
                     gpu_memory_utilization=0.7) as vllm_model:
         vllm_output = vllm_model.generate_greedy(INPUT_PROMPTS, max_tokens)
 
@@ -111,7 +108,6 @@ def test_prefix_cache_with_ascend_scheduler(model: str,
                     },
                     enforce_eager=True,
                     max_model_len=2048,
-                    tensor_parallel_size=1,
                     gpu_memory_utilization=0.7) as vllm_model:
         prefix_cache_output = vllm_model.generate_greedy(
             INPUT_PROMPTS, max_tokens)
@@ -126,7 +122,6 @@ def test_prefix_cache_with_ascend_scheduler(model: str,
                     },
                     enforce_eager=True,
                     max_model_len=2048,
-                    tensor_parallel_size=1,
                     gpu_memory_utilization=0.7) as vllm_model:
         chunk_prefill_prefix_cache_output = vllm_model.generate_greedy(
             INPUT_PROMPTS, max_tokens)
