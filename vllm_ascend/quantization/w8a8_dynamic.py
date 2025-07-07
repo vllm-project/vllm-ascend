@@ -780,7 +780,9 @@ class AscendW8A8DynamicFusedMoEMethod:
                 log2phy=log2phy,
                 global_redundant_expert_num=global_redundant_expert_num,
                 shared_experts=shared_experts)
-        elif fused_moe_state == FusedMoEState.AllGather:
+        elif fused_moe_state in [
+                FusedMoEState.AllGather, FusedMoEState.NaiveMulticast
+        ]:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
                                  w1_scale=layer.w13_weight_scale,
