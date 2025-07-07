@@ -8,6 +8,7 @@ from vllm.distributed.parallel_state import (GroupCoordinator, get_world_group,
 # customize parallel solution
 _EP: Optional[GroupCoordinator] = None
 _ETP: Optional[GroupCoordinator] = None
+_MLPTP: Optional[GroupCoordinator] = None
 
 
 def get_ep_group() -> GroupCoordinator:
@@ -20,14 +21,27 @@ def get_etp_group() -> GroupCoordinator:
         "expert tensor parallel group is not initialized")
     return _ETP
 
+def get_mlptp_group() -> GroupCoordinator:
+    assert _MLPTP is not None, (
+        "mlp tensor parallel group is not initialized")
+    return _MLPTP
+
+def get_mlp_tensor_model_parallel_world_size():
+    """Return world size for the mlp tensor model parallel group."""
+    return get_mlptp_group().world_size
+
+def get_mlp_tensor_model_parallel_rank():
+    """Return my rank for the tensor model parallel group."""
+    return get_mlptp_group().rank_in_group
 
 def model_parallel_initialized():
-    return (_ETP is not None and _EP is not None)
+    return (_ETP is not None and _EP is not None and _MLPTP is not None)
 
 
 def init_ascend_model_parallel(
     expert_parallel_size: int = 1,
     expert_tensor_parallel_size: int = 1,
+    mlp_tensor_parallel_size: int = 4,
     world_size: Optional[int] = None,
     backend: Optional[str] = None,
 ):
@@ -39,6 +53,9 @@ def init_ascend_model_parallel(
         get_world_group().device_group)
     num_expert_parallel_groups = expert_tensor_parallel_size
     num_expert_tensor_parallel_groups = expert_parallel_size
+    assert (world_size % mlp_tensor_parallel_size == 0), (
+                "world_size must be divisible by mlp_tensor_parallel_size")
+    num_mlp_tensor_parallel_groups = world_size // mlp_tensor_parallel_size
 
     global _EP
     group_ranks = []
@@ -64,6 +81,19 @@ def init_ascend_model_parallel(
                                      backend,
                                      group_name="etp")
 
+    group_ranks = []
+    global _MLPTP
+    for i in range(num_mlp_tensor_parallel_groups):
+        ranks = list(
+            range(i * mlp_tensor_parallel_size,
+                  (i + 1) * mlp_tensor_parallel_size))
+        group_ranks.append(ranks)
+    # Build the mlp tensor model-parallel groups.
+    _MLPTP = init_model_parallel_group(group_ranks,
+                                     get_world_group().local_rank,
+                                     backend,
+                                     group_name="mlptp")
+
 
 def destory_ascend_model_parallel():
     global _EP
@@ -75,3 +105,8 @@ def destory_ascend_model_parallel():
     if _ETP:
         _ETP.destroy()
     _ETP = None
+
+    global _MLPTP
+    if _MLPTP:
+        _MLPTP.destroy()
+    _MLPTP = None
