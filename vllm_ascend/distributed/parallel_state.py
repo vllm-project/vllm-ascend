@@ -41,9 +41,9 @@ def model_parallel_initialized():
 def init_ascend_model_parallel(
     expert_parallel_size: int = 1,
     expert_tensor_parallel_size: int = 1,
-    mlp_tensor_parallel_size: int = 4,
     world_size: Optional[int] = None,
     backend: Optional[str] = None,
+    mlp_tensor_parallel_size: Optional[int] = 4,
 ):
     if model_parallel_initialized():
         return
