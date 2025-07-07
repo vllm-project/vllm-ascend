@@ -133,7 +133,7 @@ class AscendMetadata:
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
 
-    with_prefill_across_dp: bool = False
+    enable_dbo_across_dp: bool = False
 
 
 class AscendAttentionMetadataBuilder:
@@ -150,7 +150,7 @@ class AscendAttentionMetadataBuilder:
               num_actual_tokens,
               max_query_len,
               common_prefix_len,
-              with_prefill_across_dp: bool = False):
+              enable_dbo_across_dp: bool = False):
 
         block_table = self.runner.input_batch.block_table[0].get_device_tensor(
         )
@@ -177,7 +177,7 @@ class AscendAttentionMetadataBuilder:
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
             attn_state=attn_state,
-            with_prefill_across_dp=with_prefill_across_dp)
+            enable_dbo_across_dp=enable_dbo_across_dp)
         return attn_metadata
 
 
@@ -275,7 +275,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # TODO: Remove this contiguous in the future.
             value = value.contiguous()
 
-            if kv_cache.numel() > 0:
+            if len(kv_cache) > 0:
                 if self.key_cache is None:
                     self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
                 slots = attn_metadata.slot_mapping
@@ -307,11 +307,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 assert attn_metadata is not None
                 assert attn_metadata.attn_mask is not None
                 compress_mask = attn_metadata.attn_mask
+                batch_size = attn_metadata.query_lens.shape[0]
+                block_table = attn_metadata.block_tables[:batch_size, :]
                 torch_npu._npu_flash_attention_qlens(
                     query=query,
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
-                    block_table=attn_metadata.block_tables,
+                    block_table=block_table,
                     mask=compress_mask,
                     seq_len=attn_metadata.query_lens,
                     context_lens=attn_metadata.seq_lens,

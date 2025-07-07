@@ -41,9 +41,15 @@ import pytest
 from vllm.model_executor.layers.vocab_parallel_embedding import \
     pad_vocab_size  # noqa: F401
 
+<<<<<<<< HEAD:tests/e2e/long_term/spec_decode/e2e/test_mlp_correctness.py
 from tests.e2e.long_term.spec_decode.e2e.conftest import \
     run_equality_correctness_test
 from tests.e2e.long_term.spec_decode.utils import maybe_enable_chunked_prefill
+========
+from tests.long_term.spec_decode_v0.e2e.conftest import \
+    run_equality_correctness_test
+from tests.long_term.spec_decode_v0.utils import maybe_enable_chunked_prefill
+>>>>>>>> upstream/v0.9.1-dev:tests/long_term/spec_decode_v0/e2e/test_mlp_correctness.py
 
 # main model
 MAIN_MODEL = "JackFram/llama-160m"

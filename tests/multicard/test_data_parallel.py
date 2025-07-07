@@ -16,7 +16,6 @@
 #
 """
 Compare the outputs of vLLM with and without aclgraph.
-
 Run `pytest tests/multicard/test_data_parallel.py`.
 """
 
@@ -30,6 +29,7 @@ from tests.model_utils import check_outputs_equal
 MODELS = ["Qwen/Qwen2.5-0.5B-Instruct"]
 
 
+@pytest.mark.skipif(True, reason="OPEN ME when dp is supported on A2")
 @pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
                     reason="Data parallel only support on v1")
 @pytest.mark.parametrize("model", MODELS)

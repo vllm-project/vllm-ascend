@@ -63,7 +63,10 @@ def test_mtp_correctness(
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
-        ref_llm = LLM(model=model_name, max_model_len=256, enforce_eager=True)
+        ref_llm = LLM(model=model_name,
+                      max_model_len=256,
+                      gpu_memory_utilization=0.8,
+                      enforce_eager=True)
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
         del ref_llm
 
@@ -74,7 +77,67 @@ def test_mtp_correctness(
                            "num_speculative_tokens": 1,
                        },
                        max_model_len=256,
+                       gpu_memory_utilization=0.8,
                        enforce_eager=True)
+        spec_outputs = spec_llm.chat(test_prompts, sampling_config)
+        matches = 0
+        misses = 0
+        for ref_output, spec_output in zip(ref_outputs, spec_outputs):
+            if ref_output.outputs[0].text == spec_output.outputs[0].text:
+                matches += 1
+            else:
+                misses += 1
+                print(f"ref_output: {ref_output.outputs[0].text}")
+                print(f"spec_output: {spec_output.outputs[0].text}")
+
+        # Heuristic: expect at least 66% of the prompts to match exactly
+        # Upon failure, inspect the outputs to check for inaccuracy.
+        assert matches > int(0.66 * len(ref_outputs))
+        del spec_llm
+
+
+def test_mtp_torchair_correctness(
+    monkeypatch: pytest.MonkeyPatch,
+    test_prompts: list[list[dict[str, Any]]],
+    sampling_config: SamplingParams,
+    model_name: str,
+):
+    '''
+    Compare the outputs of a original LLM and a speculative LLM
+    should be the same when using mtp speculative decoding.
+    '''
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+
+        ref_llm = LLM(model=model_name,
+                      max_model_len=256,
+                      enforce_eager=False,
+                      additional_config={
+                          "torchair_graph_config": {
+                              "enabled": True
+                          },
+                          "ascend_scheduler_config": {
+                              "enabled": True
+                          },
+                      })
+        ref_outputs = ref_llm.chat(test_prompts, sampling_config)
+        del ref_llm
+
+        spec_llm = LLM(model=model_name,
+                       trust_remote_code=True,
+                       enforce_eager=False,
+                       speculative_config={
+                           "method": "deepseek_mtp",
+                           "num_speculative_tokens": 1,
+                       },
+                       additional_config={
+                           "torchair_graph_config": {
+                               "enabled": True
+                           },
+                           "ascend_scheduler_config": {
+                               "enabled": True
+                           },
+                       })
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
         matches = 0
         misses = 0

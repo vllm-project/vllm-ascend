@@ -22,7 +22,11 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.top1_proposer import Top1Proposer
 
+<<<<<<<< HEAD:tests/e2e/long_term/spec_decode/test_ngram_worker.py
 from tests.e2e.long_term.spec_decode.utils import (
+========
+from tests.long_term.spec_decode_v0.utils import (
+>>>>>>>> upstream/v0.9.1-dev:tests/long_term/spec_decode_v0/test_ngram_worker.py
     create_seq_group_metadata_from_prompts, create_worker)
 
 

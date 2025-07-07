@@ -29,7 +29,11 @@ from vllm.sequence import (ExecuteModelRequest, HiddenStates, Logprob,
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.top1_proposer import Top1Proposer
 
+<<<<<<<< HEAD:tests/e2e/long_term/spec_decode/test_multi_step_worker.py
 from tests.e2e.long_term.spec_decode.utils import (
+========
+from tests.long_term.spec_decode_v0.utils import (
+>>>>>>>> upstream/v0.9.1-dev:tests/long_term/spec_decode_v0/test_multi_step_worker.py
     assert_logprobs_dict_allclose, create_batch,
     create_seq_group_metadata_from_prompts, create_worker,
     patch_execute_model_with_seeds, zero_kv_cache)

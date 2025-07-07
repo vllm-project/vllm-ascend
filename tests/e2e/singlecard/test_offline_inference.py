@@ -43,6 +43,10 @@ QUANTIZATION_MODELS = [
 ]
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
+QUANTIZATION_MODELS = [
+    "vllm-ascend/Qwen2.5-0.5B-Instruct-W8A8",
+]
+
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half", "float16"])
