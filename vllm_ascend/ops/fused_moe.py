@@ -1140,7 +1140,8 @@ class AscendFusedMoE(FusedMoE):
                 enable_force_load_balance: bool = False,
                 top_k: Optional[int] = None,
                 shared_experts: Optional[Any] = None,
-                gate: Optional[Any] = None):
+                gate: Optional[Any] = None,
+                replace_allreduce: bool = False):
         assert self.quant_method is not None
 
         if top_k:
@@ -1158,9 +1159,11 @@ class AscendFusedMoE(FusedMoE):
         if self.enable_multistream_moe:
             assert gate is not None
             router_logits, _ = gate(hidden_states)
-            if isinstance(self.quant_method.quant_method,
-                          AscendW8A8DynamicFusedMoEMethod
-                          ) and fused_moe_state == FusedMoEState.MC2:
+            if not isinstance(self.quant_method,
+                              AscendUnquantizedFusedMoEMethod) and isinstance(
+                                  self.quant_method.quant_method,
+                                  AscendW8A8DynamicFusedMoEMethod
+                              ) and fused_moe_state == FusedMoEState.MC2:
                 with npu_stream_switch("moe_secondary", 0):
                     quantized_x_for_share, dynamic_scale_for_share = torch_npu.npu_dynamic_quant(
                         hidden_states)
@@ -1173,7 +1176,8 @@ class AscendFusedMoE(FusedMoE):
         mc2_mask = attn_metadata.decode.mc2_mask if attn_metadata is not None and attn_metadata.decode is not None else None
 
         tp_size = get_tensor_model_parallel_world_size()
-        if tp_size > 1 and fused_moe_state != FusedMoEState.AllGather:
+        if (tp_size > 1 and fused_moe_state != FusedMoEState.AllGather
+                and not replace_allreduce):
             if num_tokens < tp_size:
                 hidden_states = nn.functional.pad(
                     hidden_states, (0, 0, 0, tp_size - num_tokens))
@@ -1241,7 +1245,8 @@ class AscendFusedMoE(FusedMoE):
             if isinstance(e_hidden_states, tuple):
                 e_hidden_states, shared_hidden_states = e_hidden_states
 
-        if tp_size > 1 and fused_moe_state != FusedMoEState.AllGather:
+        if (tp_size > 1 and fused_moe_state != FusedMoEState.AllGather
+                and not replace_allreduce):
             dist.all_gather(list(chunk_hidden_states), e_hidden_states,
                             self.tp_group)
             final_hidden_states = torch.cat(chunk_hidden_states, dim=0)
