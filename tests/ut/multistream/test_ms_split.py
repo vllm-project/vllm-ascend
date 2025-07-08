@@ -2,11 +2,12 @@ import unittest
 from unittest.mock import MagicMock
 
 import torch 
-
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
-from vllm_ascend.multistream.ms_split import compute_split_seq_index, split_attn_tensor_type, \
-                                        split_attn_int_type, model_input_split_v1_mla_attn
+from vllm_ascend.multistream.ms_split import (compute_split_seq_index, 
+                                              split_attn_tensor_type, 
+                                              split_attn_int_type, 
+                                              model_input_split_v1_mla_attn)
 
 
 class TestMsSplit(unittest.TestCase):
