@@ -1272,7 +1272,7 @@ class AscendFusedMoE(FusedMoE):
         if (fused_moe_state not in [
                 FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
                 FusedMoEState.NaiveMulticast
-        ]  or not is_deepseek_v3_r1):
+        ] or not is_deepseek_v3_r1):
             router_logits, _ = gate(hidden_states)
 
         tp_size = get_tensor_model_parallel_world_size()
