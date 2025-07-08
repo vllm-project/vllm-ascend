@@ -56,7 +56,7 @@ def test_models_distributed_DeepSeek_multistream_moe():
     with VllmRunner(
             "vllm-ascend/DeepSeek-V3-Pruning",
             dtype=dtype,
-            tensor_parallel_size=2,
+            tensor_parallel_size=4,
             distributed_executor_backend="mp",
             additional_config={
                 "torchair_graph_config": {
@@ -69,21 +69,6 @@ def test_models_distributed_DeepSeek_multistream_moe():
                 "refresh": True,
             },
             enforce_eager=False,
-    ) as vllm_model:
-        vllm_model.generate_greedy(example_prompts, max_tokens)
-
-
-def test_models_distributed_DeepSeek():
-    example_prompts = [
-        "Hello, my name is",
-    ]
-    dtype = "half"
-    max_tokens = 5
-    with VllmRunner(
-            "deepseek-ai/DeepSeek-V2-Lite",
-            dtype=dtype,
-            tensor_parallel_size=4,
-            distributed_executor_backend="mp",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
@@ -163,5 +148,22 @@ def test_models_distributed_DeepSeek_W8A8():
             dtype="auto",
             tensor_parallel_size=4,
             quantization="ascend",
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+def test_models_distributed_pangu():
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+
+    with VllmRunner(
+            snapshot_download("vllm-ascend/pangu-pro-moe-pruing"),
+            max_model_len=8192,
+            enforce_eager=True,
+            dtype="auto",
+            tensor_parallel_size=4,
+            distributed_executor_backend="mp",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

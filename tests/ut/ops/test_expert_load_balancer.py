@@ -1,14 +1,26 @@
-# fused moe ops test will hit the infer_schema error, we need add the patch
-# here to make the test pass.
-import vllm_ascend.patch.worker.patch_common.patch_utils  # type: ignore[import]  # isort: skip  # noqa
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
 
 import json
-import unittest
+import os
 from typing import List, TypedDict
 from unittest import mock
 
 import torch
 
+from tests.ut.base import TestBase
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 
 
@@ -28,31 +40,13 @@ class MockData(TypedDict):
     layer_list: List[Layer]
 
 
-MOCK_DATA: MockData = {
-    "moe_layer_count":
-    1,
-    "layer_list": [{
-        "layer_id":
-        0,
-        "device_count":
-        2,
-        "device_list": [{
-            "device_id": 0,
-            "device_expert": [7, 2, 0, 3, 5]
-        }, {
-            "device_id": 1,
-            "device_expert": [6, 1, 4, 7, 2]
-        }]
-    }]
-}
-
-
-class TestExpertLoadBalancer(unittest.TestCase):
+class TestExpertLoadBalancer(TestBase):
 
     def setUp(self):
-        json_file = "expert_map.json"
-        with open(json_file, 'w') as f:
-            json.dump(MOCK_DATA, f)
+        _TEST_DIR = os.path.dirname(__file__)
+        json_file = _TEST_DIR + "/expert_map.json"
+        with open(json_file, 'r') as f:
+            self.expert_map: MockData = json.load(f)
 
         self.expert_load_balancer = ExpertLoadBalancer(json_file,
                                                        global_expert_num=8)
@@ -62,9 +56,9 @@ class TestExpertLoadBalancer(unittest.TestCase):
         self.assertIsInstance(self.expert_load_balancer.expert_map_tensor,
                               torch.Tensor)
         self.assertEqual(self.expert_load_balancer.layers_num,
-                         MOCK_DATA["moe_layer_count"])
+                         self.expert_map["moe_layer_count"])
         self.assertEqual(self.expert_load_balancer.ranks_num,
-                         MOCK_DATA["layer_list"][0]["device_count"])
+                         self.expert_map["layer_list"][0]["device_count"])
 
     def test_generate_index_dicts(self):
         tensor_2d = torch.tensor([[7, 2, 0, 3, 5], [6, 1, 4, 7, 2]])
@@ -142,6 +136,6 @@ class TestExpertLoadBalancer(unittest.TestCase):
     def test_get_global_redundant_expert_num(self):
         redundant_expert_num = self.expert_load_balancer.get_global_redundant_expert_num(
         )
-        expected_redundant_expert_num = len(MOCK_DATA["layer_list"][0]["device_list"][0]["device_expert"]) * \
-                                        MOCK_DATA["layer_list"][0]["device_count"] - 8
+        expected_redundant_expert_num = len(self.expert_map["layer_list"][0]["device_list"][0]["device_expert"]) * \
+                                        self.expert_map["layer_list"][0]["device_count"] - 8
         self.assertEqual(redundant_expert_num, expected_redundant_expert_num)

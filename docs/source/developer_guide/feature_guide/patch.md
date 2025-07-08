@@ -12,7 +12,7 @@ We should keep in mind that Patch is not the best way to make vLLM Ascend compat
 2. Once a patch is added, it's required to describe the future plan for removing the patch.
 3. Anytime, clean the patch code is welcome.
 
-## How it work
+## How it works
 
 In `vllm_ascend/patch`, you can see the code structure as follows:
 
@@ -31,14 +31,14 @@ vllm_ascend
 ```
 
 - **platform**: The patch code in this directory is for patching the code in vLLM main process. It's called by `vllm_ascend/platform::NPUPlatform::pre_register_and_update` very early when vLLM is initialized.
-  - for online mode, vLLM process calls the platform patch here `vllm/vllm/engine/arg_utils.py::AsyncEngineArgs.add_cli_args` when parsing the cli args.
-  - for offline mode, vLLM process calls the platform patch here `vllm/vllm/engine/arg_utils.py::EngineArgs.create_engine_config` when parsing the input parameters.
+  - For online mode, vLLM process calls the platform patch here `vllm/vllm/engine/arg_utils.py::AsyncEngineArgs.add_cli_args` when parsing the cli args.
+  - For offline mode, vLLM process calls the platform patch here `vllm/vllm/engine/arg_utils.py::EngineArgs.create_engine_config` when parsing the input parameters.
 - **worker**: The patch code in this directory is for patching the code in vLLM worker process. It's called by `vllm_ascend/worker/worker_v1::NPUWorker::__init__` when the vLLM worker process is initialized.
-  - for both online and offline mode, vLLM engine core process calls the worker patch here `vllm/vllm/worker/worker_base.py::WorkerWrapperBase.init_worker` when initializing the worker process.
+  - For both online and offline mode, vLLM engine core process calls the worker patch here `vllm/vllm/worker/worker_base.py::WorkerWrapperBase.init_worker` when initializing the worker process.
 
-In both **platform** and **worker** folder, there are several patch module. They are used for patching different version of vLLM.
+In both **platform** and **worker** folder, there are several patch modules. They are used for patching different version of vLLM.
 
-- `patch_0_9_1`: This module is used for patching vLLM 0.9.1. The version is always the nearest version of vLLM. Once vLLM is released, we will drop this patch module and bump a new version. For example, `patch_0_9_2` is used for patching vLLM 0.9.2.
+- `patch_0_9_1`: This module is used for patching vLLM 0.9.1. The version is always the nearest version of vLLM. Once vLLM is released, we will drop this patch module and bump to a new version. For example, `patch_0_9_2` is used for patching vLLM 0.9.2.
 - `patch_main`: This module is used for patching the code in vLLM main branch.
 - `patch_common`: This module is used for patching both vLLM 0.9.1 and vLLM main branch.
 
@@ -74,9 +74,9 @@ Before writing a patch, following the principle above, we should patch the least
     #    Future Plan:
     #       <Describe the future plan to remove the patch>
     ```
-7. Add the Unit Test and E2E Test. Any new added code in vLLM Ascend should contain the Unit Test and E2E Test as well. You can find more detail in [test guide](../contribution/testing.md)
+7. Add the Unit Test and E2E Test. Any newly added code in vLLM Ascend should contain the Unit Test and E2E Test as well. You can find more details in [test guide](../contribution/testing.md)
 
 
 ## Limitation
-1. In V1 Engine, vLLM start three kinds for process: Main process, EngineCore process and Worker process. Now vLLM Ascend only support patch the code in Main process and Worker process by default. If you want to patch the code runs in EngineCore process, you should patch EngineCore process totally during setup, the entry code is here `vllm.v1.engine.core`. Please override `EngineCoreProc` and `DPEngineCoreProc` totally.
-2. If you are running an edited vLLM code, the version of the vLLM may be changed automatically. For example, if you runs an edited vLLM basing on v0.9.1, the version of vLLM may be change to v0.9.2xxx, in this case, the patch for v0.9.1 in vLLM Ascend would not work as expect, because that vLLM Ascend can't distinguish the version of vLLM you're using. In this case, you can set the environment variable `VLLM_VERSION` to specify the version of vLLM you're using, then the patch for v0.9.1 should work.
+1. In V1 Engine, vLLM starts three kinds of process: Main process, EngineCore process and Worker process. Now vLLM Ascend only support patch the code in Main process and Worker process by default. If you want to patch the code runs in EngineCore process, you should patch EngineCore process entirely during setup, the entry code is here `vllm.v1.engine.core`. Please override `EngineCoreProc` and `DPEngineCoreProc` entirely.
+2. If you are running an edited vLLM code, the version of the vLLM may be changed automatically. For example, if you runs an edited vLLM based on v0.9.1, the version of vLLM may be change to v0.9.2xxx, in this case, the patch for v0.9.1 in vLLM Ascend would not work as expect, because that vLLM Ascend can't distinguish the version of vLLM you're using. In this case, you can set the environment variable `VLLM_VERSION` to specify the version of vLLM you're using, then the patch for v0.9.1 should work.
