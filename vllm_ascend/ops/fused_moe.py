@@ -1055,8 +1055,14 @@ class AscendFusedMoE(FusedMoE):
         self.log2phy = None
         self.global_redundant_expert_num = 0
 
+        # TODO: if this is not need for dynamic eplb with redundant expert, remove this
+        # self.log2phy = torch.full((self.ep_size, self.global_num_experts),
+        #                             -1,
+        #                             dtype=torch.int32)
+
         ascend_config = get_ascend_config()
         expert_map_path = ascend_config.expert_map_path
+        self.dynamic_eplb = ascend_config.dynamic_eplb
         if expert_map_path and os.path.exists(expert_map_path):
             # moe expert load balance
             expert_load_balancer = ExpertLoadBalancer(expert_map_path,
@@ -1101,6 +1107,10 @@ class AscendFusedMoE(FusedMoE):
 
         local_num_experts = torch.sum(self.expert_map != -1) \
             if self.expert_map is not None else num_experts
+
+        self.moe_load = None
+        if self.dynamic_eplb:
+            self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
 
         moe_quant_params = {
             "num_experts": local_num_experts,
@@ -1187,7 +1197,7 @@ class AscendFusedMoE(FusedMoE):
             router_logits = get_dp_group().all_gather(router_logits, 0)
 
         # Matrix multiply.
-        e_hidden_states = self.quant_method.apply(
+        e_hidden_states, expert_token_num, group_list_type  = self.quant_method.apply(
             layer=self,
             x=hidden_states,
             router_logits=router_logits,
@@ -1210,6 +1220,10 @@ class AscendFusedMoE(FusedMoE):
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
         )
+
+        if self.dynamic_eplb:
+            self.moe_load += expert_token_num if group_list_type else \
+                torch.cat([expert_token_num[:1], expert_token_num[1:] - expert_token_num[:-1]])
 
         if shared_experts:
             if isinstance(e_hidden_states, tuple):
@@ -1270,3 +1284,15 @@ class AscendFusedMoE(FusedMoE):
             enable_force_load_balance=enable_force_load_balance)
 
         return hidden_states
+
+    def update_map(self, new_expert_map):
+        self.expert_map = new_expert_map
+
+    def get_map(self):
+        return self.expert_map
+
+    def get_log2phy_map(self):
+        return self.log2phy
+
+    def clear_moe_load(self):
+        self.moe_load.zero_()

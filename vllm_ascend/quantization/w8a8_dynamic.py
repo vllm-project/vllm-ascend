@@ -313,15 +313,15 @@ def fused_experts_with_mc2(
     kwargs_mc2.update(stage3_kwargs)
 
     hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
-
+    group_list_type = 1
     if shared_experts is None:
-        return hidden_states
+        return hidden_states, expert_token_nums, group_list_type
     else:
         with npu_stream_switch("moe_secondary", 0):
             npu_wait_tensor(shared_act, down_out_list)
             shared_output, _ = shared_experts.down_proj(
                 (shared_act, swiglu_out_scale))
-        return hidden_states, shared_output
+        return hidden_states, shared_output, expert_token_nums, group_list_type
 
 
 # currently expert parallelism implemented with all2all
@@ -452,7 +452,7 @@ def fused_experts_with_all2all(hidden_states: torch.Tensor,
         )
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
-    return final_hidden_states
+    return final_hidden_states, expert_tokens, group_list_type
 
 
 def fused_experts(hidden_states: torch.Tensor,
@@ -566,7 +566,7 @@ def fused_experts(hidden_states: torch.Tensor,
 
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
-    return final_hidden_states
+    return final_hidden_states, expert_tokens, group_list_type
 
 
 class AscendW8A8DynamicLinearMethod:
@@ -807,7 +807,8 @@ class AscendW8A8DynamicFusedMoEMethod:
                 shared_experts=shared_experts,
                 is_torchair=self.torchair_graph_enabled,
                 quantized_x_for_share=shared_gate_up,
-                dynamic_scale_for_share=shared_dequant_scale)
+                dynamic_scale_for_share=shared_dequant_scale,
+                **kwargs)
         elif fused_moe_state == FusedMoEState.AllGather:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,

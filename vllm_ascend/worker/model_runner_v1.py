@@ -75,6 +75,10 @@ from vllm.v1.worker.utils import (gather_mm_placeholders,
                                   sanity_check_mm_encoder_outputs,
                                   scatter_mm_placeholders)
 
+from vllm_ascend.eplb.eplb_updator import EplbUpdator
+from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+from vllm_ascend.eplb.core.loader.device_transfer_loader import D2DExpertWeightLoader
+
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention import AttentionMaskBuilder
@@ -395,6 +399,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.is_kv_producer = False
         if vllm_config.kv_transfer_config is not None:
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
+
+        # EPLB
+        self.dynamic_eplb = ascend_config.dynamic_eplb
+        if self.dynamic_eplb == True:
+            self.eplb_adaptor = None
+            self.is_eplb_warmuped = False
+            self.eplb_updator = EplbUpdator(ascend_config.expert_map_path)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -1319,10 +1330,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     # Return empty ModelRunnerOuptut if there's no work to do.
                     return EMPTY_MODEL_RUNNER_OUTPUT
                 return self.kv_connector_no_forward(scheduler_output)
+
+            if self.dynamic_eplb:
+                self.eplb_updator.forward_before()
             (attn_metadata, hidden_states, spec_decode_metadata, positions,
              num_scheduled_tokens, sample_indices, finished_sending,
              finished_recving) = (self._process_reqs(scheduler_output,
                                                      intermediate_tensors))
+
+            if self.dynamic_eplb:
+                self.eplb_updator.take_update_info_from_eplb_process()
 
         with ProfileExecuteDuration().capture_async("post process"):
             logits = self.model.compute_logits(hidden_states[sample_indices],
@@ -1436,6 +1453,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             captured_name = "Decode" if self.attn_state == AscendAttentionState.DecodeOnly else "Prefill"
             logger.info("Profile execute duration [%s]:%s", captured_name,
                         " ".join(dr_str))
+
+        if self.dynamic_eplb:
+            self.eplb_updator.forward_end()
 
         return model_runner_output
 
@@ -1574,6 +1594,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         with_prefill: bool = False,
         is_torchair_compile: bool = False,
         attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
+        is_profile_run: bool = False,
     ) -> torch.Tensor:
         if self.torchair_graph_enabled and not with_prefill:
             num_tokens = self.select_torchair_padded_batch_size(num_tokens)
@@ -1619,6 +1640,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_scheduled_tokens=num_scheduled_tokens,
                 attn_state=attn_state,
             )
+
+        if not is_torchair_compile and not is_profile_run and self.dynamic_eplb:
+            self.eplb_updator.forward_before()
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
@@ -1696,6 +1720,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=inputs_embeds,
                         **model_kwargs)
+
+                if is_profile_run and self.dynamic_eplb:
+                    self.model.clear_all_moe_loads()
+                if not is_torchair_compile and not is_profile_run and self.dynamic_eplb:
+                    self.eplb_updator.take_update_info_from_eplb_process()
+                    self.eplb_updator.forward_end()
             if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
                 assert isinstance(self.drafter, MtpProposer)
                 self.drafter.dummy_run(num_reqs, with_prefill=with_prefill)
@@ -1737,7 +1767,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Trigger compilation for general shape.
         with self.set_in_profile_run():
             hidden_states = self._dummy_run(self.max_num_tokens,
-                                            with_prefill=True)
+                                            with_prefill=True, is_profile_run=True)
 
         if get_pp_group().is_last_rank:
             hidden_states = hidden_states[logit_indices]
@@ -1749,6 +1779,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         del hidden_states, logits
         self.encoder_cache.clear()
         gc.collect()
+
+    def do_get_expert_load(self) -> tuple:
+        return self.eplb_updator.get_expert_load()
+
+    def do_update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
+        return self.eplb_updator.update_expert_load_statistical_period(num_expert_load_gather, num_iterations)
+
+    def eplb_warmup(self):
+        # EPLB
+        if self.dynamic_eplb and not self.is_eplb_warmuped:
+            self.is_eplb_warmuped = True
+            self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
+            self.eplb_updator.set_adaptor(self.eplb_adaptor)
+            self.eplb_updator.warm_up_eplb()
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
