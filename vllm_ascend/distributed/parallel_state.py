@@ -2,7 +2,8 @@ from typing import Optional
 
 import torch
 from vllm.distributed.parallel_state import (GroupCoordinator, get_world_group,
-                                             init_model_parallel_group)
+                                             init_model_parallel_group,
+                                             logger, get_dp_group, get_pp_group, get_tp_group)
 
 # vllm-ascend will maintain its own EP GroupCoordinator and ETP GroupCoordinator for
 # customize parallel solution
@@ -93,6 +94,12 @@ def init_ascend_model_parallel(
                                      get_world_group().local_rank,
                                      backend,
                                      group_name="mlptp")
+    
+    logger.info(
+    "vllm-ascend: rank %s in world size %s is assigned as "
+    "DP rank %s, PP rank %s, TP rank %s, EP rank %s, MLP TP rank %s", torch.distributed.get_rank(), world_size,
+    get_dp_group.rank_in_group, get_pp_group.rank_in_group, get_tp_group.rank_in_group,
+    _EP.rank_in_group, _MLPTP.rank_in_group)
 
 
 def destory_ascend_model_parallel():
