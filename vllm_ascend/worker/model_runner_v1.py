@@ -2166,14 +2166,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         kv_cache_list = []
                         for i in range(num_caches):
                             cache_shape = kv_cache_shape[1:]
-                            cache_size = math.prod(cache_shape)
                             if self.vllm_config.kv_transfer_config is None:
-                                kv_cache = torch.zeros(cache_size,
+                                kv_cache = torch.zeros(cache_shape,
                                                        dtype=dtype,
                                                        device=self.device)
                                 kv_cache = torch_npu.npu_format_cast(
                                     kv_cache, acl_format)
                             else:
+                                cache_size = math.prod(cache_shape)
                                 cache_size_aligned = cache_size + alignment
                                 kv_cache = torch.zeros(cache_size_aligned,
                                                        dtype=dtype,
