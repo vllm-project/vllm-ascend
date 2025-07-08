@@ -669,6 +669,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                                                 eps=config.rms_norm_eps)
         self.routed_scaling_factor = config.routed_scaling_factor
         self.first_k_dense_replace = config.first_k_dense_replace
+        self.layer_name = prefix
 
     def forward(
         self,
@@ -676,9 +677,14 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
         kv_cache: Optional[torch.Tensor] = None,
-        attn_metadata: Optional[AttentionMetadata] = None,
+        attn_metadata: Optional[Union["AttentionMetadata",
+                                      dict[str, "AttentionMetadata"]]] = None,
         replace_allreduce: bool = False,
     ) -> torch.Tensor:
+        if attn_metadata is None:
+            attn_metadata = get_forward_context().attn_metadata
+        if isinstance(attn_metadata, dict):
+            attn_metadata = attn_metadata[f"{self.layer_name}.self_attn.attn"]
         # Self Attention
         if attn_metadata is not None and attn_metadata.num_decodes > 0:
             mla_moe_communication = self.mla_moe_communication and replace_allreduce
@@ -803,7 +809,8 @@ class CustomDeepseekV2Model(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: Optional[List[torch.Tensor]] = None,
-        attn_metadata: Optional[AttentionMetadata] = None,
+        attn_metadata: Optional[Union["AttentionMetadata",
+                                      dict[str, "AttentionMetadata"]]] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -975,7 +982,8 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: Optional[List[torch.Tensor]] = None,
-        attn_metadata: Optional[AttentionMetadata] = None,
+        attn_metadata: Optional[Union["AttentionMetadata",
+                                      dict[str, "AttentionMetadata"]]] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
