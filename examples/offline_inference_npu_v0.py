@@ -17,6 +17,11 @@
 # Adapted from vllm-project/vllm/examples/offline_inference/basic.py
 #
 
+import os
+
+os.environ["VLLM_USE_V1"] = "0"
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
+
 from vllm import LLM, SamplingParams
 
 prompts = [
