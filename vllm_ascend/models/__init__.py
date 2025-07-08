@@ -21,10 +21,6 @@ def register_model():
         "Qwen2VLForConditionalGeneration",
         "vllm_ascend.models.qwen2_vl:AscendQwen2VLForConditionalGeneration")
 
-    ModelRegistry.register_model(
-        "Qwen3MoeSparseMoeBlock",
-        "vllm_ascend.models.moe_block:AscendSparseMoeBlock")
-
     if envs.USE_OPTIMIZED_MODEL:
         ModelRegistry.register_model(
             "Qwen2_5_VLForConditionalGeneration",
