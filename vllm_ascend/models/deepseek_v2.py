@@ -69,7 +69,6 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.sequence import IntermediateTensors
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
