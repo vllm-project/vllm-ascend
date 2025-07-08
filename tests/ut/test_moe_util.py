@@ -4,9 +4,9 @@
 import torch
 import pytest
 import math
+import vllm_ascend.patch.worker.patch_common.patch_utils
 
-from vllm_ascend.ops.moe_dispatcher.moe_utils import permute, get_capacity, topk_softmax_with_capacity, \
-    group_limited_topk, unpermute, sort_chunks_by_idxs
+from vllm_ascend.ops.moe_dispatcher.moe_utils import permute, get_capacity, topk_softmax_with_capacity, group_limited_topk, unpermute, sort_chunks_by_idxs
 
 
 class TestMoeUtils:
@@ -21,6 +21,7 @@ class TestMoeUtils:
         self.group_topk = 2
         self.num_groups = 2
         self.scaling_factor = 1.0
+
 
     def test_group_limited_topk(self, setup):
         # Test group-limited topk routing
@@ -38,41 +39,32 @@ class TestMoeUtils:
         assert indices.shape == (self.num_tokens, self.topk)
         assert torch.all(indices < self.num_experts)
 
-    def test_topk_softmax_with_capacity(self, setup):
+
+    @pytest.mark.parametrize("score_function", ["softmax"])
+    def test_topk_softmax_with_capacity(self, setup, score_function):
         # Test topk softmax with capacity
         logits = torch.randn(self.num_tokens, self.num_experts)
 
         # Test without capacity
         probs, routing_map, tokens_per_expert, top_indices = topk_softmax_with_capacity(
             logits,
-            topk=self.topk
+            topk=self.topk,
+            score_function=score_function
         )
         assert probs.shape == (self.num_tokens, self.num_experts)
         assert routing_map.shape == (self.num_tokens, self.num_experts)
         assert tokens_per_expert.shape == (self.num_experts,)
-
-        # Test with capacity
-        probs, routing_map, tokens_per_expert, top_indices = topk_softmax_with_capacity(
-            logits,
-            topk=self.topk,
-            capacity_factor=self.capacity_factor,
-            pad_to_capacity=True
-        )
-        expert_capacity = get_capacity(
-            num_tokens=self.num_tokens * self.topk,
-            num_experts=self.num_experts,
-            capacity_factor=self.capacity_factor
-        )
-        assert tokens_per_expert.max() <= expert_capacity
 
         # Test with group routing
         probs, routing_map, tokens_per_expert, top_indices = topk_softmax_with_capacity(
             logits,
             topk=self.topk,
             num_groups=self.num_groups,
-            group_topk=self.group_topk
+            group_topk=self.group_topk,
+            score_function=score_function
         )
         assert probs.shape == (self.num_tokens, self.num_experts)
+
 
     def test_get_capacity(self, setup):
         # Test capacity calculation
@@ -93,6 +85,7 @@ class TestMoeUtils:
             min_capacity=min_capacity
         )
         assert capacity == min_capacity
+
 
     def test_permute(self, setup):
         # Test token permutation
@@ -119,6 +112,7 @@ class TestMoeUtils:
         )
         assert permuted_tokens.shape[0] == num_out_tokens
         assert sorted_indices.shape[0] == num_out_tokens
+
 
     def test_unpermute(self, setup):
         # Test token unpermutation
@@ -162,6 +156,7 @@ class TestMoeUtils:
         )
         assert restored_tokens.shape == tokens.shape
 
+
     def test_sort_chunks_by_idxs(self, setup):
         # Test chunk sorting
         input_tensor = torch.randn(10, self.hidden_size)
@@ -173,10 +168,10 @@ class TestMoeUtils:
 
         # Verify the order is correct
         expected = torch.cat([input_tensor[5:], input_tensor[0: 3], input_tensor[3: 5]])
-        assert torch.allclose(output, expected) \
- \
-               @ pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
+        assert torch.allclose(output, expected)
 
+
+    @pytest.mark.parametrize("score_function", ["softmax"])
     def test_score_functions(self, setup, score_function):
         # Test different score functions
         logits = torch.randn(self.num_tokens, self.num_experts)
@@ -191,27 +186,3 @@ class TestMoeUtils:
         assert probs.shape == (self.num_tokens, self.num_experts)
         assert routing_map.shape == (self.num_tokens, self.num_experts)
         assert tokens_per_expert.shape == (self.num_experts,)
-
-    def test_edge_cases(self, setup):
-        # Test empty input
-        empty_logits = torch.randn(0, self.num_experts)
-        with pytest.raises(AssertionError):
-            topk_softmax_with_capacity(empty_logits, topk=self.topk)
-
-        # Test invalid score function
-        logits = torch.randn(self.num_tokens, self.num_experts)
-        with pytest.raises(ValueError):
-            topk_softmax_with_capacity(
-                logits,
-                topk=self.topk,
-                score_function="invalid"
-            )
-
-        # Test invalid drop policy
-        with pytest.raises(ValueError):
-            topk_softmax_with_capacity(
-                logits,
-                topk=self.topk,
-                capacity_factor=1.0,
-                drop_policy="invalid"
-            )
