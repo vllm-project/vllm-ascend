@@ -122,6 +122,7 @@ def fused_experts_with_mc2(
     moe_all_to_all_group_name: Optional[str] = None,
     shared_experts: Optional[Any] = None,
     is_torchair: bool = False,
+    shared_expert_rank_num: int = 0,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     quant_mode = 0
     ep_group = get_ep_group()
@@ -143,7 +144,7 @@ def fused_experts_with_mc2(
         "x": hidden_states,
         "expert_ids": topk_ids,
         "expert_shard_type": 0,
-        "shared_expert_rank_num": 0,
+        "shared_expert_rank_num": shared_expert_rank_num,
         "moe_expert_num": moe_expert_num,
         "global_bs": global_bs,
     }
@@ -212,7 +213,7 @@ def fused_experts_with_mc2(
         "expand_idx": expand_idx,
         "expert_scales": topk_weights.to(torch.float32),
         "expert_shard_type": 0,
-        "shared_expert_rank_num": 0,
+        "shared_expert_rank_num": shared_expert_rank_num,
         "moe_expert_num": moe_expert_num,
         "global_bs": global_bs,
     }
@@ -903,6 +904,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         is_prefill: bool = False,
         enable_force_load_balance: bool = False,
         shared_experts: Optional[Any] = None,
+        shared_expert_rank_num:int = 0,
         **kwargs,
     ) -> torch.Tensor:
 
@@ -954,7 +956,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 expert_map=expert_map,
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name,
                 shared_experts=shared_experts,
-                is_torchair=self.torchair_graph_enabled)
+                is_torchair=self.torchair_graph_enabled,
+                shared_expert_rank_num=shared_expert_rank_num)
         elif fused_moe_state == FusedMoEState.AllGather:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
@@ -1057,10 +1060,11 @@ class AscendFusedMoE(FusedMoE):
 
         ascend_config = get_ascend_config()
         expert_map_path = ascend_config.expert_map_path
+        self.shared_expert_rank_num = ascend_config.shared_expert_rank_num
         if expert_map_path and os.path.exists(expert_map_path):
             # moe expert load balance
             expert_load_balancer = ExpertLoadBalancer(expert_map_path,
-                                                      self.global_num_experts)
+                                                      self.global_num_experts, self.shared_expert_rank_num)
             self.local_num_experts, self.expert_map = \
                                 expert_load_balancer.get_rank_placement_map(
                                                 self.moe_instance_id,
@@ -1099,7 +1103,7 @@ class AscendFusedMoE(FusedMoE):
 
         assert self.quant_method is not None
 
-        local_num_experts = torch.sum(self.expert_map != -1) \
+        local_num_experts = self.local_num_experts \
             if self.expert_map is not None else num_experts
 
         moe_quant_params = {
@@ -1209,6 +1213,7 @@ class AscendFusedMoE(FusedMoE):
             and self.enable_multistream_moe and not is_prefill else None,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
+            shared_expert_rank_num=self.shared_expert_rank_num
         )
 
         if shared_experts:
