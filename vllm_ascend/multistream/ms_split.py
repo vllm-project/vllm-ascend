@@ -324,13 +324,13 @@ def model_input_split_v1_attn(
          query_start_loc=query_start_loc_pre,
          query_lens=query_lens_pre,
          seq_lens=seq_lens_pre,
+         seq_lens_list=seq_lens_pre.tolist(),
          max_query_len=max_query_len_pre,
          slot_mapping=slot_mapping_pre,
          is_only_prefill=is_only_prefill_pre,
          attn_state=attn_state_pre,
          attn_mask=attn_mask_pre,
          num_input_tokens=token_index,
-         with_prefill_across_dp=attn_metadata.with_prefill_across_dp,
          enable_dbo_across_dp=attn_metadata.enable_dbo_across_dp,
      )
 
@@ -340,13 +340,13 @@ def model_input_split_v1_attn(
          query_start_loc=query_start_loc_post,
          query_lens=query_lens_post,
          seq_lens=seq_lens_post,
+         seq_lens_list=seq_lens_post.tolist(),
          max_query_len=max_query_len_post,
          slot_mapping=slot_mapping_post,
          is_only_prefill=is_only_prefill_post,
          attn_state=attn_state_post,
          attn_mask=attn_mask_post,
          num_input_tokens=attn_metadata.num_input_tokens - token_index,
-         with_prefill_across_dp=attn_metadata.with_prefill_across_dp,
          enable_dbo_across_dp=attn_metadata.enable_dbo_across_dp,
      )
 

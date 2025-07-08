@@ -21,7 +21,7 @@ class FusedMoEState(Enum):
 def get_fused_moe_state(ep_size: int, with_prefill: bool):
     if ep_size == 1:
         return FusedMoEState.AllGather
-    elif with_prefill and envs_ascend.VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ:
+    elif envs_ascend.VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ:
         return FusedMoEState.All2AllSeq
     # NOTE: mc2 need ep_size >= 16 & all2all can't use in torchair graph.
     elif ep_size < 16 or with_prefill:

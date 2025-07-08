@@ -6,7 +6,6 @@ import torch
 import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
-from vllm.compilation.decorators import support_torch_compile
 
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeDecoderLayer, Qwen3MoeModel
 from vllm.config import CacheConfig, VllmConfig
@@ -22,6 +21,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.compilation.decorators import support_torch_compile
 
 from vllm_ascend.multistream.context import (
     advance_step_multistream_layer_context, get_multistream_comm_context,
@@ -35,6 +35,7 @@ from vllm_ascend.multistream.metadata import (MultiStreamConfig,
 from vllm_ascend.ops.fused_moe import AscendFusedMoE, select_experts, apply_mlp
 from vllm_ascend.distributed.tensor_parallel import gather_from_sequence_parallel_region
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.models.qwen3_moe import CustomQwen3MoeForCausalLM
 
 VLLM_ASCEND_ENABLE_DBO: bool = envs_ascend.VLLM_ASCEND_ENABLE_DBO
 
@@ -197,7 +198,7 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
             self, dispatched_input, tokens_per_expert
     ):
         return apply_mlp(
-            [dispatched_input],
+            dispatched_input,
             self.mlp.experts.w13_weight,
             self.mlp.experts.w2_weight,
             tokens_per_expert
@@ -207,8 +208,7 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
             self, hidden_states, microbatch_id, num_tokens, chunked_hidden_states_sizes
     ):
         token_dispatcher = self.mlp.experts.token_dispatchers[microbatch_id]
-        token_dispatcher.combine_alltoall()
-        final_hidden_states = token_dispatcher.unpermute2()
+        final_hidden_states, _ = token_dispatcher.token_unpermutation(hidden_states)
         if hasattr(self.mlp, 'routed_scaling_factor'):
             final_hidden_states = final_hidden_states * self.mlp.routed_scaling_factor
 
@@ -267,13 +267,10 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
         # communication in the previous layer, and the attn computation of microbatch 2
         # can be overlapped with the attn communication of microbatch 1
         for i in range(num_micro_batchs):
-            # wait last layer moe finishing communication
-            ms_metadata.try_wait_event(layer_index - 1, i,
-                                       MSEventKey.MOE_AFTER_COMM)
-
             forward_context = get_forward_context()
             layer_index, ms_metadata, attn_metadata = get_multistream_layer_context(
             )
+            ms_metadata.try_wait_event(layer_index - 1, i, MSEventKey.FFN_AR_FINISH)
             forward_context.attn_metadata = attn_metadata[i]
 
             # input layernorm
@@ -309,36 +306,25 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
             with torch.npu.stream(dispatch_context.comm_stream):
                 dispatch_context.comm_stream.wait_event(dispatch_context.before_comm_event)
                 token_dispatchers[i].dispatch_alltoall()
+                dispatched_input[i], tokens_per_expert[i] = token_dispatchers[i].permute2()
                 dispatch_context.after_comm_event.record()
-
-                if has_shared_expert:
-                    token_dispatchers[i].cached_shared_expert_output = tensor_model_parallel_all_reduce(
-                        token_dispatchers[i].cached_shared_expert_output
-                    )
-                    ms_metadata.ms_events[layer_index][i][MSEventKey.MOE_SE_COMM_FINISH].record()
 
         # print_with_sync('begin experts...', torch.distributed.get_rank())
         # block 4 : Router Experts Computation
         # block 5 : Token Combine Communication
         for i in range(num_micro_batchs):
-
             ms_metadata.try_wait_event(layer_index, i, MSEventKey.MOE_AFTER_COMM)
             discard_tensor(hidden_states[i])
-
-            dispatched_input[i], tokens_per_expert[i] = token_dispatchers[i].permute2()
             router_expert_output[i] = self._forward_op_grouped_mlp(dispatched_input[i], tokens_per_expert[i])
             discard_tensor(dispatched_input[i])
-            token_dispatchers[i].unpermute1(router_expert_output[i])
-            if router_expert_output[i].shape[0] > 0 and token_dispatchers[i].num_local_experts > 1:
-                discard_tensor(router_expert_output[i])
 
             # Launch Combine Comm in a New Stream.
             combine_context = MultiStreamStepMetadata(
                 comm_stream=ms_metadata.communicate_stream,
                 before_comm_event=ms_metadata.ms_events[layer_index][i][
-                    MSEventKey.MOE_BEFORE_COMM],
+                    MSEventKey.FFN_COM_FINISH],
                 after_comm_event=ms_metadata.ms_events[layer_index][i][
-                    MSEventKey.MOE_AFTER_COMM],
+                    MSEventKey.FFN_AR_FINISH],
             )
             combine_context.before_comm_event.record()
             ms_metadata.try_wait_event(layer_index, i, MSEventKey.MOE_SE_COMM_FINISH)
@@ -347,7 +333,7 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
                 hidden_states[i] = self._forward_combine_comm(
                     router_expert_output[i], i, num_tokens[i], chunked_hidden_states_sizes[i]
                 )
-                combine_context.after_comm_event.record()
+                ms_metadata.ms_events[layer_index][i][MSEventKey.FFN_AR_FINISH] = combine_context.comm_stream.record_event()
 
         return hidden_states, residual
 
@@ -443,11 +429,10 @@ class CustomQwen3DBOMoEModel(Qwen3MoeModel):
     def can_run_ms(self):
         attn_metadata = get_forward_context().attn_metadata
         # enable prefill overlap
-        with_prefill = getattr(attn_metadata, "with_prefill_across_dp", False)
+        with_prefill = get_forward_context().with_prefill
         if attn_metadata is None or not with_prefill or not attn_metadata.enable_dbo_across_dp:
             return False
-        # if torch.distributed.get_rank() == 0:
-        #     print(attn_metadata)
+
         return True
 
     def _forward_ms_layers(
@@ -465,9 +450,7 @@ class CustomQwen3DBOMoEModel(Qwen3MoeModel):
         attn_metadata, [positions, hidden_states,
                         residual] = self.ms_pre_layer(
             [positions, hidden_states, residual], )
-        # if torch.distributed.get_rank() == 0:
-        #     print(attn_metadata[0], attn_metadata[1])
-        # exit()
+        num_micro_batch = len(attn_metadata)
         # the rest layers
         for i in range(moe_start_layer, self.end_layer):
             layer = self.layers[i]
@@ -480,6 +463,11 @@ class CustomQwen3DBOMoEModel(Qwen3MoeModel):
                 attn_metadata=attn_metadata,
             )
             advance_step_multistream_layer_context()
+
+        layer_index, ms_metadata, attn_metadata = get_multistream_layer_context()
+        for i in range(num_micro_batch):
+            ms_metadata.try_wait_event(layer_index - 1, i, MSEventKey.FFN_AR_FINISH)
+
 
         [hidden_states,
          residual] = self.ms_post_layer([hidden_states, residual], )
@@ -517,17 +505,11 @@ class CustomQwen3MoeForCausalLMDBO(Qwen3MoeForCausalLM):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+    
+    def forward(self, *args, **kwargs):
+        if "graph_enable" in kwargs:
+            kwargs.pop('graph_enable')
+        return super().forward(*args, **kwargs)
 
-    def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            intermediate_tensors: Optional[IntermediateTensors] = None,
-            inputs_embeds: Optional[torch.Tensor] = None,
-            graph_enable: Optional[bool] = True
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds)
-        return hidden_states
 
 

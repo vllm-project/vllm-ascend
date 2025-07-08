@@ -989,7 +989,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 global_batch_size=self.global_batch_size,
                 expert_map=expert_map,
                 ep_group=get_ep_group())
-        elif fused_moe_state == FusedMoEState.All2AllSeq and is_prefill:
+        elif fused_moe_state == FusedMoEState.All2AllSeq:
             token_dispatcher = kwargs.get('token_dispatcher')
             return fused_experts_with_all2allv(token_dispatcher=token_dispatcher,
                                                probs=topk_weights,
