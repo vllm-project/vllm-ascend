@@ -1,12 +1,12 @@
 from unittest.mock import MagicMock, patch
 
 import torch
-from tests.ut.base import TestBase 
+from tests.ut.base import TestBase
 from vllm_ascend.multistream.base import MSEventKey
 from vllm_ascend.multistream.metadata import (MultiStreamConfig,
                                               MultiStreamMetadata,
-                                              MultiStreamStepMetadata, 
-                                              split_micro_batches_tensors) 
+                                              MultiStreamStepMetadata,
+                                              split_micro_batches_tensors)
 
 
 class TestMetaData(TestBase):
