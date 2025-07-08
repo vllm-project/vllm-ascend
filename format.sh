@@ -22,13 +22,13 @@
 check_command() {
     if ! command -v "$1" &> /dev/null; then
         echo "❓❓$1 is not installed, please run:"
-		echo "# Install lint deps"
-		echo "pip install -r requirements-lint.txt"
-		echo "# (optional) Enable git commit pre check"
-		echo "pre-commit install"
-		echo ""
-		echo "See step by step contribution guide:"
-		echo "https://vllm-ascend.readthedocs.io/en/latest/developer_guide/contribution"
+        echo "# Install lint deps"
+        echo "pip install -r requirements-lint.txt"
+        echo "# (optional) Enable git commit pre check"
+        echo "pre-commit install"
+        echo ""
+        echo "See step by step contribution guide:"
+        echo "https://vllm-ascend.readthedocs.io/en/latest/developer_guide/contribution"
         exit 1
     fi
 }
