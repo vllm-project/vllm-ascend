@@ -2171,7 +2171,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                 kv_cache = torch.zeros(cache_size,
                                                        dtype=dtype,
                                                        device=self.device)
-                                kv_cache = torch.npu_format_cast(
+                                kv_cache = torch_npu.npu_format_cast(
                                     kv_cache, acl_format)
                             else:
                                 cache_size_aligned = cache_size + alignment
