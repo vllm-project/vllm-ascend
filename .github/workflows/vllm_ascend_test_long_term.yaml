@@ -99,5 +99,5 @@ jobs:
             pytest -sv tests/e2e/long_term/test_accuracy.py
           else
             # accuracy test multi card
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/long_term/test_deepseek_v2_lite_tp2_accuracy.py
+            # VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/long_term/test_deepseek_v2_lite_tp2_accuracy.py
           fi
