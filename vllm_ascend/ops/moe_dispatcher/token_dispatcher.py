@@ -348,6 +348,10 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
     def routing(self, probs):
         seq_length, bsz = probs.shape[:2]
         probs = probs.view(-1, self.config.num_moe_experts)
+        if self.config.is_fused:
+            score_function = "sigmoid"
+        else:
+            score_function = "softmax"
 
         scores, routing_map, _, top_indices = topk_softmax_with_capacity(
             probs,
@@ -357,7 +361,8 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
             group_topk=self.config.group_topk,
             num_groups=self.config.num_groups,
             expert_bias=self.config.expert_bias,
-            scaling_factor=self.config.scaling_factor
+            scaling_factor=self.config.scaling_factor,
+            score_function=score_function
         )
         self.top_indices = top_indices
         return scores, routing_map
