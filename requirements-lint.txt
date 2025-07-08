@@ -2,7 +2,7 @@
 pre-commit==4.0.1
 
 # type checking
-mypy==1.15.0
+mypy==1.11.1
 types-PyYAML
 types-requests
 types-setuptools
