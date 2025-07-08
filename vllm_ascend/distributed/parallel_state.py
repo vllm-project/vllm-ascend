@@ -54,8 +54,7 @@ def init_ascend_model_parallel(
         get_world_group().device_group)
     num_expert_parallel_groups = expert_tensor_parallel_size
     num_expert_tensor_parallel_groups = expert_parallel_size
-    assert (world_size % mlp_tensor_parallel_size == 0), (
-                "world_size must be divisible by mlp_tensor_parallel_size")
+    assert world_size % mlp_tensor_parallel_size == 0, "world_size must be divisible by mlp_tensor_parallel_size"
     num_mlp_tensor_parallel_groups = world_size // mlp_tensor_parallel_size
 
     global _EP
@@ -98,7 +97,7 @@ def init_ascend_model_parallel(
     logger.info(
     "vllm-ascend: rank %s in world size %s is assigned as "
     "DP rank %s, PP rank %s, TP rank %s, EP rank %s, MLP TP rank %s", torch.distributed.get_rank(), world_size,
-    get_dp_group.rank_in_group, get_pp_group.rank_in_group, get_tp_group.rank_in_group,
+    get_dp_group().rank_in_group, get_pp_group().rank_in_group, get_tp_group().rank_in_group,
     _EP.rank_in_group, _MLPTP.rank_in_group)
 
 
