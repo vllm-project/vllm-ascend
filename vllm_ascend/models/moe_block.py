@@ -98,10 +98,8 @@ class AscendSparseMoeBlock(nn.Module):
             is_prefill = True
             enable_force_load_balance = True
         else:
-            is_prefill = False
+            is_prefill = get_forward_context().with_prefill
             enable_force_load_balance = False
-            if hasattr(attn_metadata, 'with_prefill_across_dp'):
-                is_prefill = attn_metadata.with_prefill_across_dp
 
         # router_logits: (num_tokens, n_experts)
         router_logits, _ = self.gate(hidden_states)
