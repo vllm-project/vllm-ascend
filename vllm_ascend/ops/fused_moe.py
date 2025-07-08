@@ -1273,7 +1273,7 @@ class AscendFusedMoE(FusedMoE):
                 FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
                 FusedMoEState.NaiveMulticast
         ]:
-            router_logits, _ = gate(hidden_states) 
+            router_logits, _ = gate(hidden_states)
 
         tp_size = get_tensor_model_parallel_world_size()
         if (tp_size > 1 and fused_moe_state not in [
@@ -1296,7 +1296,8 @@ class AscendFusedMoE(FusedMoE):
             router_logits = chunk_router_logits[tp_rank]
 
         if self.dp_size > 1:
-            if (fused_moe_state == FusedMoEState.AllGather or fused_moe_state == FusedMoEState.AllGatherEP):
+            if (fused_moe_state == FusedMoEState.AllGather
+                    or fused_moe_state == FusedMoEState.AllGatherEP):
                 # NOTE: When in torchair graph, it has been padded in model_runner_v1
                 if not self.torchair_graph_enabled:
                     attn_metadata = get_forward_context().attn_metadata
@@ -1311,7 +1312,7 @@ class AscendFusedMoE(FusedMoE):
                                 router_logits = nn.functional.pad(
                                     router_logits,
                                     (0, 0, 0,
-                                    max_num_tokens_across_dp - num_tokens))
+                                     max_num_tokens_across_dp - num_tokens))
                 hidden_states = get_dp_group().all_gather(hidden_states, 0)
                 if is_deepseek_v3_r1:
                     router_logits, _ = gate(hidden_states)
@@ -1326,9 +1327,8 @@ class AscendFusedMoE(FusedMoE):
                 if is_deepseek_v3_r1:
                     router_logits, _ = gate(hidden_states)
                 else:
-                    router_logits = self.naive_multicast(router_logits,
-                                                     cu_tokens_across_dp_cpu)
-
+                    router_logits = self.naive_multicast(
+                        router_logits, cu_tokens_across_dp_cpu)
 
         # Matrix multiply.
         e_hidden_states = self.quant_method.apply(
