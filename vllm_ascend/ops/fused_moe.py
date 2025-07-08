@@ -1269,10 +1269,10 @@ class AscendFusedMoE(FusedMoE):
             if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
                 shared_hidden_states = shared_experts(hidden_states)
 
-        if (fused_moe_state not in [
+        if not (fused_moe_state in [
                 FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
                 FusedMoEState.NaiveMulticast
-        ] or not is_deepseek_v3_r1):
+        ] and is_deepseek_v3_r1):
             router_logits, _ = gate(hidden_states)
 
         tp_size = get_tensor_model_parallel_world_size()
