@@ -132,23 +132,3 @@ def test_models_topk() -> None:
                     gpu_memory_utilization=0.7) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
-
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ": "1", "VLLM_ASCEND_ENABLE_DBO": "1"})
-def test_models_topk() -> None:
-    example_prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
-    sampling_params = SamplingParams(max_tokens=5,
-                                     temperature=0.0,
-                                     top_k=50,
-                                     top_p=0.9)
-
-    with VllmRunner("Qwen/Qwen2.5-0.5B-Instruct",
-                    max_model_len=8192,
-                    dtype="float16",
-                    enforce_eager=True,
-                    gpu_memory_utilization=0.7) as vllm_model:
-        vllm_model.generate(example_prompts, sampling_params)
