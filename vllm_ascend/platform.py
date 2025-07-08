@@ -125,17 +125,10 @@ class NPUPlatform(Platform):
         cache_config = vllm_config.cache_config
 
         if parallel_config:
-            # Default value for expert tensor parallel size
-            parallel_config.expert_tensor_parallel_size = parallel_config.tensor_parallel_size
-
-            # NOTE: When enable_expert_parallel is True, we follow vLLM convention:
-            # ep_size = world_size, which means expert_tensor_parallel_size must be 1
             if parallel_config.enable_expert_parallel:
                 parallel_config.expert_tensor_parallel_size = 1
-            # NOTE: When enable_expert_parallel is False and param `asceend_config.expert_tensor_parallel_size`
-            # is configured, use ascend_config
-            elif ascend_config.expert_tensor_parallel_size > 0:
-                parallel_config.expert_tensor_parallel_size = ascend_config.expert_tensor_parallel_size
+            else:
+                parallel_config.expert_tensor_parallel_size = parallel_config.world_size_across_dp
 
             # Calculate expert parallel size based on world size
             parallel_config.expert_parallel_size = (
@@ -148,14 +141,6 @@ class NPUPlatform(Platform):
             enforce_eager = False
         else:
             enforce_eager = getattr(model_config, "enforce_eager", False)
-
-        if ascend_config.torchair_graph_config.enabled and envs.VLLM_MLA_DISABLE:
-            # torchair_graph is not supported for V1 without mla currently.
-            logger.warning(
-                "Torchair graph mode is still experimental and not supported for V1 without mla currently, "
-                "Fallback to eager mode.")
-            ascend_config.torchair_graph_config.enabled = False
-            enforce_eager = True
 
         check_ascend_config(vllm_config, enforce_eager)
 
@@ -177,8 +162,9 @@ class NPUPlatform(Platform):
                 "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
                 "using only ACL Graph mode")
             compilation_config.use_inductor = False
-            compilation_config.splitting_ops.extend(
-                ["vllm.unified_ascend_attention_with_output"])
+            if not compilation_config.full_cuda_graph:
+                compilation_config.splitting_ops.extend(
+                    ["vllm.unified_ascend_attention_with_output"])
             update_aclgraph_sizes(vllm_config)
 
         if parallel_config and parallel_config.worker_cls == "auto":

@@ -66,5 +66,11 @@ developer_guide/evaluation/index
 :maxdepth: 1
 community/governance
 community/contributors
-community/user_stories/index
+:::
+
+% User stories about vLLM Ascend project
+:::{toctree}
+:caption: User Story
+:maxdepth: 1
+user_stories/index
 :::

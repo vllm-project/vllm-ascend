@@ -1,4 +1,4 @@
-name: 'image / Ubuntu'
+name: 'image'
 # This is a docker build check and publish job:
 # 1. PR Triggered docker image build check
 #   - is for image build check
@@ -39,7 +39,7 @@ on:
 jobs:
 
   build:
-    name: vllm-ascend image build
+    name: vllm-ascend Ubuntu image
     runs-on: ubuntu-latest
 
     steps:
@@ -93,12 +93,7 @@ jobs:
     - name: Build and push
       uses: docker/build-push-action@v6
       with:
-        platforms: >-
-          ${{
-              github.event_name == 'push' && github.repository_owner == 'vllm-project' &&
-              'linux/amd64,linux/arm64' ||
-              'linux/amd64'
-          }}
+        platforms: linux/amd64,linux/arm64
         # use the current repo path as the build context, ensure .git is contained
         context: .
         # only trigger when tag, branch/main push

@@ -21,13 +21,7 @@ set -eo errexit
 
 . $(dirname "$0")/common.sh
 
-export VLLM_USE_MODELSCOPE=true
-export VLLM_LOGGING_LEVEL=ERROR
-
 _info "====> Start Quickstart test"
 . "${SCRIPT_DIR}/doctests/001-quickstart-test.sh"
-
-_info "====> Start pip binary installation test"
-. "${SCRIPT_DIR}/doctests/002-pip-binary-installation-test.sh"
 
 _info "Doctest passed."

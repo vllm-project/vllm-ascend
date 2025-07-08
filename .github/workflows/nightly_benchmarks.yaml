@@ -18,11 +18,7 @@
 name: 'Benchmarks / Performance'
 # This workflow runs nightly benchmarks for vllm-ascend.
 
-on:
-  schedule:
-    # Run at 02:00 everyday
-    - cron: '00 18 * * *'
-  
+on:  
   workflow_dispatch:
     # Allow manual triggering of the workflow
 
@@ -167,8 +163,6 @@ jobs:
           cp -r benchmarks/* /github/home/benchmarks/
 
       - name: Run benchmark iteration
-        env:
-          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         if: github.event_name != 'pull_request'
         run: |
           while IFS= read -r line || [[ -n "$line" ]]; do

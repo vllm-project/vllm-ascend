@@ -80,10 +80,7 @@ def native_rope_deepseek_forward(self,
                                  positions: torch.Tensor,
                                  query: torch.Tensor,
                                  key: torch.Tensor,
-                                 offsets: Optional[torch.Tensor] = None,
-                                 max_seq_len: Optional[int] = None):
-    if max_seq_len is not None and max_seq_len > self.max_seq_len:
-        _set_cos_sin_cache(self, max_seq_len, query.device, query.dtype)
+                                 offsets: Optional[torch.Tensor] = None):
     if len(key.shape) == 2:
         key = key[:, None, :]
     # Note: we implement the non neox_style method with shuffle the last dim and neox style
@@ -198,8 +195,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
     return q_embed, k_embed
 
 
-def _set_cos_sin_cache(self, seq_len, device, dtype):
-    self.max_seq_len_cached = seq_len
+def _set_cos_sin_cache(self, max_seq_len, device, dtype):
     dim = self.rotary_dim
 
     freq_extra = 1.0 / (self.base**(
@@ -219,9 +215,7 @@ def _set_cos_sin_cache(self, seq_len, device, dtype):
     inv_freq = freq_inter * (1 - inv_freq_mask) + freq_extra * inv_freq_mask
     self.register_buffer("inv_freq", inv_freq, persistent=False)
 
-    t = torch.arange(seq_len * self.scaling_factor,
-                     device=device,
-                     dtype=torch.float32)
+    t = torch.arange(max_seq_len, device=device, dtype=torch.float32)
 
     freqs = torch.outer(t, inv_freq)
     cos_cached = torch.cat([freqs, freqs], dim=-1).cos() * self.mscale
@@ -266,11 +260,10 @@ def deepseek_rope_init_func(
     super(DeepseekScalingRotaryEmbedding,
           self).__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, dtype)
-    self.max_seq_len = max_position_embeddings
-    _set_cos_sin_cache(self,
-                       max_position_embeddings,
-                       dtype=dtype,
-                       device="npu")
+
+    # NOTE: For ascend friendly computing, reorder sin and cos cache
+    self.max_seq_len = max_position_embeddings * scaling_factor
+    _set_cos_sin_cache(self, self.max_seq_len, dtype=dtype, device="npu")
 
 
 RotaryEmbedding.forward_oot = rope_forward_oot
