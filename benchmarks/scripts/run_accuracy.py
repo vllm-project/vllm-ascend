@@ -44,82 +44,72 @@ BATCH_SIZE = {"ceval-valid": 1, "mmlu": 1, "gsm8k": "auto", "mmmu_val": 1}
 MODEL_TYPE = {
     "Qwen/Qwen3-8B-Base": "vllm",
     "Qwen/Qwen3-30B-A3B": "vllm",
-    "Qwen/Qwen2.5-VL-7B-Instruct": "vllm-vlm"
+    "Qwen/Qwen2.5-VL-7B-Instruct": "vllm-vlm",
 }
 
 # Command templates for running evaluations
 MODEL_RUN_INFO = {
-    "Qwen/Qwen3-30B-A3B":
-    ("export MODEL_ARGS='pretrained={model},max_model_len=4096,dtype=auto,tensor_parallel_size=4,gpu_memory_utilization=0.6,enable_expert_parallel=True'\n"
-     "lm_eval --model vllm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
-     "--apply_chat_template --fewshot_as_multiturn --num_fewshot 5 --batch_size 1"
-     ),
-    "Qwen/Qwen3-8B-Base":
-    ("export MODEL_ARGS='pretrained={model},max_model_len=4096,dtype=auto,tensor_parallel_size=2,gpu_memory_utilization=0.6'\n"
-     "lm_eval --model vllm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
-     "--apply_chat_template --fewshot_as_multiturn --num_fewshot 5 --batch_size 1"
-     ),
-    "Qwen/Qwen2.5-VL-7B-Instruct":
-    ("export MODEL_ARGS='pretrained={model},max_model_len=8192,dtype=auto,tensor_parallel_size=2,max_images=2'\n"
-     "lm_eval --model vllm-vlm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
-     "--apply_chat_template --fewshot_as_multiturn  --batch_size 1"),
+    "Qwen/Qwen3-30B-A3B": (
+        "export MODEL_ARGS='pretrained={model},max_model_len=4096,dtype=auto,tensor_parallel_size=4,gpu_memory_utilization=0.6,enable_expert_parallel=True'\n"
+        "lm_eval --model vllm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
+        "--apply_chat_template --fewshot_as_multiturn --num_fewshot 5 --batch_size 1"
+    ),
+    "Qwen/Qwen3-8B-Base": (
+        "export MODEL_ARGS='pretrained={model},max_model_len=4096,dtype=auto,tensor_parallel_size=2,gpu_memory_utilization=0.6'\n"
+        "lm_eval --model vllm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
+        "--apply_chat_template --fewshot_as_multiturn --num_fewshot 5 --batch_size 1"
+    ),
+    "Qwen/Qwen2.5-VL-7B-Instruct": (
+        "export MODEL_ARGS='pretrained={model},max_model_len=8192,dtype=auto,tensor_parallel_size=2,max_images=2'\n"
+        "lm_eval --model vllm-vlm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
+        "--apply_chat_template --fewshot_as_multiturn  --batch_size 1"
+    ),
 }
 
 # Evaluation metric filters per task
 FILTER = {
     "gsm8k": "exact_match,flexible-extract",
     "ceval-valid": "acc,none",
-    "mmmu_val": "acc,none"
+    "mmmu_val": "acc,none",
 }
 
 # Expected accuracy values for models
 EXPECTED_VALUE = {
-    "Qwen/Qwen3-30B-A3B": {
-        "ceval-valid": 0.83,
-        "gsm8k": 0.85
-    },
-    "Qwen/Qwen3-8B-Base": {
-        "ceval-valid": 0.82,
-        "gsm8k": 0.83
-    },
-    "Qwen/Qwen2.5-VL-7B-Instruct": {
-        "mmmu_val": 0.51
-    }
+    "Qwen/Qwen3-30B-A3B": {"ceval-valid": 0.83, "gsm8k": 0.85},
+    "Qwen/Qwen3-8B-Base": {"ceval-valid": 0.82, "gsm8k": 0.83},
+    "Qwen/Qwen2.5-VL-7B-Instruct": {"mmmu_val": 0.51},
 }
 PARALLEL_MODE = {
     "Qwen/Qwen3-8B-Base": "TP",
     "Qwen/Qwen2.5-VL-7B-Instruct": "TP",
-    "Qwen/Qwen3-30B-A3B": "EP"
+    "Qwen/Qwen3-30B-A3B": "EP",
 }
 
 # Execution backend configuration
 EXECUTION_MODE = {
     "Qwen/Qwen3-8B-Base": "ACLGraph",
     "Qwen/Qwen2.5-VL-7B-Instruct": "ACLGraph",
-    "Qwen/Qwen3-30B-A3B": "ACLGraph"
+    "Qwen/Qwen3-30B-A3B": "ACLGraph",
 }
 
 # Model arguments for evaluation
 MODEL_ARGS = {
-    "Qwen/Qwen3-8B-Base":
-    "pretrained=Qwen/Qwen3-8B-Base,max_model_len=4096,dtype=auto,tensor_parallel_size=2,gpu_memory_utilization=0.6",
-    "Qwen/Qwen2.5-VL-7B-Instruct":
-    "pretrained=Qwen/Qwen2.5-VL-7B-Instruct,max_model_len=8192,dtype=auto,tensor_parallel_size=2,max_images=2",
-    "Qwen/Qwen3-30B-A3B":
-    "pretrained=Qwen/Qwen3-30B-A3B,max_model_len=4096,dtype=auto,tensor_parallel_size=4,gpu_memory_utilization=0.6,enable_expert_parallel=True"
+    "Qwen/Qwen3-8B-Base": "pretrained=Qwen/Qwen3-8B-Base,max_model_len=4096,dtype=auto,tensor_parallel_size=2,gpu_memory_utilization=0.6",
+    "Qwen/Qwen2.5-VL-7B-Instruct": "pretrained=Qwen/Qwen2.5-VL-7B-Instruct,max_model_len=8192,dtype=auto,tensor_parallel_size=2,max_images=2",
+    "Qwen/Qwen3-30B-A3B": "pretrained=Qwen/Qwen3-30B-A3B,max_model_len=4096,dtype=auto,tensor_parallel_size=4,gpu_memory_utilization=0.6,enable_expert_parallel=True",
 }
 
 # Whether to apply chat template formatting
 APPLY_CHAT_TEMPLATE = {
     "Qwen/Qwen3-8B-Base": True,
     "Qwen/Qwen2.5-VL-7B-Instruct": True,
-    "Qwen/Qwen3-30B-A3B": False
+    "Qwen/Qwen3-30B-A3B": False,
 }
 # Few-shot examples handling as multi-turn dialogues.
 FEWSHOT_AS_MULTITURN = {
     "Qwen/Qwen3-8B-Base": True,
     "Qwen/Qwen2.5-VL-7B-Instruct": True,
-    "Qwen/Qwen3-30B-A3B": False
+    "Qwen/Qwen3-30B-A3B": False,
 }
 
 # Relative tolerance for accuracy checks
@@ -136,7 +126,7 @@ def run_accuracy_test(queue, model, dataset):
             "tasks": dataset,
             "apply_chat_template": APPLY_CHAT_TEMPLATE[model],
             "fewshot_as_multiturn": FEWSHOT_AS_MULTITURN[model],
-            "batch_size": BATCH_SIZE[dataset]
+            "batch_size": BATCH_SIZE[dataset],
         }
 
         if MODEL_TYPE[model] == "vllm":
@@ -151,7 +141,7 @@ def run_accuracy_test(queue, model, dataset):
         queue.put(e)
         sys.exit(1)
     finally:
-        if 'results' in locals():
+        if "results" in locals():
             del results
         gc.collect()
         torch.npu.empty_cache()
@@ -161,16 +151,15 @@ def run_accuracy_test(queue, model, dataset):
 def generate_md(model_name, tasks_list, args, datasets):
     """Generate Markdown report with evaluation results"""
     # Format the run command
-    run_cmd = MODEL_RUN_INFO[model_name].format(model=model_name,
-                                                datasets=datasets)
+    run_cmd = MODEL_RUN_INFO[model_name].format(model=model_name, datasets=datasets)
     model = model_name.split("/")[1]
 
     # Version information section
     version_info = (
         f"**vLLM Version**: vLLM: {args.vllm_version} "
-        f"([{args.vllm_commit}]({VLLM_URL+args.vllm_commit})), "
+        f"([{args.vllm_commit}]({VLLM_URL + args.vllm_commit})), "
         f"vLLM Ascend: {args.vllm_ascend_version} "
-        f"([{args.vllm_ascend_commit}]({VLLM_ASCEND_URL+args.vllm_ascend_commit}))  "
+        f"([{args.vllm_ascend_commit}]({VLLM_ASCEND_URL + args.vllm_ascend_commit}))  "
     )
 
     # Report header with system info
@@ -218,21 +207,39 @@ def generate_md(model_name, tasks_list, args, datasets):
             else:
                 n_shot = "0"
             flag = ACCURACY_FLAG.get(task_name, "")
-            row = (f"| {task_name:<37} "
-                   f"| {flt:<6} "
-                   f"| {n_shot:6} "
-                   f"| {metric:<6} "
-                   f"| {flag}{value:>5.4f} "
-                   f"| ± {stderr:>5.4f} |")
+            row = (
+                f"| {task_name:<37} "
+                f"| {flt:<6} "
+                f"| {n_shot:6} "
+                f"| {metric:<6} "
+                f"| {flag}{value:>5.4f} "
+                f"| ± {stderr:>5.4f} |"
+            )
             if not task_name.startswith("-"):
                 rows.append(row)
-                rows_sub.append("<details>" + "\n" + "<summary>" + task_name +
-                                " details" + "</summary>" + "\n" * 2 + header)
+                rows_sub.append(
+                    "<details>"
+                    + "\n"
+                    + "<summary>"
+                    + task_name
+                    + " details"
+                    + "</summary>"
+                    + "\n" * 2
+                    + header
+                )
             rows_sub.append(row)
         rows_sub.append("</details>")
     # Combine all Markdown sections
-    md = preamble + "\n" + header + "\n" + "\n".join(rows) + "\n" + "\n".join(
-        rows_sub) + "\n"
+    md = (
+        preamble
+        + "\n"
+        + header
+        + "\n"
+        + "\n".join(rows)
+        + "\n"
+        + "\n".join(rows_sub)
+        + "\n"
+    )
     print(md)
     return md
 
@@ -262,8 +269,9 @@ def main(args):
     # Evaluate model on each dataset
     for dataset in datasets:
         accuracy_expected = EXPECTED_VALUE[args.model][dataset]
-        p = multiprocessing.Process(target=run_accuracy_test,
-                                    args=(result_queue, args.model, dataset))
+        p = multiprocessing.Process(
+            target=run_accuracy_test, args=(result_queue, args.model, dataset)
+        )
         p.start()
         p.join()
         if p.is_alive():
@@ -274,8 +282,11 @@ def main(args):
         time.sleep(10)
         result = result_queue.get()
         print(result)
-        if accuracy_expected - RTOL < result[dataset][
-                FILTER[dataset]] < accuracy_expected + RTOL:
+        if (
+            accuracy_expected - RTOL
+            < result[dataset][FILTER[dataset]]
+            < accuracy_expected + RTOL
+        ):
             ACCURACY_FLAG[dataset] = "✅"
         else:
             ACCURACY_FLAG[dataset] = "❌"
@@ -285,10 +296,11 @@ def main(args):
 
 
 if __name__ == "__main__":
-    multiprocessing.set_start_method('spawn', force=True)
+    multiprocessing.set_start_method("spawn", force=True)
     # Initialize argument parser
     parser = argparse.ArgumentParser(
-        description="Run model accuracy evaluation and generate report")
+        description="Run model accuracy evaluation and generate report"
+    )
     parser.add_argument("--output", type=str, required=True)
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--vllm_ascend_version", type=str, required=False)
