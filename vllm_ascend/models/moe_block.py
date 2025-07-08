@@ -18,6 +18,8 @@
 from typing import Optional
 
 import torch
+import vllm.model_executor.models.qwen3_moe as qwen3
+
 from torch import nn
 from vllm.attention import AttentionMetadata
 from vllm.distributed import (get_tensor_model_parallel_world_size,
@@ -91,13 +93,12 @@ class AscendSparseMoeBlock(nn.Module):
             attn_metadata = get_forward_context().attn_metadata
         # when profile runs, force experts to load balanced tokens
         # to avoid high memory consumption on a single rank.
-        is_prefill = True
         if attn_metadata is None:
             # for profile run
             is_prefill = True
             enable_force_load_balance = True
         else:
-            # is_prefill = attn_metadata.num_prefills > 0 is_prefill or
+            is_prefill = False
             enable_force_load_balance = False
             if hasattr(attn_metadata, 'with_prefill_across_dp'):
                 is_prefill = attn_metadata.with_prefill_across_dp
@@ -115,3 +116,5 @@ class AscendSparseMoeBlock(nn.Module):
         )
 
         return hidden_states
+
+qwen3.Qwen3MoeSparseMoeBlock = AscendSparseMoeBlock
