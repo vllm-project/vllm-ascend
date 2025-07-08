@@ -550,9 +550,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             with_prefill: bool) -> tuple[torch.Tensor, bool]:
         local_forward_metadata = torch.tensor([num_tokens, with_prefill],
                                               device="npu",
-                                              dtype=torch.int32)
+                                              dtype=torch.int32).unsqueeze(0)
         global_forward_metadata = get_dp_group().all_gather(
-            local_forward_metadata)
+            local_forward_metadata, dim=0)
         num_tokens_across_dp = global_forward_metadata[:, 0].cpu()
         with_prefill = bool(global_forward_metadata[:, 1].any())
         return num_tokens_across_dp, with_prefill
