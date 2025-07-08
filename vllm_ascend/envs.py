@@ -121,10 +121,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value to False to disable the optimized model.
     "USE_OPTIMIZED_MODEL":
     lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
-    # all_reduce merge of shared experts and routing experts
-    "VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE":
-    lambda: bool(
-        int(os.getenv("VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE", '0'))),
     # The tolerance of the kv cache size, if the difference between the
     # actual kv cache size and the cached kv cache size is less than this value,
     # then the cached kv cache size will be used.

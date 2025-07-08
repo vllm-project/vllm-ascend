@@ -39,7 +39,7 @@ from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
                                get_fused_moe_state, is_310p, npu_stream_switch,
-                               npu_wait_tensor, vllm_version_is)
+                               npu_wait_tensor, vllm_version_is, get_all_reduce_merge_state)
 
 if vllm_version_is("0.9.1"):
     from vllm.model_executor.layers.fused_moe.layer import \
@@ -1148,7 +1148,9 @@ class AscendFusedMoE(FusedMoE):
         self.activation = activation
         self.log2phy = None
         self.global_redundant_expert_num = 0
-        self.all_reduce_merge = envs_ascend.VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE
+
+        is_deepseek_v3_r1 = self.global_num_experts == 256
+        self.all_reduce_merge = get_all_reduce_merge_state(self.moe_parallel_config.ep_size, is_deepseek_v3_r1)
 
         ascend_config = get_ascend_config()
         expert_map_path = ascend_config.expert_map_path

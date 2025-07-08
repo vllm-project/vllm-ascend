@@ -345,7 +345,7 @@ class CustomDeepseekV2MoE(nn.Module):
             e_score_correction_bias=self.gate.e_score_correction_bias)
 
         if config.n_shared_experts is not None:
-            self.all_reduce_merge = envs_ascend.VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE
+            self.all_reduce_merge = self.experts.all_reduce_merge
             reduce_results = not self.all_reduce_merge
             intermediate_size = (config.moe_intermediate_size *
                                  config.n_shared_experts)
@@ -402,16 +402,12 @@ class CustomDeepseekV2MoE(nn.Module):
             shared_experts=self.shared_experts,
             replace_allreduce=replace_allreduce)
 
+        hidden_states = (
+            experts_hidden_states[0] * self.routed_scaling_factor +
+            experts_hidden_states[1])
         if self.all_reduce_merge:
             # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
-            hidden_states = (
-                experts_hidden_states[0] * self.routed_scaling_factor +
-                experts_hidden_states[1])
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-        else:
-            hidden_states = (
-                experts_hidden_states[0] * self.routed_scaling_factor +
-                experts_hidden_states[1])
 
         return hidden_states
 

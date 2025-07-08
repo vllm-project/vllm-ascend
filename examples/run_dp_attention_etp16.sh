@@ -4,7 +4,6 @@ source /usr/local/Ascend/ascend-toolkit/set_env.sh
 source /usr/local/Ascend/nnal/atb/set_env.sh
 export ASCEND_LAUNCH_BLOCKING=0
 export VLLM_VERSION=0.9.1
-export VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE=1
 
 nohup python -m vllm.entrypoints.openai.api_server --model=/mnt/deepseek/DeepSeek-R1-W8A8-VLLM \
     --served-model-name auto \
