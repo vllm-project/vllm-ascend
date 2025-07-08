@@ -28,15 +28,13 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.sample.logits_processor import init_builtin_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 
 from vllm_ascend.pool.metadata import PoolingMetadata
-from vllm_ascend.utils import vllm_version_is
-
-if not vllm_version_is("0.9.1"):
-    from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 
 _SAMPLING_EPS = 1e-5
 
@@ -253,17 +251,13 @@ class InputBatch:
 
         self.req_output_token_ids: list[Optional[list[int]]] = []
 
-        if not vllm_version_is("0.9.1"):
-            from vllm.v1.sample.logits_processor import \
-                init_builtin_logitsprocs
-
-            # Define logits processors.
-            # TODO(andy): logits processor list should be extensible via engine
-            # constructor argument; for now the list is fixed.
-            self.logitsprocs = init_builtin_logitsprocs(
-                pin_memory_available=pin_memory,
-                max_num_reqs=max_num_reqs + 1,
-                device=device)
+        # Define logits processors.
+        # TODO(andy): logits processor list should be extensible via engine
+        # constructor argument; for now the list is fixed.
+        self.logitsprocs = init_builtin_logitsprocs(
+            pin_memory_available=pin_memory,
+            max_num_reqs=max_num_reqs + 1,
+            device=device)
 
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
@@ -314,8 +308,8 @@ class InputBatch:
         self.block_table.add_row(request.block_ids, req_index)
 
         if sampling_params := request.sampling_params:
-            if ((not vllm_version_is("0.9.1")) and self.is_spec_decode
-                    and is_spec_decode_unsupported(sampling_params)):
+            if self.is_spec_decode and is_spec_decode_unsupported(
+                    sampling_params):
                 self.spec_decode_unsupported_reqs.add(req_id)
             if sampling_params.sampling_type == SamplingType.GREEDY:
                 # Avoid later division by zero.
@@ -641,48 +635,24 @@ class InputBatch:
                        self.allowed_token_ids_mask, num_reqs)
             allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
 
-        if vllm_version_is("0.9.1"):
-            return SamplingMetadata(
-                temperature=temperature,
-                all_greedy=self.all_greedy,
-                all_random=self.all_random,
-                top_p=None if self.no_top_p else self.top_p[:num_reqs],
-                top_k=None if self.no_top_k else self.top_k[:num_reqs],
-                min_p=None if self.no_min_p else self.min_p[:num_reqs],
-                generators=self.generators,
-                max_num_logprobs=self.max_num_logprobs,
-                prompt_token_ids=prompt_token_ids,
-                frequency_penalties=self.frequency_penalties[:num_reqs],
-                presence_penalties=self.presence_penalties[:num_reqs],
-                repetition_penalties=self.repetition_penalties[:num_reqs],
-                output_token_ids=cast(list[list[int]],
-                                      self.req_output_token_ids),
-                min_tokens=self.min_tokens,
-                no_penalties=self.no_penalties,
-                logit_bias=self.logit_bias[:num_reqs],
-                allowed_token_ids_mask=allowed_token_ids_mask,
-                bad_words_token_ids=self.bad_words_token_ids,
-            )
-        else:
-            return SamplingMetadata(
-                temperature=temperature,
-                all_greedy=self.all_greedy,
-                all_random=self.all_random,
-                top_p=None if self.no_top_p else self.top_p[:num_reqs],
-                top_k=None if self.no_top_k else self.top_k[:num_reqs],
-                generators=self.generators,
-                max_num_logprobs=self.max_num_logprobs,
-                prompt_token_ids=prompt_token_ids,
-                frequency_penalties=self.frequency_penalties[:num_reqs],
-                presence_penalties=self.presence_penalties[:num_reqs],
-                repetition_penalties=self.repetition_penalties[:num_reqs],
-                output_token_ids=cast(list[list[int]],
-                                      self.req_output_token_ids),
-                no_penalties=self.no_penalties,
-                allowed_token_ids_mask=allowed_token_ids_mask,
-                bad_words_token_ids=self.bad_words_token_ids,
-                logitsprocs=self.logitsprocs,
-            )
+        return SamplingMetadata(
+            temperature=temperature,
+            all_greedy=self.all_greedy,
+            all_random=self.all_random,
+            top_p=None if self.no_top_p else self.top_p[:num_reqs],
+            top_k=None if self.no_top_k else self.top_k[:num_reqs],
+            generators=self.generators,
+            max_num_logprobs=self.max_num_logprobs,
+            prompt_token_ids=prompt_token_ids,
+            frequency_penalties=self.frequency_penalties[:num_reqs],
+            presence_penalties=self.presence_penalties[:num_reqs],
+            repetition_penalties=self.repetition_penalties[:num_reqs],
+            output_token_ids=cast(list[list[int]], self.req_output_token_ids),
+            no_penalties=self.no_penalties,
+            allowed_token_ids_mask=allowed_token_ids_mask,
+            bad_words_token_ids=self.bad_words_token_ids,
+            logitsprocs=self.logitsprocs,
+        )
 
     @property
     def pooling_metadata(self) -> PoolingMetadata:

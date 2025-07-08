@@ -50,10 +50,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value is None, which means the system default C compiler will be used.
     "C_COMPILER":
     lambda: os.getenv("C_COMPILER", None),
-    # Whether to enable the topk optimization. It's disabled by default for experimental support
-    # We'll make it enabled by default in the future.
-    "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE", '0'))),
     # The version of the Ascend chip. If not set, the default value is
     # ASCEND910B1. It's used for package building. Please make sure that the
     # version is correct.
