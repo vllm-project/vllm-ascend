@@ -22,14 +22,14 @@ jobs:
       with:
         repository: vllm-project/vllm
         path: ./vllm-empty
-    - name: Install vllm-ascend dev
-      run: |
-        pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
     - name: Install vllm
       working-directory: vllm-empty
       run: |
         pip install -r requirements/build.txt --extra-index-url https://download.pytorch.org/whl/cpu
         VLLM_TARGET_DEVICE=empty pip install .
+    - name: Install vllm-ascend dev
+      run: |
+        pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
       env:
         SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086" # Exclude SC2046, SC2006, SC2086 for actionlint
