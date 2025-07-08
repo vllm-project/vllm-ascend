@@ -114,7 +114,8 @@ def test_mtp_torchair_correctness(
                       enforce_eager=False,
                       additional_config={
                           "torchair_graph_config": {
-                              "enabled": True
+                              "enabled": True,
+                              "graph_batch_size": [256]
                           },
                           "ascend_scheduler_config": {
                               "enabled": True
@@ -132,7 +133,8 @@ def test_mtp_torchair_correctness(
                        },
                        additional_config={
                            "torchair_graph_config": {
-                               "enabled": True
+                               "enabled": True,
+                               "graph_batch_size": [256]
                            },
                            "ascend_scheduler_config": {
                                "enabled": True

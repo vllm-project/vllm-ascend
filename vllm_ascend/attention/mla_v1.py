@@ -324,7 +324,7 @@ class AscendMLAMetadataBuilder:
             num_reqs, block_table)
         num_tokens = num_reqs * self.runner.decode_token_per_req
         seq_lens = torch.zeros(num_reqs, dtype=torch.int32, device=device)
-        seq_lens_list = seq_lens.tolist()
+        seq_lens_list = [0] * num_reqs
         input_positions = torch.zeros(num_tokens,
                                       dtype=torch.int32,
                                       device=device).long()
@@ -497,7 +497,7 @@ class AscendMLAMetadataBuilder:
         decode_metadata = None
         use_torchair_graph = num_token_pad_size != -1
         if self._num_decodes > 0:
-            actual_seq_q_lens = None
+            actual_seq_q_lens = query_start_loc[1:].tolist()
             max_seq_lens = seq_lens[:self._num_decodes].max().item()
             seq_lens = seq_lens[:self._num_decode_tokens]
             input_positions = input_positions[:self._num_decode_tokens]
@@ -1014,11 +1014,13 @@ class AscendMLAImpl(MLAAttentionImpl):
                                  self.qk_rope_head_dim)
                 input_layout = "BNSD"
 
-            # TorchAir's shape is [bs, num_heads_per_rank, q_seq_len, dim]
             if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
                 assert num_tokens % self.spec_token_num == 0
+                if self.enable_kv_nz:
+                    input_layout = "TND_NTD"
+                else:
+                    input_layout = "TND"
                 # [bs * q_seq_len, num_heads_per_rank, dim]
-                input_layout = "TND"
                 q_nope = q_nope.view(num_tokens, self.num_heads, -1)
                 q_pe = q_pe.view(num_tokens, self.num_heads, -1)
                 sparse_mode = 3
