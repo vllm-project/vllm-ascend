@@ -21,13 +21,13 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch
 from vllm.distributed import get_pp_group
-from vllm.forward_context import set_forward_context
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.multimodal import MultiModalKwargs
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
 
+from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.worker.model_runner import (ModelInputForNPU,
                                              ModelInputForNPUBuilder,
                                              NPUModelRunnerBase)
@@ -142,8 +142,8 @@ class NPUPoolingModelRunner(
         if model_input.token_types is not None:
             cross_enc_kwargs["token_type_ids"] = model_input.token_types
 
-        with set_forward_context(model_input.attn_metadata, self.vllm_config,
-                                 virtual_engine):
+        with set_ascend_forward_context(model_input.attn_metadata,
+                                        self.vllm_config, virtual_engine):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,

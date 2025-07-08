@@ -35,7 +35,6 @@ from vllm.config import VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import broadcast_tensor_dict, get_dp_group, get_pp_group
 from vllm.distributed.kv_transfer import get_kv_transfer_group
-from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import logger
 from vllm.lora.layers import LoRAMapping
@@ -66,6 +65,7 @@ from vllm.worker.model_runner_base import (
     _init_sampling_metadata_from_tensor_dict)
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
@@ -1431,8 +1431,12 @@ class NPUModelRunner(NPUModelRunnerBase[ModelInputForNPUWithSamplingMetadata]):
             model_forward_start.record()
 
         if not bypass_model_exec:
-            with set_forward_context(model_input.attn_metadata,
-                                     self.vllm_config, virtual_engine):
+            with set_ascend_forward_context(
+                    model_input.attn_metadata,
+                    self.vllm_config,
+                    virtual_engine,
+                    with_prefill=prefill_meta is not None,
+                    in_profile_run=self.in_profile_run):
                 if model_input.attn_metadata is not None:
                     model_input.attn_metadata.input_positions = model_input.input_positions
                 if self.torchair_graph_enabled:

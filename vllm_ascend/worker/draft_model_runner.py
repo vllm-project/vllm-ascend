@@ -18,7 +18,6 @@
 from typing import List, Optional
 
 import torch
-from vllm.forward_context import set_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MultiModalKwargs
@@ -27,6 +26,7 @@ from vllm.worker.model_runner_base import (ModelRunnerBase,
                                            ModelRunnerInputBase,
                                            ModelRunnerWrapperBase)
 
+from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention import AscendMetadata
 
 # A flag to enable debug prints for the updated input tensors
@@ -51,12 +51,6 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
     """
 
     def __init__(self, model_runner: ModelRunnerBase):
-        if hasattr(
-                model_runner,
-                "return_hidden_states") and model_runner.return_hidden_states:
-            raise ValueError(
-                "return_hidden_states is not supported for TP1DraftModelRunner."
-            )
         super().__init__(model_runner)
 
         self.indices_of_seq_with_bonus_tokens = None
@@ -211,6 +205,9 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
             if self.prompt_adapter_config is not None:
                 raise ValueError("TP1DraftModelRunner has no support for "
                                  "prompt_adapter_config")
+            if model_input.inputs_embeds is not None:
+                raise ValueError("TP1DraftModelRunner has no support for "
+                                 "inputs_embeds")
             if model_input.multi_modal_kwargs:
                 raise ValueError(
                     "TP1DraftModelRunner has no support for multi_modal_kwargs"
@@ -264,14 +261,15 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 spec_step_idx = kwargs.get("spec_step_idx", step)
                 model_execute_kwargs["spec_step_idx"] = spec_step_idx
                 compute_logits_kwargs["spec_step_idx"] = spec_step_idx
-            with set_forward_context(model_input.attn_metadata,
-                                     self.vllm_config):
+            with set_ascend_forward_context(model_input.attn_metadata,
+                                            self.vllm_config):
 
                 if model_input.attn_metadata is not None:
                     model_input.attn_metadata.input_positions = model_input.input_positions
 
                 hidden_states = model_executable(
                     input_ids=model_input.input_tokens,
+                    inputs_embeds=None,
                     positions=model_input.input_positions,
                     intermediate_tensors=intermediate_tensors,
                     **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
@@ -292,6 +290,9 @@ class TP1DraftModelRunner(ModelRunnerWrapperBase):
                 sampling_metadata=model_input.sampling_metadata,
             )
             outputs.append(output)
+
+            if self.return_hidden_states and is_fallback:
+                output.hidden_states = hidden_states
 
             if model_input.attn_metadata.num_prefills == 0 \
                 and self.indices_of_seq_with_bonus_tokens is not None:
