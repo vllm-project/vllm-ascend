@@ -4,11 +4,13 @@ from unittest.mock import MagicMock
 import torch 
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.ms_split import compute_split_seq_index, split_attn_tensor_type, \
                                         split_attn_int_type, model_input_split_v1_mla_attn
-from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
+
 
 class TestMsSplit(unittest.TestCase):
+
     def test_decode_only(self):
         result = compute_split_seq_index(
             query_lens=None,

@@ -4,10 +4,12 @@ import torch
 
 from tests.ut.base import TestBase 
 from vllm_ascend.multistream.metadata import MultiStreamStepMetadata, MultiStreamConfig, MultiStreamMetadata 
-from vllm_ascend.multistream.metadata import split_micro_batches_tensors
 from vllm_ascend.multistream.base import MSEventKey
+from vllm_ascend.multistream.metadata import split_micro_batches_tensors
+
 
 class TestMetaData(TestBase):
+    
     def setUp(self):
         self.test_tensors_list = [torch.randn(100,1024) for i in range(3)]
         self.test_tensors = torch.randn(100,1024)
