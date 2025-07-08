@@ -67,6 +67,8 @@ concurrency:
 
 jobs:
   lint:
+    # Only trigger lint on pull request
+    if: ${{ github.event_name == 'pull_request' }}
     uses: ./.github/workflows/pre-commit.yml
 
   ut:
