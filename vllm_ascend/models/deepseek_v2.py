@@ -367,6 +367,7 @@ class CustomDeepseekV2MoE(nn.Module):
         self.ep_group = get_ep_group()
 
         self.params_dtype = torch.get_default_dtype()
+        self.rm_router_logits = self.experts.rm_router_logits
 
     def forward(self,
                 hidden_states: torch.Tensor,
@@ -390,6 +391,8 @@ class CustomDeepseekV2MoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits = None
+        if not self.rm_router_logits:
+            router_logits, _ = self.gate(hidden_states)
 
         experts_hidden_states = self.experts(
             hidden_states=hidden_states,

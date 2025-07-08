@@ -38,8 +38,9 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
-                               get_fused_moe_state, is_310p, npu_stream_switch,
-                               npu_wait_tensor, vllm_version_is)
+                               get_fused_moe_state, get_rm_router_logits_state,
+                               is_310p, npu_stream_switch, npu_wait_tensor,
+                               vllm_version_is)
 
 if vllm_version_is("0.9.1"):
     from vllm.model_executor.layers.fused_moe.layer import \
@@ -1149,6 +1150,10 @@ class AscendFusedMoE(FusedMoE):
         self.log2phy = None
         self.global_redundant_expert_num = 0
 
+        is_deepseek_v3_r1 = self.global_num_experts == 256
+        self.rm_router_logits = get_rm_router_logits_state(
+            self.moe_parallel_config.ep_size, self.dp_size, is_deepseek_v3_r1)
+
         ascend_config = get_ascend_config()
         expert_map_path = ascend_config.expert_map_path
         if expert_map_path and os.path.exists(expert_map_path):
@@ -1301,29 +1306,27 @@ class AscendFusedMoE(FusedMoE):
                                 hidden_states,
                                 (0, 0, 0,
                                  max_num_tokens_across_dp - num_tokens))
-                            # if not is_deepseek_v3_r1:
-                            #     router_logits = nn.functional.pad(
-                            #         router_logits,
-                            #         (0, 0, 0,
-                            #          max_num_tokens_across_dp - num_tokens))
+                            if not self.rm_router_logits:
+                                router_logits = nn.functional.pad(
+                                    router_logits,
+                                    (0, 0, 0,
+                                     max_num_tokens_across_dp - num_tokens))
                 hidden_states = get_dp_group().all_gather(hidden_states, 0)
-                router_logits, _ = gate(hidden_states)
-                # if is_deepseek_v3_r1:
-                #     router_logits, _ = gate(hidden_states)
-                # else:
-                #     router_logits = get_dp_group().all_gather(router_logits, 0)
+                if self.rm_router_logits:
+                    router_logits, _ = gate(hidden_states)
+                else:
+                    router_logits = get_dp_group().all_gather(router_logits, 0)
 
             elif fused_moe_state == FusedMoEState.NaiveMulticast:
                 cu_tokens_across_dp_cpu = get_forward_context(
                 ).dp_metadata.cu_tokens_across_dp_cpu
                 hidden_states = self.naive_multicast(hidden_states,
                                                      cu_tokens_across_dp_cpu)
-                router_logits, _ = gate(hidden_states)
-                # if is_deepseek_v3_r1:
-                #     router_logits, _ = gate(hidden_states)
-                # else:
-                #     router_logits = self.naive_multicast(
-                #         router_logits, cu_tokens_across_dp_cpu)
+                if self.rm_router_logits:
+                    router_logits, _ = gate(hidden_states)
+                else:
+                    router_logits = self.naive_multicast(
+                        router_logits, cu_tokens_across_dp_cpu)
 
         # Matrix multiply.
         e_hidden_states = self.quant_method.apply(
