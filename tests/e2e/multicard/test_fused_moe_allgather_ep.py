@@ -32,7 +32,7 @@ from tests.e2e.conftest import VllmRunner
 
 @pytest.mark.skipif(
     True,
-    "Current disaggregated pd implementation may cause memory pulse, which will cause this test OOM, skip this test until the ringmla is ready "
+    reason="Current disaggregated pd implementation may cause memory pulse, which will cause this test OOM, skip this test until the ringmla is ready "
 )
 @patch.dict(
     os.environ, {
@@ -59,6 +59,10 @@ def test_generate_with_allgather():
         vllm_model.generate(example_prompts, sampling_params)
 
 
+@pytest.mark.skipif(
+    True,
+    reason="Current disaggregated pd implementation may cause memory pulse, which will cause this test OOM, skip this test until the ringmla is ready "
+)
 @patch.dict(os.environ, {
     "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
     "TASK_QUEUE_ENABLE": "1"

@@ -2182,7 +2182,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                     kv_cache,
                                     alignment)[:cache_size].view(cache_shape)
                             kv_cache_list.append(kv_cache)
-                        kv_caches[layer_name] = kv_cache_list
+                        kv_caches[layer_name] = tuple(kv_cache_list)
                 else:
                     # TODO: add new branches when introducing more types of
                     # KV cache specs.
