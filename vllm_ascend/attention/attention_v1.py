@@ -24,12 +24,16 @@ import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
+from vllm.config import get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import direct_register_custom_op
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
+from vllm_ascend.attention.utils import \
+    AscendCommonAttentionMetadata as CommonAttentionMetadata
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
+from vllm_ascend.utils import get_graph_params
 
 
 class AscendAttentionBackend(AttentionBackend):
@@ -114,6 +118,7 @@ class AscendMetadata:
     query_start_loc: torch.Tensor
     query_lens: torch.Tensor
     seq_lens: torch.Tensor
+    seq_lens_list: list
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int] = None
     # (num_tokens,). The indices of the token slots that input tokens will be
@@ -133,7 +138,7 @@ class AscendMetadata:
     # For logging.
     num_input_tokens: int = 0  # Number of tokens including padding.
 
-    with_prefill_across_dp: bool = False
+    enable_dbo_across_dp: bool = False
 
 
 class AscendAttentionMetadataBuilder:
@@ -149,23 +154,26 @@ class AscendAttentionMetadataBuilder:
               num_reqs,
               num_actual_tokens,
               max_query_len,
-              common_prefix_len,
-              with_prefill_across_dp: bool = False):
+              common_attn_metadata: CommonAttentionMetadata,
+              enable_dbo_across_dp: bool = False,
+              *args,
+              **kwargs):
 
         block_table = self.runner.input_batch.block_table[0].get_device_tensor(
         )
         block_table[:num_reqs, :self.runner.max_num_blocks_per_req] = (
             block_table[:num_reqs])
 
-        query_lens = self.runner.query_lens
-        seq_lens = self.runner.seq_lens_cpu[:num_reqs]
-        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
-            self.runner.device, non_blocking=True)
+        query_start_loc = common_attn_metadata.query_start_loc
+        seq_lens = common_attn_metadata.seq_lens
+        # TODO: Refactor these two param to common metadata in runners,
+        # preparing for the hybrid KV groups feature
+        query_lens = common_attn_metadata.query_lens if common_attn_metadata.query_lens is not None else self.runner.query_lens
+        seq_lens_list = common_attn_metadata.seq_lens_list if common_attn_metadata.seq_lens_list is not None else self.runner.seq_lens_list
+
+        slot_mapping = self.runner.slot_mapping[:num_actual_tokens]
         attn_mask = self.runner.attn_mask
         attn_state = self.runner.attn_state
-        query_start_loc_cpu = self.runner.query_start_loc_cpu[:num_reqs + 1]
-        query_start_loc = query_start_loc_cpu.to(self.runner.device,
-                                                 non_blocking=True)
 
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -173,11 +181,40 @@ class AscendAttentionMetadataBuilder:
             query_start_loc=query_start_loc,
             query_lens=query_lens,
             seq_lens=seq_lens,
+            seq_lens_list=seq_lens_list,
             max_query_len=max_query_len,
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
             attn_state=attn_state,
-            with_prefill_across_dp=with_prefill_across_dp)
+            enable_dbo_across_dp=enable_dbo_across_dp)
+        return attn_metadata
+
+    def build_dummy_metadata(self, num_actual_tokens, num_reqs,
+                             num_scheduled_tokens, attn_state):
+        if attn_state == AscendAttentionState.DecodeOnly:
+            # NOTE: We only need to pay attention to seq_lens_list and block_table here
+            common_attn_metadata = CommonAttentionMetadata(seq_lens_list=[2] *
+                                                           num_reqs)
+
+            block_table = self.runner.input_batch.block_table[0].block_table
+            block_table[:num_reqs, 0] = torch.arange(1,
+                                                     num_reqs + 1,
+                                                     device=block_table.device,
+                                                     dtype=block_table.dtype)
+
+            attn_metadata = self.build(
+                num_reqs=num_reqs,
+                num_actual_tokens=num_actual_tokens,
+                max_query_len=num_scheduled_tokens.max(),
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            )
+        else:
+            raise NotImplementedError(
+                "Currently we only support building dummy metadata for DecodeOnly state"
+            )
+
+        attn_metadata.attn_state = attn_state
         return attn_metadata
 
 
@@ -217,6 +254,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.key_cache = None
         self.value_cache = None
 
+        vllm_config = get_current_vllm_config()
+        self.full_graph = vllm_config.compilation_config.full_cuda_graph
+        self.block_size = vllm_config.cache_config.block_size
+
     def forward(
         self,
         layer: AttentionLayer,
@@ -228,21 +269,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         output: Optional[torch.Tensor] = None,
         trace_flag: bool = True,
     ) -> torch.Tensor:
-        """Forward pass with Ascend attention.
-        Args:
-            query: shape = [batch_size, seq_len, num_heads * head_size]
-            key: shape = [batch_size, seq_len, num_kv_heads * head_size]
-            value: shape = [batch_size, seq_len, num_kv_heads * head_size]
-            kv_cache: shape = [2, num_blocks, block_size,
-                               num_kv_heads, head_size]
-                      key_cache = [num_blocks, block_size,
-                                   num_kv_heads, head_size]
-                      value_cache = [num_blocks, block_size,
-                                     num_kv_heads, head_size]
-            attn_metadata: Metadata for attention.
-        Returns:
-            shape = [batch_size * seq_len, num_heads, head_size]
-        """
+        """Forward pass with Ascend attention."""
         num_tokens = query.shape[0]
         if output is None:
             output = torch.empty(num_tokens,
@@ -275,7 +302,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
             # TODO: Remove this contiguous in the future.
             value = value.contiguous()
 
-            if kv_cache.numel() > 0:
+            if len(kv_cache) > 0:
                 if self.key_cache is None:
                     self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
                 slots = attn_metadata.slot_mapping
@@ -307,11 +334,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 assert attn_metadata is not None
                 assert attn_metadata.attn_mask is not None
                 compress_mask = attn_metadata.attn_mask
+                batch_size = attn_metadata.query_lens.shape[0]
+                block_table = attn_metadata.block_tables[:batch_size, :]
                 torch_npu._npu_flash_attention_qlens(
                     query=query,
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
-                    block_table=attn_metadata.block_tables,
+                    block_table=block_table,
                     mask=compress_mask,
                     seq_len=attn_metadata.query_lens,
                     context_lens=attn_metadata.seq_lens,
@@ -320,16 +349,92 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     scale_value=self.scale,
                     out=output)
             elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-                torch_npu._npu_paged_attention(
-                    query=query,
-                    key_cache=self.key_cache,
-                    value_cache=self.value_cache,
-                    num_kv_heads=self.num_kv_heads,
-                    num_heads=self.num_heads,
-                    scale_value=self.scale,
-                    block_table=attn_metadata.block_tables,
-                    context_lens=attn_metadata.seq_lens,
-                    out=output)
+                if self.full_graph:
+                    graph_params = get_graph_params()
+                    q = query.view(num_tokens, -1, self.hidden_size)
+                    k = self.key_cache.view(  # type: ignore
+                        -1, self.block_size,
+                        self.num_kv_heads * self.head_size)
+                    v = self.value_cache.view(  # type: ignore
+                        -1, self.block_size,
+                        self.num_kv_heads * self.head_size)
+                    actual_seq_lens = attn_metadata.seq_lens_list
+                    attn_args = {
+                        "query": q,
+                        "key": k,
+                        "value": v,
+                        "actual_seq_lengths_kv": actual_seq_lens,
+                        "block_table": attn_metadata.block_tables,
+                        "num_heads": self.num_heads,
+                        "scale": self.scale,
+                        "input_layout": "BSH",
+                        "num_key_value_heads": self.num_kv_heads,
+                        "block_size": self.block_size,
+                    }
+
+                    # Prepare tensors for attention output
+                    # TODO: Refactor this to step-level instead of layer-level
+                    attn_output = torch.empty(num_tokens,
+                                              1,
+                                              self.hidden_size,
+                                              dtype=output.dtype,
+                                              device=output.device)
+                    softmax_lse = torch.empty(num_tokens,
+                                              dtype=output.dtype,
+                                              device=output.device)
+
+                    # Get workspace from cache or calculate it if not present.
+                    workspace = graph_params.workspaces.get(num_tokens)
+                    if workspace is None:
+                        workspace = torch_npu._npu_fused_infer_attention_score_get_max_workspace(
+                            **attn_args)
+                        graph_params.workspaces[num_tokens] = workspace
+
+                    forward_context = get_forward_context()
+                    if not forward_context.capturing:
+                        # Execute attention kernel directly in non-capturing mode
+                        torch.ops.npu.npu_fused_infer_attention_score.out(
+                            workspace=workspace,
+                            out=[attn_output, softmax_lse],
+                            **attn_args)
+                    else:
+                        # Handle graph capturing mode
+                        stream = torch_npu.npu.current_stream()
+
+                        event = torch.npu.ExternalEvent()
+                        event.wait(stream)
+                        event.reset(stream)
+                        graph_params.events[num_tokens].append(event)
+
+                        graph_params.attn_params[num_tokens].append(
+                            (q, k, v, actual_seq_lens,
+                             attn_metadata.block_tables, self.num_heads,
+                             self.scale, self.num_kv_heads, attn_output,
+                             softmax_lse))
+
+                        torch.npu.graph_task_group_begin(stream)
+                        torch.ops.npu.npu_fused_infer_attention_score.out(
+                            workspace=workspace,
+                            out=[attn_output, softmax_lse],
+                            **attn_args)
+                        handle = torch.npu.graph_task_group_end(stream)
+                        graph_params.handles[num_tokens].append(handle)
+
+                    # Reshape output to match the expected format
+                    output.copy_(
+                        attn_output.view(num_tokens, self.num_heads,
+                                         self.head_size))
+                else:
+                    torch_npu._npu_paged_attention(
+                        query=query,
+                        key_cache=self.key_cache,
+                        value_cache=self.value_cache,
+                        num_kv_heads=self.num_kv_heads,
+                        num_heads=self.num_heads,
+                        scale_value=self.scale,
+                        block_table=attn_metadata.block_tables,
+                        context_lens=attn_metadata.seq_lens,
+                        out=output)
             # Normal V1 situation.
             else:
                 # use chunked prefill for head size 192 scenario, like deepseek

@@ -12,7 +12,7 @@ This document describes how to install vllm-ascend manually.
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
     | CANN          | >= 8.1.RC1                       | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | >= 2.5.1.post1.dev20250528       | Required for vllm-ascend                  |
+    | torch-npu     | >= 2.5.1.post1.dev20250619       | Required for vllm-ascend                  |
     | torch         | >= 2.5.1                         | Required for torch-npu and vllm           |
 
 You have 2 way to install:
@@ -246,8 +246,7 @@ for output in outputs:
 Then run:
 
 ```bash
-# Try `export VLLM_USE_MODELSCOPE=true` and `pip install modelscope`
-# to speed up download if huggingface is not reachable.
+# export VLLM_USE_MODELSCOPE=true to speed up download if huggingface is not reachable.
 python example.py
 ```
 

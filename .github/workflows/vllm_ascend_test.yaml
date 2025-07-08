@@ -18,8 +18,22 @@
 name: 'test'
 
 on:
-  schedule:
-    - cron: '0 23 * * *'
+  push:
+    # Enable merged test per commit
+    branches:
+      - 'main'
+    paths:
+      - '*.txt'
+      - '**/*.py'
+      - '.github/workflows/vllm_ascend_test.yaml'
+      - '!docs/**'
+      - 'pytest.ini'
+      - '!benchmarks/**'
+      - 'tools/mypy.sh'
+      - 'mypy.ini'
+      - '.github/workflows/*.ya?ml'
+      - '.github/workflows/actionlint.*'
+      - '.github/workflows/matchers/actionlint.json'
   pull_request:
     branches:
       - 'main'
@@ -29,6 +43,7 @@ on:
       - '**/*.py'
       - '.github/workflows/vllm_ascend_test.yaml'
       - '!docs/**'
+      - '!examples/**'
       - 'pytest.ini'
       - '!benchmarks/**'
       - 'tools/mypy.sh'
@@ -52,6 +67,8 @@ concurrency:
 
 jobs:
   lint:
+    # Only trigger lint on pull request
+    if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -69,7 +86,7 @@ jobs:
       - name: Run codespell check
         run: |
           CODESPELL_EXCLUDES=('--skip' 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**')
-          CODESPELL_IGNORE_WORDS=('-L' 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn')
+          CODESPELL_IGNORE_WORDS=('-L' 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn,assertIn,rever')
 
           codespell --toml pyproject.toml "${CODESPELL_EXCLUDES[@]}" "${CODESPELL_IGNORE_WORDS[@]}"
       - name: Analysing the code with ruff
@@ -85,10 +102,6 @@ jobs:
           pip install toml
           pip install yapf==0.32.0
           yapf --diff --recursive .
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v4
@@ -109,6 +122,10 @@ jobs:
           pip install -r requirements/build.txt --extra-index-url https://download.pytorch.org/whl/cpu
           VLLM_TARGET_DEVICE=empty pip install .
 
+      - name: Install dependencies
+        run: |
+          pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
+
       - name: Mypy Check
         run: |
           echo "::add-matcher::.github/workflows/matchers/mypy.json"
@@ -117,21 +134,22 @@ jobs:
   ut:
     needs: [lint]
     name: unit test
-    if: ${{ needs.lint.result == 'success' }}
+    # only trigger e2e test on [pull request after lint passed] and [merged commit]
+    if: ${{ needs.lint.result == 'success' || github.event_name == 'push' }}
     runs-on: ubuntu-latest
     container:
-      image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
+      image: quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
     strategy:
       matrix:
-        vllm_version: [main, v0.9.1]
+        vllm_version: [main, v0.9.2]
     steps:
       - name: Install packages
         run: |
           apt-get update -y
-          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev
+          apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
       - name: Checkout vllm-project/vllm repo
         uses: actions/checkout@v4
@@ -163,16 +181,27 @@ jobs:
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         run: |
           export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
-          pytest -sv tests/ut
+          pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut
+
+      - name: Upload coverage to Codecov
+        if: ${{ matrix.vllm_version == 'main' }}
+        uses: codecov/codecov-action@v5
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        with:
+          flags: unittests
+          name: vllm-ascend
+          verbose: true
 
   e2e:
     needs: [lint]
-    if: ${{ needs.lint.result == 'success' }}
+    # only trigger e2e test on pull request after lint passed
+    if: ${{ needs.lint.result == 'success' && github.event_name == 'pull_request' }}
     strategy:
       max-parallel: 2
       matrix:
         os: [linux-arm64-npu-1]
-        vllm_version: [main, v0.9.1]
+        vllm_version: [main, v0.9.2]
     name: singlecard e2e test
     runs-on: ${{ matrix.os }}
     container:
@@ -180,6 +209,7 @@ jobs:
       image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
       env:
         VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
     steps:
       - name: Check npu and CANN info
         run: |
@@ -228,17 +258,22 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         run: |
           pytest -sv tests/e2e/singlecard/test_offline_inference.py
-          # TODO: switch hf to modelscope
-          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
-            pytest -sv tests/e2e/singlecard/test_ilama_lora.py
-          # TODO(sss): guided decoding doesn't work, fix it later
-          # pytest -sv tests/e2e/singlecard/test_guided_decoding.py
+          pytest -sv tests/e2e/singlecard/test_ilama_lora.py
+          pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv tests/e2e/singlecard/test_camem.py
+          pytest -sv tests/e2e/singlecard/test_embedding.py
           pytest -sv tests/e2e/singlecard/ \
           --ignore=tests/e2e/singlecard/test_offline_inference.py \
           --ignore=tests/e2e/singlecard/test_ilama_lora.py \
           --ignore=tests/e2e/singlecard/test_guided_decoding.py \
-          --ignore=tests/e2e/singlecard/test_camem.py
+          --ignore=tests/e2e/singlecard/test_camem.py \
+          --ignore=tests/e2e/singlecard/test_embedding.py \
+          --ignore=tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_correctness.py \
+          --ignore=tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py
+          # ------------------------------------ v1 spec decode test ------------------------------------ #
+          VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_correctness.py
+          # TODO: revert me when test_v1_spec_decode.py::test_ngram_correctness is fixed
+          VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py
 
       - name: Run e2e test on V0 engine
         if: ${{ github.event_name == 'schedule' }}
@@ -247,21 +282,18 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         run: |
           pytest -sv tests/e2e/singlecard/test_offline_inference.py
-          # TODO: switch hf to modelscope
-          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
-            pytest -sv tests/e2e/singlecard/test_ilama_lora.py
-          # guided decoding doesn't work, fix it later
-          # pytest -sv tests/e2e/singlecard/test_guided_decoding.py
+          pytest -sv tests/e2e/singlecard/test_ilama_lora.py
+          pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv tests/e2e/singlecard/test_camem.py
           pytest -sv tests/e2e/singlecard/test_prompt_embedding.py
+          pytest -sv tests/e2e/singlecard/test_embedding.py
           pytest -sv tests/e2e/singlecard/ \
             --ignore=tests/e2e/singlecard/test_offline_inference.py \
             --ignore=tests/e2e/singlecard/test_ilama_lora.py \
             --ignore=tests/e2e/singlecard/test_guided_decoding.py \
             --ignore=tests/e2e/singlecard/test_camem.py \
             --ignore=tests/e2e/singlecard/test_prompt_embedding.py \
-            --ignore=tests/e2e/singlecard/core/test_ascend_scheduler.py \
-            --ignore=tests/e2e/singlecard/core/test_ascend_scheduler_e2e.py
+            --ignore=tests/e2e/singlecard/test_embedding.py
 
   e2e-4-cards:
     needs: [e2e]
@@ -270,7 +302,7 @@ jobs:
       max-parallel: 1
       matrix:
         os: [linux-arm64-npu-4]
-        vllm_version: [main, v0.9.1]
+        vllm_version: [main, v0.9.2]
     name: multicard e2e test
     runs-on: ${{ matrix.os }}
     container:
@@ -326,16 +358,19 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
         run: |
-          # TODO: switch hf to modelscope
-          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
-            pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
+          pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
           # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py will raise error.
           # To avoid oom, we need to run the test in a single process.
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_topk
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
-          pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_ilama_lora_tp2.py --ignore=tests/e2e/multicard/test_offline_inference_distributed.py
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_dbo
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeekV3_dbo
+          pytest -sv tests/e2e/multicard/test_data_parallel.py
+          pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_ilama_lora_tp2.py \
+            --ignore=tests/e2e/multicard/test_offline_inference_distributed.py \
+            --ignore=tests/e2e/multicard/test_data_parallel.py
 
       - name: Run vllm-project/vllm-ascend test on V0 engine
         if: ${{ github.event_name == 'schedule' }}
@@ -343,13 +378,13 @@ jobs:
           VLLM_USE_V1: 0
           VLLM_USE_MODELSCOPE: True
         run: |
-          # TODO: switch hf to modelscope
-          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
-            pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
+          pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
           # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py will raise error.
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_topk
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
-          pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_ilama_lora_tp2.py --ignore=tests/e2e/multicard/test_offline_inference_distributed.py
+          pytest -sv tests/e2e/multicard/test_data_parallel.py
+          pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_ilama_lora_tp2.py \
+            --ignore=tests/e2e/multicard/test_offline_inference_distributed.py \
+            --ignore=tests/e2e/multicard/test_data_parallel.py

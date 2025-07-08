@@ -38,7 +38,7 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
 - Software:
   * Python >= 3.9, < 3.12
   * CANN >= 8.1.RC1
-  * PyTorch >= 2.5.1, torch-npu >= 2.5.1.post1.dev20250528
+  * PyTorch >= 2.5.1, torch-npu >= 2.5.1.post1.dev20250619
   * vLLM (the same version as vllm-ascend)
 
 ## Getting Started
@@ -46,7 +46,7 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
 Please refer to [QuickStart](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/latest/installation.html) for more details.
 
 ## Contributing
-See [CONTRIBUTING](https://vllm-ascend.readthedocs.io/en/main/developer_guide/contributing.html) for more details, which is a step-by-step guide to help you set up development environment, build and test.
+See [CONTRIBUTING](https://vllm-ascend.readthedocs.io/en/latest/developer_guide/contribution/index.html) for more details, which is a step-by-step guide to help you set up development environment, build and test.
 
 We welcome and value any contributions and collaborations:
 - Please let us know if you encounter a bug by [filing an issue](https://github.com/vllm-project/vllm-ascend/issues)
@@ -67,7 +67,7 @@ Below is maintained branches:
 | v0.7.1-dev | Unmaintained | Only doc fixed is allowed |
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version |
 
-Please refer to [Versioning policy](https://vllm-ascend.readthedocs.io/en/main/developer_guide/versioning_policy.html) for more details.
+Please refer to [Versioning policy](https://vllm-ascend.readthedocs.io/en/latest/community/versioning_policy.html) for more details.
 
 ## Weekly Meeting
 

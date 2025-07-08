@@ -16,6 +16,16 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+function install_system_packages() {
+    if command -v apt-get >/dev/null; then
+        sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+        apt-get update -y && apt install -y curl
+    elif command -v yum >/dev/null; then
+        yum update -y && yum install -y curl
+    else
+        echo "Unknown package manager. Please install gcc, g++, numactl-devel, git, curl, and jq manually."
+    fi
+}
 
 function simple_test() {
   # Do real import test
@@ -28,6 +38,7 @@ function quickstart_offline_test() {
 }
 
 function quickstart_online_test() {
+  install_system_packages
   vllm serve Qwen/Qwen2.5-0.5B-Instruct &
   wait_url_ready "vllm serve" "localhost:8000/v1/models"
   # Do real curl test
