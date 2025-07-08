@@ -138,7 +138,7 @@ jobs:
     if: ${{ needs.lint.result == 'success' || github.event_name == 'push' }}
     runs-on: ubuntu-latest
     container:
-      image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
+      image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1.alpha003-910b-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -206,7 +206,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     container:
       # TODO(yikun): Remove m.daocloud.io prefix when infra proxy ready
-      image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
+      image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1.alpha003-910b-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -307,7 +307,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     container:
       # TODO(yikun): Remove m.daocloud.io prefix when infra proxy ready
-      image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
+      image: m.daocloud.io/quay.io/ascend/cann:8.2.rc1.alpha003-910b-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
