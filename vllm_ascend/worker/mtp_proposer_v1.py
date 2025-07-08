@@ -308,14 +308,9 @@ class MtpProposer:
     def dummy_run(
         self,
         num_tokens: int,
-        with_prefill: bool = False,
     ) -> None:
-        if self.runner.torchair_graph_enabled and not with_prefill:
-            attn_metadata = self.runner.attn_metadata_builder.build_torchair_graph_dummy(
-                num_reqs=num_tokens, num_actual_tokens=1, is_mtp_model=True)
-        else:
-            attn_metadata = self.runner.attn_metadata_builder.build_torchair_graph_dummy(
-                num_reqs=num_tokens, num_actual_tokens=1, is_mtp_model=True)
+        attn_metadata = self.runner.attn_metadata_builder.build_torchair_graph_dummy(
+            num_reqs=num_tokens, num_actual_tokens=1, is_mtp_model=True)
         with set_ascend_forward_context(None,
                                         self.vllm_config,
                                         num_tokens=num_tokens):

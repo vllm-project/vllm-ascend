@@ -1698,7 +1698,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         **model_kwargs)
             if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
                 assert isinstance(self.drafter, MtpProposer)
-                self.drafter.dummy_run(num_reqs, with_prefill=with_prefill)
+                self.drafter.dummy_run(num_reqs)
             return hidden_states
 
     @contextmanager
@@ -2163,6 +2163,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.torchair_graph_batch_sizes[-1] < self.max_num_reqs:
                 self.torchair_graph_batch_sizes.append(self.max_num_reqs)
 
+        # we need to make sure that we can deal with max_num_req when `self.decode_token_per_req` is not 1
+        self.torchair_graph_batch_sizes = [
+            graph_batch_size * self.decode_token_per_req
+            for graph_batch_size in self.torchair_graph_batch_sizes
+        ]
+
         # NOTE: when enable_expert_parallel, we need to check if `graph_batch_size` is divisible by `tp_size`
         tp_size = self.parallel_config.tensor_parallel_size
         if self.parallel_config.enable_expert_parallel:
@@ -2170,9 +2176,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             for graph_batch_size in self.torchair_graph_batch_sizes:
                 cur_graph_batch_size = (graph_batch_size + tp_size -
                                         1) // tp_size * tp_size
-                # `graph_batch_size` need to be divisible by `self.decode_token_per_req`
-                cur_graph_batch_size = cur_graph_batch_size * self.decode_token_per_req
                 if cur_graph_batch_size not in new_graph_batch_sizes and \
                     cur_graph_batch_size <= self.scheduler_config.max_num_batched_tokens:
                     new_graph_batch_sizes.append(cur_graph_batch_size)
+                elif cur_graph_batch_size > self.scheduler_config.max_num_batched_tokens \
+                        and self.decode_token_per_req > 1:
+                    logger.warning(
+                        f"torchair_graph_batch_sizes {cur_graph_batch_size} is bigger than max_num_batched_tokens",
+                        f"{self.scheduler_config.max_num_batched_tokens} will skip this batch size."
+                    )
             self.torchair_graph_batch_sizes = new_graph_batch_sizes
