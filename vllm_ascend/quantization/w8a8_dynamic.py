@@ -217,7 +217,7 @@ def fused_experts_with_mc2(
     dynamic_scale_for_share: Optional[Any] = None,
     mc2_mask: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-    if log2phy:
+    if log2phy is not None:
         topk_ids = log2phy[topk_ids]
     quant_mode = 2
     ep_group = get_ep_group()
@@ -352,7 +352,7 @@ def fused_experts_with_all2all(hidden_states: torch.Tensor,
                                global_redundant_expert_num: int = 0,
                                w1_scale_bias: torch.Tensor = None,
                                w2_scale_bias: torch.Tensor = None):
-    if log2phy:
+    if log2phy is not None:
         topk_ids = log2phy[topk_ids]
     original_shape = hidden_states.shape
     if len(original_shape) == 3:
