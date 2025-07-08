@@ -141,8 +141,8 @@ def fused_experts_with_mc2(
     local_rank = torch.distributed.get_rank(group=ep_group)
     all_to_all_group_size = torch.distributed.get_world_size(ep_group)
 
-    world_szie = torch.distributed.get_world_size()
-    tp_size = world_szie // all_to_all_group_size
+    world_size = torch.distributed.get_world_size()
+    tp_size = world_size // all_to_all_group_size
     tp_rank = rank % tp_size
 
     stage1_kwargs = {
@@ -780,7 +780,9 @@ class AscendW8A8DynamicFusedMoEMethod:
                 log2phy=log2phy,
                 global_redundant_expert_num=global_redundant_expert_num,
                 shared_experts=shared_experts)
-        elif fused_moe_state == FusedMoEState.AllGather:
+        elif fused_moe_state in [
+                FusedMoEState.AllGather, FusedMoEState.NaiveMulticast
+        ]:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
                                  w1_scale=layer.w13_weight_scale,

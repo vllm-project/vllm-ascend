@@ -201,7 +201,10 @@ def test_schedule(enable_prefix_caching: Optional[bool],
     # Test initial scheduling
     output = scheduler.schedule()
     assert len(output.scheduled_new_reqs) == len(requests)
-    assert len(output.scheduled_cached_reqs) == 0
+    if vllm_version_is("0.9.1"):
+        assert len(output.scheduled_cached_reqs) == 0
+    else:
+        assert output.scheduled_cached_reqs.num_reqs == 0
     assert len(output.finished_req_ids) == 0
     # Verify all requests are scheduled.
     for req_id, num_tokens in output.num_scheduled_tokens.items():
@@ -238,7 +241,10 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
 
     output = scheduler.schedule()
     assert len(output.scheduled_new_reqs) == 3
-    assert len(output.scheduled_cached_reqs) == 0
+    if vllm_version_is("0.9.1"):
+        assert len(output.scheduled_cached_reqs) == 0
+    else:
+        assert output.scheduled_cached_reqs.num_reqs == 0
     assert len(output.finished_req_ids) == 0
 
     # The first request is scheduled partially - 400.
@@ -268,7 +274,10 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     output1 = scheduler.schedule()
     assert len(scheduler.running) == 3
     assert len(output1.scheduled_new_reqs) == 0
-    assert len(output1.scheduled_cached_reqs) == 3
+    if vllm_version_is("0.9.1"):
+        assert len(output1.scheduled_cached_reqs) == 3
+    else:
+        assert output1.scheduled_cached_reqs.num_reqs == 3
     assert len(output1.finished_req_ids) == 0
     assert output1.num_scheduled_tokens[requests[0].request_id] == 400
     assert output1.num_scheduled_tokens[requests[1].request_id] == 400
@@ -292,7 +301,10 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     output2 = scheduler.schedule()
     assert len(scheduler.running) == 3
     assert len(output2.scheduled_new_reqs) == 0
-    assert len(output2.scheduled_cached_reqs) == 3
+    if vllm_version_is("0.9.1"):
+        assert len(output2.scheduled_cached_reqs) == 3
+    else:
+        assert output2.scheduled_cached_reqs.num_reqs == 3
     assert len(output2.finished_req_ids) == 0
     assert output2.num_scheduled_tokens[requests[0].request_id] == 1
     assert output2.num_scheduled_tokens[requests[1].request_id] == 1
@@ -672,73 +684,6 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         assert stats.num_accepted_tokens_per_pos == expected[3]
 
 
-def _assert_right_scheduler_output(
-    output: SchedulerOutput,
-    num_requests: int,
-    expected_num_scheduled_tokens: int,
-):
-    """Check if SchedulerOutput is correct after remote KV cache hit."""
-
-    # We should inject the kv_connector_metadata.
-    assert len(output.kv_connector_metadata.requests) == num_requests
-
-    # Only num_tokens - matched_num_new_tokens should be scheduled.
-    for _, num_scheduled_tokens in output.num_scheduled_tokens.items():
-        assert num_scheduled_tokens == expected_num_scheduled_tokens
-
-
-def _assert_right_kv_cache_manager(
-    scheduler: AscendScheduler,
-    req_ids: list[str],
-    num_tokens: int,
-    block_size: int,
-    num_requests: int,
-    num_total_blocks: int,
-):
-    """Check whether KVCacheManager is correct after allocate."""
-
-    # Make sure the request stats are right.
-    EXPECTED_TOTAL_BLOCKS = num_tokens // block_size
-    for req_id in req_ids:
-        blocks = (scheduler.kv_cache_manager.coordinator.
-                  single_type_managers[0].req_to_blocks[req_id])
-        hashes = scheduler.kv_cache_manager.req_to_block_hashes[req_id]
-        assert (scheduler.kv_cache_manager.coordinator.single_type_managers[0].
-                num_cached_block[req_id] == EXPECTED_TOTAL_BLOCKS)
-        assert len(blocks) == EXPECTED_TOTAL_BLOCKS
-        assert len(hashes) == EXPECTED_TOTAL_BLOCKS
-
-    # Make sure we actually touched all the blocks.
-    BLOCKS_PER_REQ = num_tokens / block_size
-    assert (scheduler.kv_cache_manager.block_pool.get_num_free_blocks() ==
-            num_total_blocks - num_requests * BLOCKS_PER_REQ)
-
-
-def _step_until_done(
-    scheduler: AscendScheduler,
-    output: SchedulerOutput,
-    model_runner_output: ModelRunnerOutput,
-):
-    """Loop over schedule(), update_from_output() until finished."""
-
-    all_finished = False
-    _ = scheduler.update_from_output(output, model_runner_output)
-    while not all_finished:
-        # Schedule + a few iterations until stopping.
-        output = scheduler.schedule()
-        assert len(scheduler.running)
-        for _, num_scheduled_tokens in output.num_scheduled_tokens.items():
-            # We should be in the decode phase now.
-            assert num_scheduled_tokens == 1
-        assert len(output.kv_connector_metadata.requests) == 0
-        ecos = scheduler.update_from_output(output, model_runner_output)[0]
-        all_done = True
-        for eco in ecos.outputs:
-            if eco.finish_reason is None:
-                all_done = False
-        all_finished = all_done
-
-
 def make_output(scheduler: AscendScheduler):
     return ModelRunnerOutput(
         req_ids=[req.request_id for req in scheduler.running],
@@ -762,7 +707,6 @@ def assert_scheduler_empty(scheduler: AscendScheduler):
     assert len(scheduler.waiting) == 0
     assert len(scheduler.running) == 0
     assert len(scheduler.finished_req_ids) == 0
-    assert len(scheduler._cached_reqs_data) == 0
 
     # EncoderCacheManager.
     assert len(scheduler.encoder_cache_manager.freed) == 0

@@ -41,7 +41,7 @@ def test_generate_with_allgather():
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 
     with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V3-Pruning"),
-                    tensor_parallel_size=16,
+                    tensor_parallel_size=4,
                     enforce_eager=True,
                     max_model_len=1024,
                     dtype="auto",
@@ -67,7 +67,7 @@ def test_generate_with_alltoall():
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 
     with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V3-Pruning"),
-                    tensor_parallel_size=16,
+                    tensor_parallel_size=4,
                     enforce_eager=True,
                     max_model_len=1024,
                     dtype="auto",

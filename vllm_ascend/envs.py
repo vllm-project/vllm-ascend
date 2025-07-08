@@ -125,6 +125,12 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE":
     lambda: bool(
         int(os.getenv("VLLM_ASCEND_SHARED_ROUTER_ALL_REDUCE_MERGE", '0'))),
+    # The tolerance of the kv cache size, if the difference between the
+    # actual kv cache size and the cached kv cache size is less than this value,
+    # then the cached kv cache size will be used.
+    "VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE":
+    lambda: int(
+        os.getenv("VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE", 64)),
 }
 
 # end-env-vars-definition
