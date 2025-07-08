@@ -7,8 +7,10 @@ import torch
 
 class ExpertLoadBalancer(object):
 
-    def __init__(self, expert_map_path, global_expert_num):
+    def __init__(self, expert_map_path, global_expert_num, shared_expert_rank_num):
         self.expert_map_path = expert_map_path
+        self.rank_local_expert_num = 0
+        self.shared_expert_rank_num = shared_expert_rank_num
         self.global_expert_num = global_expert_num
         self.expert_map_tensor, self.layers_num, self.ranks_num = (
             self._expert_file_to_tensor())
@@ -26,6 +28,7 @@ class ExpertLoadBalancer(object):
                 device_data.append(device["device_expert"])
             tensor_data.append(device_data)
         expert_map_tensor = torch.tensor(tensor_data, dtype=torch.int32)
+        self.rank_local_expert_num = expert_map_tensor.shape[self.shared_expert_rank_num][0]
         return expert_map_tensor, layers_num, gpus_num
 
     def generate_index_dicts(self, tensor_2d):
@@ -49,7 +52,13 @@ class ExpertLoadBalancer(object):
             dtype=torch.int32,
         )
         for layer_id in range(self.layers_num):
-            for gpu_id in range(self.ranks_num):
+            if self.shared_expert_rank_num > 0:
+                for gpu_id in range(self.shared_expert_rank_num):
+                    e_ids = range(sel.rank_local_expert_num)
+                    expert_placement_map[layer_id, gpu_id,
+                                        e_ids] = torch.arange(len(e_ids),
+                                                              dtype=torch.int32)
+            for gpu_id in range(self.shared_expert_rank_num, self.ranks_num):
                 e_ids = self.expert_map_tensor[layer_id, gpu_id]
                 expert_placement_map[layer_id, gpu_id,
                                      e_ids] = torch.arange(len(e_ids),
@@ -73,7 +82,7 @@ class ExpertLoadBalancer(object):
         for rank in range(self.ranks_num):
             for key in result_dict:
                 indices_in_concat = result_dict[key]
-                if key in rank_expert_to_global[rank]:
+                if key in rank_expert_to_global[rank] and not rank < self.shared_expert_rank_num:
                     log2phy_map[rank][key] = rank_expert_to_global[rank][key]
                 else:
                     chosen_index = random.choice(indices_in_concat)

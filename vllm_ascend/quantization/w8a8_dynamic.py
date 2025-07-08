@@ -215,6 +215,7 @@ def fused_experts_with_mc2(
     w2_scale_bias: torch.Tensor = None,
     quantized_x_for_share: Optional[Any] = None,
     dynamic_scale_for_share: Optional[Any] = None,
+    shared_expert_rank_num: int = 0,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     if log2phy:
         topk_ids = log2phy[topk_ids]
@@ -242,7 +243,7 @@ def fused_experts_with_mc2(
         "x": hidden_states,
         "expert_ids": topk_ids,
         "expert_shard_type": 0,
-        "shared_expert_rank_num": 0,
+        "shared_expert_rank_num": shared_expert_rank_num,
         "moe_expert_num": moe_expert_num,
         "global_bs": global_bs,
     }
@@ -290,7 +291,7 @@ def fused_experts_with_mc2(
         "expand_idx": expand_idx,
         "expert_scales": topk_weights.to(torch.float32),
         "expert_shard_type": 0,
-        "shared_expert_rank_num": 0,
+        "shared_expert_rank_num": shared_expert_rank_num,
         "moe_expert_num": moe_expert_num,
         "global_bs": global_bs,
     }
@@ -738,6 +739,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         shared_experts: Optional[Any] = None,
         quantized_x_for_share: Optional[Any] = None,
         dynamic_scale_for_share: Optional[Any] = None,
+        shared_expert_rank_num: int = 0,
         **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
@@ -807,7 +809,8 @@ class AscendW8A8DynamicFusedMoEMethod:
                 shared_experts=shared_experts,
                 is_torchair=self.torchair_graph_enabled,
                 quantized_x_for_share=shared_gate_up,
-                dynamic_scale_for_share=shared_dequant_scale)
+                dynamic_scale_for_share=shared_dequant_scale,
+                shared_expert_rank_num=shared_expert_rank_num,)
         elif fused_moe_state == FusedMoEState.AllGather:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,

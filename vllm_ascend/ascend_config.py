@@ -37,6 +37,7 @@ class AscendConfig:
             ascend_scheduler_config)
 
         self.expert_map_path = additional_config.get("expert_map_path", None)
+        self.shared_expert_rank_num = additional_config.get("shared_expert_rank_num", 0)
         self.chunked_prefill_for_mla = additional_config.get(
             "chunked_prefill_for_mla", False)
         self.enable_weight_nz_layout = additional_config.get(

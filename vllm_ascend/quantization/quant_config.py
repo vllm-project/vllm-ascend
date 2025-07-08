@@ -348,6 +348,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         enable_force_load_balance: bool = False,
         log2phy: torch.Tensor = None,
         global_redundant_expert_num=0,
+        shared_expert_rank_num: int = 0,
         **kwargs,
     ) -> torch.Tensor:
         return self.quant_method.apply(
@@ -355,7 +356,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             global_num_experts, expert_map, topk_group, num_expert_group,
             custom_routing_function, scoring_func, e_score_correction_bias,
             is_prefill, enable_force_load_balance, log2phy,
-            global_redundant_expert_num, **kwargs)
+            global_redundant_expert_num, shared_expert_rank_num, **kwargs)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
