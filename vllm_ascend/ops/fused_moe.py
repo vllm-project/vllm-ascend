@@ -45,7 +45,6 @@ from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
                                get_fused_moe_state, get_rm_router_logits_state,
                                is_310p, npu_stream_switch, npu_wait_tensor)
 
-
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
 
 
