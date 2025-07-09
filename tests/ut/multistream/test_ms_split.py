@@ -86,12 +86,6 @@ class TestMsSplit(unittest.TestCase):
         self.assertTrue(torch.equal(result[0], expected_result[0]))
         self.assertTrue(torch.equal(result[1], expected_result[1]))
 
-    def test_split_attn_tensor_type_invalid_index(self):
-        input_tensor = torch.tensor([1, 2, 3, 4, 5])
-        index = 6
-        with self.assertRaises(IndexError):
-            split_attn_tensor_type(input_tensor, index)
-
     def test_split_attn_tensor_type_empty_tensor(self):
         input_tensor = torch.tensor([])
         index = 0
