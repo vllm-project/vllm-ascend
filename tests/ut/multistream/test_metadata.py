@@ -37,13 +37,16 @@ class TestMetaData(TestBase):
     def test_split_micro_batches_tensors(self):
         test_tensors_list_res = split_micro_batches_tensors(
             self.test_tensors_list, self.split_index)
+        
         test_tensors_res = split_micro_batches_tensors(self.test_tensors, 
                                                        self.split_index)
         test_tensors_dict_res = split_micro_batches_tensors(
             self.test_tensors_dict, self.split_index)
         for i in range(3):
+            
             self.assertEqual(len(test_tensors_list_res[i][0]), 
                              self.split_index)
+            
             self.assertEqual(
                 len(test_tensors_list_res[i][0]) + 
                 len(test_tensors_list_res[i][1]), 100)
@@ -53,6 +56,7 @@ class TestMetaData(TestBase):
             len(test_tensors_res[0]) + len(test_tensors_res[1]), 100)
 
         for key in ['query', 'key', 'value']:
+            
             self.assertEqual(len(test_tensors_dict_res[0][key]), 
                              self.split_index)
             self.assertEqual(
