@@ -259,7 +259,7 @@ jobs:
           pytest -sv tests/e2e/singlecard/compile
 
 
-  e2e-4-cards:
+  e2e-2-cards:
     needs: [e2e]
     if: ${{ needs.e2e.result == 'success' }}
     strategy:
