@@ -1342,11 +1342,17 @@ class AscendFusedMoE(FusedMoE):
                 final_hidden_states = final_hidden_states[start:end, :]
                 dispose_tensor(e_hidden_states)
             elif fused_moe_state == FusedMoEState.AllGather:
-                final_hidden_states = dist._functional_collectives.reduce_scatter_tensor(
-                    e_hidden_states,
-                    "sum",
-                    scatter_dim=0,
-                    group=get_dp_group().device_group)
+                final_hidden_states_shape = (
+                    e_hidden_states.size(0) //
+                    self.dp_size, ) + e_hidden_states.shape[1:]
+                final_hidden_states = torch.empty(
+                    final_hidden_states_shape,
+                    dtype=e_hidden_states.dtype,
+                    device=e_hidden_states.device)
+                dist.reduce_scatter_tensor(final_hidden_states,
+                                           e_hidden_states,
+                                           op=dist.ReduceOp.SUM,
+                                           group=get_dp_group().device_group)
                 final_hidden_states = final_hidden_states[:num_tokens]
                 dispose_tensor(e_hidden_states)
         else:
