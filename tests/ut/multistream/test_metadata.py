@@ -48,7 +48,7 @@ class TestMetaData(TestBase):
             self.assertEqual(
                 len(test_tensors_list_res[i][0]) +
                 len(test_tensors_list_res[i][1]), 100)
-  
+
         self.assertEqual(len(test_tensors_res[0]), self.split_index)
         self.assertEqual(
             len(test_tensors_res[0]) + len(test_tensors_res[1]), 100)
