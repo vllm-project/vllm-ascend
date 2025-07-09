@@ -178,7 +178,6 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
         int64_t aiv_num = 0;
         TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
         uint32_t loop_cnt = (size + aiv_num - 1) / aiv_num;
-
         // Call implementation
         get_masked_input_and_mask_impl(
             stream,
@@ -193,7 +192,6 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
             size,
             loop_cnt,
             aiv_num);
-            
         return 0;
     });
     cmd.Run();
