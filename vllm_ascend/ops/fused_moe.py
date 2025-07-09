@@ -1174,6 +1174,16 @@ class AscendFusedMoE(FusedMoE):
 
         tp_size = get_tensor_model_parallel_world_size()
 
+        if tp_size > 1 and fused_moe_state != FusedMoEState.AllGather:
+            if num_tokens < tp_size:
+                if mc2_mask is not None:
+                    mc2_mask = nn.functional.pad(mc2_mask,
+                                                 (0, tp_size - num_tokens))
+            tp_rank = get_tensor_model_parallel_rank()
+            if mc2_mask is not None:
+                chunk_mc2_mask = torch.tensor_split(mc2_mask, tp_size, dim=0)
+                mc2_mask = chunk_mc2_mask[tp_rank]
+
         if self.dp_size > 1 and fused_moe_state == FusedMoEState.AllGather:
             # NOTE: When in torchair graph, it has been padded in model_runner_v1
             if not self.torchair_graph_enabled or is_prefill:
