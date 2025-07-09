@@ -122,7 +122,6 @@ def fused_experts_with_mc2(
     moe_all_to_all_group_name: Optional[str] = None,
     shared_experts: Optional[Any] = None,
     is_torchair: bool = False,
-    mc2_mask: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     quant_mode = 0
     ep_group = get_ep_group()
@@ -138,9 +137,6 @@ def fused_experts_with_mc2(
     # NOTE: Currently, when in A3 or in torchair graph, we need to pass in some extra param into dispatch & combine
     need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A3
                        or is_torchair)
-
-    # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
-    a3_need_extra_args = get_ascend_soc_version() == AscendSocVersion.A3
 
     moe_expert_num = len(expert_map)
     kwargs_mc2 = {
@@ -164,10 +160,6 @@ def fused_experts_with_mc2(
             "group_tp": moe_all_to_all_group_name,
             "tp_world_size": 1,
             "tp_rank_id": 0,
-        })
-    if a3_need_extra_args:
-        stage1_kwargs.update({
-            "x_active_mask": mc2_mask,
         })
 
     kwargs_mc2.update(stage1_kwargs)
@@ -237,10 +229,6 @@ def fused_experts_with_mc2(
             "group_tp": moe_all_to_all_group_name,
             "tp_world_size": 1,
             "tp_rank_id": 0,
-        })
-    if a3_need_extra_args:
-        stage3_kwargs.update({
-            "x_active_mask": mc2_mask,
         })
     kwargs_mc2.update(stage3_kwargs)
 
@@ -956,7 +944,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
         fused_moe_state = get_forward_context().fused_moe_state
         if fused_moe_state == FusedMoEState.MC2:
-            mc2_mask = kwargs.get("mc2_mask", None)
             return fused_experts_with_mc2(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -967,8 +954,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 expert_map=expert_map,
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name,
                 shared_experts=shared_experts,
-                is_torchair=self.torchair_graph_enabled,
-                mc2_mask=mc2_mask)
+                is_torchair=self.torchair_graph_enabled)
         elif fused_moe_state == FusedMoEState.AllGather:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
@@ -1169,9 +1155,6 @@ class AscendFusedMoE(FusedMoE):
             if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
                 shared_hidden_states = shared_experts(hidden_states)
 
-        attn_metadata = get_forward_context().attn_metadata
-        mc2_mask = attn_metadata.decode.mc2_mask if attn_metadata is not None and attn_metadata.decode is not None else None
-
         tp_size = get_tensor_model_parallel_world_size()
         if tp_size > 1 and fused_moe_state != FusedMoEState.AllGather:
             if num_tokens < tp_size:
@@ -1179,9 +1162,6 @@ class AscendFusedMoE(FusedMoE):
                     hidden_states, (0, 0, 0, tp_size - num_tokens))
                 router_logits = nn.functional.pad(
                     router_logits, (0, 0, 0, tp_size - num_tokens))
-                if mc2_mask is not None:
-                    mc2_mask = nn.functional.pad(mc2_mask,
-                                                 (0, tp_size - num_tokens))
             chunk_hidden_states = torch.tensor_split(hidden_states,
                                                      tp_size,
                                                      dim=0)
@@ -1191,11 +1171,6 @@ class AscendFusedMoE(FusedMoE):
             tp_rank = get_tensor_model_parallel_rank()
             hidden_states = chunk_hidden_states[tp_rank]
             router_logits = chunk_router_logits[tp_rank]
-
-            if mc2_mask is not None:
-                chunk_mc2_mask = torch.tensor_split(mc2_mask, tp_size, dim=0)
-                mc2_mask = chunk_mc2_mask[tp_rank]
-
         if self.dp_size > 1 and fused_moe_state == FusedMoEState.AllGather:
             # NOTE: When in torchair graph, it has been padded in model_runner_v1
             if not self.torchair_graph_enabled or is_prefill:
@@ -1234,7 +1209,6 @@ class AscendFusedMoE(FusedMoE):
             and self.enable_multistream_moe and not is_prefill else None,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
-            mc2_mask=mc2_mask,
         )
 
         if shared_experts:
