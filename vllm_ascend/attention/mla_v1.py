@@ -352,13 +352,13 @@ class AscendMLAMetadataBuilder:
         else:
             attn_state = AscendAttentionState.DecodeOnly
             num_decode_tokens = 1
-        sin = torch.ones(num_reqs,
+        sin = torch.ones(num_tokens,
                          1,
                          1,
                          self.rope_dim,
                          dtype=self.runner.dtype,
                          device=device)
-        cos = torch.ones(num_reqs,
+        cos = torch.ones(num_tokens,
                          1,
                          1,
                          self.rope_dim,
@@ -547,15 +547,13 @@ class AscendMLAMetadataBuilder:
                 actual_seq_q_lens = query_start_loc[1:].tolist(
                 ) + self.runner.actual_seq_q_lens[num_reqs:num_reqs +
                                                   num_reqs_pad_size]
-                cos = self.cos_cache[
-                    input_positions].unsqueeze(  # type: ignore
-                        1).unsqueeze(2)
-                sin = self.sin_cache[
-                    input_positions].unsqueeze(  # type: ignore
-                        1).unsqueeze(2)
             else:
                 seq_lens_list = seq_lens.tolist()
-                cos, sin = None, None
+
+            cos = self.cos_cache[input_positions].unsqueeze(  # type: ignore
+                1).unsqueeze(2)
+            sin = self.sin_cache[input_positions].unsqueeze(  # type: ignore
+                1).unsqueeze(2)
             mc2_mask = self.generate_activate_mask(
                 num_actual_tokens, num_reqs + num_reqs_pad_size)
 
