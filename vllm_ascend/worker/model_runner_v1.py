@@ -325,8 +325,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # the size of the pre-constructed mask matrix based on requirements.
         mask_len = os.getenv("PAGED_ATTENTION_MASK_LEN", 10000)
         attn_mask_len = min(self.model_config.max_model_len, int(mask_len))
-        self.attn_mask_builder = AttentionMaskBuilder.initialize_from_len(
-            attn_mask_len, self.dtype)
+        self.attn_mask_builder = AttentionMaskBuilder(attn_mask_len,
+                                                      self.dtype)
 
         self.new_kv_cache_bytes = -1
         self.torchair_compiled_model = None  # type: ignore
