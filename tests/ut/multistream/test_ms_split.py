@@ -17,8 +17,7 @@ class TestMsSplit(unittest.TestCase):
         result = compute_split_seq_index(
             query_lens=None,
             attn_state=AscendAttentionState.DecodeOnly,
-            num_tokens=10
-        )
+            num_tokens=10)
         self.assertEqual(result, [5, 5])
 
     def test_perfect_balance(self):
@@ -26,8 +25,7 @@ class TestMsSplit(unittest.TestCase):
         result = compute_split_seq_index(
             query_lens=query_lens,
             attn_state=AscendAttentionState.PrefillNoCache,
-            num_tokens=10
-        )
+            num_tokens=10)
         self.assertEqual(result, [5, 2])
 
     def test_imbalance(self):
@@ -35,8 +33,7 @@ class TestMsSplit(unittest.TestCase):
         result = compute_split_seq_index(
             query_lens=query_lens,
             attn_state=AscendAttentionState.PrefillNoCache,
-            num_tokens=10
-        )
+            num_tokens=10)
         self.assertEqual(result, [0, 0])
 
     def test_query_lens_none(self):
@@ -44,16 +41,14 @@ class TestMsSplit(unittest.TestCase):
             compute_split_seq_index(
                 query_lens=None,
                 attn_state=AscendAttentionState.PrefillNoCache,
-                num_tokens=10
-            )
+                num_tokens=10)
 
     def test_empty_query_lens(self):
         query_lens: list[int] = []
         result = compute_split_seq_index(
             query_lens=query_lens,
             attn_state=AscendAttentionState.PrefillNoCache,
-            num_tokens=10
-        )
+            num_tokens=10)
         self.assertEqual(result, [0, 0])
 
     def test_single_query_len(self):
@@ -61,8 +56,7 @@ class TestMsSplit(unittest.TestCase):
         result = compute_split_seq_index(
             query_lens=query_lens,
             attn_state=AscendAttentionState.PrefillNoCache,
-            num_tokens=10
-        )
+            num_tokens=10)
         self.assertEqual(result, [0, 0])
 
     def test_split_attn_tensor_type_middle(self):
@@ -106,7 +100,6 @@ class TestMsSplit(unittest.TestCase):
         self.assertEqual(len(result), 2)
         self.assertTrue(torch.equal(result[0], expected_result[0]))
         self.assertTrue(torch.equal(result[1], expected_result[1]))
-
 
     def test_split_attn_int_type_index_greater_than_var(self):
         var = 5
@@ -154,5 +147,7 @@ class TestMsSplit(unittest.TestCase):
         attn_metadata = None 
         ascendMLAPrefillMetadata = MagicMock()
         ms_split_config = MSAttentionMetadataSplitConfig(num_micro_batches=1)
-        result = model_input_split_v1_mla_attn(attn_metadata, ascendMLAPrefillMetadata, ms_split_config)
+        result = model_input_split_v1_mla_attn(attn_metadata, 
+                                               ascendMLAPrefillMetadata, 
+                                               ms_split_config)
         self.assertEqual(result, [None])
