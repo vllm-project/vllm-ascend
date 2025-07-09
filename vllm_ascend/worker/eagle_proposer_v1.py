@@ -74,8 +74,8 @@ class EagleProposer:
         mask_len = os.getenv("PAGED_ATTENTION_MASK_LEN", 10000)
         self.attn_mask_len = min(self.model_config.max_model_len,
                                  int(mask_len))
-        self.attn_mask_builder = AttentionMaskBuilder.initialize_from_len(
-            self.attn_mask_len, self.dtype)
+        self.attn_mask_builder = AttentionMaskBuilder(self.attn_mask_len,
+                                                      self.dtype)
 
     def _make_attention_mask(
         self,
