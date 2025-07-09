@@ -548,13 +548,18 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 output = output.view(-1, output_shape[-1])
             return output
         else:
-            kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
+            kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]
+            if self.debug_layer_idx > 3:
+                hidden_states_or_q_c = get_tp_group().all_gather(hidden_states_or_q_c, 0)
+                kv_no_split = get_tp_group().all_gather(kv_no_split, 0)
+            
+            kv_c, k_pe = kv_no_split.split(
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
             kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
             if self.debug_layer_idx < 3:
                 output_shape = hidden_states.shape
             else:
-                num_tokens = hidden_states.shape[0]
+                num_tokens = hidden_states_or_q_c.shape[0]
                 rows = num_tokens // self.tp_size
                 if num_tokens % self.tp_size:
                     rows += 1
@@ -670,7 +675,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 residual *= 1. / self.routed_scaling_factor
 
         tp_size = get_tensor_model_parallel_world_size()
-        if self.layer_idx >= 3 and tp_size > 1:
+        if self.layer_idx == 3 and tp_size > 1:
             num_tokens, _ = residual.shape
             if num_tokens % tp_size:
                 residual = nn.functional.pad(residual, (0, 0, 0, -num_tokens % tp_size))
@@ -686,17 +691,6 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             hidden_states = self.mlp(hidden_states, attn_metadata)
         else:
             hidden_states = self.mlp(hidden_states)
-
-        if self.layer_idx >= 3 and tp_size > 1:
-            dist.all_gather(list(chunk_residual), residual, self.tp_group)
-            residual = torch.cat(chunk_residual, dim=0)
-            chunk_hidden_states = list(torch.unbind(torch.empty(tp_size, hidden_states.shape[0], hidden_states.shape[1], device=hidden_states.device, dtype=hidden_states.dtype), dim=0))
-            dist.all_gather(list(chunk_hidden_states), hidden_states, self.tp_group)
-            hidden_states = torch.cat(chunk_hidden_states, dim=0)
-
-            if num_tokens % tp_size:
-                residual = residual[:num_tokens]
-                hidden_states = hidden_states[:num_tokens]
 
         if isinstance(
                 self.mlp,
@@ -792,6 +786,14 @@ class CustomDeepseekV2Model(nn.Module):
             })
 
         hidden_states, _ = self.norm(hidden_states, residual)
+
+        tp_size = get_tensor_model_parallel_world_size()
+        if tp_size > 1:
+            hidden_states = get_tp_group().all_gather(hidden_states, 0)
+            num_tokens = hidden_states.shape[0]
+
+            if num_tokens % tp_size:
+                hidden_states = hidden_states[:num_tokens]
         return hidden_states
 
 
