@@ -26,6 +26,7 @@ from vllm.forward_context import get_forward_context
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
+from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import select_experts
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
                                dispose_tensor, get_ascend_soc_version,
@@ -220,7 +221,7 @@ def fused_experts_with_mc2(
     if log2phy is not None:
         topk_ids = log2phy[topk_ids]
     quant_mode = 2
-    ep_group = get_ep_group()
+    ep_group = get_mc2_group()
     ep_rank_id = ep_group.rank_in_group
     ep_world_size = ep_group.world_size
     tp_world_size = get_tp_group().world_size
@@ -677,7 +678,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         self.enable_weight_nz_layout = ascend_config.enable_weight_nz_layout
 
         try:
-            device_group = self.ep_group.device_group
+            device_group = get_mc2_group().device_group
             # TODO: Try local_rank = ep_group.rank_in_group
             local_rank = torch.distributed.get_rank(group=device_group)
             backend = device_group._get_backend(torch.device("npu"))
