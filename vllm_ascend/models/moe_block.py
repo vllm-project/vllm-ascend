@@ -19,21 +19,17 @@ from typing import Optional
 
 import torch
 import vllm.model_executor.models.qwen3_moe as qwen3
-
 from torch import nn
+from transformers import PretrainedConfig
 from vllm.attention import AttentionMetadata
-from vllm.distributed import (get_tensor_model_parallel_world_size,
-                              get_tp_group)
-from vllm.distributed.parallel_state import get_dp_group
+from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
+from vllm.distributed.parallel_state import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.quantization import QuantizationConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
-
-from transformers import PretrainedConfig
-from vllm.model_executor.layers.quantization import QuantizationConfig
 
 
 class AscendSparseMoeBlock(nn.Module):

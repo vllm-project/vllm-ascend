@@ -34,8 +34,7 @@ from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.distributed import (get_pp_group,
-                              get_tensor_model_parallel_rank,
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               get_tp_group, tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import get_dp_group, get_ep_group
@@ -55,8 +54,9 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.distributed.tensor_parallel import gather_from_sequence_parallel_region
 from vllm_ascend.ascend_forward_context import FusedMoEState
+from vllm_ascend.distributed.tensor_parallel import \
+    gather_from_sequence_parallel_region
 from vllm_ascend.models.deepseek_v2 import (CustomDeepseekV2DecoderLayer,
                                             CustomDeepseekV2MLP,
                                             CustomDeepseekV2MoE)
@@ -69,9 +69,9 @@ from vllm_ascend.multistream.layers import (MultiStreamPostTransformerLayer,
 from vllm_ascend.multistream.metadata import (MultiStreamConfig,
                                               MultiStreamStepMetadata,
                                               make_multistream_metadata_ds)
+from vllm_ascend.ops.fused_moe import select_experts
 from vllm_ascend.quantization.w8a8_dynamic import (
     AscendW8A8DynamicLinearMethod, apply_mlp)
-from vllm_ascend.ops.fused_moe import select_experts
 from vllm_ascend.utils import dispose_tensor
 
 VLLM_ASCEND_ENABLE_DBO: bool = envs_ascend.VLLM_ASCEND_ENABLE_DBO
