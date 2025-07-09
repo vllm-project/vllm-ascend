@@ -24,7 +24,6 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 from vllm import LLM, SamplingParams
 
-
 if __name__ == "__main__":
     prompts = [
         "Hello, my name is",
