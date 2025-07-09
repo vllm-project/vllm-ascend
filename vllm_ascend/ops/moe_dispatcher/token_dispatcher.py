@@ -32,9 +32,8 @@ from vllm_ascend.distributed.tensor_parallel import (
     reduce_scatter_last_dim_to_tensor_parallel_region)
 from vllm_ascend.ops.comm_utils import async_all_to_all
 from vllm_ascend.ops.moe_dispatcher.moe_utils import (
-    get_capacity, permute, sort_chunks_by_idxs, topk_softmax_with_capacity,
+    get_capacity, permute, topk_softmax_with_capacity,
     unpermute)
-
 """ We use the following notation throughout this file:
      H: hidden size
      B: micro batch size
@@ -147,7 +146,6 @@ class MoEDispatcher:
 
 class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
     overlap_stream = None
-
     """
     The implementation of the AlltoAll-based token dispatcher, which handles token
     dispatching on the sequence level instead of token level. The core of this implementation
@@ -178,20 +176,18 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
                 device=torch.npu.current_device(),
             )
 
-        local_expert_indices_offset = (
-                self.ep_rank * self.num_local_experts
-        )
+        local_expert_indices_offset = (self.ep_rank * self.num_local_experts)
 
         self.local_expert_indices = [
-            local_expert_indices_offset + i for i in range(self.num_local_experts)
+            local_expert_indices_offset + i
+            for i in range(self.num_local_experts)
         ]
-        assert (
-                len(self.local_expert_indices) == self.num_local_experts
-        ), "Invalid local expert indices"
+        assert (len(self.local_expert_indices) == self.num_local_experts
+                ), "Invalid local expert indices"
         for i in range(len(self.local_expert_indices) - 1):
-            assert (
-                    self.local_expert_indices[i] == self.local_expert_indices[i + 1] - 1
-            ), "local_expert_indices must be continuous"
+            assert (self.local_expert_indices[i] ==
+                    self.local_expert_indices[i + 1] -
+                    1), "local_expert_indices must be continuous"
         self.probs = None
         self.input_splits = None
         self.output_splits = None
@@ -205,12 +201,11 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         input_chunk_idxs = torch.arange(self.num_experts)
         # [num_local_experts, ep_size]. Sort the input chunks by local experts.
         self.sort_input_by_local_experts = input_chunk_idxs.reshape(
-            -1, self.num_local_experts
-        ).T.ravel()
+            -1, self.num_local_experts).T.ravel()
         # [ep_size, num_local_experts]. Restore the output chunks by local experts.
         self.restore_output_by_local_experts = input_chunk_idxs.reshape(
-            self.num_local_experts, -1
-        ).T.ravel().to(torch.device("cpu"), non_blocking=True)
+            self.num_local_experts, -1).T.ravel().to(torch.device("cpu"),
+                                                     non_blocking=True)
 
         # Token drop and padding.
         # We need to keep track of the token num if we drop tokens without padding them.
@@ -240,7 +235,9 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
 
         self.overlap_stream = MoEAlltoAllSeqOverLapDispatcher.overlap_stream
 
-    def preprocess(self, indices: torch.Tensor, with_sync=True) -> torch.Tensor:
+    def preprocess(self,
+                   indices: torch.Tensor,
+                   with_sync=True) -> torch.Tensor:
         """
         Preprocess routing map for AlltoAll communication and token permutation.
         This method computes the number of tokens assigned to each expert based on
@@ -255,9 +252,10 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         Returns:
             torch.Tensor: Tensor containing the number of tokens assigned to local expert.
         """
-        num_local_tokens_per_expert = torch.histc(
-            indices, bins=self.num_experts, min=0, max=self.num_experts
-        )
+        num_local_tokens_per_expert = torch.histc(indices,
+                                                  bins=self.num_experts,
+                                                  min=0,
+                                                  max=self.num_experts)
 
         # num_local_tokens_per_expert: [num_experts]
 
@@ -272,18 +270,19 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
             )
             self.num_out_tokens = self.capacity * self.num_experts
             num_tokens_per_local_expert = torch.full(
-                (self.num_local_experts,), self.capacity * self.ep_size, dtype=torch.long
-            )
+                (self.num_local_experts, ),
+                self.capacity * self.ep_size,
+                dtype=torch.long)
             self.num_global_tokens_per_local_expert_cpu = torch.full(
-                (self.num_experts * self.tp_ep_size,), self.capacity, dtype=torch.long
-            )
+                (self.num_experts * self.tp_ep_size, ),
+                self.capacity,
+                dtype=torch.long)
             return num_tokens_per_local_expert
         elif self.config.moe_expert_capacity_factor is not None:
             # Token drop but no pad. A synchronization is needed before the first
             # permutation to get the `num_out_tokens` CPU value.
             self.num_out_tokens = num_local_tokens_per_expert.sum().to(
-                torch.device("cpu"), non_blocking=True
-            )
+                torch.device("cpu"), non_blocking=True)
             self.cuda_sync_point = "before_permutation_1"
         else:
             # Dropless
@@ -301,23 +300,18 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
             # ===================================================
             # Calculate input_splits, output_splits for alltoall-v.
             # ===================================================
-            self.input_splits = (
-                num_local_tokens_per_expert.reshape(ep_size, self.num_local_experts)
-                .sum(axis=1)
-                .to(torch.device("cpu"), non_blocking=True)
-                .numpy()
-            )
+            self.input_splits = (num_local_tokens_per_expert.reshape(
+                ep_size, self.num_local_experts).sum(axis=1).to(
+                    torch.device("cpu"), non_blocking=True).numpy())
             num_global_tokens_per_expert = gather_from_sequence_parallel_region(
-                num_local_tokens_per_expert, group=self.ep_group
-            ).reshape(ep_size, self.num_experts)
-            self.num_global_tokens_per_local_expert = num_global_tokens_per_expert[:, self.local_expert_indices[0]:
-                                                                                      self.local_expert_indices[-1] + 1]
-            self.output_splits = (
-                self.num_global_tokens_per_local_expert.sum(axis=-1)
-                .to(torch.device("cpu"), non_blocking=True)
-                .numpy()
-            )
-            num_tokens_per_local_expert = self.num_global_tokens_per_local_expert.sum(axis=0)
+                num_local_tokens_per_expert,
+                group=self.ep_group).reshape(ep_size, self.num_experts)
+            self.num_global_tokens_per_local_expert = num_global_tokens_per_expert[:, self.local_expert_indices[
+                0]:self.local_expert_indices[-1] + 1]
+            self.output_splits = (self.num_global_tokens_per_local_expert.sum(
+                axis=-1).to(torch.device("cpu"), non_blocking=True).numpy())
+            num_tokens_per_local_expert = self.num_global_tokens_per_local_expert.sum(
+                axis=0)
             # ===================================================
             # num_global_tokens_per_expert: [ep_size, num_experts]
             # num_global_tokens_per_local_expert: [ep_size, num_local_experts]
@@ -325,15 +319,14 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
             # ===================================================
         else:
             self.num_global_tokens_per_local_expert = num_local_tokens_per_expert.reshape(
-                -1, self.num_experts
-            )
+                -1, self.num_experts)
             num_tokens_per_local_expert = num_local_tokens_per_expert
 
         if self.num_local_experts > 1 and with_sync:
             self.cuda_sync_point = "no_sync"
             self.global_input_tokens_local_experts_indices = torch.repeat_interleave(
-                self.expert_ids_per_ep_rank, self.num_global_tokens_per_local_expert.ravel()
-            )
+                self.expert_ids_per_ep_rank,
+                self.num_global_tokens_per_local_expert.ravel())
 
             # self.num_global_tokens_per_local_expert_cpu = (
             #     self.num_global_tokens_per_local_expert.view(-1, self.num_local_experts).to(
@@ -363,8 +356,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
             num_groups=self.config.num_groups,
             expert_bias=self.config.expert_bias,
             scaling_factor=self.config.scaling_factor,
-            score_function=score_function
-        )
+            score_function=score_function)
         self.top_indices = top_indices
         return scores, routing_map
 
@@ -378,10 +370,10 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         return num_tokens_per_local_expert
 
     def token_permutation(
-            self,
-            hidden_states: torch.Tensor,
-            probs: torch.Tensor,
-            routing_map: torch.Tensor,
+        self,
+        hidden_states: torch.Tensor,
+        probs: torch.Tensor,
+        routing_map: torch.Tensor,
     ):
         """
         Dispatch tokens to local experts using AlltoAllSeq communication.
@@ -410,7 +402,8 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
             hidden_states = hidden_states.view(-1, self.hidden_shape[-1])
             tokens_per_expert = self.preprocess(routing_map)
             if self.tp_ep_size > 1:
-                hidden_states = all_to_all_sp2hp(hidden_states, group=self.tp_ep_group)
+                hidden_states = all_to_all_sp2hp(hidden_states,
+                                                 group=self.tp_ep_group)
             self.hidden_shape_before_permute = hidden_states.shape
 
             if self.cuda_sync_point == "before_permutation_1":
@@ -460,15 +453,13 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
             if self.num_local_experts > 1:
                 global_input_tokens, self.reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(
                     global_input_tokens,
-                    self.global_input_tokens_local_experts_indices
-                )
+                    self.global_input_tokens_local_experts_indices)
 
             # Perform tensor parallel AllGather on the hidden dimension to obtain the input tokens.
             # global_input_tokens: [SEQL, H/TP] -> [SEQL, H]
             if self.tp_ep_size > 1 and self.config.moe_grouped_gemm:
                 global_input_tokens = all_gather_last_dim_from_tensor_parallel_region(
-                    global_input_tokens, self.tp_ep_group
-                )
+                    global_input_tokens, self.tp_ep_group)
             if self.cuda_sync_point == "before_finish":
                 torch.npu.current_stream().synchronize()
 
@@ -479,14 +470,12 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
 
         return share_experts_output, global_input_tokens, tokens_per_expert
 
-    def preprocess_and_permtute1(
-            self,
-            hidden_states: torch.Tensor,
-            probs: torch.Tensor,
-            routing_map: torch.Tensor,
-            shared_experts=None,
-            shared_experts_input: torch.Tensor = None
-    ):
+    def preprocess_and_permtute1(self,
+                                 hidden_states: torch.Tensor,
+                                 probs: torch.Tensor,
+                                 routing_map: torch.Tensor,
+                                 shared_experts=None,
+                                 shared_experts_input: torch.Tensor = None):
         self.hidden_shape = hidden_states.shape
         self.probs = probs
         self.top_indices = routing_map
@@ -528,8 +517,8 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         if self.num_local_experts > 1:
             self.cuda_sync_point = "no_sync"
             self.global_input_tokens_local_experts_indices = torch.repeat_interleave(
-                self.expert_ids_per_ep_rank, self.num_global_tokens_per_local_expert.ravel()
-            )
+                self.expert_ids_per_ep_rank,
+                self.num_global_tokens_per_local_expert.ravel())
 
         self.cached_permutated_local_input_tokens = hidden_states
         self.tokens_per_expert = tokens_per_expert
@@ -558,23 +547,17 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         if self.num_local_experts > 1:
             global_input_tokens, self.reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(
                 self.cached_global_input_tokens,
-                self.global_input_tokens_local_experts_indices
-            )
+                self.global_input_tokens_local_experts_indices)
             self.cached_global_input_tokens.untyped_storage().resize_(0)
             self.cached_global_input_tokens = None
 
         return global_input_tokens, self.tokens_per_expert
 
-    def unpermute1(
-            self,
-            hidden_states: torch.Tensor
-    ):
+    def unpermute1(self, hidden_states: torch.Tensor):
         # Unpermutation 2: expert output to AlltoAll input
         if hidden_states.shape[0] > 0 and self.num_local_experts > 1:
             hidden_states = torch_npu.npu_moe_token_unpermute(
-                hidden_states,
-                self.reversed_global_input_permutation_mapping
-            )
+                hidden_states, self.reversed_global_input_permutation_mapping)
         self.cached_global_output_tokens = hidden_states
         self.reversed_global_input_permutation_mapping = None
 
@@ -583,11 +566,8 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         # Perform expert parallel AlltoAll communication
         # hidden_states: [SEQL, H] -> [SEQL, H/TP]
         _, self.cached_local_output_tokens, handle = async_all_to_all(
-            self.cached_global_output_tokens,
-            self.input_splits,
-            self.output_splits,
-            ep_group
-        )
+            self.cached_global_output_tokens, self.input_splits,
+            self.output_splits, ep_group)
         handle.wait()
         self.cached_global_output_tokens.untyped_storage().resize_(0)
         self.cached_global_output_tokens = None
@@ -597,10 +577,10 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
     def unpermute2(self):
         output = torch_npu.npu_moe_token_unpermute(
             permuted_tokens=self.cached_local_output_tokens,
-            sorted_indices=self.reversed_local_input_permutation_mapping.to(torch.int32),
+            sorted_indices=self.reversed_local_input_permutation_mapping.to(
+                torch.int32),
             probs=self.probs,
-            restore_shape=self.hidden_shape_before_permute
-        )
+            restore_shape=self.hidden_shape_before_permute)
 
         output = output.view(self.hidden_shape)
 
@@ -611,11 +591,9 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
 
         return output
 
-    def token_unpermutation(
-            self,
-            hidden_states: torch.Tensor,
-            bias: torch.Tensor = None
-    ):
+    def token_unpermutation(self,
+                            hidden_states: torch.Tensor,
+                            bias: torch.Tensor = None):
         """
         Reverse the token permutation to restore the original order.
 
@@ -634,14 +612,14 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
             # Perform tensor parallel Reduce-Scatter
             # hidden_states: [SEQL, H] -> [SEQL, H/TP]
             if self.tp_ep_size > 1:
-                hidden_states = reduce_scatter_last_dim_to_tensor_parallel_region(hidden_states, group=self.tp_ep_group)
+                hidden_states = reduce_scatter_last_dim_to_tensor_parallel_region(
+                    hidden_states, group=self.tp_ep_group)
 
             # Unpermutation 2: expert output to AlltoAll input
             if hidden_states.shape[0] > 0 and self.num_local_experts > 1:
                 hidden_states = torch_npu.npu_moe_token_unpermute(
                     hidden_states,
-                    self.reversed_global_input_permutation_mapping
-                )
+                    self.reversed_global_input_permutation_mapping)
                 # hidden_states = sort_chunks_by_idxs(
                 #     hidden_states,
                 #     self.num_global_tokens_per_local_expert_cpu.T.ravel(),
@@ -655,11 +633,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         # Perform expert parallel AlltoAll communication
         # hidden_states: [SEQL, H] -> [SEQL, H/TP]
         _, permutated_local_input_tokens, handle = async_all_to_all(
-            hidden_states,
-            self.input_splits,
-            self.output_splits,
-            ep_group
-        )
+            hidden_states, self.input_splits, self.output_splits, ep_group)
         handle.wait()
         hidden_states.untyped_storage().resize_(0)
 
@@ -670,10 +644,10 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
                 #                   .view(-1, self.config.moe_router_topk))
                 output = torch_npu.npu_moe_token_unpermute(
                     permuted_tokens=permutated_local_input_tokens,
-                    sorted_indices=self.reversed_local_input_permutation_mapping.to(torch.int32),
+                    sorted_indices=self.
+                    reversed_local_input_permutation_mapping.to(torch.int32),
                     probs=self.probs,
-                    restore_shape=self.hidden_shape_before_permute
-                )
+                    restore_shape=self.hidden_shape_before_permute)
             else:
                 output = unpermute(
                     permutated_local_input_tokens,

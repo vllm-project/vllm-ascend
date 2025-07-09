@@ -1,5 +1,27 @@
-from collections.abc import Iterable
-from typing import Any, Optional, Union, List
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
+# Copyright 2023 DeepSeek-AI and the HuggingFace Inc. team. All rights reserved.
+#
+# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
+# and OPT implementations in this library. It has been modified from its
+# original forms to accommodate minor architectural differences compared
+# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# # Adapted from
+# """Inference-only Qwen3 model."""
+from typing import Optional, Union, List
 from types import SimpleNamespace
 
 import torch
@@ -12,10 +34,11 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.attention import AttentionMetadata
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.distributed import tensor_model_parallel_all_reduce, get_tensor_model_parallel_world_size, get_tp_group, \
+from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group, \
     get_pp_group
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.models.utils import (make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
+from vllm.model_executor.models.utils import (
+    make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.sequence import IntermediateTensors
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
@@ -24,43 +47,38 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.compilation.decorators import support_torch_compile
 
 from vllm_ascend.multistream.context import (
-    advance_step_multistream_layer_context, get_multistream_comm_context,
-    get_multistream_layer_context, set_multistream_context)
+    advance_step_multistream_layer_context, get_multistream_layer_context)
 from vllm_ascend.multistream.base import MSEventKey
 from vllm_ascend.multistream.layers import (MultiStreamPostTransformerLayer,
                                             MultiStreamPreTransformerLayer)
 from vllm_ascend.multistream.metadata import (MultiStreamConfig,
                                               MultiStreamStepMetadata,
                                               make_multistream_metadata_ds)
-from vllm_ascend.ops.fused_moe import AscendFusedMoE, select_experts, apply_mlp
+from vllm_ascend.ops.fused_moe import select_experts, apply_mlp
 from vllm_ascend.distributed.tensor_parallel import gather_from_sequence_parallel_region
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.models.qwen3_moe import CustomQwen3MoeForCausalLM
 
 VLLM_ASCEND_ENABLE_DBO: bool = envs_ascend.VLLM_ASCEND_ENABLE_DBO
 
 
 class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
+
     def __init__(
-            self,
-            config: PretrainedConfig,
-            cache_config: Optional[CacheConfig] = None,
-            quant_config: Optional[QuantizationConfig] = None,
-            prefix: str = "",
+        self,
+        config: PretrainedConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
-        super(Qwen3MoeDecoderLayerDBO, self).__init__(config, cache_config, quant_config, prefix)
+        super(Qwen3MoeDecoderLayerDBO, self).__init__(config, cache_config,
+                                                      quant_config, prefix)
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tp_group().rank_in_group
         self.tp_group = get_tp_group().device_group
         self.dummy_vllm_config = SimpleNamespace(
-            parallel_config=SimpleNamespace(
-                data_parallel_size=1,
-            ),
-            compilation_config=SimpleNamespace(
-                static_forward_context=None,
-            ),
-            other_setting="value"
-        )
+            parallel_config=SimpleNamespace(data_parallel_size=1, ),
+            compilation_config=SimpleNamespace(static_forward_context=None, ),
+            other_setting="value")
         self.config = config
 
     def forward(self, *args, **kwargs):
@@ -68,9 +86,9 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
 
     # should split ops in Decoder Layer
     def _forward_ms_op_input_layernorm(
-            self,
-            hidden_states: torch.Tensor,
-            residual: Optional[torch.Tensor],
+        self,
+        hidden_states: torch.Tensor,
+        residual: Optional[torch.Tensor],
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if residual is None:
             residual = hidden_states
@@ -81,14 +99,15 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
         return hidden_states, residual
 
     def _forward_ms_op_attn(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor,
-            residual: torch.Tensor,
-            kv_cache: Optional[torch.Tensor] = None,
-            attn_metadata: Optional[AttentionMetadata] = None,
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        kv_cache: Optional[torch.Tensor] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        self.dummy_vllm_config.compilation_config.static_forward_context = get_forward_context().no_compile_layers
+        self.dummy_vllm_config.compilation_config.static_forward_context = get_forward_context(
+        ).no_compile_layers
         with set_forward_context(attn_metadata, self.dummy_vllm_config):
             hidden_states = self.self_attn(
                 positions=positions,
@@ -106,9 +125,9 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
         return hidden_states, residual
 
     def _forward_ms_op_post_attn_layernorm(
-            self,
-            hidden_states: torch.Tensor,
-            residual: Optional[torch.Tensor],
+        self,
+        hidden_states: torch.Tensor,
+        residual: Optional[torch.Tensor],
     ):
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
@@ -117,8 +136,7 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
     def _forward_op_gating(
             self,
             hidden_states: torch.Tensor,
-            attn_metadata: Optional[AttentionMetadata] = None
-    ) -> torch.Tensor:
+            attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
         if attn_metadata is None:
             attn_metadata = get_forward_context().attn_metadata
         # when profile runs, force experts to load balanced tokens
@@ -146,7 +164,9 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
             chunk_hidden_states = torch.tensor_split(hidden_states,
                                                      self.tp_size,
                                                      dim=0)
-            chunked_hidden_states_sizes = [x.shape[0] for x in chunk_hidden_states]
+            chunked_hidden_states_sizes = [
+                x.shape[0] for x in chunk_hidden_states
+            ]
             local_hidden_states = chunk_hidden_states[self.tp_rank]
         else:
             local_hidden_states = hidden_states
@@ -182,8 +202,9 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
                 num_expert_group=getattr(mlp_config, "n_group", None),
                 custom_routing_function=None,
                 scoring_func=getattr(mlp_config, "scoring_func", 'softmax'),
-                e_score_correction_bias=getattr(self.mlp.gate, "e_score_correction_bias", None)
-            )
+                e_score_correction_bias=getattr(self.mlp.gate,
+                                                "e_score_correction_bias",
+                                                None))
 
         topk_weights = topk_weights.to(hidden_states.dtype)
         # this is a naive implementation for experts load balance so as
@@ -194,33 +215,29 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
 
         return topk_weights, topk_ids, local_hidden_states, chunked_hidden_states_sizes
 
-    def _forward_op_grouped_mlp(
-            self, dispatched_input, tokens_per_expert
-    ):
-        return apply_mlp(
-            dispatched_input,
-            self.mlp.experts.w13_weight,
-            self.mlp.experts.w2_weight,
-            tokens_per_expert
-        )
+    def _forward_op_grouped_mlp(self, dispatched_input, tokens_per_expert):
+        return apply_mlp(dispatched_input, self.mlp.experts.w13_weight,
+                         self.mlp.experts.w2_weight, tokens_per_expert)
 
-    def _forward_combine_comm(
-            self, hidden_states, microbatch_id, num_tokens, chunked_hidden_states_sizes
-    ):
+    def _forward_combine_comm(self, hidden_states, microbatch_id, num_tokens,
+                              chunked_hidden_states_sizes):
         token_dispatcher = self.mlp.experts.token_dispatchers[microbatch_id]
-        final_hidden_states, _ = token_dispatcher.token_unpermutation(hidden_states)
+        final_hidden_states, _ = token_dispatcher.token_unpermutation(
+            hidden_states)
         if hasattr(self.mlp, 'routed_scaling_factor'):
             final_hidden_states = final_hidden_states * self.mlp.routed_scaling_factor
 
         if self.tp_size > 1:
-            final_hidden_states = gather_from_sequence_parallel_region(final_hidden_states, self.tp_group,
-                                                                       chunked_hidden_states_sizes)
+            final_hidden_states = gather_from_sequence_parallel_region(
+                final_hidden_states, self.tp_group,
+                chunked_hidden_states_sizes)
             if num_tokens < self.tp_size:
                 final_hidden_states = final_hidden_states[:num_tokens]
 
         if hasattr(self.mlp, "shared_experts"):
             final_hidden_states = final_hidden_states + token_dispatcher.cached_shared_expert_output
-            token_dispatcher.cached_shared_expert_output.untyped_storage().resize_(0)
+            token_dispatcher.cached_shared_expert_output.untyped_storage(
+            ).resize_(0)
             token_dispatcher.cached_shared_expert_output = None
 
         final_hidden_states = final_hidden_states.view(num_tokens, -1)
@@ -228,12 +245,12 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
         return final_hidden_states
 
     def _forward_ms_layer_alltoallv_finegrained(
-            self,
-            positions: List[torch.Tensor],
-            hidden_states: List[torch.Tensor],
-            residual: List[torch.Tensor],
-            attn_metadata: List[AttentionMetadata],
-            kv_cache: Optional[torch.Tensor] = None,
+        self,
+        positions: List[torch.Tensor],
+        hidden_states: List[torch.Tensor],
+        residual: List[torch.Tensor],
+        attn_metadata: List[AttentionMetadata],
+        kv_cache: Optional[torch.Tensor] = None,
     ):
         layer_index, ms_metadata, attn_metadata = get_multistream_layer_context(
         )
@@ -245,7 +262,9 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
         assert attn_metadata is not None
         num_tokens = [None] * num_micro_batchs
         hidden_dims = [None] * num_micro_batchs
-        topk_weights, topk_ids = [None] * num_micro_batchs, [None] * num_micro_batchs
+        topk_weights, topk_ids = [None] * num_micro_batchs, [
+            None
+        ] * num_micro_batchs
         tokens_per_expert = [None] * num_micro_batchs
         dispatched_input = [None] * num_micro_batchs
         shared_expert_output = [None] * num_micro_batchs
@@ -270,29 +289,33 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
             forward_context = get_forward_context()
             layer_index, ms_metadata, attn_metadata = get_multistream_layer_context(
             )
-            ms_metadata.try_wait_event(layer_index - 1, i, MSEventKey.FFN_AR_FINISH)
+            ms_metadata.try_wait_event(layer_index - 1, i,
+                                       MSEventKey.FFN_AR_FINISH)
             forward_context.attn_metadata = attn_metadata[i]
 
             # input layernorm
             hidden_states[i], residual[
                 i] = self._forward_ms_op_input_layernorm(
-                hidden_states[i], residual[i])
+                    hidden_states[i], residual[i])
             # attention and tp allreduce
             hidden_states[i], residual[i] = self._forward_ms_op_attn(
                 positions[i], hidden_states[i], residual[i], kv_cache,
                 attn_metadata[i])
             # post attention layer norm
-            hidden_states[i], residual[i] = self._forward_ms_op_post_attn_layernorm(
-                hidden_states[i], residual[i]
-            )
+            hidden_states[i], residual[
+                i] = self._forward_ms_op_post_attn_layernorm(
+                    hidden_states[i], residual[i])
             num_tokens[i], hidden_dims[i] = hidden_states[i].shape
             # If TP is enabled, hidden_states will be chunked.
-            topk_weights[i], topk_ids[i], dispatched_input[i], chunked_hidden_states_sizes[i] = self._forward_op_gating(
-                hidden_states[i], attn_metadata[i])
+            topk_weights[i], topk_ids[i], dispatched_input[
+                i], chunked_hidden_states_sizes[i] = self._forward_op_gating(
+                    hidden_states[i], attn_metadata[i])
             token_dispatchers[i].preprocess_and_permtute1(
-                dispatched_input[i], topk_weights[i], topk_ids[i],
-                shared_experts=None, shared_experts_input=None
-            )
+                dispatched_input[i],
+                topk_weights[i],
+                topk_ids[i],
+                shared_experts=None,
+                shared_experts_input=None)
             # Launch DisPatch Comm in a New Stream.
             dispatch_context = MultiStreamStepMetadata(
                 comm_stream=ms_metadata.communicate_stream,
@@ -304,18 +327,22 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
             dispatch_context.before_comm_event.record()
             # print_with_sync(f'begin token dispatch{i}...', torch.distributed.get_rank())
             with torch.npu.stream(dispatch_context.comm_stream):
-                dispatch_context.comm_stream.wait_event(dispatch_context.before_comm_event)
+                dispatch_context.comm_stream.wait_event(
+                    dispatch_context.before_comm_event)
                 token_dispatchers[i].dispatch_alltoall()
-                dispatched_input[i], tokens_per_expert[i] = token_dispatchers[i].permute2()
+                dispatched_input[i], tokens_per_expert[i] = token_dispatchers[
+                    i].permute2()
                 dispatch_context.after_comm_event.record()
 
         # print_with_sync('begin experts...', torch.distributed.get_rank())
         # block 4 : Router Experts Computation
         # block 5 : Token Combine Communication
         for i in range(num_micro_batchs):
-            ms_metadata.try_wait_event(layer_index, i, MSEventKey.MOE_AFTER_COMM)
+            ms_metadata.try_wait_event(layer_index, i,
+                                       MSEventKey.MOE_AFTER_COMM)
             discard_tensor(hidden_states[i])
-            router_expert_output[i] = self._forward_op_grouped_mlp(dispatched_input[i], tokens_per_expert[i])
+            router_expert_output[i] = self._forward_op_grouped_mlp(
+                dispatched_input[i], tokens_per_expert[i])
             discard_tensor(dispatched_input[i])
 
             # Launch Combine Comm in a New Stream.
@@ -327,19 +354,25 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
                     MSEventKey.FFN_AR_FINISH],
             )
             combine_context.before_comm_event.record()
-            ms_metadata.try_wait_event(layer_index, i, MSEventKey.MOE_SE_COMM_FINISH)
+            ms_metadata.try_wait_event(layer_index, i,
+                                       MSEventKey.MOE_SE_COMM_FINISH)
             with torch.npu.stream(combine_context.comm_stream):
-                combine_context.comm_stream.wait_event(combine_context.before_comm_event)
+                combine_context.comm_stream.wait_event(
+                    combine_context.before_comm_event)
                 hidden_states[i] = self._forward_combine_comm(
-                    router_expert_output[i], i, num_tokens[i], chunked_hidden_states_sizes[i]
-                )
-                ms_metadata.ms_events[layer_index][i][MSEventKey.FFN_AR_FINISH] = combine_context.comm_stream.record_event()
+                    router_expert_output[i], i, num_tokens[i],
+                    chunked_hidden_states_sizes[i])
+                ms_metadata.ms_events[layer_index][i][
+                    MSEventKey.
+                    FFN_AR_FINISH] = combine_context.comm_stream.record_event(
+                    )
 
         return hidden_states, residual
 
 
 @support_torch_compile
 class CustomQwen3DBOMoEModel(Qwen3MoeModel):
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
 
@@ -383,11 +416,11 @@ class CustomQwen3DBOMoEModel(Qwen3MoeModel):
                 multistream_metadata)
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            intermediate_tensors: Optional[IntermediateTensors] = None,
-            inputs_embeds: Optional[torch.Tensor] = None,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -414,8 +447,7 @@ class CustomQwen3DBOMoEModel(Qwen3MoeModel):
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
-                moe_start_layer=moe_start_layer
-            )
+                moe_start_layer=moe_start_layer)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -436,12 +468,12 @@ class CustomQwen3DBOMoEModel(Qwen3MoeModel):
         return True
 
     def _forward_ms_layers(
-            self,
-            positions: torch.Tensor,
-            hidden_states: torch.Tensor,
-            residual: torch.Tensor,
-            moe_start_layer: int,
-            kv_caches: Optional[List[torch.Tensor]] = None,
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        moe_start_layer: int,
+        kv_caches: Optional[List[torch.Tensor]] = None,
     ):
 
         if moe_start_layer == self.end_layer:
@@ -449,7 +481,7 @@ class CustomQwen3DBOMoEModel(Qwen3MoeModel):
 
         attn_metadata, [positions, hidden_states,
                         residual] = self.ms_pre_layer(
-            [positions, hidden_states, residual], )
+                            [positions, hidden_states, residual], )
         num_micro_batch = len(attn_metadata)
         # the rest layers
         for i in range(moe_start_layer, self.end_layer):
@@ -464,10 +496,11 @@ class CustomQwen3DBOMoEModel(Qwen3MoeModel):
             )
             advance_step_multistream_layer_context()
 
-        layer_index, ms_metadata, attn_metadata = get_multistream_layer_context()
+        layer_index, ms_metadata, attn_metadata = get_multistream_layer_context(
+        )
         for i in range(num_micro_batch):
-            ms_metadata.try_wait_event(layer_index - 1, i, MSEventKey.FFN_AR_FINISH)
-
+            ms_metadata.try_wait_event(layer_index - 1, i,
+                                       MSEventKey.FFN_AR_FINISH)
 
         [hidden_states,
          residual] = self.ms_post_layer([hidden_states, residual], )
@@ -486,7 +519,7 @@ class CustomQwen3MoeForCausalLMDBO(Qwen3MoeForCausalLM):
             "up_proj",
         ],
         "experts":
-            ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -496,7 +529,8 @@ class CustomQwen3MoeForCausalLMDBO(Qwen3MoeForCausalLM):
         self.config = config
         self.quant_config = quant_config
         self.model = CustomQwen3DBOMoEModel(vllm_config=vllm_config,
-                                            prefix=maybe_prefix(prefix, "model"))
+                                            prefix=maybe_prefix(
+                                                prefix, "model"))
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config)
@@ -505,11 +539,8 @@ class CustomQwen3MoeForCausalLMDBO(Qwen3MoeForCausalLM):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
-    
+
     def forward(self, *args, **kwargs):
         if "graph_enable" in kwargs:
             kwargs.pop('graph_enable')
         return super().forward(*args, **kwargs)
-
-
-

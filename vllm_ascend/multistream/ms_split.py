@@ -249,105 +249,111 @@ def model_input_split_v1_mla_attn(
 
 
 def model_input_split_v1_attn(
-     attn_metadata: AscendMetadata,
-     _metadata_cls,
-     ms_split_config: MSAttentionMetadataSplitConfig,
- ) -> List[Any]:
-     assert 0 < ms_split_config.num_micro_batches < 3
-     if attn_metadata is None:
-         return [attn_metadata]
-     [token_index,
-      seq_index] = compute_split_seq_index(attn_metadata.query_lens,
-                                           attn_metadata.attn_state,
-                                           attn_metadata.num_actual_tokens)
-     if token_index == 0 or seq_index == 0 or seq_index == len(
-             attn_metadata.query_lens):
-         return [attn_metadata]
+    attn_metadata: AscendMetadata,
+    _metadata_cls,
+    ms_split_config: MSAttentionMetadataSplitConfig,
+) -> List[Any]:
+    assert 0 < ms_split_config.num_micro_batches < 3
+    if attn_metadata is None:
+        return [attn_metadata]
+    [token_index,
+     seq_index] = compute_split_seq_index(attn_metadata.query_lens,
+                                          attn_metadata.attn_state,
+                                          attn_metadata.num_actual_tokens)
+    if token_index == 0 or seq_index == 0 or seq_index == len(
+            attn_metadata.query_lens):
+        return [attn_metadata]
 
+    # split attn metadata
 
-     # split attn metadata
+    [block_table_pre,
+     block_table_post] = split_attn_tensor_type(attn_metadata.block_tables,
+                                                seq_index)
 
+    query_start_loc_pre = query_start_loc_post = None
+    if attn_metadata.query_start_loc is not None:
+        query_start_loc_pre = attn_metadata.query_start_loc[:seq_index + 1]
+        query_start_loc_post = deepcopy(
+            attn_metadata.query_start_loc[seq_index:]
+        ) - attn_metadata.query_start_loc[seq_index]
 
-     [block_table_pre, block_table_post] = split_attn_tensor_type(attn_metadata.block_tables, seq_index)
+    [query_lens_pre,
+     query_lens_post] = split_attn_tensor_type(attn_metadata.query_lens,
+                                               seq_index)
+    [seq_lens_pre,
+     seq_lens_post] = split_attn_tensor_type(attn_metadata.seq_lens, seq_index)
 
-     query_start_loc_pre = query_start_loc_post = None
-     if attn_metadata.query_start_loc is not None:
-         query_start_loc_pre = attn_metadata.query_start_loc[:seq_index + 1]
-         query_start_loc_post = deepcopy(
-             attn_metadata.query_start_loc[seq_index:]
-         ) - attn_metadata.query_start_loc[seq_index]
+    max_query_len_pre = max_query_len_post = None
+    if attn_metadata.max_query_len is not None:
+        max_query_len_pre, max_query_len_post = max(query_lens_pre), max(
+            query_lens_post)
 
-     [query_lens_pre, query_lens_post] = split_attn_tensor_type(attn_metadata.query_lens, seq_index)
-     [seq_lens_pre, seq_lens_post] = split_attn_tensor_type(attn_metadata.seq_lens, seq_index)
+    [slot_mapping_pre,
+     slot_mapping_post] = split_attn_tensor_type(attn_metadata.slot_mapping,
+                                                 token_index)
 
-     max_query_len_pre = max_query_len_post = None
-     if attn_metadata.max_query_len is not None:
-         max_query_len_pre, max_query_len_post = max(query_lens_pre), max(query_lens_post)
+    is_only_prefill_pre = is_only_prefill_post = attn_metadata.is_only_prefill
+    has_prefill_pre, has_prefill_post = torch.any(
+        query_lens_pre > 1).item(), torch.any(query_lens_post > 1).item()
 
-     [slot_mapping_pre, slot_mapping_post] = split_attn_tensor_type(attn_metadata.slot_mapping, token_index)
+    if not attn_metadata.is_only_prefill:
+        is_only_prefill_post = torch.all(query_lens_post > 1).item()
 
-     is_only_prefill_pre = is_only_prefill_post = attn_metadata.is_only_prefill
-     has_prefill_pre, has_prefill_post = torch.any(query_lens_pre > 1).item(), torch.any(query_lens_post > 1).item()
+    if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache or attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
+        # the attn_mla kernel in torch npu only accept 128*128 attn mask
+        attn_mask_pre = attn_mask_post = attn_metadata.attn_mask
+        attn_state_pre = attn_state_post = attn_metadata.attn_state
+    elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+        # should be none in decode only state
+        attn_mask_pre = attn_mask_post = attn_metadata.attn_mask
+        attn_state_pre = attn_state_post = AscendAttentionState.DecodeOnly
+    else:
+        # chunked prefill
+        if has_prefill_pre:
+            attn_state_pre = attn_state_post = AscendAttentionState.ChunkedPrefill
+            attn_mask_pre = attn_metadata.attn_mask[:token_index, :max(
+                seq_lens_pre)].contiguous()
+            attn_state_post = AscendAttentionState.ChunkedPrefill
+            attn_mask_post = attn_metadata.attn_mask[
+                token_index:, :max(seq_lens_post)].contiguous()
+        else:
+            attn_state_pre = AscendAttentionState.DecodeOnly
+            attn_mask_pre = None
+            attn_state_post = AscendAttentionState.ChunkedPrefill
+            attn_mask_post = attn_metadata.attn_mask[
+                token_index:, :max(seq_lens_post)].contiguous()
 
-     if not attn_metadata.is_only_prefill:
-         is_only_prefill_post = torch.all(query_lens_post > 1).item()
+    # construct metadata
+    attention_metadata_pre = _metadata_cls(
+        num_actual_tokens=token_index,
+        block_tables=block_table_pre,
+        query_start_loc=query_start_loc_pre,
+        query_lens=query_lens_pre,
+        seq_lens=seq_lens_pre,
+        seq_lens_list=seq_lens_pre.tolist(),
+        max_query_len=max_query_len_pre,
+        slot_mapping=slot_mapping_pre,
+        is_only_prefill=is_only_prefill_pre,
+        attn_state=attn_state_pre,
+        attn_mask=attn_mask_pre,
+        num_input_tokens=token_index,
+        enable_dbo_across_dp=attn_metadata.enable_dbo_across_dp,
+    )
 
+    attention_metadata_post = _metadata_cls(
+        num_actual_tokens=attn_metadata.num_actual_tokens - token_index,
+        block_tables=block_table_post,
+        query_start_loc=query_start_loc_post,
+        query_lens=query_lens_post,
+        seq_lens=seq_lens_post,
+        seq_lens_list=seq_lens_post.tolist(),
+        max_query_len=max_query_len_post,
+        slot_mapping=slot_mapping_post,
+        is_only_prefill=is_only_prefill_post,
+        attn_state=attn_state_post,
+        attn_mask=attn_mask_post,
+        num_input_tokens=attn_metadata.num_input_tokens - token_index,
+        enable_dbo_across_dp=attn_metadata.enable_dbo_across_dp,
+    )
 
-     if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache or attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
-         # the attn_mla kernel in torch npu only accept 128*128 attn mask
-         attn_mask_pre = attn_mask_post = attn_metadata.attn_mask
-         attn_state_pre = attn_state_post = attn_metadata.attn_state
-     elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-         # should be none in decode only state
-         attn_mask_pre = attn_mask_post = attn_metadata.attn_mask
-         attn_state_pre = attn_state_post = AscendAttentionState.DecodeOnly
-     else:
-         # chunked prefill
-         if has_prefill_pre:
-             attn_state_pre = attn_state_post = AscendAttentionState.ChunkedPrefill
-             attn_mask_pre = attn_metadata.attn_mask[:token_index, :max(
-                 seq_lens_pre)].contiguous()
-             attn_state_post = AscendAttentionState.ChunkedPrefill
-             attn_mask_post = attn_metadata.attn_mask[
-                 token_index:, :max(seq_lens_post)].contiguous()
-         else:
-             attn_state_pre = AscendAttentionState.DecodeOnly
-             attn_mask_pre = None
-             attn_state_post = AscendAttentionState.ChunkedPrefill
-             attn_mask_post = attn_metadata.attn_mask[
-                 token_index:, :max(seq_lens_post)].contiguous()
-
-     # construct metadata
-     attention_metadata_pre = _metadata_cls(
-         num_actual_tokens=token_index,
-         block_tables=block_table_pre,
-         query_start_loc=query_start_loc_pre,
-         query_lens=query_lens_pre,
-         seq_lens=seq_lens_pre,
-         seq_lens_list=seq_lens_pre.tolist(),
-         max_query_len=max_query_len_pre,
-         slot_mapping=slot_mapping_pre,
-         is_only_prefill=is_only_prefill_pre,
-         attn_state=attn_state_pre,
-         attn_mask=attn_mask_pre,
-         num_input_tokens=token_index,
-         enable_dbo_across_dp=attn_metadata.enable_dbo_across_dp,
-     )
-
-     attention_metadata_post = _metadata_cls(
-         num_actual_tokens=attn_metadata.num_actual_tokens - token_index,
-         block_tables=block_table_post,
-         query_start_loc=query_start_loc_post,
-         query_lens=query_lens_post,
-         seq_lens=seq_lens_post,
-         seq_lens_list=seq_lens_post.tolist(),
-         max_query_len=max_query_len_post,
-         slot_mapping=slot_mapping_post,
-         is_only_prefill=is_only_prefill_post,
-         attn_state=attn_state_post,
-         attn_mask=attn_mask_post,
-         num_input_tokens=attn_metadata.num_input_tokens - token_index,
-         enable_dbo_across_dp=attn_metadata.enable_dbo_across_dp,
-     )
-
-     return [attention_metadata_pre, attention_metadata_post]
+    return [attention_metadata_pre, attention_metadata_post]

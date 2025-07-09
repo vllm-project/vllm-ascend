@@ -142,8 +142,8 @@ class AscendMetadata:
     enable_dbo_across_dp: bool = False
 
     def split_metadata_for_multistream(
-            self,
-            ms_split_config: MSAttentionMetadataSplitConfig,
+        self,
+        ms_split_config: MSAttentionMetadataSplitConfig,
     ) -> list["AscendMetadata"]:
         """Split metadata for multi-stream with AscendMetadata"""
         from vllm_ascend.multistream.ms_split import model_input_split_v1_attn

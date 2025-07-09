@@ -131,4 +131,3 @@ def test_models_topk() -> None:
                     enforce_eager=True,
                     gpu_memory_utilization=0.7) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
-

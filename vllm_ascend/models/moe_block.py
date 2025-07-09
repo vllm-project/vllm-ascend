@@ -41,10 +41,10 @@ class AscendSparseMoeBlock(nn.Module):
     top_k: int
 
     def __init__(
-            self,
-            config: PretrainedConfig,
-            quant_config: Optional[QuantizationConfig] = None,
-            prefix: str = "",
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -84,7 +84,6 @@ class AscendSparseMoeBlock(nn.Module):
 
         self.params_dtype = torch.get_default_dtype()
 
-
     def forward(
             self,
             hidden_states: torch.Tensor,
@@ -114,5 +113,6 @@ class AscendSparseMoeBlock(nn.Module):
         )
 
         return hidden_states
+
 
 qwen3.Qwen3MoeSparseMoeBlock = AscendSparseMoeBlock

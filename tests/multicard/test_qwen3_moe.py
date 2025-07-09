@@ -1,4 +1,3 @@
-
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # Copyright 2023 The vLLM team.
 #
@@ -32,7 +31,12 @@ MODELS = ["vllm-ascend/Qwen3-30B-A3B-Puring"]
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-@patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1,2,3", "VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ": "1", "VLLM_ASCEND_ENABLE_DBO": "1"})
+@patch.dict(
+    os.environ, {
+        "ASCEND_RT_VISIBLE_DEVICES": "0,1,2,3",
+        "VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ": "1",
+        "VLLM_ASCEND_ENABLE_DBO": "1"
+    })
 def test_qwen3_moe_inference(model, max_tokens):
     script = "examples/offline_data_parallel.py"
 

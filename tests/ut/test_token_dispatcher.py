@@ -4,13 +4,15 @@
 
 import torch
 import pytest
+import vllm_ascend.patch.worker.patch_common.patch_utils # type: ignore[import]  # isort: skip  # noqa
+
 from pytest_mock import MockerFixture
-import vllm_ascend.patch.worker.patch_common.patch_utils
-from vllm_ascend.utils import adapt_patch # noqa E402
+from vllm_ascend.utils import adapt_patch  # noqa E402
 
 from vllm_ascend.ops.moe_dispatcher.token_dispatcher import MoeDispatcherConfig, MoEAlltoAllSeqOverLapDispatcher
 
 adapt_patch(True)
+
 
 class TestMoEAlltoAllSeqOverLapDispatcher:
 
@@ -37,8 +39,9 @@ class TestMoEAlltoAllSeqOverLapDispatcher:
 
     @pytest.fixture
     def dispatcher(self, config, mocker: MockerFixture):
-        mocker.patch("vllm_ascend.ops.moe_dispatcher.token_dispatcher.get_ep_group",
-                     return_value=self.mock_ep_group(mocker))
+        mocker.patch(
+            "vllm_ascend.ops.moe_dispatcher.token_dispatcher.get_ep_group",
+            return_value=self.mock_ep_group(mocker))
         return MoEAlltoAllSeqOverLapDispatcher(config)
 
     def test_initialization(self, dispatcher, config):

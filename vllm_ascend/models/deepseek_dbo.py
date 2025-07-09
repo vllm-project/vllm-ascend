@@ -34,7 +34,7 @@ from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.distributed import (get_ep_group, get_pp_group,
+from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               get_tp_group, tensor_model_parallel_all_reduce)
@@ -71,7 +71,7 @@ from vllm_ascend.multistream.metadata import (MultiStreamConfig,
                                               make_multistream_metadata_ds)
 from vllm_ascend.quantization.w8a8_dynamic import (
     AscendW8A8DynamicLinearMethod, apply_mlp)
-from vllm_ascend.ops.fused_moe import apply_mlp, select_experts
+from vllm_ascend.ops.fused_moe import select_experts
 from vllm_ascend.utils import dispose_tensor
 
 VLLM_ASCEND_ENABLE_DBO: bool = envs_ascend.VLLM_ASCEND_ENABLE_DBO
@@ -183,8 +183,10 @@ class CustomDeepseekDBOMoE(CustomDeepseekV2MoE):
             shared_experts=self.shared_experts)
 
         shared_experts_hidden = experts_hidden_states[1]
-        if not (self.shared_experts.down_proj.reduce_results and self.shared_experts.down_proj.tp_size > 1):
-            shared_experts_hidden = tensor_model_parallel_all_reduce(shared_experts_hidden)
+        if not (self.shared_experts.down_proj.reduce_results
+                and self.shared_experts.down_proj.tp_size > 1):
+            shared_experts_hidden = tensor_model_parallel_all_reduce(
+                shared_experts_hidden)
 
         hidden_states = (
             experts_hidden_states[0] * self.routed_scaling_factor +
@@ -211,8 +213,7 @@ class CustomDeepseekDBOMoE(CustomDeepseekV2MoE):
     def _forward_op_gating(
             self,
             hidden_states: torch.Tensor,
-            attn_metadata: Optional[AttentionMetadata] = None
-    ) -> torch.Tensor:
+            attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
         if attn_metadata is None:
             attn_metadata = get_forward_context().attn_metadata
         # when profile runs, force experts to load balanced tokens
@@ -278,42 +279,36 @@ class CustomDeepseekDBOMoE(CustomDeepseekV2MoE):
 
         return topk_weights, topk_ids, local_hidden_states, chunked_hidden_states_sizes
 
-
-    def _forward_op_shared_experts(
-            self, hidden_states
-    ):
+    def _forward_op_shared_experts(self, hidden_states):
         if self.n_shared_experts is not None:
             shared_output = self.shared_experts(hidden_states)
 
         return shared_output
 
-    def _forward_op_grouped_mlp(
-            self, dispatched_input, tokens_per_expert
-    ):
-        return apply_mlp(
-            dispatched_input,
-            self.experts.w13_weight,
-            self.experts.w2_weight,
-            tokens_per_expert
-        )
+    def _forward_op_grouped_mlp(self, dispatched_input, tokens_per_expert):
+        from vllm_ascend.ops.fused_moe import apply_mlp
+        return apply_mlp(dispatched_input, self.experts.w13_weight,
+                         self.experts.w2_weight, tokens_per_expert)
 
-    def _forward_combine_comm(
-            self, hidden_states, microbatch_id, num_tokens, chunked_hidden_states_sizes
-    ):
+    def _forward_combine_comm(self, hidden_states, microbatch_id, num_tokens,
+                              chunked_hidden_states_sizes):
         token_dispatcher = self.experts.token_dispatchers[microbatch_id]
-        final_hidden_states, _ = token_dispatcher.token_unpermutation(hidden_states)
+        final_hidden_states, _ = token_dispatcher.token_unpermutation(
+            hidden_states)
         if hasattr(self, 'routed_scaling_factor'):
             final_hidden_states = final_hidden_states * self.routed_scaling_factor
 
         if self.tp_size > 1:
-            final_hidden_states = gather_from_sequence_parallel_region(final_hidden_states, self.tp_group,
-                                                                       chunked_hidden_states_sizes)
+            final_hidden_states = gather_from_sequence_parallel_region(
+                final_hidden_states, self.tp_group,
+                chunked_hidden_states_sizes)
             if num_tokens < self.tp_size:
                 final_hidden_states = final_hidden_states[:num_tokens]
 
         if self.shared_experts is not None:
             final_hidden_states = final_hidden_states + token_dispatcher.cached_shared_expert_output
-            token_dispatcher.cached_shared_expert_output.untyped_storage().resize_(0)
+            token_dispatcher.cached_shared_expert_output.untyped_storage(
+            ).resize_(0)
             token_dispatcher.cached_shared_expert_output = None
 
         final_hidden_states = final_hidden_states.view(num_tokens, -1)
@@ -744,13 +739,13 @@ class CustomDeepseekDBODecoderLayer(CustomDeepseekV2DecoderLayer):
 
     # ----------------------------------------- TBO-related --------------------------------------------
     def _forward_ms_layer_alltoallv_finegrained(
-            self,
-            positions: List[torch.Tensor],
-            hidden_states: List[torch.Tensor],
-            residual: List[torch.Tensor],
-            attn_metadata: List[AttentionMetadata],
-            kv_cache: Optional[torch.Tensor] = None,
-            is_prefill: bool = False,
+        self,
+        positions: List[torch.Tensor],
+        hidden_states: List[torch.Tensor],
+        residual: List[torch.Tensor],
+        attn_metadata: List[AttentionMetadata],
+        kv_cache: Optional[torch.Tensor] = None,
+        is_prefill: bool = False,
     ) -> tuple[List[torch.Tensor], List[torch.Tensor]]:
         layer_index, ms_metadata, attn_metadata = get_multistream_layer_context(
         )
@@ -763,10 +758,11 @@ class CustomDeepseekDBODecoderLayer(CustomDeepseekV2DecoderLayer):
         assert attn_metadata is not None
         num_tokens = [None] * num_micro_batchs
         hidden_dims = [None] * num_micro_batchs
-        topk_weights, topk_ids = [None] * num_micro_batchs, [None] * num_micro_batchs
+        topk_weights, topk_ids = [None] * num_micro_batchs, [
+            None
+        ] * num_micro_batchs
         tokens_per_expert = [None] * num_micro_batchs
         dispatched_input = [None] * num_micro_batchs
-        shared_expert_output = [None] * num_micro_batchs
         router_expert_output = [None] * num_micro_batchs
         chunked_hidden_states_sizes = [None] * num_micro_batchs
         token_dispatchers = self.mlp.experts.token_dispatchers
@@ -776,7 +772,6 @@ class CustomDeepseekDBODecoderLayer(CustomDeepseekV2DecoderLayer):
                 tensor = [tensor]
             for t in tensor:
                 t.untyped_storage().resize_(0)
-
 
         # block 1 : attention
         # block 2 : Router Gating
@@ -790,30 +785,35 @@ class CustomDeepseekDBODecoderLayer(CustomDeepseekV2DecoderLayer):
             forward_context = get_forward_context()
             layer_index, ms_metadata, attn_metadata = get_multistream_layer_context(
             )
-            ms_metadata.try_wait_event(layer_index - 1, i, MSEventKey.FFN_AR_FINISH)
+            ms_metadata.try_wait_event(layer_index - 1, i,
+                                       MSEventKey.FFN_AR_FINISH)
             forward_context.attn_metadata = attn_metadata[i]
 
             # input layernorm
             hidden_states[i], residual[
                 i] = self._forward_ms_op_input_layernorm(
-                hidden_states[i], residual[i])
+                    hidden_states[i], residual[i])
             # attention and tp allreduce
             hidden_states[i], residual[i] = self._forward_ms_op_attn(
                 positions[i], hidden_states[i], residual[i], kv_cache,
                 attn_metadata[i])
             # post attention layer norm
-            hidden_states[i], residual[i] = self._forward_ms_op_post_attn_layernorm(
-                hidden_states[i], residual[i]
-            )
+            hidden_states[i], residual[
+                i] = self._forward_ms_op_post_attn_layernorm(
+                    hidden_states[i], residual[i])
             num_tokens[i], hidden_dims[i] = hidden_states[i].shape
             # If TP is enabled, hidden_states will be chunked.
-            topk_weights[i], topk_ids[i], dispatched_input[i], chunked_hidden_states_sizes[
-                i] = self.mlp._forward_op_gating(hidden_states[i], attn_metadata[i])
+            topk_weights[i], topk_ids[i], dispatched_input[
+                i], chunked_hidden_states_sizes[
+                    i] = self.mlp._forward_op_gating(hidden_states[i],
+                                                     attn_metadata[i])
             token_dispatchers[i].preprocess_and_permtute1(
-                dispatched_input[i], topk_weights[i], topk_ids[i],
+                dispatched_input[i],
+                topk_weights[i],
+                topk_ids[i],
                 self.mlp.shared_experts,
-                shared_experts_input=hidden_states[i] if self.mlp.n_shared_experts else None
-            )
+                shared_experts_input=hidden_states[i]
+                if self.mlp.n_shared_experts else None)
             # Launch DisPatch Comm in a New Stream.
             dispatch_context = MultiStreamStepMetadata(
                 comm_stream=ms_metadata.communicate_stream,
@@ -825,26 +825,31 @@ class CustomDeepseekDBODecoderLayer(CustomDeepseekV2DecoderLayer):
             dispatch_context.before_comm_event.record()
             # print_with_sync(f'begin token dispatch{i}...', torch.distributed.get_rank())
             with torch.npu.stream(dispatch_context.comm_stream):
-                dispatch_context.comm_stream.wait_event(dispatch_context.before_comm_event)
+                dispatch_context.comm_stream.wait_event(
+                    dispatch_context.before_comm_event)
                 token_dispatchers[i].dispatch_alltoall()
-                dispatched_input[i], tokens_per_expert[i] = token_dispatchers[i].permute2()
+                dispatched_input[i], tokens_per_expert[i] = token_dispatchers[
+                    i].permute2()
                 dispatch_context.after_comm_event.record()
 
                 if self.mlp.n_shared_experts and self.tp_size > 1:
-                    token_dispatchers[i].cached_shared_expert_output = tensor_model_parallel_all_reduce(
-                        token_dispatchers[i].cached_shared_expert_output
-                    )
-                    ms_metadata.ms_events[layer_index][i][MSEventKey.MOE_SE_COMM_FINISH].record()
+                    token_dispatchers[
+                        i].cached_shared_expert_output = tensor_model_parallel_all_reduce(
+                            token_dispatchers[i].cached_shared_expert_output)
+                    ms_metadata.ms_events[layer_index][i][
+                        MSEventKey.MOE_SE_COMM_FINISH].record()
 
         # print_with_sync('begin experts...', torch.distributed.get_rank())
         # block 4 : Router Experts Computation
         # block 5 : Token Combine Communication
         for i in range(num_micro_batchs):
 
-            ms_metadata.try_wait_event(layer_index, i, MSEventKey.MOE_AFTER_COMM)
+            ms_metadata.try_wait_event(layer_index, i,
+                                       MSEventKey.MOE_AFTER_COMM)
             discard_tensor(hidden_states[i])
 
-            router_expert_output[i] = self.mlp._forward_op_grouped_mlp(dispatched_input[i], tokens_per_expert[i])
+            router_expert_output[i] = self.mlp._forward_op_grouped_mlp(
+                dispatched_input[i], tokens_per_expert[i])
             discard_tensor(dispatched_input[i])
 
             # Launch Combine Comm in a New Stream.
@@ -856,12 +861,14 @@ class CustomDeepseekDBODecoderLayer(CustomDeepseekV2DecoderLayer):
                     MSEventKey.FFN_AR_FINISH],
             )
             combine_context.before_comm_event.record()
-            ms_metadata.try_wait_event(layer_index, i, MSEventKey.MOE_SE_COMM_FINISH)
+            ms_metadata.try_wait_event(layer_index, i,
+                                       MSEventKey.MOE_SE_COMM_FINISH)
             with torch.npu.stream(combine_context.comm_stream):
-                combine_context.comm_stream.wait_event(combine_context.before_comm_event)
+                combine_context.comm_stream.wait_event(
+                    combine_context.before_comm_event)
                 hidden_states[i] = self.mlp._forward_combine_comm(
-                    router_expert_output[i], i, num_tokens[i], chunked_hidden_states_sizes[i]
-                )
+                    router_expert_output[i], i, num_tokens[i],
+                    chunked_hidden_states_sizes[i])
                 combine_context.after_comm_event.record()
 
         return hidden_states, residual
