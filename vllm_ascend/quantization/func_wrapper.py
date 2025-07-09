@@ -45,23 +45,26 @@ def wrapper_rmsnorm_forward_oot(func):
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         if not self.ignore_anti:
+            out = torch.empty_like(x, dtype=torch.int8).npu()
             if residual is not None:
                 residual += x
-                out = torch_npu._npu_quant_rms_norm(
+                torch_npu._npu_quant_rms_norm(
                     residual,
                     self.weight,
                     self.bias,
                     self.input_scale,
                     self.input_offset,
+                    out,
                     self.variance_epsilon,
                 )
                 return out, residual
-            out = torch_npu._npu_quant_rms_norm(
+            torch_npu._npu_quant_rms_norm(
                 x,
                 self.weight,
                 self.bias,
                 self.input_scale,
                 self.input_offset,
+                out,
                 self.variance_epsilon,
             )
             return out
@@ -90,6 +93,20 @@ MODEL_LAYER_MAPPING = {
             "unquantized_type": UnquantizedLinearMethod,
         },
     },
+    "Qwen2Model": {
+        "attn": {
+            "layer_attr": "self_attn",
+            "proj_attr": "qkv_proj",
+            "norm_attr": "input_layernorm",
+            "unquantized_type": UnquantizedLinearMethod,
+        },
+        "mlp": {
+            "layer_attr": "mlp",
+            "proj_attr": "gate_up_proj",
+            "norm_attr": "post_attention_layernorm",
+            "unquantized_type": UnquantizedLinearMethod,
+        },
+    }
 }
 
 
@@ -132,6 +149,24 @@ def wrapper_load_model(func):
 
             process_module(mapping.get("attn"), layer)
             process_module(mapping.get("mlp"), layer)
+
+        def is_enable(quant_description) -> bool:
+            need_activate = False
+            for name in quant_description.keys():
+                if "norm.bias" in name:
+                    need_activate = True
+                    return need_activate
+            return need_activate
+
+        # check if patch activated
+        try:
+            if not is_enable(self.model.quant_config.quant_description):
+                return
+        except AttributeError:
+            logger.info(
+                "Warning: load model patch do not enable, because it is not quantified and llm weights"
+            )
+            return
 
         model_type = self.model.model.__class__.__name__
         mapping = MODEL_LAYER_MAPPING.get(model_type)

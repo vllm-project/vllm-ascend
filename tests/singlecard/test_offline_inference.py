@@ -45,6 +45,7 @@ os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 QUANTIZATION_MODELS = [
     "vllm-ascend/Qwen2.5-0.5B-Instruct-W8A8",
+    "vllm-ascend/Qwen2.5-0.5B-Instruct-fa3"
 ]
 
 
@@ -71,7 +72,7 @@ def test_models(model: str, dtype: str, max_tokens: int) -> None:
 @pytest.mark.parametrize("max_tokens", [5])
 def test_quantization_models(model: str, max_tokens: int) -> None:
     prompt = "The following numbers of the sequence " + ", ".join(
-        str(i) for i in range(1024)) + " are:"
+        str(i) for i in range(256)) + " are:"
     example_prompts = [prompt]
 
     # NOTE: Using quantized model repo id from modelscope encounters an issue,
@@ -80,7 +81,7 @@ def test_quantization_models(model: str, max_tokens: int) -> None:
     model_path = snapshot_download(model)
 
     with VllmRunner(model_path,
-                    max_model_len=8192,
+                    max_model_len=4096,
                     enforce_eager=True,
                     dtype="auto",
                     gpu_memory_utilization=0.7,

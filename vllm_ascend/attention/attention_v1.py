@@ -331,7 +331,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 # TODO: Add attr (num_prefills, prefill_metadata, decode_metadata) to AscendMetadata
                 pass
             # V0-Style scheduler situation.
-            elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+            if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
                 assert attn_metadata is not None
                 assert attn_metadata.attn_mask is not None
                 mask = attn_metadata.attn_mask

@@ -21,9 +21,12 @@ import types
 from typing import Any, Dict, List, Optional
 
 from vllm.logger import logger
+from vllm.model_executor.model_loader.weight_utils import \
+    safetensors_weights_iterator
 
-from .func_wrapper import (wrapper_load_model, wrapper_rmsnorm_forward_oot,
-                           wrapper_rmsnorm_init)
+from .faquant import AscendFAQuantAttentionMethod
+from .func_wrapper import wrapper_rmsnorm_forward_oot, wrapper_rmsnorm_init
+from .quant_utils import cache_engine_init, wrapper_weights_iterator
 from .w4a8_dynamic import (AscendW4A8DynamicFusedMoEMethod,
                            AscendW4A8DynamicLinearMethod)
 from .w8a8 import AscendW8A8LinearMethod
@@ -32,33 +35,8 @@ from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
 
 CUSTOMIZED_QUANTIZER_TYPE: List[str] = []
 
-
-class AscendQuantizer:
-    """An interface to different quantization implementations for ascend hardwares."""
-
-    @classmethod
-    def get_quantizer(cls,
-                      quant_config: Dict[str, Any],
-                      prefix: str,
-                      packed_modules_mapping: Optional[Dict[str,
-                                                            Any]] = dict()):
-        # TODO: Need a param to choose quantization algorithms.
-        quantization_algorithm = ''
-
-        if quantization_algorithm in CUSTOMIZED_QUANTIZER_TYPE:
-            return
-
-        return VLLMAscendQuantizer.get_quantizer(quant_config, prefix,
-                                                 packed_modules_mapping)
-
-    def build_linear_method(self):
-        raise NotImplementedError
-
-    def build_moe_method(self):
-        raise NotImplementedError
-
-    def build_attention_method(self):
-        raise NotImplementedError
+DECORATE = "decoreate"
+REPLACE = "replace"
 
 
 class VLLMAscendQuantizer:
@@ -72,37 +50,51 @@ class VLLMAscendQuantizer:
             if "norm.bias" in name:
                 VLLMAscendQuantizer.apply_patch(
                     "vllm.model_executor.layers.layernorm.RMSNorm", "__init__",
-                    [wrapper_rmsnorm_init])
+                    wrapper_rmsnorm_init)
                 VLLMAscendQuantizer.apply_patch(
                     "vllm.model_executor.layers.layernorm.RMSNorm",
-                    "forward_oot", [wrapper_rmsnorm_forward_oot])
-                VLLMAscendQuantizer.apply_patch(
-                    "vllm_ascend.worker.model_runner.NPUModelRunnerBase",
-                    "load_model", [wrapper_load_model])
+                    "forward_oot", wrapper_rmsnorm_forward_oot)
                 break
+        if quant_description.get("fa_quant_type") == "FAQuant":
+            VLLMAscendQuantizer.apply_patch(
+                "vllm.model_executor.model_loader.weight_utils",
+                "safetensors_weights_iterator",
+                wrapper_weights_iterator(safetensors_weights_iterator),
+                REPLACE)
+            VLLMAscendQuantizer.apply_patch(
+                "vllm.worker.cache_engine.CacheEngine", "__init__",
+                cache_engine_init, REPLACE)
         VLLMAscendQuantizer.patched = True
         logger.info("Using the vLLM Ascend Quantizer version now!")
 
     @staticmethod
-    def apply_patch(target_module, target_function, wrappers):
+    def apply_patch(target_module, target_function, wrapper, method=DECORATE):
 
         original_module, original_function = VLLMAscendQuantizer.parse_path(
             target_module, target_function, False)
 
         original_function_id = id(original_function)
 
-        candidate = original_function
-        for wrapper in wrappers:
-            candidate = wrapper(candidate)
+        candidate = None
+        if method == DECORATE:
+            candidate = candidate = wrapper(original_function)
+        else:
+            candidate = wrapper
         if target_function is not None:
             setattr(original_module, target_function, candidate)
 
-        for key, value in sys.modules.copy().items():
-            if (target_function is not None
-                    and hasattr(value, target_function)
-                    and id(getattr(value,
-                                   target_function)) == original_function_id):
-                setattr(value, target_function, candidate)
+        for _, value in sys.modules.copy().items():
+            if target_function is None:
+                continue
+            try:
+                attr = getattr(value, target_function, None)
+                if attr is not None and id(attr) == original_function_id:
+                    setattr(value, target_function, candidate)
+            except ImportError:
+                logger.info(
+                    "modelscope override getattr() method which cause import error, \
+                    see https://github.com/modelscope/modelscope/blob/7c9b89d24dddda5d6b9ef84e04e7fdbc0dbd8f8a/modelscope/__init__.py#L141"
+                )
 
     @staticmethod
     def parse_path(module_path, function_name, create_dummy):
@@ -246,6 +238,8 @@ class VLLMAscendQuantizer:
         # Attention
         if '.attn' in prefix and 'fa_quant_type' in quant_description.keys():
             quant_type = quant_description['fa_quant_type']
+        elif '.attn' in prefix and 'kv_quant_type' in quant_description.keys():
+            quant_type = quant_description['kv_quant_type']
         # Linear
         else:
             quant_type = cls.get_linear_quant_type(quant_description, prefix,
@@ -288,8 +282,16 @@ class W8A8DYNAMICQuantizer(VLLMAscendQuantizer):
         return AscendW8A8DynamicFusedMoEMethod()
 
 
+class FAQuantizer(VLLMAscendQuantizer):
+
+    @staticmethod
+    def build_attention_method():
+        return AscendFAQuantAttentionMethod()
+
+
 SUPPORT_ASCEND_QUANTIZER_TYPE = {
     "W4A8_DYNAMIC": W4A8DYNAMICQuantizer,
     "W8A8": W8A8Quantizer,
     "W8A8_DYNAMIC": W8A8DYNAMICQuantizer,
+    "FAQuant": FAQuantizer
 }
