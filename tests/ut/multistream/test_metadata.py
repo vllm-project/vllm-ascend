@@ -220,5 +220,3 @@ class TestMetaData(TestBase):
         self.assertEqual(len(result), 2)
         self.assertIsNone(result[0])
         self.assertTrue(torch.equal(result[1], torch.tensor([5, 6, 7, 8])))
-    
-
