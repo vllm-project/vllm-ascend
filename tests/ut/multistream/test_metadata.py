@@ -37,18 +37,18 @@ class TestMetaData(TestBase):
     def test_split_micro_batches_tensors(self):
         test_tensors_list_res = split_micro_batches_tensors(
             self.test_tensors_list, self.split_index)
-        test_tensors_res = split_micro_batches_tensors(self.test_tensors, 
+        test_tensors_res = split_micro_batches_tensors(self.test_tensors,
                                                        self.split_index)
         test_tensors_dict_res = split_micro_batches_tensors(
             self.test_tensors_dict, self.split_index)
         for i in range(3):
-            self.assertEqual(len(test_tensors_list_res[i][0]), 
+            self.assertEqual(len(test_tensors_list_res[i][0]),
                              self.split_index)
 
             self.assertEqual(
                 len(test_tensors_list_res[i][0]) +
                 len(test_tensors_list_res[i][1]), 100)
-        
+  
         self.assertEqual(len(test_tensors_res[0]), self.split_index)
         self.assertEqual(
             len(test_tensors_res[0]) + len(test_tensors_res[1]), 100)
@@ -76,14 +76,14 @@ class TestMetaData(TestBase):
         self.assertEqual(metadata.before_comm_event, mockEvent1)
         self.assertEqual(metadata.after_comm_event, mockEvent2)
 
-    def test_default_init_multistream_config(self): 
+    def test_default_init_multistream_config(self):
         config = MultiStreamConfig()
         self.assertEqual(config.min_total_tokens_to_split, 256)
         self.assertEqual(config.min_prefill_tokens_to_split, 64)
         self.assertEqual(config.num_micro_batches, 2)
         self.assertEqual(config.imbalance_ratio, 0.1)
 
-    def test_custom_init_multistream_config(self): 
+    def test_custom_init_multistream_config(self):
         config = MultiStreamConfig(512, 128, 1, 0.2)
         self.assertEqual(config.min_total_tokens_to_split, 512)
         self.assertEqual(config.min_prefill_tokens_to_split, 128)
@@ -132,7 +132,7 @@ class TestMetaData(TestBase):
                 0: {
                     0: {
                         event_keys[0]: mock_event
-                    }, 
+                    },
                     1: {
                         event_keys[0]: mock_event
                     }
@@ -140,7 +140,7 @@ class TestMetaData(TestBase):
                 1: {
                     0: {
                         event_keys[0]: mock_event
-                    }, 
+                    },
                     1: {
                         event_keys[0]: mock_event
                     }
@@ -215,7 +215,7 @@ class TestMetaData(TestBase):
             metadata.try_record_event(layer_index=1,
                                       micro_batch_index=0,
                                       event_key=event_keys[0])
-            mock_event.record.assert_called_once()  
+            mock_event.record.assert_called_once()
 
     def test_merge_batches_none_input(self):
         input_tensors = None
