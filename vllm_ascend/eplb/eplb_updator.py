@@ -61,7 +61,7 @@ class EplbUpdator:
 
         self.cur_iterations: torch.int64 = 0
 
-        self.num_wait_worker_iterations: torch.int64 = 20
+        self.num_wait_worker_iterations: torch.int64 = 30
 
         self.planner_block_queue = Queue()
         self.block_update_queue = Queue(maxsize=1)
@@ -81,7 +81,7 @@ class EplbUpdator:
             planner_q = self.planner_block_queue,
             block_update_q = self.block_update_queue,
             redundant_enable = self.redundant_enable,
-            policy_type = 1,
+            policy_type = 4,
             enable_d2d = True
         )
 
@@ -97,7 +97,7 @@ class EplbUpdator:
                 self.cur_iterations = 0
 
     def get_update_info_flag(self):
-        return self.cur_iterations == (self.num_iterations_eplb_update + self.num_wait_worker_iterations)
+        return self.cur_iterations == (self.num_iterations_eplb_update + self.num_wait_worker_iterations - 1)
 
     def wakeup_eplb_worker_flag(self):
         return self.cur_iterations == (self.num_iterations_eplb_update - 1)
