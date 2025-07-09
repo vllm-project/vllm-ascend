@@ -1,4 +1,4 @@
-# Multi-NPU (Qwen3 MoE-30B)
+# Multi-NPU (Qwen3-30B-A3B)
 
 ## Run vllm-ascend on Multi-NPU with Qwen3 MoE
 
@@ -35,6 +35,9 @@ export VLLM_USE_MODELSCOPE=True
 
 # Set `max_split_size_mb` to reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
+
+# For vllm-ascend 0.9.2+, the V1 engine is enabled by default and no longer needs to be explicitly specified.
+export VLLM_USE_V1=1
 ```
 
 ### Online Inference on Multi-NPU
@@ -44,7 +47,7 @@ Run the following script to start the vLLM server on Multi-NPU:
 For an Atlas A2 with 64GB of NPU card memory, tensor-parallel-size should be at least 2, and for 32GB of memory, tensor-parallel-size should be at least 4.
 
 ```bash
-vllm serve  Qwen/Qwen3-30B-A3B --tensor-parallel-size 4 --enable_expert_parallel
+vllm serve Qwen/Qwen3-30B-A3B --tensor-parallel-size 4 --enable_expert_parallel
 ```
 
 Once your server is started, you can query the model with input prompts
@@ -68,13 +71,11 @@ Run the following script to execute offline inference on multi-NPU:
 
 ```python
 import gc
-import os
 import torch
 
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import (destroy_distributed_environment,
                                              destroy_model_parallel)
-os.environ["VLLM_USE_V1"] = "1"
 
 def clean_up():
     destroy_model_parallel()
