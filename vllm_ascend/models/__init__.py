@@ -12,6 +12,7 @@ def register_model():
         AscendQwen2_5_VLForConditionalGeneration  # noqa: F401
     from .qwen2_vl import AscendQwen2VLForConditionalGeneration  # noqa: F401
     from .moe_block import AscendSparseMoeBlock # noqa: F401
+    from .qwen3 import CustomQwen3ForCausalLM  # noqa: F401
 
     ModelRegistry.register_model(
         "DeepSeekMTPModel",
