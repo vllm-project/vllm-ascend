@@ -97,7 +97,7 @@ class EplbUpdator:
                 self.cur_iterations = 0
 
     def get_update_info_flag(self):
-        return self.cur_iterations == (self.num_iterations_eplb_update + self.num_wait_worker_iterations)
+        return self.cur_iterations == (self.num_iterations_eplb_update + self.num_wait_worker_iterations - 1)
 
     def wakeup_eplb_worker_flag(self):
         return self.cur_iterations == (self.num_iterations_eplb_update - 1)
