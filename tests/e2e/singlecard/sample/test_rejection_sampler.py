@@ -4,12 +4,12 @@ from typing import Any, Optional
 import pytest
 import torch
 import torch.nn.functional as F
+from vllm.v1.sample.logits_processor import LogitsProcessorManager
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 from vllm_ascend.sample.rejection_sampler import (PLACEHOLDER_TOKEN_ID,
                                                   AscendRejectionSampler)
-from vllm_ascend.utils import vllm_version_is
 
 DEVICE = "npu"
 
@@ -50,46 +50,23 @@ def create_sampling_metadata(
         temperature = None
     else:
         assert temperature is not None
-    if vllm_version_is("0.9.1"):
-        return SamplingMetadata(
-            temperature=temperature,
-            all_greedy=all_greedy,
-            all_random=not all_greedy,
-            top_p=top_p,
-            top_k=top_k,
-            min_p=torch.empty(1, ),
-            generators=generators,
-            max_num_logprobs=0,
-            no_penalties=False,
-            prompt_token_ids=None,
-            frequency_penalties=torch.tensor([]),
-            presence_penalties=torch.tensor([]),
-            repetition_penalties=torch.tensor([]),
-            output_token_ids=[],
-            min_tokens={},
-            logit_bias=[None],
-            allowed_token_ids_mask=None,
-            bad_words_token_ids={},
-        )
-    else:
-        from vllm.v1.sample.logits_processor import LogitsProcessorManager
 
-        return SamplingMetadata(temperature=temperature,
-                                all_greedy=all_greedy,
-                                all_random=not all_greedy,
-                                top_p=top_p,
-                                top_k=top_k,
-                                generators=generators,
-                                max_num_logprobs=0,
-                                no_penalties=False,
-                                prompt_token_ids=None,
-                                frequency_penalties=torch.tensor([]),
-                                presence_penalties=torch.tensor([]),
-                                repetition_penalties=torch.tensor([]),
-                                output_token_ids=[],
-                                allowed_token_ids_mask=None,
-                                bad_words_token_ids={},
-                                logitsprocs=LogitsProcessorManager())
+    return SamplingMetadata(temperature=temperature,
+                            all_greedy=all_greedy,
+                            all_random=not all_greedy,
+                            top_p=top_p,
+                            top_k=top_k,
+                            generators=generators,
+                            max_num_logprobs=0,
+                            no_penalties=False,
+                            prompt_token_ids=None,
+                            frequency_penalties=torch.tensor([]),
+                            presence_penalties=torch.tensor([]),
+                            repetition_penalties=torch.tensor([]),
+                            output_token_ids=[],
+                            allowed_token_ids_mask=None,
+                            bad_words_token_ids={},
+                            logitsprocs=LogitsProcessorManager())
 
 
 ########################### Tests for Greedy Sampling ###################

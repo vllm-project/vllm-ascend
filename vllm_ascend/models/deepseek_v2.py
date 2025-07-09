@@ -75,7 +75,7 @@ from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (dispose_tensor, npu_stream_switch,
-                               npu_wait_tensor, vllm_version_is)
+                               npu_wait_tensor)
 
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
@@ -936,19 +936,12 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    if vllm_version_is("0.9.1"):
-                        weight_loader(param,
-                                      loaded_weight,
-                                      name,
-                                      shard_id=shard_id,
-                                      expert_id=expert_id)
-                    else:
-                        weight_loader(param,
-                                      loaded_weight,
-                                      name,
-                                      shard_id=shard_id,
-                                      expert_id=expert_id,
-                                      return_success=False)
+                    weight_loader(param,
+                                  loaded_weight,
+                                  name,
+                                  shard_id=shard_id,
+                                  expert_id=expert_id,
+                                  return_success=False)
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.

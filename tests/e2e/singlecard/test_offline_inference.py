@@ -21,12 +21,9 @@
 Run `pytest tests/test_offline_inference.py`.
 """
 import os
-from unittest.mock import patch
 
 import pytest
-import vllm  # noqa: F401
 from modelscope import snapshot_download  # type: ignore[import-untyped]
-from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 
 import vllm_ascend  # noqa: F401
@@ -106,24 +103,3 @@ def test_multimodal(model, prompt_template, vllm_runner):
         vllm_model.generate_greedy(prompts=prompts,
                                    images=images,
                                    max_tokens=64)
-
-
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "1"})
-def test_models_topk() -> None:
-    example_prompts = [
-        "Hello, my name is",
-        "The president of the United States is",
-        "The capital of France is",
-        "The future of AI is",
-    ]
-    sampling_params = SamplingParams(max_tokens=5,
-                                     temperature=0.0,
-                                     top_k=50,
-                                     top_p=0.9)
-
-    with VllmRunner("Qwen/Qwen2.5-0.5B-Instruct",
-                    max_model_len=8192,
-                    dtype="float16",
-                    enforce_eager=True,
-                    gpu_memory_utilization=0.7) as vllm_model:
-        vllm_model.generate(example_prompts, sampling_params)

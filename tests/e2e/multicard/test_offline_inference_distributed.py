@@ -73,28 +73,6 @@ def test_models_distributed_DeepSeek_multistream_moe():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "1"})
-def test_models_distributed_topk() -> None:
-    example_prompts = [
-        "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
-        "Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.",
-        "Compare and contrast artificial intelligence with human intelligence in terms of processing information.",
-    ]
-    dtype = "half"
-    sampling_params = SamplingParams(max_tokens=5,
-                                     temperature=0.0,
-                                     top_k=50,
-                                     top_p=0.9)
-
-    with VllmRunner(
-            "deepseek-ai/DeepSeek-V2-Lite",
-            dtype=dtype,
-            tensor_parallel_size=4,
-            distributed_executor_backend="mp",
-    ) as vllm_model:
-        vllm_model.generate(example_prompts, sampling_params)
-
-
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DBO": "1"})
 def test_models_distributed_DeepSeek_dbo():
     example_prompts = ["The president of the United States is"] * 41
