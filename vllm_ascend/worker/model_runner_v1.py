@@ -2054,7 +2054,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.kv_cache_config = kv_cache_config
         import torch_npu
         acl_format = ACL_FORMAT_FRACTAL_NZ if is_310p(
-        ) else ACL_FORMAT_FRACTAL_ND
+        ) and not self.torchair_graph_enabled else ACL_FORMAT_FRACTAL_ND
         kv_caches: Dict[str, torch.Tensor] = {}
 
         def align_memory(tensor: torch.Tensor, alignment: int) -> torch.Tensor:
