@@ -248,7 +248,6 @@ def fused_experts_with_mc2(
         "shared_expert_rank_num": 0,
         "moe_expert_num": moe_expert_num,
         "global_bs": global_bs,
-        "x_active_mask": mc2_mask,
     }
 
     stage1_kwargs = {
@@ -284,12 +283,12 @@ def fused_experts_with_mc2(
 
     # `expand_x` will be disposed in the `apply_mlp` function
     down_out_list = apply_mlp_decode([expand_x],
-                                    w1,
-                                    w1_scale,
-                                    w2,
-                                    w2_scale,
-                                    expert_token_nums,
-                                    dynamic_scale=dynamic_scale)
+                                     w1,
+                                     w1_scale,
+                                     w2,
+                                     w2_scale,
+                                     expert_token_nums,
+                                     dynamic_scale=dynamic_scale)
 
     # moeCombine
     kwargs_mc2 = {
@@ -301,7 +300,6 @@ def fused_experts_with_mc2(
         "shared_expert_rank_num": 0,
         "moe_expert_num": moe_expert_num,
         "global_bs": global_bs,
-        "x_active_mask": mc2_mask,
     }
     tp_recv_counts = torch.empty(1,
                                  dtype=torch.int32,
@@ -406,8 +404,7 @@ def fused_prefill_experts_with_mc2(
             w2_scale_bias=w2_scale_bias,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
-            mc2_mask=mc2_mask_chunk
-        )
+            mc2_mask=mc2_mask_chunk)
         end_indx += hidden_states_chunk.shape[0]
         if shared_experts is None:
             hidden_states_outputs[start_indx:end_indx,

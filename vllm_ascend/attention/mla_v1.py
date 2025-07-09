@@ -11,7 +11,6 @@ from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
-from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
 
 from vllm_ascend import envs
@@ -100,7 +99,6 @@ class AscendMLADecodeMetadata:
     attn_mask: Optional[torch.Tensor] = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
-    mc2_mask: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -215,13 +213,6 @@ class AscendMLAMetadataBuilder:
         self.rope_dim = self.runner.model_config.hf_text_config.qk_rope_head_dim
         self.cos_cache = None
         self.sin_cache = None
-
-    def generate_activate_mask(self, actual_seqs_num, batch_size):
-        mc2_mask = torch.zeros(batch_size,
-                               dtype=torch.bool,
-                               device=current_platform.device_type)
-        mc2_mask[:actual_seqs_num].fill_(True)
-        return mc2_mask
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -365,7 +356,6 @@ class AscendMLAMetadataBuilder:
                          self.rope_dim,
                          dtype=self.runner.dtype,
                          device=device)
-        mc2_mask = self.generate_activate_mask(num_actual_tokens, num_reqs)
         decode_metadata = AscendMLADecodeMetadata(
             input_positions=input_positions,
             block_table=block_table,
@@ -375,8 +365,7 @@ class AscendMLAMetadataBuilder:
             attn_mask=self.runner.spec_attn_mask,
             actual_seq_q_lens=self.runner.actual_seq_q_lens[:num_reqs],
             sin=sin,
-            cos=cos,
-            mc2_mask=mc2_mask)
+            cos=cos)
         return self.metadata_cls(  # type: ignore
             num_input_tokens=num_actual_tokens,
             num_actual_tokens=num_actual_tokens,
@@ -558,8 +547,6 @@ class AscendMLAMetadataBuilder:
             else:
                 seq_lens_list = seq_lens.tolist()
                 cos, sin = None, None
-            mc2_mask = self.generate_activate_mask(
-                num_actual_tokens, num_reqs + num_reqs_pad_size)
 
             decode_metadata = AscendMLADecodeMetadata(
                 input_positions=input_positions,
@@ -570,8 +557,7 @@ class AscendMLAMetadataBuilder:
                 attn_mask=self.runner.spec_attn_mask,
                 actual_seq_q_lens=actual_seq_q_lens,
                 sin=sin,
-                cos=cos,
-                mc2_mask=mc2_mask)
+                cos=cos)
 
         return self.metadata_cls(  # type: ignore
             num_actual_tokens=num_actual_tokens,

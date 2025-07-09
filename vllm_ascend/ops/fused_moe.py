@@ -1170,24 +1170,26 @@ class AscendFusedMoE(FusedMoE):
             if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
                 shared_hidden_states = shared_experts(hidden_states)
 
-        mc2_mask = None
+        mc2_mask = forward_context.mc2_mask
         tp_size = get_tensor_model_parallel_world_size()
         if fused_moe_state != FusedMoEState.AllGather:
             if num_tokens < forward_context.padded_num_tokens:
                 hidden_states = nn.functional.pad(
-                    hidden_states, (0, 0, 0, forward_context.padded_num_tokens - num_tokens))
+                    hidden_states,
+                    (0, 0, 0, forward_context.padded_num_tokens - num_tokens))
                 router_logits = nn.functional.pad(
-                    router_logits, (0, 0, 0, forward_context.padded_num_tokens - num_tokens))
+                    router_logits,
+                    (0, 0, 0, forward_context.padded_num_tokens - num_tokens))
             if tp_size > 1:
                 chunk_hidden_states = torch.tensor_split(hidden_states,
-                                                        tp_size,
-                                                        dim=0)
+                                                         tp_size,
+                                                         dim=0)
                 chunk_router_logits = torch.tensor_split(router_logits,
-                                                        tp_size,
-                                                        dim=0)
+                                                         tp_size,
+                                                         dim=0)
                 chunk_mc2_mask = torch.tensor_split(forward_context.mc2_mask,
-                                            tp_size,
-                                            dim=0)
+                                                    tp_size,
+                                                    dim=0)
                 tp_rank = get_tensor_model_parallel_rank()
                 hidden_states = chunk_hidden_states[tp_rank]
                 router_logits = chunk_router_logits[tp_rank]

@@ -609,7 +609,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def _get_forward_metadata_across_dp(
             self, maybe_padded_num_tokens: int, num_tokens: int,
             with_prefill: bool, enable_dbo: bool
-        ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
+    ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
         if self.dp_size == 1:
             return maybe_padded_num_tokens, None, with_prefill, enable_dbo
 
@@ -642,7 +642,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, not bool(
             forward_metadata[-1])
-
 
     def _check_dbo_is_valid(self, query_lens: torch.Tensor,
                             attn_state: AscendAttentionState,
@@ -1001,13 +1000,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         enable_dbo = self._check_dbo_is_valid(self.query_lens.tolist(),
                                               attn_state,
                                               total_num_scheduled_tokens)
-        
+
         maybe_padded_num_tokens = total_num_scheduled_tokens
         if self.torchair_graph_enabled and not with_prefill:
             maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
                 total_num_scheduled_tokens)
-        (padded_num_tokens_across_dp, num_tokens_across_dp,
-         with_prefill, enable_dbo) = self._get_forward_metadata_across_dp(
+        (padded_num_tokens_across_dp, num_tokens_across_dp, with_prefill,
+         enable_dbo) = self._get_forward_metadata_across_dp(
              maybe_padded_num_tokens, total_num_scheduled_tokens, with_prefill,
              enable_dbo)
         extra_builder_kwargs['enable_dbo_across_dp'] = enable_dbo
@@ -1017,8 +1016,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Add num_token_pad_size and num_reqs_pad_size here for torchair graph mode
         if self.torchair_graph_enabled and not with_prefill:
             num_token_pad_size = padded_num_tokens_across_dp - total_num_scheduled_tokens
-            num_reqs_pad_size = (padded_num_tokens_across_dp //
-                                 self.decode_token_per_req - num_reqs)
+            num_reqs_pad_size = (
+                padded_num_tokens_across_dp // self.decode_token_per_req -
+                num_reqs)
             assert num_token_pad_size >= 0 and num_reqs_pad_size >= 0
 
             extra_builder_kwargs['num_token_pad_size'] = num_token_pad_size
@@ -1675,7 +1675,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     with_prefill=with_prefill,
                     in_profile_run=self.in_profile_run,
                     num_actual_tokens=0,
-                ):
+            ):
                 model_kwargs = {}
                 if self.torchair_graph_enabled and not with_prefill:
                     # Only mark static while compiling

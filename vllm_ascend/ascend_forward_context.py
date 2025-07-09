@@ -32,7 +32,6 @@ def get_fused_moe_state(ep_size: int, with_prefill: bool):
     else:
         return FusedMoEState.MC2
 
-count = 0
 
 @contextmanager
 def set_ascend_forward_context(
@@ -88,9 +87,6 @@ def set_ascend_forward_context(
 
         forward_context.max_tokens_across_dp = max_tokens_across_dp
 
-        global count
-        count += 1
-
         if num_tokens is not None:
             tp_world_size = get_tp_group().world_size
             world_size = torch.distributed.get_world_size()
@@ -114,7 +110,7 @@ def set_ascend_forward_context(
                 min_num_tokens = forward_context.max_num_chunks * tp_world_size
                 forward_context.padded_num_tokens = math.ceil(
                     max_tokens_across_dp / min_num_tokens) * min_num_tokens
-          
+
             mc2_mask = torch.zeros(forward_context.padded_num_tokens,
                                    dtype=torch.bool,
                                    device=current_platform.device_type)
