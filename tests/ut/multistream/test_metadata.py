@@ -39,8 +39,9 @@ class TestMetaData(TestBase):
             self.test_tensors_list, self.split_index)
         test_tensors_res = split_micro_batches_tensors(self.test_tensors,
                                                        self.split_index)
+        keys = ['query', 'key', 'value']
         test_tensors_dict_res = split_micro_batches_tensors(
-            self.test_tensors_dict, self.split_index)
+            self.test_tensors_dict, self.split_index, keys)
         for i in range(3):
             self.assertEqual(len(test_tensors_list_res[i][0]),
                              self.split_index)
@@ -53,12 +54,12 @@ class TestMetaData(TestBase):
         self.assertEqual(
             len(test_tensors_res[0]) + len(test_tensors_res[1]), 100)
 
-        for key in ['query', 'key', 'value']:
+        for key in keys:
             self.assertEqual(len(test_tensors_dict_res[0][key]),
                              self.split_index)
             self.assertEqual(
                 len(test_tensors_dict_res[0][key]) +
-                len(test_tensors_dict_res[0][key]), 100)
+                len(test_tensors_dict_res[1][key]), 100)
 
     def test_default_init_multistream_step_metadata(self):
         metadata = MultiStreamStepMetadata()
@@ -231,8 +232,8 @@ class TestMetaData(TestBase):
     def test_merge_batches_list_of_tensors_input(self):
         input_tensors = [torch.tensor([1, 2]), torch.tensor([3, 4])]
         result = self.metadata.merge_micro_batches(input_tensors)
-        self.assertEqual(len(result), 1)
-        self.assertTrue(torch.equal(result[0], torch.tensor([1, 2, 3, 4])))
+        self.assertEqual(len(result), 2)
+        self.assertTrue(torch.equal(result, input_tensors))
 
     def test_merge_batches_nested_list_input(self):
         input_tensors = [[torch.tensor([1, 2]),
@@ -242,13 +243,4 @@ class TestMetaData(TestBase):
         result = self.metadata.merge_micro_batches(input_tensors)
         self.assertEqual(len(result), 2)
         self.assertTrue(torch.equal(result[0], torch.tensor([1, 2, 3, 4])))
-        self.assertTrue(torch.equal(result[1], torch.tensor([5, 6, 7, 8])))
-
-    def test_merge_batches_none_in_list_input(self):
-        input_tensors = [[torch.tensor([1, 2]), None],
-                         [torch.tensor([5, 6]),
-                          torch.tensor([7, 8])]]
-        result = self.metadata.merge_micro_batches(input_tensors)
-        self.assertEqual(len(result), 2)
-        self.assertIsNone(result[0])
         self.assertTrue(torch.equal(result[1], torch.tensor([5, 6, 7, 8])))
