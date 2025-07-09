@@ -181,7 +181,10 @@ class NPUPlatform(Platform):
 
         if parallel_config and parallel_config.worker_cls == "auto":
             if envs.VLLM_USE_V1:
-                parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
+                if ascend_config.torchair_graph_config.enabled:
+                    parallel_config.worker_cls = "vllm_ascend.torchair.worker_torchair.NPUTorchairWorker"
+                else:
+                    parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
             elif vllm_config.speculative_config:
                 # NOTE: We set this var to `1` in vllm-ascend to avoid segment
                 # fault when using spec decode with V0 engine.
@@ -224,7 +227,7 @@ class NPUPlatform(Platform):
             return "vllm_ascend.attention.mla_v1.AscendMLABackend"
         use_torchair = get_ascend_config().torchair_graph_config.enabled
         if use_v1 and use_torchair:
-            return "vllm_ascend.attention.attention_v1_torchair.AscendAttentionTorchairBackend"
+            return "vllm_ascend.torchair.attention_torchair.AscendAttentionTorchairBackend"
         if use_v1:
             return "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
         if use_mla:
