@@ -12,14 +12,13 @@ from vllm_ascend.multistream.metadata import (MultiStreamConfig,
 
 class TestMetaData(TestBase):
 
-  
     def setUp(self):
-        self.test_tensors_list = [torch.randn(100,1024) for i in range(3)]
-        self.test_tensors = torch.randn(100,1024)
+        self.test_tensors_list = [torch.randn(100, 1024) for i in range(3)]
+        self.test_tensors = torch.randn(100, 1024)
         self.test_tensors_dict = {
-            'query': torch.randn(100,1024),
-            'key': torch.randn(100,1024),
-            'value': torch.randn(100,1024)
+            'query': torch.randn(100, 1024),
+            'key': torch.randn(100, 1024),
+            'value': torch.randn(100, 1024)
         }
         self.split_index = 50
 
@@ -37,27 +36,29 @@ class TestMetaData(TestBase):
 
     def test_split_micro_batches_tensors(self):
         test_tensors_list_res = split_micro_batches_tensors(
-          self.test_tensors_list, self.split_index)
+            self.test_tensors_list, self.split_index)
         test_tensors_res = split_micro_batches_tensors(self.test_tensors, 
                                                        self.split_index)
         test_tensors_dict_res = split_micro_batches_tensors(
-          self.test_tensors_dict, self.split_index)
+            self.test_tensors_dict, self.split_index)
         for i in range(3):
             self.assertEqual(len(test_tensors_list_res[i][0]), 
                              self.split_index)
-            self.assertEqual(len(test_tensors_list_res[i][0]) + 
-                             len(test_tensors_list_res[i][1]), 100)
+            self.assertEqual(
+                len(test_tensors_list_res[i][0]) + 
+                len(test_tensors_list_res[i][1]), 100)
         
         self.assertEqual(len(test_tensors_res[0]), self.split_index)
-        self.assertEqual(len(test_tensors_res[0]) + 
-                         len(test_tensors_res[1]), 100)
+        self.assertEqual(
+            len(test_tensors_res[0]) + len(test_tensors_res[1]), 100)
 
         for key in ['query', 'key', 'value']:
             self.assertEqual(len(test_tensors_dict_res[0][key]), 
                              self.split_index)
-            self.assertEqual(len(test_tensors_dict_res[0][key]) + 
-                             len(test_tensors_dict_res[0][key]), 100)
-
+            self.assertEqual(
+                len(test_tensors_dict_res[0][key]) + 
+                len(test_tensors_dict_res[0][key]), 100)
+          
     def test_default_init_multistream_step_metadata(self):
         metadata = MultiStreamStepMetadata()
         self.assertIsNone(metadata.comm_stream)
@@ -128,28 +129,28 @@ class TestMetaData(TestBase):
 
             expected_events = {
                 0: {
-                  0: {
-                    event_keys[0]: mock_event
-                  }, 
-                  1: {
-                    event_keys[0]: mock_event
-                  }
-                },
+                    0: {
+                      event_keys[0]: mock_event
+                    }, 
+                    1: {
+                      event_keys[0]: mock_event
+                    }
+                  },
                 1: {
-                  0: {
-                    event_keys[0]: mock_event
-                  }, 
-                  1: {
-                    event_keys[0]: mock_event
-                  }
-                },
+                    0: {
+                      event_keys[0]: mock_event
+                    }, 
+                    1: {
+                      event_keys[0]: mock_event
+                    }
+                  },
                 2: {
-                  0: {
-                    event_keys[0]: mock_event
-                  }, 
-                  1: {
-                    event_keys[0]: mock_event
-                  }
+                    0: {
+                      event_keys[0]: mock_event
+                    }, 
+                    1: {
+                      event_keys[0]: mock_event
+                    }
                 }
             }
             self.assertEqual(metadata.ms_events, expected_events)
