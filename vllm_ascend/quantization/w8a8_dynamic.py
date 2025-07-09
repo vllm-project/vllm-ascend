@@ -31,6 +31,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
                                dispose_tensor, get_ascend_soc_version,
                                npu_stream_switch, npu_wait_tensor)
 
+ENABLE_FUSED_EXPERTS_WITH_ALL_TO_ALL_V2: bool = True
 
 def apply_mlp_decode(hidden_states_wrapper: List[torch.Tensor],
                      w1: torch.Tensor,
@@ -104,6 +105,45 @@ def apply_mlp_decode(hidden_states_wrapper: List[torch.Tensor],
         group_list=group_list,
         output_dtype=w2_scale.dtype)[0]
     return hidden_states
+
+
+def gmm_expert(x, expert_tokens, w1, w2, w1_scale, w2_scale, dynamic_scale=None, avg_tokens_per_expert=None):
+    hidden_size = x.size(-1)
+    h = x
+    pertoken_scale = dynamic_scale
+
+    if pertoken_scale.dim() > 1:
+        pertoken_scale = pertoken_scale.reshape(-1)
+        h = h.view(-1, hidden_size)
+    # gmm1: gate_up
+    mm1_mm3 = torch_npu.npu_grouped_matmul([h], [w1],
+                                            group_list=expert_tokens, split_item=3,
+                                            output_dtype=torch.int32, group_type=0,
+                                            group_list_type=1, tuning_config=avg_tokens_per_expert)[0]
+    # dequant_swiglu_quant
+    # op[DequantSwigluQuant], ScaleShape[0] be groupNum[16], but is [256]
+    scale_2 = torch.ones((16, w1_scale.shape[-1]//2), dtype=torch.float32, device=x.device)
+    # op[DequantSwigluQuant], weight_scale dtype only support float32, please check
+    w1_scale = w1_scale.to(torch.float32)
+
+    intermediate_h, pertoken_scale = torch_npu.npu_dequant_swiglu_quant(
+        x=mm1_mm3, weight_scale=w1_scale,
+        activation_scale=pertoken_scale.squeeze(0), bias=None, quant_scale=scale_2, quant_offset=None,
+        group_index=expert_tokens, activate_left=True, quant_mode=1)
+
+    if pertoken_scale.dim() > 1:
+        inter_size = intermediate_h.size(-1)
+        pertoken_scale = pertoken_scale.reshape(-1)
+        intermediate_h = intermediate_h.view(-1, inter_size)
+    # gmm2: down
+    out_dtype = torch.bfloat16
+    w2_scale = w2_scale.to(torch.bfloat16)
+    out_hidden = torch_npu.npu_grouped_matmul([intermediate_h], [w2], bias=None,
+                                            scale=[w2_scale], per_token_scale=[pertoken_scale],
+                                            group_list=expert_tokens, split_item=3,
+                                            output_dtype=out_dtype, group_type=0,
+                                            group_list_type=1, tuning_config=avg_tokens_per_expert)[0]
+    return out_hidden
 
 
 def apply_mlp(hidden_states: torch.Tensor,
@@ -334,6 +374,72 @@ def fused_experts_with_mc2(
             shared_output, _ = shared_experts.down_proj(
                 (shared_act, swiglu_out_scale))
         return hidden_states, shared_output
+
+
+def fused_experts_with_all2all_v2(x, topk_ids, topk_weight, w1, w2, w1_scale, w2_scale):
+    _, h = x.shape
+    hidden_states = x.view(-1, h)
+    topk_weight = topk_weight.to(x.dtype)
+    expanded_x, expanded_row_idx, tokens_per_expert, _, pertoken_scale = torch_npu.npu_moe_init_routing_quantv2(
+        hidden_states,
+        expert_idx=topk_ids.to(torch.int32),
+        active_num=0,
+        expert_capacity=0,
+        expert_num=256,
+        drop_pad_mode=0,
+        expert_tokens_count_or_cumsum_flag=2,
+        expert_tokens_before_capacity_flag=False,
+        quant_mode=1,
+    )
+
+    tokens_per_expert_group = tokens_per_expert.new_empty(tokens_per_expert.shape[0])
+    dist.all_to_all_single(tokens_per_expert_group, tokens_per_expert)  # (total_experts,) --> (total_ranks * n_routed_experts_per_rank)
+ 
+    # combine tensors, do reduceSum and D2H toghter
+    combine_tokens = torch.stack([tokens_per_expert_group, tokens_per_expert], dim=0)
+    # view: EP, E//EP
+    # sum: EP, the number of tokens each rank receives from other cards
+    # ep_size = get_expert_parallel_world_size()
+    ep_size = 16
+    combine_tokens = combine_tokens.view(2, ep_size, -1).sum(2)
+    all_tokens = combine_tokens[0].sum()
+    combine_tokens_cpu = combine_tokens.cpu().tolist()
+    # alltoall input splits, the total number of tokens routed from the current rank to other ranks
+    input_splits = combine_tokens_cpu[1]
+    # alltoall output splits, the number of tokens each rank receives from other cards
+    output_splits = combine_tokens_cpu[0]
+    # alltoall output, unfolded into one dimension, the size is the sum of the number of tokens routed from other cards to the current rank.
+    gathered_tokens = expanded_x.new_empty(
+        all_tokens.item(), expanded_x.shape[1]
+    )
+    dist.all_to_all_single(gathered_tokens, expanded_x, output_splits, input_splits)
+    gathered_pertoken_scale = pertoken_scale.new_empty(gathered_tokens.shape[0])
+    dist.all_to_all_single(gathered_pertoken_scale, pertoken_scale, output_splits, input_splits)
+    # reroute
+    # Tokens merged by experts, scales merged by experts, indices for FinalizeRouting, number of tokens processed by each expert
+    hidden_states_sorted_by_experts, gathered_pertoken_scale, gathered_idxs_unsort, tokens_per_local_expert = torch_npu.npu_moe_re_routing(
+        gathered_tokens,
+        tokens_per_expert_group.view(ep_size, -1),
+        per_token_scales=gathered_pertoken_scale
+    )
+    hidden_states_ordered_by_experts = gmm_expert(hidden_states_sorted_by_experts, tokens_per_local_expert.to(torch.int64), w1, w2, w1_scale, w2_scale, gathered_pertoken_scale)
+
+    new_x = torch.index_select(hidden_states_ordered_by_experts, 0, gathered_idxs_unsort.to(torch.float32).argsort().to(torch.int32))
+    gathered_tokens = new_x.new_empty(*expanded_x.shape)
+ 
+    dist.all_to_all_single(gathered_tokens, new_x, input_splits, output_splits)
+
+    final_hidden_states = torch_npu.npu_moe_finalize_routing(
+        gathered_tokens,
+        skip1=None,
+        skip2=None,
+        bias=None,
+        scales=topk_weight.to(gathered_tokens.dtype),
+        expanded_src_to_dst_row=expanded_row_idx,
+        export_for_source_row=None,
+        drop_pad_mode=2
+    )
+    return final_hidden_states
 
 
 # currently expert parallelism implemented with all2all
@@ -832,6 +938,16 @@ class AscendW8A8DynamicFusedMoEMethod:
                                  topk_ids=topk_ids,
                                  top_k=top_k,
                                  expert_map=expert_map)
+        elif ENABLE_FUSED_EXPERTS_WITH_ALL_TO_ALL_V2:
+            return fused_experts_with_all2all_v2(
+                x=x,
+                topk_ids=topk_ids,
+                topk_weight=topk_weights,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+            )
         else:
             # The current implementation of deepseek moe splits hidden_states
             # according to tp_size before they are feed into fused_moe module.

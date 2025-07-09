@@ -31,12 +31,17 @@ import torch
 import torch_npu
 import vllm.envs as envs
 from torch import nn
+from torch.nn.parameter import Parameter
+import torch.distributed as dist
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
                          get_current_vllm_config)
 from vllm.distributed import (get_dp_group, get_pp_group,
+                              get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_reduce_scatter,
+                              split_tensor_along_last_dim,
                               get_tp_group)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -70,6 +75,40 @@ from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (dispose_tensor, npu_stream_switch,
                                npu_wait_tensor)
+
+
+class RowParallelScatterLinear(RowParallelLinear):
+    def forward(
+        self, input_
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            tp_rank = get_tensor_model_parallel_rank()
+            splitted_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size)
+            input_parallel = splitted_input[tp_rank].contiguous()
+
+        # Matrix multiply.
+        assert self.quant_method is not None
+        # Only fuse bias add into GEMM for rank 0 (this ensures that
+        # bias will not get added more than once in TP>1 case)
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        output_parallel = self.quant_method.apply(self,
+                                                  input_parallel,
+                                                  bias=bias_)
+        if self.reduce_results and self.tp_size > 1:
+            num_tokens, _ = output_parallel.shape
+            if num_tokens % self.tp_size:
+                output_parallel = nn.functional.pad(output_parallel, (0, 0, 0, -num_tokens % self.tp_size))
+            output = tensor_model_parallel_reduce_scatter(output_parallel, dim=0)
+        else:
+            output = output_parallel
+
+        output_bias = self.bias if self.skip_bias_add else None
+        if not self.return_bias:
+            return output
+        return output, output_bias
 
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
@@ -273,7 +312,7 @@ class CustomDeepseekV2MoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=True,
-                force_replicate=self.enable_multistream_moe,
+                force_replicate=True,
                 prefix=f"{prefix}.shared_experts",
             )
         else:
@@ -362,9 +401,9 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         self.kv_lora_rank = kv_lora_rank
 
         self.num_heads = num_heads
-        tp_size = get_tensor_model_parallel_world_size()
-        assert num_heads % tp_size == 0
-        self.num_local_heads = num_heads // tp_size
+        self.tp_size = get_tensor_model_parallel_world_size()
+        assert num_heads % self.tp_size == 0
+        self.num_local_heads = num_heads // self.tp_size
 
         self.scaling = self.qk_head_dim**-0.5
         self.rope_theta = rope_theta
@@ -406,11 +445,19 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj")
-        self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
-                                        self.hidden_size,
-                                        bias=False,
-                                        quant_config=quant_config,
-                                        prefix=f"{prefix}.o_proj")
+
+        if int(prefix.split(".")[-2]) < 3:
+            self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
+                                            self.hidden_size,
+                                            bias=False,
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.o_proj")
+        else:
+            self.o_proj = RowParallelScatterLinear(self.num_heads * self.v_head_dim,
+                                    self.hidden_size,
+                                    bias=False,
+                                    quant_config=quant_config,
+                                    prefix=f"{prefix}.o_proj")
 
         if rope_scaling:
             rope_scaling["rope_type"] = 'deepseek_yarn'
@@ -504,10 +551,18 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
             kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+            if self.debug_layer_idx < 3:
+                output_shape = hidden_states.shape
+            else:
+                num_tokens = hidden_states.shape[0]
+                rows = num_tokens // self.tp_size
+                if num_tokens % self.tp_size:
+                    rows += 1
+                output_shape = (rows, hidden_states.shape[1])
             return self.mla_attn(hidden_states_or_q_c,
                                  kv_c_normed,
                                  k_pe,
-                                 output_shape=hidden_states.shape)
+                                 output_shape=output_shape)
 
 
 class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
@@ -574,6 +629,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
         self.routed_scaling_factor = config.routed_scaling_factor
+        self.tp_group = get_tp_group().device_group
 
     def forward(
         self,
@@ -613,6 +669,15 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 # first layer.
                 residual *= 1. / self.routed_scaling_factor
 
+        tp_size = get_tensor_model_parallel_world_size()
+        if self.layer_idx >= 3 and tp_size > 1:
+            num_tokens, _ = residual.shape
+            if num_tokens % tp_size:
+                residual = nn.functional.pad(residual, (0, 0, 0, -num_tokens % tp_size))
+            chunk_residual = torch.tensor_split(residual, tp_size, dim=0)
+            tp_rank = get_tensor_model_parallel_rank()
+            residual = chunk_residual[tp_rank]
+
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
@@ -621,6 +686,17 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             hidden_states = self.mlp(hidden_states, attn_metadata)
         else:
             hidden_states = self.mlp(hidden_states)
+
+        if self.layer_idx >= 3 and tp_size > 1:
+            dist.all_gather(list(chunk_residual), residual, self.tp_group)
+            residual = torch.cat(chunk_residual, dim=0)
+            chunk_hidden_states = list(torch.unbind(torch.empty(tp_size, hidden_states.shape[0], hidden_states.shape[1], device=hidden_states.device, dtype=hidden_states.dtype), dim=0))
+            dist.all_gather(list(chunk_hidden_states), hidden_states, self.tp_group)
+            hidden_states = torch.cat(chunk_hidden_states, dim=0)
+
+            if num_tokens % tp_size:
+                residual = residual[:num_tokens]
+                hidden_states = hidden_states[:num_tokens]
 
         if isinstance(
                 self.mlp,
