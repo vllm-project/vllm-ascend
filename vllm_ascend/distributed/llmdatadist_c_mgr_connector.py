@@ -4,6 +4,7 @@ import math
 import threading
 import time
 from collections.abc import Iterator
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
@@ -268,9 +269,11 @@ class LLMDataDistCMgrConnectorScheduler():
         # we just transfer any data that computed from prefill node
         # note: there might be some issue on this, check it if there is any unexpected result
         computed_block_ids = block_ids
-        # If prompt < block_size, no xfer so free blocks immediately.
-
-        return False, dict(
+        delay_free_blocks = len(computed_block_ids) > 0
+        if delay_free_blocks:
+            logger.info("Delaying free of %d blocks for request %s",
+                        len(computed_block_ids), request.request_id)
+        return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
             remote_block_ids=computed_block_ids,
@@ -334,6 +337,13 @@ class LLMDataDistCMgrConnectorWorker():
         self.init_llm_datadist()
         self.finished_reqs: set[str] = set()
         self.soc_info = NPUSocInfo()
+        # get decode tp size from extra config
+        self.done_task_counts: defaultdict[str, set[int]] = defaultdict(set)
+        decode_parallel_config: dict[
+            str, Any] = self.kv_transfer_config.get_from_extra_config(
+                "decode", {})
+        assert "tp_size" in decode_parallel_config.keys()
+        self.decode_tp_size = decode_parallel_config["tp_size"]
 
     def listen_for_agent_metadata_req(self, event: threading.Event):
         assert self.local_agent_metadata is not None
@@ -368,15 +378,34 @@ class LLMDataDistCMgrConnectorWorker():
                         )
                 elif event_msg == LLMDataDistCMgrEvent.ReqForFinished:
                     finished_req_id = decode_msg[0]
+                    decode_tp_rank = decode_msg[1]
                     with self.thread_lock:
-                        logger.debug(
-                            f"LLMDataDistCMgrConnectorWorker: Receiving request {finished_req_id} finished"
-                        )
-                        self.finished_reqs.add(finished_req_id)
+                        if self._increment_task_count(finished_req_id, decode_tp_rank):
+                            logger.debug(
+                                f"LLMDataDistCMgrConnectorWorker: Receiving request {finished_req_id} finished"
+                            )
+                            self.finished_reqs.add(finished_req_id)
                 else:
                     raise RuntimeError(
                         f"LLMDataDistCMgrConnectorWorker: Receiving unexpected request event {event_msg} from remote !"
                     )
+
+    def _increment_task_count(self, request_id: str, tp_rank: int):
+        with self.thread_lock:
+            if tp_rank in self.done_task_counts[request_id]:
+                logger.warning(
+                    f"Received duplicate done signal for request {request_id} "
+                    f"from tp rank {tp_rank}. Ignoring.")
+                return False
+
+            self.done_task_counts[request_id].add(tp_rank)
+            if len(self.done_task_counts[request_id]) == self.decode_tp_size:
+                self.done_task_counts.pop(request_id)
+                logger.info("All transfers completed for request: "
+                            f"{request_id}. Total ranks: "
+                            f"{self.decode_tp_size}.")
+                return True
+            return False
 
     def init_llm_datadist(self):
         assert self.local_agent_metadata is not None
@@ -727,7 +756,7 @@ class LLMDataDistCMgrConnectorWorker():
         logger.debug(f"Sending finished to remote: {url}")
         msg_encoder = msgspec.msgpack.Encoder()
         msg_send = msg_encoder.encode(
-            [LLMDataDistCMgrEvent.ReqForFinished, [request_id]])
+            [LLMDataDistCMgrEvent.ReqForFinished, [request_id, self.tp_rank]])
         with zmq_ctx(zmq.REQ, url) as sock:  # type: ignore[attr-defined]
             try:
                 sock.send(msg_send)
