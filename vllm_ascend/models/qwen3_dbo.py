@@ -267,11 +267,9 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
         ] * num_micro_batchs
         tokens_per_expert = [None] * num_micro_batchs
         dispatched_input = [None] * num_micro_batchs
-        shared_expert_output = [None] * num_micro_batchs
         router_expert_output = [None] * num_micro_batchs
         chunked_hidden_states_sizes = [None] * num_micro_batchs
         token_dispatchers = self.mlp.experts.token_dispatchers
-        has_shared_expert = hasattr(self.mlp, 'shared_experts')
 
         def discard_tensor(tensor):
             if isinstance(tensor, torch.Tensor):
