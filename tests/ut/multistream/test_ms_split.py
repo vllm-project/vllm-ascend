@@ -144,10 +144,10 @@ class TestMsSplit(unittest.TestCase):
         self.assertEqual(result, expected_result)
 
     def test_split_v1_mla_attn_input_none(self):
-        attn_metadata = None 
+        attn_metadata = None
         ascendMLAPrefillMetadata = MagicMock()
         ms_split_config = MSAttentionMetadataSplitConfig(num_micro_batches=1)
-        result = model_input_split_v1_mla_attn(attn_metadata, 
-                                               ascendMLAPrefillMetadata, 
+        result = model_input_split_v1_mla_attn(attn_metadata,
+                                               ascendMLAPrefillMetadata,
                                                ms_split_config)
         self.assertEqual(result, [None])
