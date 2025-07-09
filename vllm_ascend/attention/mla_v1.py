@@ -538,6 +538,11 @@ class AscendMLAMetadataBuilder:
                 actual_seq_q_lens = query_start_loc[1:].tolist(
                 ) + self.runner.actual_seq_q_lens[num_reqs:num_reqs +
                                                   num_reqs_pad_size]
+                # mtp torchair + PD scenario, last element of actual_seq_q_lens must equal to num_reqs_pad_size
+                num_padded_token_size = slot_mapping.size(0)
+                if actual_seq_q_lens[-1] != num_padded_token_size:
+                    actual_seq_q_lens.append(num_padded_token_size)
+                    seq_lens_list.append(0)
             else:
                 seq_lens_list = seq_lens.tolist()
 
