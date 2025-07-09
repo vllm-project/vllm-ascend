@@ -47,7 +47,7 @@ class TestMsSplit(unittest.TestCase):
             )
 
     def test_empty_query_lens(self):
-        query_lens = []
+        query_lens: list[int] = []
         result = compute_split_seq_index(
             query_lens=query_lens,
             attn_state=AscendAttentionState.PrefillNoCache,
