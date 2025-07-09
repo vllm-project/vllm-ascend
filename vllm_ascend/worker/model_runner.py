@@ -52,8 +52,6 @@ from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs, MultiModalPlaceholderMap,
                              MultiModalRegistry)
-from vllm.prompt_adapter.layers import PromptAdapterMapping
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import (DeviceMemoryProfiler, PyObjectCache, flatten_2d_lists,
@@ -1236,27 +1234,6 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
         return self.lora_manager.list_adapters()
-
-    def remove_all_prompt_adapters(self):
-        raise RuntimeError("PromptAdapter is not supported on NPU now.")
-
-    def set_active_prompt_adapters(
-            self, prompt_adapter_requests: Set[PromptAdapterRequest],
-            prompt_adapter_mapping: PromptAdapterMapping) -> None:
-        raise RuntimeError("PromptAdapter is not supported on NPU now.")
-
-    def add_prompt_adapter(
-            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
-        raise RuntimeError("PromptAdapter is not supported on NPU now.")
-
-    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        raise RuntimeError("PromptAdapter is not supported on NPU now.")
-
-    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        raise RuntimeError("PromptAdapter is not supported on NPU now.")
-
-    def list_prompt_adapters(self) -> Set[int]:
-        raise RuntimeError("PromptAdapter is not supported on NPU now.")
 
     @property
     def vocab_size(self) -> int:
