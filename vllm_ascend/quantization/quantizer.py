@@ -21,9 +21,14 @@ import types
 from typing import Any, Dict, List, Optional
 
 from vllm.logger import logger
+from vllm.model_executor.model_loader.weight_utils import \
+    safetensors_weights_iterator
 
+from .faquant import AscendFAQuantAttentionMethod
 from .func_wrapper import (wrapper_load_model, wrapper_rmsnorm_forward_oot,
                            wrapper_rmsnorm_init)
+from .quant_utils import (attention_init, cache_engine_init,
+                          wrapper_weights_iterator)
 from .w4a8_dynamic import (AscendW4A8DynamicFusedMoEMethod,
                            AscendW4A8DynamicLinearMethod)
 from .w8a8 import AscendW8A8LinearMethod
@@ -80,6 +85,22 @@ class VLLMAscendQuantizer:
                     "vllm_ascend.worker.model_runner.NPUModelRunnerBase",
                     "load_model", [wrapper_load_model])
                 break
+            if "fa_quant_type" in name:
+                VLLMAscendQuantizer.apply_patch(
+                    "vllm.model_executor.model_loader.weight_utils",
+                    "safetensors_weights_iterator",
+                    [wrapper_weights_iterator(safetensors_weights_iterator)],
+                )
+                VLLMAscendQuantizer.apply_patch(
+                    "vllm.worker.cache_engine.CacheEngine",
+                    "__init__",
+                    [cache_engine_init],
+                )
+                VLLMAscendQuantizer.apply_patch(
+                    "vllm.attention.layer.Attention",
+                    "__init__",
+                    [attention_init],
+                )
         VLLMAscendQuantizer.patched = True
         logger.info("Using the vLLM Ascend Quantizer version now!")
 
@@ -244,7 +265,7 @@ class VLLMAscendQuantizer:
         if packed_modules_mapping is None:
             packed_modules_mapping = dict()
         # Attention
-        if '.attn' in prefix and 'fa_quant_type' in quant_description.keys():
+        elif '.attn' in prefix and 'fa_quant_type' in quant_description.keys():
             quant_type = quant_description['fa_quant_type']
         # Linear
         else:
@@ -288,8 +309,16 @@ class W8A8DYNAMICQuantizer(VLLMAscendQuantizer):
         return AscendW8A8DynamicFusedMoEMethod()
 
 
+class FAQuantizer(VLLMAscendQuantizer):
+
+    @staticmethod
+    def build_attention_method():
+        return AscendFAQuantAttentionMethod()
+
+
 SUPPORT_ASCEND_QUANTIZER_TYPE = {
     "W4A8_DYNAMIC": W4A8DYNAMICQuantizer,
     "W8A8": W8A8Quantizer,
     "W8A8_DYNAMIC": W8A8DYNAMICQuantizer,
+    "FAQuant": FAQuantizer
 }

@@ -42,7 +42,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm_ascend.ops.fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD
 
-from .quantizer import AscendQuantizer
+from .quantizer import VLLMAscendQuantizer
 
 
 @register_quantization_config(ASCEND_QUATIZATION_METHOD)
@@ -151,7 +151,7 @@ class AscendQuantConfig(QuantizationConfig):
 class AscendLinearMethod(LinearMethodBase):
     """Linear method for Ascend quantization.
 
-    This class calls AscendQuantizer to search a specific quantization
+    This class calls VLLMAscendQuantizer to search a specific quantization
     implementations supported on ascend hardware for linear methods.
 
     Args:
@@ -160,7 +160,7 @@ class AscendLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: AscendQuantConfig, prefix: str,
                  packed_modules_mapping: Dict[str, Any]) -> None:
-        self.quantizer = AscendQuantizer.get_quantizer(
+        self.quantizer = VLLMAscendQuantizer.get_quantizer(
             quant_config.quant_description, prefix, packed_modules_mapping)
         self.quant_method = self.quantizer.build_linear_method()
 
@@ -232,7 +232,7 @@ class AscendLinearMethod(LinearMethodBase):
 class AscendKVCacheMethod(BaseKVCacheMethod):
     """KVCache method for Ascend quantization.
 
-    This class calls AscendQuantizer to search a specific quantization
+    This class calls VLLMAscendQuantizer to search a specific quantization
     implementations supported on ascend hardware for kvcache methods.
 
     Args:
@@ -240,7 +240,7 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
     """
 
     def __init__(self, quant_config: AscendQuantConfig, prefix: str) -> None:
-        self.quantizer = AscendQuantizer.get_quantizer(
+        self.quantizer = VLLMAscendQuantizer.get_quantizer(
             quant_config.quant_description, prefix)
         self.quant_method = self.quantizer.build_attention_method()
 
@@ -285,7 +285,7 @@ class AscendKVCacheMethod(BaseKVCacheMethod):
 class AscendFusedMoEMethod(FusedMoEMethodBase):
     """FusedMoE method for Ascend quantization.
 
-    This class calls AscendQuantizer to search a specific quantization
+    This class calls VLLMAscendQuantizer to search a specific quantization
     implementations supported on ascend hardware for kvcache methods.
 
     Args:
@@ -294,7 +294,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
 
     def __init__(self, quant_config: AscendQuantConfig, prefix: str,
                  packed_modules_mapping: Dict[str, Any]):
-        self.quantizer = AscendQuantizer.get_quantizer(
+        self.quantizer = VLLMAscendQuantizer.get_quantizer(
             quant_config.quant_description, prefix, packed_modules_mapping)
         self.quant_method = self.quantizer.build_moe_method()
 
@@ -365,7 +365,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
 class AscendEmbeddingMethod(AscendLinearMethod):
     """Embedding method for Ascend quantization.
 
-      This class calls AscendQuantizer to search a specific quantization
+      This class calls VLLMAscendQuantizer to search a specific quantization
       implementations supported on ascend hardware for Embedding methods.
 
       Args:
@@ -374,6 +374,6 @@ class AscendEmbeddingMethod(AscendLinearMethod):
 
     def __init__(self, quant_config: AscendQuantConfig, prefix: str,
                  packed_modules_mapping: Dict[str, Any]) -> None:
-        self.quantizer = AscendQuantizer.get_quantizer(
+        self.quantizer = VLLMAscendQuantizer.get_quantizer(
             quant_config.quant_description, prefix, packed_modules_mapping)
         self.quant_method = self.quantizer.build_linear_method()
