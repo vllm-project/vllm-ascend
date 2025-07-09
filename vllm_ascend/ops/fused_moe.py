@@ -40,11 +40,11 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
+from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
+    MoEAlltoAllSeqOverLapDispatcher, MoeDispatcherConfig)
 from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
                                get_ascend_soc_version, npu_stream_switch,
                                npu_wait_tensor)
-from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
-    MoEAlltoAllSeqOverLapDispatcher, MoeDispatcherConfig)
 
 VLLM_ASCEND_MOE_ALL2ALL_BUFFER: bool = envs_ascend.VLLM_ASCEND_MOE_ALL2ALL_BUFFER
 

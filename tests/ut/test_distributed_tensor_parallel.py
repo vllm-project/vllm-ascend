@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-import pytest
-import torch
 import importlib
 from unittest.mock import MagicMock, patch
+
+import pytest
+import torch
+
 from vllm_ascend.distributed.tensor_parallel import (
     _gather_along_first_dim, _gather_along_last_dim,
     _reduce_scatter_along_first_dim, _reduce_scatter_along_last_dim,
-    all_to_all_sp2hp, all_to_all_hp2sp)
+    all_to_all_hp2sp, all_to_all_sp2hp)
 
 
 # 测试用的固定数据

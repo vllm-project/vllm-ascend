@@ -2,14 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
-import torch
 import pytest
-import vllm_ascend.patch.worker.patch_common.patch_utils # type: ignore[import]  # isort: skip  # noqa
-
+import torch
 from pytest_mock import MockerFixture
+
+from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
+    MoEAlltoAllSeqOverLapDispatcher, MoeDispatcherConfig)
 from vllm_ascend.utils import adapt_patch  # noqa E402
 
-from vllm_ascend.ops.moe_dispatcher.token_dispatcher import MoeDispatcherConfig, MoEAlltoAllSeqOverLapDispatcher
+import vllm_ascend.patch.worker.patch_common.patch_utils # type: ignore[import]  # isort: skip  # noqa
+
+
 
 adapt_patch(True)
 

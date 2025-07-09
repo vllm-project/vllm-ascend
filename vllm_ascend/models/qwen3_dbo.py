@@ -21,42 +21,44 @@
 # limitations under the License.
 # # Adapted from
 # """Inference-only Qwen3 model."""
-from typing import Optional, Union, List
 from types import SimpleNamespace
+from typing import List, Optional, Union
 
 import torch
 import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
-
-from vllm.model_executor.models.qwen3_moe import Qwen3MoeDecoderLayer, Qwen3MoeModel
-from vllm.config import CacheConfig, VllmConfig
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.attention import AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config import CacheConfig, VllmConfig
+from vllm.distributed import (get_pp_group,
+                              get_tensor_model_parallel_world_size,
+                              get_tp_group)
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group, \
-    get_pp_group
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.models.qwen3_moe import (Qwen3MoeDecoderLayer,
+                                                  Qwen3MoeForCausalLM,
+                                                  Qwen3MoeModel)
 from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.sequence import IntermediateTensors
-from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.compilation.decorators import support_torch_compile
 
+import vllm_ascend.envs as envs_ascend
+from vllm_ascend.distributed.tensor_parallel import \
+    gather_from_sequence_parallel_region
+from vllm_ascend.multistream.base import MSEventKey
 from vllm_ascend.multistream.context import (
     advance_step_multistream_layer_context, get_multistream_layer_context)
-from vllm_ascend.multistream.base import MSEventKey
 from vllm_ascend.multistream.layers import (MultiStreamPostTransformerLayer,
                                             MultiStreamPreTransformerLayer)
 from vllm_ascend.multistream.metadata import (MultiStreamConfig,
                                               MultiStreamStepMetadata,
                                               make_multistream_metadata_ds)
-from vllm_ascend.ops.fused_moe import select_experts, apply_mlp
-from vllm_ascend.distributed.tensor_parallel import gather_from_sequence_parallel_region
-import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ops.fused_moe import apply_mlp, select_experts
 
 VLLM_ASCEND_ENABLE_DBO: bool = envs_ascend.VLLM_ASCEND_ENABLE_DBO
 

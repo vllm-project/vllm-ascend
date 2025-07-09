@@ -1,12 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-import torch
-import pytest
 import math
+
+import pytest
+import torch
+
+from vllm_ascend.ops.moe_dispatcher.moe_utils import (
+    get_capacity, group_limited_topk, permute, sort_chunks_by_idxs,
+    topk_softmax_with_capacity, unpermute)
+
 import vllm_ascend.patch.worker.patch_common.patch_utils # type: ignore[import]  # isort: skip  # noqa
 
-from vllm_ascend.ops.moe_dispatcher.moe_utils import permute, get_capacity, topk_softmax_with_capacity, group_limited_topk, unpermute, sort_chunks_by_idxs
 
 
 class TestMoeUtils:

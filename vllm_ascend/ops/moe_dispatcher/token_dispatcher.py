@@ -24,16 +24,16 @@ from typing import Optional
 
 import torch
 import torch_npu
-
 from vllm.distributed.parallel_state import get_ep_group
+
 from vllm_ascend.distributed.tensor_parallel import (
     all_gather_last_dim_from_tensor_parallel_region, all_to_all_hp2sp,
     all_to_all_sp2hp, gather_from_sequence_parallel_region,
     reduce_scatter_last_dim_to_tensor_parallel_region)
 from vllm_ascend.ops.comm_utils import async_all_to_all
 from vllm_ascend.ops.moe_dispatcher.moe_utils import (
-    get_capacity, permute, topk_softmax_with_capacity,
-    unpermute)
+    get_capacity, permute, topk_softmax_with_capacity, unpermute)
+
 """ We use the following notation throughout this file:
      H: hidden size
      B: micro batch size
