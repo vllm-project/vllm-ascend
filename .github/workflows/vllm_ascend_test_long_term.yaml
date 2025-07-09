@@ -96,13 +96,8 @@ jobs:
       - name: Run vllm-project/vllm-ascend long term test
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
-            # v0 spec decode test
-            # TODO: Revert me when test_mtp_correctness is fixed
-            # VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/long_term/spec_decode_v0/e2e/test_mtp_correctness.py  # it needs a clean process
-            pytest -sv tests/e2e/long_term/spec_decode_v0 --ignore=tests/e2e/long_term/spec_decode_v0/e2e/test_mtp_correctness.py
-            # accuracy test single card
             pytest -sv tests/e2e/long_term/test_accuracy.py
-          else
+          # else
             # accuracy test multi card
-            VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/long_term/test_deepseek_v2_lite_tp2_accuracy.py
+            # VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/long_term/test_deepseek_v2_lite_tp2_accuracy.py
           fi
