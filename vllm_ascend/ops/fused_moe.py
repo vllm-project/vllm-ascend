@@ -968,7 +968,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
         fused_moe_state = get_forward_context().fused_moe_state
-
         if fused_moe_state == FusedMoEState.MC2:
             mc2_mask = kwargs.get("mc2_mask", None)
             return fused_experts_with_mc2(
@@ -1209,7 +1208,7 @@ class AscendFusedMoE(FusedMoE):
                 shared_hidden_states = shared_experts(hidden_states)
 
         attn_metadata = get_forward_context().attn_metadata
-        mc2_mask = attn_metadata.decode.mc2_mask if attn_metadata is not None and attn_metadata.decode is not None else None
+        mc2_mask = attn_metadata.decode.mc2_mask if attn_metadata is not None and getattr(attn_metadata, "decode", None) is not None else None
 
         tp_size = get_tensor_model_parallel_world_size()
         if tp_size > 1 and fused_moe_state != FusedMoEState.AllGather:
