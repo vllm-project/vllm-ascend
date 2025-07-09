@@ -64,7 +64,7 @@ class AscendAttentionTorchairBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return (num_blocks, block_size, num_kv_heads * head_size)
+        return (2, num_blocks, block_size, num_kv_heads * head_size)
 
     @staticmethod
     def get_bsh_kv_cache_shape(
@@ -73,7 +73,7 @@ class AscendAttentionTorchairBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return (num_blocks, block_size, num_kv_heads * head_size)
+        return (2, num_blocks, block_size, num_kv_heads * head_size)
 
     @staticmethod
     def swap_blocks(
