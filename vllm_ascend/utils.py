@@ -416,6 +416,20 @@ def npu_wait_tensor(self: torch.Tensor,
     return _npu_wait_tensor(self, dependency) if enabled else self
 
 
+# TODO(wxy): Move to ops module
+def npu_prefetch(input: torch.Tensor,
+                 dependency: torch.Tensor,
+                 max_size: int = 0,
+                 *,
+                 enabled: bool = True):
+    if not enabled:
+        return
+    input_size = input.element_size() * input.numel()
+    if max_size <= 0 or max_size > input_size:
+        max_size = input_size
+    torch_npu.npu_prefetch(input, dependency, max_size)
+
+
 # TODO(zzzzwwjj): move this into forward_context
 class FusedMoEState(Enum):
     AllGather = 0
