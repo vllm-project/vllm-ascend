@@ -78,7 +78,7 @@ from vllm_ascend.multistream.metadata import (MultiStreamConfig,
                                               make_multistream_metadata_ds)
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
-from vllm_ascend.utils import dispose_tensor, vllm_version_is
+from vllm_ascend.utils import dispose_tensor
 
 VLLM_ASCEND_ENABLE_DBO: bool = envs_ascend.VLLM_ASCEND_ENABLE_DBO
 
@@ -1032,19 +1032,12 @@ class CustomDeepseekDBOForCausalLM(DeepseekV2ForCausalLM):
 
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    if vllm_version_is("0.9.1"):
-                        weight_loader(param,
-                                      loaded_weight,
-                                      name,
-                                      shard_id=shard_id,
-                                      expert_id=expert_id)
-                    else:
-                        weight_loader(param,
-                                      loaded_weight,
-                                      name,
-                                      shard_id=shard_id,
-                                      expert_id=expert_id,
-                                      return_success=False)
+                    weight_loader(param,
+                                  loaded_weight,
+                                  name,
+                                  shard_id=shard_id,
+                                  expert_id=expert_id,
+                                  return_success=False)
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.

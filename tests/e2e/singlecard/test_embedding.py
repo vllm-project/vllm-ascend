@@ -19,12 +19,10 @@
 from collections.abc import Sequence
 from typing import Optional
 
-import pytest
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 
 from tests.conftest import HfRunner
 from tests.utils import check_embeddings_close, matryoshka_fy
-from vllm_ascend.utils import vllm_version_is
 
 
 def run_embedding_correctness_test(
@@ -51,8 +49,6 @@ def test_dummy():
     assert True
 
 
-@pytest.mark.skipif(vllm_version_is("0.9.1"),
-                    reason="vLLM 0.9.1 does not support embed task for v1")
 def test_embed_models_correctness(hf_runner, vllm_runner):
     queries = ['What is the capital of China?', 'Explain gravity']
 

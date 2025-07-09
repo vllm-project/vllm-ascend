@@ -32,8 +32,6 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
-from vllm_ascend.utils import vllm_version_is
-
 
 class AscendScheduler(Scheduler):
     """This Scheduler extends vllm's original v1 scheduler
@@ -366,32 +364,12 @@ class AscendScheduler(Scheduler):
                                         req_to_new_block_ids[req.request_id])
             for req in scheduled_new_reqs
         ]
-        if vllm_version_is("0.9.1"):
-            resumed_reqs_data = [
-                self._make_cached_request_data(
-                    req,
-                    num_scheduled_tokens[req.request_id],
-                    len(scheduled_spec_decode_tokens.get(req.request_id, ())),
-                    req_to_new_block_ids[req.request_id],
-                    resumed_from_preemption=True,
-                ) for req in scheduled_resumed_reqs
-            ]
-            running_reqs_data = [
-                self._make_cached_request_data(
-                    req,
-                    num_scheduled_tokens[req.request_id],
-                    len(scheduled_spec_decode_tokens.get(req.request_id, ())),
-                    req_to_new_block_ids[req.request_id],
-                    resumed_from_preemption=False,
-                ) for req in scheduled_running_reqs
-            ]
-            scheduled_cached_reqs = resumed_reqs_data + running_reqs_data
-        else:
-            cached_reqs_data = self._make_cached_request_data(
-                scheduled_running_reqs, scheduled_resumed_reqs,
-                num_scheduled_tokens, scheduled_spec_decode_tokens,
-                req_to_new_block_ids)
-            scheduled_cached_reqs = cached_reqs_data
+
+        cached_reqs_data = self._make_cached_request_data(
+            scheduled_running_reqs, scheduled_resumed_reqs,
+            num_scheduled_tokens, scheduled_spec_decode_tokens,
+            req_to_new_block_ids)
+        scheduled_cached_reqs = cached_reqs_data
 
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,

@@ -31,7 +31,6 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 from vllm_ascend.core.scheduler import AscendScheduler
-from vllm_ascend.utils import vllm_version_is
 
 EOS_TOKEN_ID = 50256
 
@@ -131,9 +130,7 @@ def create_requests(num_requests: int,
             multi_modal_placeholders=mm_position,
             multi_modal_hashes=None,
             eos_token_id=EOS_TOKEN_ID,
-            **({
-                "pooling_params": None
-            } if not vllm_version_is("0.9.1") else {}),
+            pooling_params=None,
         )
         requests.append(request)
     return requests
@@ -192,10 +189,7 @@ def test_schedule(enable_prefix_caching: Optional[bool],
     # Test initial scheduling
     output = scheduler.schedule()
     assert len(output.scheduled_new_reqs) == len(requests)
-    if vllm_version_is("0.9.1"):
-        assert len(output.scheduled_cached_reqs) == 0
-    else:
-        assert output.scheduled_cached_reqs.num_reqs == 0
+    assert output.scheduled_cached_reqs.num_reqs == 0
     assert len(output.finished_req_ids) == 0
     # Verify all requests are scheduled.
     for req_id, num_tokens in output.num_scheduled_tokens.items():
@@ -245,9 +239,7 @@ def test_stop_via_update_from_output():
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
-        **({
-            "pooler_output": []
-        } if not vllm_version_is("0.9.1") else {}))
+        pooler_output=[])
 
     scheduler.update_from_output(scheduler_output, model_output)
 
@@ -294,9 +286,7 @@ def test_stop_via_update_from_output():
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
-        **({
-            "pooler_output": []
-        } if not vllm_version_is("0.9.1") else {}))
+        pooler_output=[])
 
     scheduler.update_from_output(scheduler_output, model_output)
 
@@ -342,9 +332,7 @@ def test_stop_via_update_from_output():
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
-        **({
-            "pooler_output": []
-        } if not vllm_version_is("0.9.1") else {}))
+        pooler_output=[])
 
     scheduler.update_from_output(scheduler_output, model_output)
 
@@ -386,9 +374,7 @@ def test_stop_via_update_from_output():
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
-        **({
-            "pooler_output": []
-        } if not vllm_version_is("0.9.1") else {}))
+        pooler_output=[])
 
     scheduler.update_from_output(scheduler_output, model_output)
 
