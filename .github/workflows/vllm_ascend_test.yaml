@@ -211,8 +211,7 @@ jobs:
 
   e2e-4-cards:
     needs: [e2e]
-    # if: ${{ needs.e2e.result == 'success' }}
-    if: false
+    if: ${{ needs.e2e.result == 'success' }}
     strategy:
       max-parallel: 2
       matrix:
