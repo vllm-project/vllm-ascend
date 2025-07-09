@@ -1118,6 +1118,11 @@ class AscendFusedMoE(FusedMoE):
         local_num_experts = torch.sum(self.expert_map != -1) \
             if self.expert_map is not None else num_experts
 
+        self.dynamic_eplb = ascend_config.dynamic_eplb
+        self.moe_load = None
+        if self.dynamic_eplb:
+            self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
+
         moe_quant_params = {
             "num_experts": local_num_experts,
             "hidden_size": hidden_size,
@@ -1238,9 +1243,19 @@ class AscendFusedMoE(FusedMoE):
             mc2_mask=mc2_mask,
         )
 
-        if shared_experts:
-            if isinstance(e_hidden_states, tuple):
-                e_hidden_states, shared_hidden_states = e_hidden_states
+        if isinstance(e_hidden_states, tuple):
+            if len(e_hidden_states) == 4:
+                e_hidden_states, shared_hidden_states, expert_token_num, group_list_type = e_hidden_states
+            else:
+                e_hidden_states, expert_token_num, group_list_type = e_hidden_states
+
+        if self.dynamic_eplb:
+            self.moe_load += expert_token_num if group_list_type else \
+                torch.cat([expert_token_num[:1], expert_token_num[1:] - expert_token_num[:-1]])
+
+        # if shared_experts:
+        #     if isinstance(e_hidden_states, tuple):
+        #         e_hidden_states, shared_hidden_states = e_hidden_states
 
         if tp_size > 1 and fused_moe_state != FusedMoEState.AllGather:
             dist.all_gather(list(chunk_hidden_states), e_hidden_states,
@@ -1268,6 +1283,18 @@ class AscendFusedMoE(FusedMoE):
             return final_hidden_states, shared_hidden_states
         else:
             return final_hidden_states
+
+    def update_map(self,new_expert_map):
+        self.expert_map = new_expert_map
+
+    def get_map(self):
+        return self.expert_map
+
+    def get_log2phy_map(self):
+        return self.log2phy
+
+    def clear_moe_load(self):
+        self.moe_load.zero_()
 
     # ----------------------------------------- TBO-related --------------------------------------------
 

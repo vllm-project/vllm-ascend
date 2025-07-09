@@ -326,14 +326,15 @@ def fused_experts_with_mc2(
 
     hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
 
+    group_list_type = 1
     if shared_experts is None:
-        return hidden_states
+        return hidden_states, expert_token_nums, group_list_type
     else:
         with npu_stream_switch("moe_secondary", 0):
             npu_wait_tensor(shared_act, down_out_list)
             shared_output, _ = shared_experts.down_proj(
                 (shared_act, swiglu_out_scale))
-        return hidden_states, shared_output
+        return hidden_states, shared_output, expert_token_nums, group_list_type
 
 
 def fused_prefill_experts_with_mc2(
@@ -551,7 +552,7 @@ def fused_experts_with_all2all(hidden_states: torch.Tensor,
         )
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
-    return final_hidden_states
+    return final_hidden_states, expert_tokens, group_list_type
 
 
 def fused_experts(hidden_states: torch.Tensor,
@@ -665,7 +666,7 @@ def fused_experts(hidden_states: torch.Tensor,
 
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
-    return final_hidden_states
+    return final_hidden_states, expert_tokens, group_list_type
 
 
 class AscendW8A8DynamicLinearMethod:
