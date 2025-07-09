@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 import torch
+
 from tests.ut.base import TestBase
 from vllm_ascend.multistream.base import MSEventKey
 from vllm_ascend.multistream.metadata import (MultiStreamConfig,
