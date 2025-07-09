@@ -16,7 +16,6 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 from vllm_ascend.core.scheduler import AscendScheduler
-from vllm_ascend.utils import vllm_version_is
 
 EOS_TOKEN_ID = 50256
 
@@ -140,9 +139,7 @@ def create_requests(num_requests: int,
             multi_modal_placeholders=mm_position,
             multi_modal_hashes=None,
             eos_token_id=EOS_TOKEN_ID,
-            **({
-                "pooling_params": None
-            } if not vllm_version_is("0.9.1") else {}),
+            pooling_params=None,
         )
         requests.append(request)
     return requests
@@ -201,10 +198,7 @@ def test_schedule(enable_prefix_caching: Optional[bool],
     # Test initial scheduling
     output = scheduler.schedule()
     assert len(output.scheduled_new_reqs) == len(requests)
-    if vllm_version_is("0.9.1"):
-        assert len(output.scheduled_cached_reqs) == 0
-    else:
-        assert output.scheduled_cached_reqs.num_reqs == 0
+    assert output.scheduled_cached_reqs.num_reqs == 0
     assert len(output.finished_req_ids) == 0
     # Verify all requests are scheduled.
     for req_id, num_tokens in output.num_scheduled_tokens.items():
@@ -241,10 +235,7 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
 
     output = scheduler.schedule()
     assert len(output.scheduled_new_reqs) == 3
-    if vllm_version_is("0.9.1"):
-        assert len(output.scheduled_cached_reqs) == 0
-    else:
-        assert output.scheduled_cached_reqs.num_reqs == 0
+    assert output.scheduled_cached_reqs.num_reqs == 0
     assert len(output.finished_req_ids) == 0
 
     # The first request is scheduled partially - 400.
@@ -264,9 +255,7 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
-        **({
-            "pooler_output": []
-        } if not vllm_version_is("0.9.1") else {}))
+        pooler_output=[])
     scheduler.update_from_output(output, model_runner_output)
 
     # Schedule the next step. All three requests are running.
@@ -274,10 +263,7 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
     output1 = scheduler.schedule()
     assert len(scheduler.running) == 3
     assert len(output1.scheduled_new_reqs) == 0
-    if vllm_version_is("0.9.1"):
-        assert len(output1.scheduled_cached_reqs) == 3
-    else:
-        assert output1.scheduled_cached_reqs.num_reqs == 3
+    assert output1.scheduled_cached_reqs.num_reqs == 3
     assert len(output1.finished_req_ids) == 0
     assert output1.num_scheduled_tokens[requests[0].request_id] == 400
     assert output1.num_scheduled_tokens[requests[1].request_id] == 400
@@ -293,18 +279,13 @@ def test_schedule_concurrent_partial_requests(enable_prefix_caching: bool):
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
-        **({
-            "pooler_output": []
-        } if not vllm_version_is("0.9.1") else {}))
+        pooler_output=[])
 
     scheduler.update_from_output(output1, model_runner_output)
     output2 = scheduler.schedule()
     assert len(scheduler.running) == 3
     assert len(output2.scheduled_new_reqs) == 0
-    if vllm_version_is("0.9.1"):
-        assert len(output2.scheduled_cached_reqs) == 3
-    else:
-        assert output2.scheduled_cached_reqs.num_reqs == 3
+    assert output2.scheduled_cached_reqs.num_reqs == 3
     assert len(output2.finished_req_ids) == 0
     assert output2.num_scheduled_tokens[requests[0].request_id] == 1
     assert output2.num_scheduled_tokens[requests[1].request_id] == 1
@@ -351,9 +332,7 @@ def test_stop_via_update_from_output():
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
-        **({
-            "pooler_output": []
-        } if not vllm_version_is("0.9.1") else {}))
+        pooler_output=[])
 
     scheduler.update_from_output(scheduler_output, model_output)
 
@@ -402,9 +381,7 @@ def test_stop_via_update_from_output():
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
-        **({
-            "pooler_output": []
-        } if not vllm_version_is("0.9.1") else {}))
+        pooler_output=[])
 
     scheduler.update_from_output(scheduler_output, model_output)
 
@@ -452,9 +429,7 @@ def test_stop_via_update_from_output():
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
-        **({
-            "pooler_output": []
-        } if not vllm_version_is("0.9.1") else {}))
+        pooler_output=[])
 
     scheduler.update_from_output(scheduler_output, model_output)
 
@@ -497,9 +472,7 @@ def test_stop_via_update_from_output():
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
-        **({
-            "pooler_output": []
-        } if not vllm_version_is("0.9.1") else {}))
+        pooler_output=[])
 
     scheduler.update_from_output(scheduler_output, model_output)
 
@@ -549,9 +522,7 @@ def test_schedule_concurrent_batches(enable_prefix_caching: Optional[bool],
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
-        **({
-            "pooler_output": []
-        } if not vllm_version_is("0.9.1") else {}))
+        pooler_output=[])
 
     scheduler.update_from_output(scheduler_output0, model_runner_output)
 
@@ -569,9 +540,7 @@ def test_schedule_concurrent_batches(enable_prefix_caching: Optional[bool],
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
-        **({
-            "pooler_output": []
-        } if not vllm_version_is("0.9.1") else {}))
+        pooler_output=[])
 
     scheduler.update_from_output(scheduler_output1, model_runner_output)
 
@@ -622,9 +591,7 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         spec_token_ids=spec_tokens,
         logprobs=None,
         prompt_logprobs_dict={},
-        **({
-            "pooler_output": []
-        } if not vllm_version_is("0.9.1") else {}))
+        pooler_output=[])
 
     engine_core_outputs = scheduler.update_from_output(output,
                                                        model_runner_output)
@@ -657,16 +624,13 @@ def test_schedule_spec_decoding_stats(spec_tokens, output_tokens, expected):
         else:
             assert req_id not in output.scheduled_spec_decode_tokens
 
-    model_runner_output = ModelRunnerOutput(
-        req_ids=req_ids,
-        req_id_to_index=req_to_index,
-        sampled_token_ids=output_tokens,
-        spec_token_ids=None,
-        logprobs=None,
-        prompt_logprobs_dict={},
-        **({
-            "pooler_output": []
-        } if not vllm_version_is("0.9.1") else {}))
+    model_runner_output = ModelRunnerOutput(req_ids=req_ids,
+                                            req_id_to_index=req_to_index,
+                                            sampled_token_ids=output_tokens,
+                                            spec_token_ids=None,
+                                            logprobs=None,
+                                            prompt_logprobs_dict={},
+                                            pooler_output=[])
 
     engine_core_outputs = scheduler.update_from_output(output,
                                                        model_runner_output)
@@ -695,9 +659,7 @@ def make_output(scheduler: AscendScheduler):
         spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
-        **({
-            "pooler_output": []
-        } if not vllm_version_is("0.9.1") else {}))
+        pooler_output=[])
 
 
 def assert_scheduler_empty(scheduler: AscendScheduler):
