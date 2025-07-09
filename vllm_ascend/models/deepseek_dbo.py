@@ -55,7 +55,6 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.tensor_parallel import gather_from_sequence_parallel_region
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.models.deepseek_v2 import (CustomDeepseekV2DecoderLayer,
@@ -72,8 +71,7 @@ from vllm_ascend.multistream.metadata import (MultiStreamConfig,
                                               make_multistream_metadata_ds)
 from vllm_ascend.quantization.w8a8_dynamic import (
     AscendW8A8DynamicLinearMethod, apply_mlp)
-from vllm_ascend.ops.fused_moe import AscendFusedMoE, apply_mlp, select_experts
-from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
+from vllm_ascend.ops.fused_moe import apply_mlp, select_experts
 from vllm_ascend.utils import dispose_tensor
 
 VLLM_ASCEND_ENABLE_DBO: bool = envs_ascend.VLLM_ASCEND_ENABLE_DBO
@@ -94,7 +92,8 @@ class CustomDeepseekDBOMLP(CustomDeepseekV2MLP):
                          intermediate_size=intermediate_size,
                          hidden_act=hidden_act,
                          quant_config=quant_config,
-                         prefix=prefix)
+                         prefix=prefix,
+                         reduce_results=reduce_results)
         self.is_dynamic_quant = not isinstance(
             self.gate_up_proj.quant_method,
             UnquantizedLinearMethod) and isinstance(
@@ -152,19 +151,6 @@ class CustomDeepseekDBOMoE(CustomDeepseekV2MoE):
                 prefix=f"{prefix}.shared_experts",
             )
         CustomDeepseekDBOMoE.top_k = config.num_experts_per_tok
-
-        self.dp_size = get_dp_group().world_size
-
-        self.tp_group = get_tp_group().device_group
-        self.tp_rank = get_tp_group().rank_in_group
-        self.kv_consumer = None
-        transfer_config = get_current_vllm_config().kv_transfer_config
-        if transfer_config is not None:
-            self.kv_consumer = transfer_config.kv_role = "kv_consumer"
-        self.params_dtype = torch.get_default_dtype()
-
-        ascend_config = get_ascend_config()
-        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.config = config
 
     def forward(
@@ -196,9 +182,13 @@ class CustomDeepseekDBOMoE(CustomDeepseekV2MoE):
             enable_force_load_balance=enable_force_load_balance,
             shared_experts=self.shared_experts)
 
+        shared_experts_hidden = experts_hidden_states[1]
+        if not (self.shared_experts.down_proj.reduce_results and self.shared_experts.down_proj.tp_size > 1):
+            shared_experts_hidden = tensor_model_parallel_all_reduce(shared_experts_hidden)
+
         hidden_states = (
             experts_hidden_states[0] * self.routed_scaling_factor +
-            experts_hidden_states[1])
+            shared_experts_hidden)
 
         return hidden_states
 
@@ -225,18 +215,10 @@ class CustomDeepseekDBOMoE(CustomDeepseekV2MoE):
     ) -> torch.Tensor:
         if attn_metadata is None:
             attn_metadata = get_forward_context().attn_metadata
-            # when profile runs, force experts to load balanced tokens
-            # to avoid high memory consumption on a single rank.
-            # TODO: need a better flag to indicate whether in profile run or not.
-            if attn_metadata is None:
-                # for profile run
-                self.is_prefill = True
-                self.enable_force_load_balance = True
-            else:
-                is_prefill = attn_metadata.num_prefills > 0
-                self.enable_force_load_balance = False
-                if hasattr(attn_metadata, 'with_prefill_across_dp'):
-                    self.is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
+        # when profile runs, force experts to load balanced tokens
+        # to avoid high memory consumption on a single rank.
+        # TODO: need a better flag to indicate whether in profile run or not.
+        enable_force_load_balance = get_forward_context().in_profile_run
 
         num_tokens, hidden_dim = hidden_states.shape
 
@@ -291,17 +273,11 @@ class CustomDeepseekDBOMoE(CustomDeepseekV2MoE):
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
-        if self.enable_force_load_balance:
+        if enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, self.config.n_routed_experts)
 
         return topk_weights, topk_ids, local_hidden_states, chunked_hidden_states_sizes
 
-    def _forward_dispatch_comm(
-            self, hidden_states, topk_weights, topk_ids, microbatch_id
-    ):
-        token_dispatcher = self.experts.token_dispatchers[microbatch_id]
-        _, hidden_states, tokens_per_expert = token_dispatcher.token_permutation(hidden_states, topk_weights, topk_ids)
-        return hidden_states, tokens_per_expert
 
     def _forward_op_shared_experts(
             self, hidden_states
@@ -315,7 +291,7 @@ class CustomDeepseekDBOMoE(CustomDeepseekV2MoE):
             self, dispatched_input, tokens_per_expert
     ):
         return apply_mlp(
-            [dispatched_input],
+            dispatched_input,
             self.experts.w13_weight,
             self.experts.w2_weight,
             tokens_per_expert
@@ -325,8 +301,9 @@ class CustomDeepseekDBOMoE(CustomDeepseekV2MoE):
             self, hidden_states, microbatch_id, num_tokens, chunked_hidden_states_sizes
     ):
         token_dispatcher = self.experts.token_dispatchers[microbatch_id]
-        token_dispatcher.combine_alltoall()
-        final_hidden_states = token_dispatcher.unpermute2() * self.routed_scaling_factor
+        final_hidden_states, _ = token_dispatcher.token_unpermutation(hidden_states)
+        if hasattr(self, 'routed_scaling_factor'):
+            final_hidden_states = final_hidden_states * self.routed_scaling_factor
 
         if self.tp_size > 1:
             final_hidden_states = gather_from_sequence_parallel_region(final_hidden_states, self.tp_group,
@@ -794,17 +771,12 @@ class CustomDeepseekDBODecoderLayer(CustomDeepseekV2DecoderLayer):
         chunked_hidden_states_sizes = [None] * num_micro_batchs
         token_dispatchers = self.mlp.experts.token_dispatchers
 
-        def print_with_sync(*args, **kwargs):
-            torch.npu.synchronize()
-            print(*args, **kwargs)
-
         def discard_tensor(tensor):
             if isinstance(tensor, torch.Tensor):
                 tensor = [tensor]
             for t in tensor:
                 t.untyped_storage().resize_(0)
 
-        # print_with_sync('begin layer...', torch.distributed.get_rank())
 
         # block 1 : attention
         # block 2 : Router Gating
@@ -814,12 +786,11 @@ class CustomDeepseekDBODecoderLayer(CustomDeepseekV2DecoderLayer):
         # can be overlapped with the attn communication of microbatch 1
         for i in range(num_micro_batchs):
             # wait last layer moe finishing communication
-            ms_metadata.try_wait_event(layer_index - 1, i,
-                                       MSEventKey.MOE_AFTER_COMM)
 
             forward_context = get_forward_context()
             layer_index, ms_metadata, attn_metadata = get_multistream_layer_context(
             )
+            ms_metadata.try_wait_event(layer_index - 1, i, MSEventKey.FFN_AR_FINISH)
             forward_context.attn_metadata = attn_metadata[i]
 
             # input layernorm
@@ -856,9 +827,10 @@ class CustomDeepseekDBODecoderLayer(CustomDeepseekV2DecoderLayer):
             with torch.npu.stream(dispatch_context.comm_stream):
                 dispatch_context.comm_stream.wait_event(dispatch_context.before_comm_event)
                 token_dispatchers[i].dispatch_alltoall()
+                dispatched_input[i], tokens_per_expert[i] = token_dispatchers[i].permute2()
                 dispatch_context.after_comm_event.record()
 
-                if self.mlp.n_shared_experts:
+                if self.mlp.n_shared_experts and self.tp_size > 1:
                     token_dispatchers[i].cached_shared_expert_output = tensor_model_parallel_all_reduce(
                         token_dispatchers[i].cached_shared_expert_output
                     )
@@ -872,20 +844,16 @@ class CustomDeepseekDBODecoderLayer(CustomDeepseekV2DecoderLayer):
             ms_metadata.try_wait_event(layer_index, i, MSEventKey.MOE_AFTER_COMM)
             discard_tensor(hidden_states[i])
 
-            dispatched_input[i], tokens_per_expert[i] = token_dispatchers[i].permute2()
             router_expert_output[i] = self.mlp._forward_op_grouped_mlp(dispatched_input[i], tokens_per_expert[i])
             discard_tensor(dispatched_input[i])
-            token_dispatchers[i].unpermute1(router_expert_output[i])
-            if router_expert_output[i].shape[0] > 0 and token_dispatchers[i].num_local_experts > 1:
-                discard_tensor(router_expert_output[i])
 
             # Launch Combine Comm in a New Stream.
             combine_context = MultiStreamStepMetadata(
                 comm_stream=ms_metadata.communicate_stream,
                 before_comm_event=ms_metadata.ms_events[layer_index][i][
-                    MSEventKey.MOE_BEFORE_COMM],
+                    MSEventKey.FFN_COM_FINISH],
                 after_comm_event=ms_metadata.ms_events[layer_index][i][
-                    MSEventKey.MOE_AFTER_COMM],
+                    MSEventKey.FFN_AR_FINISH],
             )
             combine_context.before_comm_event.record()
             ms_metadata.try_wait_event(layer_index, i, MSEventKey.MOE_SE_COMM_FINISH)
@@ -1032,7 +1000,6 @@ class CustomDeepseekDBOModel(nn.Module):
                              if VLLM_ASCEND_ENABLE_DBO and not graph_enable
                              and self.can_run_ms() else self.end_layer -
                              self.start_layer)
-
         moe_start_layer = self.start_layer + num_normal_layers
         for i in range(self.start_layer, min(moe_start_layer, self.end_layer)):
             layer = self.layers[i]
@@ -1068,16 +1035,6 @@ class CustomDeepseekDBOModel(nn.Module):
             return False
         return True
 
-    def all_can_run_ms(self):
-        can_run_ms_local = self.can_run_ms()
-        ep_group = get_ep_group().cpu_group
-        flag = torch.ones(1, dtype=torch.int) if can_run_ms_local else torch.zeros(1, dtype=torch.int)
-        torch.distributed.all_reduce(flag, group=ep_group)
-        if flag.item() == torch.distributed.get_world_size(ep_group):
-            return True
-        else:
-            return False
-
     def _forward_ms_layers(self,
                            positions: torch.Tensor,
                            hidden_states: torch.Tensor,
@@ -1098,9 +1055,7 @@ class CustomDeepseekDBOModel(nn.Module):
             layer = self.layers[i]
             ms_layer_forward_func = layer._forward_ms_layer
             if fused_moe_state == FusedMoEState.All2AllSeq:
-                # ms_layer_forward_func = layer._forward_ms_layer_alltoallv
                 ms_layer_forward_func = layer._forward_ms_layer_alltoallv_finegrained
-            # print("get_called......")
             hidden_states, residual = ms_layer_forward_func(
                 positions=positions,
                 hidden_states=hidden_states,

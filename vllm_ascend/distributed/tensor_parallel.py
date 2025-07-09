@@ -1,3 +1,4 @@
+# Copyright (c) 2024; NVIDIA CORPORATION. All rights reserved.
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # Copyright 2023 The vLLM team.
 #
