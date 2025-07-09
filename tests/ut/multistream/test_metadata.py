@@ -37,18 +37,16 @@ class TestMetaData(TestBase):
     def test_split_micro_batches_tensors(self):
         test_tensors_list_res = split_micro_batches_tensors(
             self.test_tensors_list, self.split_index)
-        
         test_tensors_res = split_micro_batches_tensors(self.test_tensors, 
                                                        self.split_index)
         test_tensors_dict_res = split_micro_batches_tensors(
             self.test_tensors_dict, self.split_index)
         for i in range(3):
-            
             self.assertEqual(len(test_tensors_list_res[i][0]), 
                              self.split_index)
-            
+
             self.assertEqual(
-                len(test_tensors_list_res[i][0]) + 
+                len(test_tensors_list_res[i][0]) +
                 len(test_tensors_list_res[i][1]), 100)
         
         self.assertEqual(len(test_tensors_res[0]), self.split_index)
@@ -56,13 +54,12 @@ class TestMetaData(TestBase):
             len(test_tensors_res[0]) + len(test_tensors_res[1]), 100)
 
         for key in ['query', 'key', 'value']:
-            
-            self.assertEqual(len(test_tensors_dict_res[0][key]), 
+            self.assertEqual(len(test_tensors_dict_res[0][key]),
                              self.split_index)
             self.assertEqual(
-                len(test_tensors_dict_res[0][key]) + 
+                len(test_tensors_dict_res[0][key]) +
                 len(test_tensors_dict_res[0][key]), 100)
-          
+
     def test_default_init_multistream_step_metadata(self):
         metadata = MultiStreamStepMetadata()
         self.assertIsNone(metadata.comm_stream)
@@ -119,8 +116,8 @@ class TestMetaData(TestBase):
         with patch('torch.npu.Event', return_value=mock_event):
             event_keys = [MagicMock(spec=MSEventKey)]
             multistream_config = MultiStreamConfig(
-                num_micro_batches=2, 
-                min_total_tokens_to_split=256, 
+                num_micro_batches=2,
+                min_total_tokens_to_split=256,
                 min_prefill_tokens_to_split=64)
 
             metadata = MultiStreamMetadata(
@@ -134,26 +131,26 @@ class TestMetaData(TestBase):
             expected_events = {
                 0: {
                     0: {
-                      event_keys[0]: mock_event
+                        event_keys[0]: mock_event
                     }, 
                     1: {
-                      event_keys[0]: mock_event
+                        event_keys[0]: mock_event
                     }
-                  },
+                },
                 1: {
                     0: {
-                      event_keys[0]: mock_event
+                        event_keys[0]: mock_event
                     }, 
                     1: {
-                      event_keys[0]: mock_event
+                        event_keys[0]: mock_event
                     }
-                  },
+                },
                 2: {
                     0: {
-                      event_keys[0]: mock_event
-                    }, 
+                        event_keys[0]: mock_event
+                    },
                     1: {
-                      event_keys[0]: mock_event
+                        event_keys[0]: mock_event
                     }
                 }
             }
@@ -175,11 +172,11 @@ class TestMetaData(TestBase):
                                        multistream_config=multistream_config)
 
         self.assertIsNotNone(metadata.ms_split_config)
-        self.assertEqual(metadata.ms_split_config.num_micro_batches, 
+        self.assertEqual(metadata.ms_split_config.num_micro_batches,
                          multistream_config.num_micro_batches)
-        self.assertEqual(metadata.ms_split_config.min_total_tokens_to_split, 
+        self.assertEqual(metadata.ms_split_config.min_total_tokens_to_split,
                          multistream_config.min_total_tokens_to_split)
-        self.assertEqual(metadata.ms_split_config.min_prefill_tokens_to_split, 
+        self.assertEqual(metadata.ms_split_config.min_prefill_tokens_to_split,
                          multistream_config.min_prefill_tokens_to_split)
 
     def test_try_wait_event(self):
@@ -196,8 +193,8 @@ class TestMetaData(TestBase):
                 event_keys=event_keys,
                 multistream_config=multistream_config)
 
-            metadata.try_wait_event(layer_index=1, 
-                                    micro_batch_index=0, 
+            metadata.try_wait_event(layer_index=1,
+                                    micro_batch_index=0,
                                     event_key=event_keys[0])
             mock_event.wait.assert_called_once()
 
@@ -215,8 +212,8 @@ class TestMetaData(TestBase):
                 event_keys=event_keys,
                 multistream_config=multistream_config)
 
-            metadata.try_record_event(layer_index=1, 
-                                      micro_batch_index=0, 
+            metadata.try_record_event(layer_index=1,
+                                      micro_batch_index=0,
                                       event_key=event_keys[0])
             mock_event.record.assert_called_once()  
 
@@ -236,11 +233,11 @@ class TestMetaData(TestBase):
         result = self.metadata.merge_micro_batches(input_tensors)
         self.assertEqual(len(result), 1)
         self.assertTrue(torch.equal(result[0], torch.tensor([1, 2, 3, 4])))
-    
+
     def test_merge_batches_nested_list_input(self):
         input_tensors = [[torch.tensor([1, 2]),
                           torch.tensor([3, 4])],
-                         [torch.tensor([5, 6]), 
+                         [torch.tensor([5, 6]),
                           torch.tensor([7, 8])]]
         result = self.metadata.merge_micro_batches(input_tensors)
         self.assertEqual(len(result), 2)
@@ -249,7 +246,7 @@ class TestMetaData(TestBase):
 
     def test_merge_batches_none_in_list_input(self):
         input_tensors = [[torch.tensor([1, 2]), None],
-                         [torch.tensor([5, 6]), 
+                         [torch.tensor([5, 6]),
                           torch.tensor([7, 8])]]
         result = self.metadata.merge_micro_batches(input_tensors)
         self.assertEqual(len(result), 2)
