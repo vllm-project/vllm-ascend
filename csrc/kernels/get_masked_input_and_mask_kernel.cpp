@@ -325,13 +325,12 @@ extern "C" __global__ __aicore__ void get_masked_input_and_mask_kernel(
     const int64_t num_org_vocab_padding,
     const int64_t added_vocab_start_index,
     const int64_t added_vocab_end_index,
-    const int64_t size,
-    const uint32_t loop_cnt,
-    const uint32_t aiv_num)
+    const int64_t size)
 {
     {
         GetMaskedInputAndMask<int32_t> op{};
-
+        uint32_t aiv_num = AscendC::GetBlockNum();
+        uint32_t loop_cnt = (size + aiv_num - 1) / aiv_num;
         for (int64_t i = AscendC::GetBlockIdx(); i < loop_cnt; i += aiv_num) {
             op.Init(input + i * size/loop_cnt, 
                    masked_input + i * size/loop_cnt,
@@ -357,11 +356,11 @@ void get_masked_input_and_mask_impl(
     const int64_t num_org_vocab_padding, 
     const int64_t added_vocab_start_index,
     const int64_t added_vocab_end_index,
-    const int64_t size,
-    const uint32_t loop_cnt,
-    const uint32_t aiv_num)
+    const int64_t size)
 {
-    get_masked_input_and_mask_kernel<<<aiv_num, nullptr, stream>>>(
+    // block_dim only used for parameter check, execute parallel number is handled in get_masked_input_and_mask_kernel
+    const uint32_t block_dim = 8;
+    get_masked_input_and_mask_kernel<<<block_dim, nullptr, stream>>>(
         static_cast<int32_t*>(input),
         static_cast<int32_t*>(masked_input),
         static_cast<bool*>(mask_out),
@@ -370,9 +369,7 @@ void get_masked_input_and_mask_impl(
         num_org_vocab_padding,
         added_vocab_start_index,
         added_vocab_end_index,
-        size,
-        loop_cnt,
-        aiv_num);
+        size);
 }
 
 } // namespace vllm_ascend
