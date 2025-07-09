@@ -54,11 +54,12 @@ def test_run_with_ascend_config():
             # torchair graph only works with deepseek. The e2e test should be added
             # in multicard test with deepseek models.
             "enabled": False,
-            "use_cached_graph": True,
-            "graph_batch_sizes": [1, 2, 4, 8],
+            "use_cached_graph": False,
+            "graph_batch_sizes": [],
             "graph_batch_sizes_init": False,
-            "enable_multistream_moe": True,
-            "enable_multistream_mla": True,
+            "enable_multistream_moe": False,
+            "enable_multistream_mla": False,
+            "enable_view_optimize": False,
         },
         "ascend_scheduler_config": {
             "enabled": True,
@@ -73,13 +74,12 @@ def test_run_with_ascend_config():
         ascend_config = get_ascend_config()
 
         assert not ascend_config.torchair_graph_config.enabled
-        assert ascend_config.torchair_graph_config.use_cached_graph
-        assert ascend_config.torchair_graph_config.graph_batch_sizes == [
-            1, 2, 4, 8
-        ]
+        assert not ascend_config.torchair_graph_config.use_cached_graph
+        assert ascend_config.torchair_graph_config.graph_batch_sizes == []
         assert not ascend_config.torchair_graph_config.graph_batch_sizes_init
-        assert ascend_config.torchair_graph_config.enable_multistream_mla
-        assert ascend_config.torchair_graph_config.enable_multistream_moe
+        assert not ascend_config.torchair_graph_config.enable_multistream_mla
+        assert not ascend_config.torchair_graph_config.enable_multistream_moe
+        assert not ascend_config.torchair_graph_config.enable_view_optimize
         assert ascend_config.ascend_scheduler_config.enabled
         assert ascend_config.ascend_scheduler_config.enable_chunked_prefill
 
@@ -142,6 +142,58 @@ def test_ascend_config_load_error():
                         additional_config=input_additional_config_fake_3):
             pass
 
+    # use_cached_graph should not be enabled without torchair graph mode
+    with pytest.raises(RuntimeError):
+        input_additional_config_fake_4 = {
+            "torchair_graph_config": {
+                "enabled": False,
+                "use_cached_graph": True,
+            },
+        }
+        with VllmRunner("facebook/opt-125m",
+                        enforce_eager=True,
+                        additional_config=input_additional_config_fake_4):
+            pass
+
+    # graph_batch_sizes_init should not be enabled without torchair graph mode
+    with pytest.raises(RuntimeError):
+        input_additional_config_fake_5 = {
+            "torchair_graph_config": {
+                "enabled": False,
+                "graph_batch_sizes_init": True,
+            },
+        }
+        with VllmRunner("facebook/opt-125m",
+                        enforce_eager=True,
+                        additional_config=input_additional_config_fake_5):
+            pass
+
+    # enable_multistream_mla should not be enabled without torchair graph mode
+    with pytest.raises(RuntimeError):
+        input_additional_config_fake_6 = {
+            "torchair_graph_config": {
+                "enabled": False,
+                "enable_multistream_mla": True,
+            },
+        }
+        with VllmRunner("facebook/opt-125m",
+                        enforce_eager=True,
+                        additional_config=input_additional_config_fake_6):
+            pass
+
+    # enable_multistream_moe should not be enabled without torchair graph mode
+    with pytest.raises(RuntimeError):
+        input_additional_config_fake_7 = {
+            "torchair_graph_config": {
+                "enabled": False,
+                "enable_multistream_moe": True,
+            },
+        }
+        with VllmRunner("facebook/opt-125m",
+                        enforce_eager=True,
+                        additional_config=input_additional_config_fake_7):
+            pass
+
 
 @_clean_up_ascend_config
 def test_check_ascend_config_v0():
@@ -168,9 +220,7 @@ def test_ascend_config_refresh():
     input_additional_config = {
         "torchair_graph_config": {
             "enabled": False,
-            "use_cached_graph": True,
-            "graph_batch_sizes": [1, 2, 4, 8],
-            "graph_batch_sizes_init": False,
+            "enable_view_optimize": False
         },
         "refresh": True,
     }
@@ -180,9 +230,4 @@ def test_ascend_config_refresh():
                     additional_config=input_additional_config):
         ascend_config = get_ascend_config()
 
-        assert not ascend_config.torchair_graph_config.enabled
-        assert ascend_config.torchair_graph_config.use_cached_graph
-        assert ascend_config.torchair_graph_config.graph_batch_sizes == [
-            1, 2, 4, 8
-        ]
-        assert not ascend_config.torchair_graph_config.graph_batch_sizes_init
+        assert not ascend_config.torchair_graph_config.enable_view_optimize
