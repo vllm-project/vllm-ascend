@@ -54,7 +54,7 @@ hccn_tool -i 0 -ping -g address 10.20.0.20
 ```
 
 ## Run with docker
-Assume you have two Altas 800 A2(64G*8) nodes, and want to deploy the `deepseek-v3-w8a8` quantitative model across multi-node.
+Assume you have two Atlas 800 A2(64G*8) nodes, and want to deploy the `deepseek-v3-w8a8` quantitative model across multi-node.
 
 ```shell
 # Define the image and container name
