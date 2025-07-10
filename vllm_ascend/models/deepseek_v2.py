@@ -549,7 +549,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             return output
         else:
             kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]
-            if self.debug_layer_idx > 3:
+            if self.debug_layer_idx > 3 and self.debug_layer_idx < 61:
                 hidden_states_or_q_c = get_tp_group().all_gather(hidden_states_or_q_c, 0)
                 kv_no_split = get_tp_group().all_gather(kv_no_split, 0)
             
@@ -675,7 +675,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 residual *= 1. / self.routed_scaling_factor
 
         tp_size = get_tensor_model_parallel_world_size()
-        if self.layer_idx == 3 and tp_size > 1:
+        if (self.layer_idx == 3 or self.layer_idx == 61) and tp_size > 1:
             num_tokens, _ = residual.shape
             if num_tokens % tp_size:
                 residual = nn.functional.pad(residual, (0, 0, 0, -num_tokens % tp_size))
@@ -701,6 +701,16 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             # The scaling of DeepseekV2MOE output would be done in the forward
             # of DeepseekV2MOE
             hidden_states *= 1. / self.routed_scaling_factor
+
+        # for last layer of main model and mtp layer.
+        if self.layer_idx >= 60 and tp_size > 1:
+            hidden_states = get_tp_group().all_gather(hidden_states, 0)
+            residual = get_tp_group().all_gather(residual, 0)
+            num_tokens = hidden_states.shape[0]
+
+            if num_tokens % tp_size:
+                hidden_states = hidden_states[:num_tokens]
+                residual = residual[:num_tokens]
 
         return hidden_states, residual
 
@@ -786,14 +796,6 @@ class CustomDeepseekV2Model(nn.Module):
             })
 
         hidden_states, _ = self.norm(hidden_states, residual)
-
-        tp_size = get_tensor_model_parallel_world_size()
-        if tp_size > 1:
-            hidden_states = get_tp_group().all_gather(hidden_states, 0)
-            num_tokens = hidden_states.shape[0]
-
-            if num_tokens % tp_size:
-                hidden_states = hidden_states[:num_tokens]
         return hidden_states
 
 
