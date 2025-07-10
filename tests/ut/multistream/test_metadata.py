@@ -233,7 +233,7 @@ class TestMetaData(TestBase):
         input_tensors = [torch.tensor([1, 2]), torch.tensor([3, 4])]
         result = self.metadata.merge_micro_batches(input_tensors)
         self.assertEqual(len(result), 2)
-        self.assertTrue(torch.equal(result, input_tensors))
+        self.assertEqual(result, input_tensors)
 
     def test_merge_batches_nested_list_input(self):
         input_tensors = [[torch.tensor([1, 2]),
