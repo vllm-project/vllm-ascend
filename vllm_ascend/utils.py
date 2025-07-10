@@ -425,6 +425,20 @@ class FusedMoEState(Enum):
     NaiveMulticast = 4
 
 
+# TODO(ttanzhiqiang): all_reduce merge
+# When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
+# Currently, all_reduce_merge is enabled by default in the AllGather, AllGatherEP and NaiveMulticast scenarios of the deepseek model.
+def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
+    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
+    # only supports deepseek v3/r1
+    if (envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
+            and is_deepseek_v3_r1):
+        return True
+    elif ep_size == 1 and is_deepseek_v3_r1:
+        return True
+    return False
+
+
 # TODO(zzzzwwjj): add soc_version to choose branch
 def get_fused_moe_state(ep_size: int, with_prefill: bool,
                         is_deepseek_v3_r1: bool):
