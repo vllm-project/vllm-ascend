@@ -1,11 +1,19 @@
-# Multi-Node (DeepSeek)
+# Multi-Node-DP (DeepSeek)
 
-Multi-node inference is suitable for scenarios where the model cannot be deployed on a single NPU. In such cases, the model can be distributed using tensor parallelism and pipeline parallelism. The specific parallelism strategies will be covered in the following sections. To successfully deploy multi-node inference, the following three steps need to be completed:
+## Getting Start
+vLLM-Ascend now supports Data Parallel (DP) deployment, enabling model weights to be replicated across multiple NPUs or instances, each processing independent batches of requests. This is particularly useful for scaling throughput across devices while maintaining high resource utilization.
 
-* **Verify Multi-Node Communication Environment** 
-* **Set Up and Start the Ray Cluster**
-* **Start the Online Inference Service on multinode**
+Each DP rank is deployed as a separate “core engine” process which communicates with front-end process(es) via ZMQ sockets. Data Parallel can be combined with Tensor Parallel, in which case each DP engine owns a number of per-NPU worker processes equal to the TP size.
 
+For Mixture-of-Experts (MoE) models — especially advanced architectures like DeepSeek that utilize Multi-head Latent Attention (MLA) — a hybrid parallelism approach is recommended:
+    - Use **Data Parallelism (DP)** for attention layers, which are replicated across devices and handle separate batches.
+    - Use **Expert or Tensor Parallelism (EP/TP)** for expert layers, which are sharded across devices to distribute the computation.
+
+This division enables attention layers to be replicated across Data Parallel (DP) ranks, enabling them to process different batches independently. Meanwhile, expert layers are partitioned (sharded) across devices using Expert or Tensor Parallelism(DP*TP), maximizing hardware utilization and efficiency.
+
+In these cases the data parallel ranks are not completely independent, forward passes must be aligned and expert layers across all ranks are required to synchronize during every forward pass, even if there are fewer requests to be processed than DP ranks.
+
+For MoE models, when any requests are in progress in any rank, we must ensure that empty “dummy” forward passes are performed in all ranks which don’t currently have any requests scheduled. This is handled via a separate DP `Coordinator` process which communicates with all of the ranks, and a collective operation performed every N steps to determine when all ranks become idle and can be paused. When TP is used in conjunction with DP, expert layers form an EP or TP group of size (DP x TP).
 
 ## Verify Multi-Node Communication Environment
 
@@ -45,24 +53,19 @@ for i in {0..7}; do hccn_tool -i $i -ip -g | grep ipaddr; done
 hccn_tool -i 0 -ping -g address 10.20.0.20
 ```
 
-## Set Up and Start the Ray Cluster
-### Setting Up the Basic Container
-To ensure a consistent execution environment across all nodes, including the model path and Python environment, it is recommended to use Docker images.
-
-For setting up a multi-node inference cluster with Ray, **containerized deployment** is the preferred approach. Containers should be started on both the master and worker nodes, with the `--net=host` option to enable proper network connectivity.
-
-Below is the example container setup command, which should be executed on **all nodes** :
-
-
+## Run with docker
+Assume you have two Altas 800 A2(64G*8) nodes, and want to deploy the `deepseek-v3-w8a8` quantitative model across multi-node.
 
 ```shell
 # Define the image and container name
-export IMAGE=quay.io/ascend/vllm-ascend:|vllm_ascend_version|
+export IMAGE=quay.io/ascend/vllm-ascend:main
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
+# Note if you are running bridge network with docker, Please expose available ports for multiple nodes communication in advance
 docker run --rm \
 --name $NAME \
+--net=host \
 --device /dev/davinci0 \
 --device /dev/davinci1 \
 --device /dev/davinci2 \
@@ -75,121 +78,121 @@ docker run --rm \
 --device /dev/devmm_svm \
 --device /dev/hisi_hdc \
 -v /usr/local/dcmi:/usr/local/dcmi \
+-v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
 -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
 -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
 -v /usr/local/Ascend/driver/version.info:/usr/local/Ascend/driver/version.info \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
--v /root/.cache:/root/.cache \
--p 8000:8000 \
+-v /mnt/sfs_turbo/.cache:/root/.cache \
 -it $IMAGE bash
 ```
 
-### Start Ray Cluster
-After setting up the containers and installing vllm-ascend on each node, follow the steps below to start the Ray cluster and execute inference tasks.
-
-Choose one machine as the head node and the others as worker nodes. Before proceeding, use `ip addr` to check your `nic_name` (network interface name).
-
-Set the `ASCEND_RT_VISIBLE_DEVICES` environment variable to specify the NPU devices to use. For Ray versions above 2.1, also set the `RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES` variable to avoid device recognition issues. The `--num-gpus` parameter defines the number of NPUs to be used on each node.
-
-Below are the commands for the head and worker nodes:
-
-**Head node**:
-
 :::{note}
-When starting a Ray cluster for multi-node inference, the environment variables on each node must be set **before** starting the Ray cluster for them to take effect. 
-Updating the environment variables requires restarting the Ray cluster.
+Before launch the inference server, ensure some environment variables are set for multi node communication
 :::
 
+Run the following scripts on two nodes respectively
+
+**node0**
 ```shell
-# Head node
-export HCCL_IF_IP={local_ip}
-export GLOO_SOCKET_IFNAME={nic_name}
-export TP_SOCKET_IFNAME={nic_name}
-export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-ray start --head --num-gpus=8
-```
-**Worker node**:
+#!/bin/sh
 
-:::{note}
-When starting a Ray cluster for multi-node inference, the environment variables on each node must be set **before** starting the Ray cluster for them to take effect. Updating the environment variables requires restarting the Ray cluster.
-:::
+# this obtained through ifconfig
+# nic_name is the network interface name corresponding to local_ip
+nic_name="xxxx"
+local_ip="xxxx"
 
-```shell
-# Worker node
-export HCCL_IF_IP={local_ip}
-export GLOO_SOCKET_IFNAME={nic_name}
-export TP_SOCKET_IFNAME={nic_name}
-export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1 
-export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-ray start --address='{head_node_ip}:{port_num}' --num-gpus=8 --node-ip-address={local_ip}
-```
-:::{tip}
-Before starting the Ray cluster, set the `export ASCEND_PROCESS_LOG_PATH={plog_save_path}` environment variable on each node to redirect the Ascend plog, which helps in debugging issues during multi-node execution.
-:::
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=100
+export VLLM_USE_V1=1
+export HCCL_BUFFSIZE=1024
 
-
-Once the cluster is started on multiple nodes, execute `ray status` and `ray list nodes` to verify the Ray cluster's status. You should see the correct number of nodes and NPUs listed.
-
-
-## Start the Online Inference Service on multinode
-In the container, you can use vLLM as if all NPUs were on a single node. vLLM will utilize NPU resources across all nodes in the Ray cluster. You only need to run the vllm command on one node. 
-
-To set up parallelism, the common practice is to set the `tensor-parallel-size` to the number of NPUs per node, and the `pipeline-parallel-size` to the number of nodes.
-
-For example, with 16 NPUs across 2 nodes (8 NPUs per node), set the tensor parallel size to 8 and the pipeline parallel size to 2:
-
-```shell
-python -m vllm.entrypoints.openai.api_server \
-       --model="Deepseek/DeepSeek-V2-Lite-Chat" \
-       --trust-remote-code \
-       --enforce-eager \
-       --distributed_executor_backend "ray" \
-       --tensor-parallel-size 8 \
-       --pipeline-parallel-size 2 \
-       --disable-frontend-multiprocessing \
-       --port {port_num}
-```
-:::{note}
-Pipeline parallelism currently requires AsyncLLMEngine, hence the `--disable-frontend-multiprocessing`  is set.
-:::
-
-Alternatively, if you want to use only tensor parallelism, set the tensor parallel size to the total number of NPUs in the cluster. For example, with 16 NPUs across 2 nodes, set the tensor parallel size to 16:
-```shell
-python -m vllm.entrypoints.openai.api_server \
-       --model="Deepseek/DeepSeek-V2-Lite-Chat" \
-       --trust-remote-code \
-       --distributed_executor_backend "ray" \
-       --enforce-eager \
-       --tensor-parallel-size 16 \
-       --port {port_num}
+# The w8a8 weight can obtained from https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3-W8A8
+# If you want to the quantization manually, please refer to https://vllm-ascend.readthedocs.io/en/latest/user_guide/quantization.html
+vllm serve /root/.cache/ds_v3 \
+--host 0.0.0.0 \
+--port 8004 \
+--data-parallel-size 4 \
+--data-parallel-size-local 2 \
+--data-parallel-address $local_ip \
+--data-parallel-rpc-port 13389 \
+--tensor-parallel-size 4 \
+--seed 1024 \
+--served-model-name deepseek_v3 \
+--enable-expert-parallel \
+--max-num-seqs 16 \
+--max-model-len 32768 \
+--quantization ascend \
+--max-num-batched-tokens 4096 \
+--trust-remote-code \
+--no-enable-prefix-caching \
+--gpu-memory-utilization 0.9 \
+--additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true}}'
 ```
 
-:::{note}
-If you're running DeepSeek V3/R1, please remove `quantization_config` section in `config.json` file since it's not supported by vllm-ascend currently.
-:::
+**node1**
+```shell
+#!/bin/sh
+
+nic_name="xxx"
+local_ip="xxx"
+
+export HCCL_IF_IP=$local_ip
+export GLOO_SOCKET_IFNAME=$nic_name
+export TP_SOCKET_IFNAME=$nic_name
+export HCCL_SOCKET_IFNAME=$nic_name
+export OMP_PROC_BIND=false
+export OMP_NUM_THREADS=100
+export VLLM_USE_V1=1
+export HCCL_BUFFSIZE=1024
+
+vllm serve /root/.cache/ds_v3 \
+--host 0.0.0.0 \
+--port 8004 \
+--headless \
+--data-parallel-size 4 \
+--data-parallel-size-local 2 \
+--data-parallel-start-rank 2 \
+--data-parallel-address { node0 ip } \
+--data-parallel-rpc-port 13389 \
+--tensor-parallel-size 4 \
+--seed 1024 \
+--quantization ascend \
+--served-model-name deepseek_v3 \
+--max-num-seqs 16 \
+--max-model-len 32768 \
+--max-num-batched-tokens 4096 \
+--enable-expert-parallel \
+--trust-remote-code \
+--no-enable-prefix-caching \
+--gpu-memory-utilization 0.92 \
+--additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true}}'
+```
+
+The Deployment view looks like: 
+![alt text](../assets/multi_node_dp.png)
 
 Once your server is started, you can query the model with input prompts:
 
 ```shell
-curl -X POST http://127.0.0.1:{prot_num}/v1/completions  \
-     -H "Content-Type: application/json" \
-     -d '{
-         "model": "Deepseek/DeepSeek-V2-Lite-Chat",
-         "prompt": "The future of AI is",
-         "max_tokens": 24
-     }'
+curl http://{ node0 ip:8004 }/v1/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "/root/.cache/ds_v3",
+        "prompt": "The future of AI is",
+        "max_tokens": 50,
+        "temperature": 0
+    }'
 ```
 
-If you query the server successfully, you can see the info shown below (client):
-
-```
-{"id":"cmpl-6dfb5a8d8be54d748f0783285dd52303","object":"text_completion","created":1739957835,"model":"/home/data/DeepSeek-V2-Lite-Chat/","choices":[{"index":0,"text":" heavily influenced by neuroscience and cognitiveGuionistes. The goalochondria is to combine the efforts of researchers, technologists,","logprobs":null,"finish_reason":"length","stop_reason":null,"prompt_logprobs":null}],"usage":{"prompt_tokens":6,"total_tokens":30,"completion_tokens":24,"prompt_tokens_details":null}}
-```
-
-Logs of the vllm server:
-
-```
-INFO:     127.0.0.1:59384 - "POST /v1/completions HTTP/1.1" 200 OK
-INFO 02-19 17:37:35 metrics.py:453 Avg prompt throughput: 0.0 tokens/s, Avg generation throughput: 1.9 tokens/s, Running: 0 reqs, Swapped: 0 reqs, Pending: 0 reqs, NPU KV cache usage: 0.0%, CPU KV cache usage: 0.0%.
+## Run benchmarks
+For details please refer to [benchmark](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks)
+```shell
+vllm bench serve --model /root/.cache/ds_v3  --served-model-name deepseek_v3 \
+--dataset-name random --random-input-len 128 --random-output-len 128 \
+--num-prompts 200  --trust-remote-code --base-url "http://{ node0 ip }:8004" --request-rate 1
 ```
