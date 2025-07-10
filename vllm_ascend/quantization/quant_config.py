@@ -288,6 +288,17 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             layer.register_parameter(param_key, param)
             set_weight_attrs(param, extra_weight_attrs)
 
+    def apply_flashcomm3(
+            self,
+            layer: torch.nn.Module,
+            x: torch.Tensor,
+            topk_weights: torch.Tensor,
+            topk_ids: torch.Tensor,
+            pertoken_scale: torch.Tensor
+    ):
+        return self.quant_method.apply_flashcomm3(
+            layer, x, topk_weights, topk_ids, pertoken_scale)
+
     def apply(
         self,
         layer: torch.nn.Module,

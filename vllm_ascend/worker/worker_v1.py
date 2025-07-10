@@ -39,7 +39,7 @@ from vllm.v1.worker.worker_base import WorkerBase
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.device_allocator.camem import CaMemAllocator
-from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel, initialize_flashcomm_dp
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (check_kv_cache_bytes_cache_exist,
                                check_torchair_cache_exist,
@@ -298,6 +298,14 @@ class NPUWorker(WorkerBase):
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
+
+        if envs_ascend.VLLM_ENABLE_FLASH_COMM3:
+            initialize_flashcomm_dp(
+                parallel_config.tensor_parallel_size,
+                parallel_config.pipeline_parallel_size,
+                parallel_config.data_parallel_size
+            )
+
         init_ascend_model_parallel(
             parallel_config.expert_parallel_size,
             parallel_config.expert_tensor_parallel_size,

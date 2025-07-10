@@ -75,3 +75,51 @@ def destory_ascend_model_parallel():
     if _ETP:
         _ETP.destroy()
     _ETP = None
+
+_DP1: Optional[GroupCoordinator] = None
+_DP2: Optional[GroupCoordinator] = None
+
+def get_dp1_group() -> GroupCoordinator:
+    assert _DP1 is not None, ("data parallel group is not initialized")
+    return _DP1
+
+
+def get_dp2_group() -> GroupCoordinator:
+    assert _DP2 is not None, ("data parallel group is not initialized")
+    return _DP2
+
+
+def initialize_flashcomm_dp(
+        tensor_model_parallel_size: int = 1,
+        pipeline_model_parallel_size: int = 1,
+        data_parallel_size=1,
+        backend: Optional[str] = None,
+) -> None:
+    assert torch.distributed.is_initialized()
+    world_size: int = torch.distributed.get_world_size()
+    rank = torch.distributed.get_rank()
+    backend = backend or torch.distributed.get_backend(
+        get_world_group().device_group)
+    all_ranks = torch.arange(world_size).reshape(
+        -1, data_parallel_size, pipeline_model_parallel_size,
+        tensor_model_parallel_size)  # noqa
+    global _DP1
+    assert _DP1 is None, ("data parallel group is already initialized")
+    group_ranks = all_ranks.transpose(1,
+                                      3).reshape(-1,
+                                                 data_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
+    _DP1 = init_model_parallel_group(group_ranks,
+                                     get_world_group().local_rank,
+                                     backend,
+                                     group_name="dp")
+    global _DP2
+    assert _DP2 is None, ("data parallel group is already initialized")
+    group_ranks = all_ranks.transpose(1,
+                                      3).reshape(-1,
+                                                 data_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
+    _DP2 = init_model_parallel_group(group_ranks,
+                                     get_world_group().local_rank,
+                                     backend,
+                                     group_name="dp")

@@ -21,6 +21,7 @@ from typing import Any, Callable, List, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch_npu
+import torchair
 from torch import nn
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (GroupCoordinator, get_tensor_model_parallel_rank,
@@ -41,7 +42,7 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.communication_op import \
     data_parallel_reduce_scatter
-from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
+from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group, get_dp1_group, get_dp2_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
                                get_all_reduce_merge_state, get_fused_moe_state,
@@ -1240,7 +1241,8 @@ class AscendFusedMoE(FusedMoE):
                 enable_force_load_balance: bool = False,
                 top_k: Optional[int] = None,
                 shared_experts: Optional[Any] = None,
-                replace_allreduce: bool = False):
+                replace_allreduce: bool = False,
+                gate: Optional[Any] = None):
         assert self.quant_method is not None
 
         if top_k:
@@ -1254,9 +1256,14 @@ class AscendFusedMoE(FusedMoE):
         fused_moe_state = get_fused_moe_state(self.moe_parallel_config.ep_size,
                                               is_prefill, is_deepseek_v3_r1)
         if shared_experts:
-            if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
-                # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
-                shared_hidden_states = shared_experts(hidden_states)
+            if envs_ascend.VLLM_ENABLE_FLASH_COMM3 and not is_prefill:
+                with npu_stream_switch("CustomDeepseekV2MoE_dp_decode_shared_experts", 0):
+                    hidden_states = torchair.scope.npu_wait_tensor(hidden_states, hidden_states)
+                    shared_hidden_states = shared_experts(hidden_states)
+            else:
+                if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
+                    # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
+                    shared_hidden_states = shared_experts(hidden_states)
 
         tp_size = get_tensor_model_parallel_world_size()
         if (tp_size > 1 and fused_moe_state not in [
@@ -1278,7 +1285,7 @@ class AscendFusedMoE(FusedMoE):
             hidden_states = chunk_hidden_states[tp_rank]
             router_logits = chunk_router_logits[tp_rank]
         if self.dp_size > 1:
-            if fused_moe_state == FusedMoEState.AllGather:
+            if fused_moe_state == FusedMoEState.AllGather or fused_moe_state == FusedMoEState.AllGatherEP:
                 # NOTE: When in torchair graph, it has been padded in model_runner_v1
                 if not self.torchair_graph_enabled:
                     attn_metadata = get_forward_context().attn_metadata
@@ -1293,8 +1300,34 @@ class AscendFusedMoE(FusedMoE):
                                 router_logits,
                                 (0, 0, 0,
                                  max_num_tokens_across_dp - num_tokens))
-                hidden_states = get_dp_group().all_gather(hidden_states, 0)
-                router_logits = get_dp_group().all_gather(router_logits, 0)
+
+                if envs_ascend.VLLM_ENABLE_FLASH_COMM3 and not is_prefill:
+                    # 计算logits和 topk weight
+                    with npu_stream_switch("CustomDeepseekV2MoE_dp_graph_decode_gating", 0):
+                        hidden_states = torchair.scope.npu_wait_tensor(hidden_states, hidden_states)
+                        router_logits, _ = gate.forward(hidden_states)
+                        topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
+                            router_logits.float(),
+                            k=top_k,  # topk当前写8
+                            bias=self.e_score_correction_bias.float(),
+                            k_group=self.topk_group,  # fix: 4
+                            group_count=self.num_expert_group,  # fix 8
+                            group_select_mode=1,  # 0: group中的最大; 1: topk2.sum(fix)
+                            renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
+                            norm_type=1,  # 0: softmax; 1: sigmoid(fix)
+                            # out_flag=False, # todo new api; 第三个输出是否输出
+                            # y2_flag=False, # old api; 第三个输出是否输出
+                            routed_scaling_factor=1,
+                            eps=float(1e-20))
+                    with npu_stream_switch("CustomDeepseekV2MoE_dp_graph_decode_gating_comm", 0):
+                        topk_weights = torchair.scope.npu_wait_tensor(topk_weights, topk_weights)
+                        topk_ids = torchair.scope.npu_wait_tensor(topk_ids, topk_ids)
+                        topk_weights = get_dp1_group().all_gather(topk_weights, 0)
+                        topk_ids = get_dp1_group().all_gather(topk_ids, 0)
+                else:
+                    hidden_states = get_dp_group().all_gather(hidden_states, 0)
+                    router_logits = get_dp_group().all_gather(router_logits, 0)
+
             elif fused_moe_state == FusedMoEState.NaiveMulticast:
                 cu_tokens_across_dp_cpu = get_forward_context(
                 ).dp_metadata.cu_tokens_across_dp_cpu
@@ -1303,28 +1336,40 @@ class AscendFusedMoE(FusedMoE):
                 router_logits = self.naive_multicast(router_logits,
                                                      cu_tokens_across_dp_cpu)
 
-        # Matrix multiply.
-        e_hidden_states = self.quant_method.apply(
-            layer=self,
-            x=hidden_states,
-            router_logits=router_logits,
-            top_k=real_top_k,
-            renormalize=self.renormalize,
-            use_grouped_topk=self.use_grouped_topk,
-            global_num_experts=self.global_num_experts,
-            expert_map=self.expert_map,
-            topk_group=self.topk_group,
-            num_expert_group=self.num_expert_group,
-            custom_routing_function=self.custom_routing_function,
-            scoring_func=self.scoring_func,
-            e_score_correction_bias=self.e_score_correction_bias,
-            is_prefill=is_prefill,
-            enable_force_load_balance=enable_force_load_balance,
-            log2phy=self.log2phy,
-            global_redundant_expert_num=self.global_redundant_expert_num,
-            shared_experts=shared_experts if self.torchair_graph_enabled
-            and self.enable_multistream_moe and not is_prefill else None,
-        )
+        if self.dp_size > 1 and envs_ascend.VLLM_ENABLE_FLASH_COMM3 and not is_prefill:
+            hidden_states_int8, pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states)
+            global_hidden_states = get_dp2_group().all_gather(hidden_states_int8, 0)
+            global_pertoken_scale = get_dp2_group().all_gather(pertoken_scale, 0).squeeze(-1)
+            e_hidden_states = self.quant_method.apply_flashcomm3(
+                layer=self,
+                x=global_hidden_states,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                pertoken_scale=global_pertoken_scale
+            )
+        else:
+            # Matrix multiply.
+            e_hidden_states = self.quant_method.apply(
+                layer=self,
+                x=hidden_states,
+                router_logits=router_logits,
+                top_k=real_top_k,
+                renormalize=self.renormalize,
+                use_grouped_topk=self.use_grouped_topk,
+                global_num_experts=self.global_num_experts,
+                expert_map=self.expert_map,
+                topk_group=self.topk_group,
+                num_expert_group=self.num_expert_group,
+                custom_routing_function=self.custom_routing_function,
+                scoring_func=self.scoring_func,
+                e_score_correction_bias=self.e_score_correction_bias,
+                is_prefill=is_prefill,
+                enable_force_load_balance=enable_force_load_balance,
+                log2phy=self.log2phy,
+                global_redundant_expert_num=self.global_redundant_expert_num,
+                shared_experts=shared_experts if self.torchair_graph_enabled
+                and self.enable_multistream_moe and not is_prefill else None,
+            )
 
         if shared_experts:
             if isinstance(e_hidden_states, tuple):
@@ -1349,7 +1394,7 @@ class AscendFusedMoE(FusedMoE):
                     e_hidden_states)
                 final_hidden_states = final_hidden_states[start:end, :]
                 dispose_tensor(e_hidden_states)
-            elif fused_moe_state == FusedMoEState.AllGather:
+            elif fused_moe_state == FusedMoEState.AllGather or fused_moe_state == FusedMoEState.AllGatherEP:
                 final_hidden_states = data_parallel_reduce_scatter(
                     e_hidden_states, dim=0)
                 final_hidden_states = final_hidden_states[:num_tokens]

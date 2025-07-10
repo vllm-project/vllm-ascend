@@ -20,7 +20,9 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch_npu
+import torchair
 from vllm.distributed import GroupCoordinator
+from vllm.distributed.parallel_state import get_dp_group
 
 import vllm_ascend.envs as envs
 from vllm_ascend.ascend_config import get_ascend_config
@@ -345,6 +347,54 @@ def fused_experts_with_all2all(
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
     return final_hidden_states
+
+
+def fused_experts_w8a8_allgather_ep_flashcomm3(hidden_states: torch.Tensor,
+                                    pertoken_scale: torch.Tensor,
+                                    w1: torch.Tensor,
+                                    w2: torch.Tensor,
+                                    w1_scale: torch.Tensor,
+                                    w2_scale: torch.Tensor,
+                                    topk_weights: torch.Tensor,
+                                    topk_ids: torch.Tensor,
+                                    n_routed_experts: int
+                                    ):
+    expert_parallel_size = get_ep_group().world_size
+    w1_scale = w1_scale.to(torch.float32)
+    w2_scale = w2_scale.to(torch.float32)
+
+    batch_size, hidden_size = hidden_states.shape
+    hidden_states = hidden_states.view(-1, hidden_size)
+    n_total_expert = n_routed_experts * expert_parallel_size
+    experts_start_idx = get_ep_group().rank_in_group * n_routed_experts
+    experts_end_idx = experts_start_idx + n_routed_experts
+    expert_range = [experts_start_idx, experts_end_idx]
+    sorted_tokens, expanded_x_idx, expert_tokens, dynamic_quant_scale = torch_npu.npu_moe_init_routing_v2(
+        hidden_states, topk_ids, scale=pertoken_scale, offset=None, active_num=topk_ids.numel(),
+    expert_num = n_total_expert,  expert_tokens_num_type=1, expert_tokens_num_flag=True, quant_mode=-1,
+    active_expert_range=expert_range, row_idx_type=1)
+    with torchair.scope.npu_stream_switch("CustomDeepseekV2MoE_dp_graph_allgather_w8a8_ep"):
+        expanded_x_idx = torchair.scope.npu_wait_tensor(expanded_x_idx, expanded_x_idx)
+        sorted_topk_weight = torch.index_select(topk_weights.view(-1), 0, expanded_x_idx)
+        row_index = expanded_x_idx // topk_ids.shape[-1]
+        row_index = row_index.to(torch.int64)
+        share_input = torch.zeros((batch_size // get_dp_group().world_size, hidden_size),
+                                  dtype=torch.bfloat16, device="npu")
+        scale_2 = torch.ones((n_routed_experts, w1_scale.shape[-1] // 2), dtype=torch.float32, device="npu")
+    gate_up_proj = torch_npu.npu_grouped_matmul([sorted_tokens], [w1], bias=None, group_list=expert_tokens,
+                                                split_item=3, output_dtype=torch.int32, group_type=0,
+                                                group_list_type=1)[0]
+    gate_up_proj, pertoken_scale = torch_npu.npu_dequant_swiglu_quant(
+        gate_up_proj, weight_scale=w1_scale, activation_scale=dynamic_quant_scale, bias=None, quant_scale=scale_2, quant_offset=None,
+        group_index=expert_tokens, activate_left=True, quant_mode=1)
+    output = torch_npu.npu_grouped_matmul_finalize_routing(gate_up_proj, w2, scale=w2_scale, bias=None,
+                                                           pertoken_scale=pertoken_scale,
+                                                           group_list=expert_tokens, shared_input=share_input,
+                                                           logit=sorted_topk_weight,
+                                                           row_index=row_index,
+                                                           output_bs=batch_size, shared_input_weight=1.0,
+                                                           shared_input_offset=0).to(torch.bfloat16)
+    return output
 
 
 def fused_experts_with_allgather(hidden_states: torch.Tensor,
@@ -687,6 +737,26 @@ class AscendW8A8DynamicFusedMoEMethod:
                                                      1,
                                                      dtype=params_dtype)
         return param_dict
+
+    def apply_flashcomm3(
+            self,
+            layer: torch.nn.Module,
+            x: torch.Tensor,
+            topk_weights: torch.Tensor,
+            topk_ids: torch.Tensor,
+            pertoken_scale: torch.Tensor
+    ):
+        return fused_experts_w8a8_allgather_ep_flashcomm3(hidden_states=x,
+                                        pertoken_scale=pertoken_scale,
+                                        w1=layer.w13_weight,
+                                        w2=layer.w2_weight,
+                                        w1_scale=layer.w13_weight_scale,
+                                        w2_scale=layer.w2_weight_scale,
+                                        topk_weights=topk_weights,
+                                        topk_ids=topk_ids,
+                                        n_routed_experts=len(layer.w13_weight)
+                                                          )
+
 
     def apply(
         self,

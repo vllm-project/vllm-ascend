@@ -123,6 +123,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE":
     lambda: int(
         os.getenv("VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE", 64)),
+    # enable multi stream of moe layer
+    "VLLM_ENABLE_FLASH_COMM3":
+        lambda: bool(int(os.getenv("VLLM_ENABLE_FLASH_COMM3", '0'))),
 }
 
 # end-env-vars-definition

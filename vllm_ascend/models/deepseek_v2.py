@@ -69,6 +69,7 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.sequence import IntermediateTensors
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
@@ -389,8 +390,11 @@ class CustomDeepseekV2MoE(nn.Module):
             if hasattr(attn_metadata, 'with_prefill_across_dp'):
                 is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
 
-        # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
+        if envs_ascend.VLLM_ENABLE_FLASH_COMM3 and not is_prefill:
+            router_logits = None
+        else:
+            # router_logits: (num_tokens, n_experts)
+            router_logits, _ = self.gate(hidden_states)
 
         experts_hidden_states = self.experts(
             hidden_states=hidden_states,
@@ -399,7 +403,9 @@ class CustomDeepseekV2MoE(nn.Module):
             top_k=CustomDeepseekV2MoE.top_k,
             enable_force_load_balance=enable_force_load_balance,
             shared_experts=self.shared_experts,
-            replace_allreduce=replace_allreduce)
+            replace_allreduce=replace_allreduce,
+            gate=self.gate
+        )
 
         hidden_states = (
             experts_hidden_states[0] * self.routed_scaling_factor +
