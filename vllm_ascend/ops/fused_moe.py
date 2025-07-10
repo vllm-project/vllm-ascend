@@ -1206,7 +1206,7 @@ class AscendFusedMoE(FusedMoE):
             else:
                 e_hidden_states, expert_token_num, group_list_type = e_hidden_states
 
-        if self.dynamic_eplb:
+        if self.dynamic_eplb and not is_prefill:
             self.moe_load += expert_token_num if group_list_type else \
                 torch.cat([expert_token_num[:1], expert_token_num[1:] - expert_token_num[:-1]])
 
