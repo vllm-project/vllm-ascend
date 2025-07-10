@@ -39,7 +39,6 @@ from vllm.distributed import (get_dp_group,
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.linear import ReplicatedLinear
 
-                                               
 from vllm.model_executor.layers.quantization import QuantizationConfig
 
 from vllm_ascend.ascend_config import get_ascend_config
@@ -51,10 +50,6 @@ from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
 from transformers import PretrainedConfig
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.sequence import IntermediateTensors
-from vllm.forward_context import get_forward_context
-
-
-VLLM_ENABLE_SP: bool = envs_ascend.VLLM_ENABLE_SP
 
 
 class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
@@ -172,7 +167,7 @@ def Qwen3MoeForCausalLM_forward(
                 is_perifll = 1
             if hasattr(attn_metadata, 'num_prefills') and attn_metadata.num_prefills > 0:
                 is_perifll = 1
-        if attn_metadata is not None and is_perifll:
+        if envs_ascend.VLLM_ENABLE_SP and is_perifll:
             lengths_sum_unpadding = input_ids.shape[0]
             self.tp_size = get_tensor_model_parallel_world_size()
             lengths_sum_padding = ((lengths_sum_unpadding + self.tp_size - 1) // self.tp_size) * self.tp_size
@@ -188,7 +183,7 @@ def Qwen3MoeForCausalLM_forward(
             _dp_metadata_for_padding = MetadataForPadding(False, None, None, None, False)
         
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
-                                   inputs_embeds, is_perifll)
+                                   inputs_embeds)
         return hidden_states
 
 
@@ -219,7 +214,7 @@ def Qwen3MoeModel_forward(
         })
     hidden_states, _ = self.norm(hidden_states, residual)
     
-    if VLLM_ENABLE_SP and _dp_metadata_for_padding.not_Dummy:              
+    if envs_ascend.VLLM_ENABLE_SP and _dp_metadata_for_padding.not_Dummy:              
         hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
         if _dp_metadata_for_padding.padding_flag:
             hidden_states = unpadding_aligned_wp(hidden_states)
@@ -258,7 +253,7 @@ def Qwen3MoeDecoderLayer_forward(
         hidden_states, residual = self.input_layernorm(
             hidden_states, residual)
 
-        if VLLM_ENABLE_SP and _dp_metadata_for_padding.not_Dummy:
+        if envs_ascend.VLLM_ENABLE_SP and _dp_metadata_for_padding.not_Dummy:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
             if _dp_metadata_for_padding.padding_flag:
                 hidden_states = unpadding_aligned_wp(hidden_states)
@@ -268,12 +263,12 @@ def Qwen3MoeDecoderLayer_forward(
         hidden_states=hidden_states,
     )
     
-    if VLLM_ENABLE_SP and _dp_metadata_for_padding.not_Dummy:
+    if envs_ascend.VLLM_ENABLE_SP and _dp_metadata_for_padding.not_Dummy:
         if _dp_metadata_for_padding.padding_flag:
             hidden_states = padding_aligned_tp(hidden_states)
         hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
 
-    if is_start and VLLM_ENABLE_SP and _dp_metadata_for_padding.not_Dummy:
+    if is_start and envs_ascend.VLLM_ENABLE_SP and _dp_metadata_for_padding.not_Dummy:
         reduce_scatter_tokens = hidden_states.size(0)
         residual = F.pad(residual, (0, 0, 0, reduce_scatter_tokens * self.tp_size - residual.size(0)))
         start = self.tp_rank_in_group * reduce_scatter_tokens
@@ -283,7 +278,7 @@ def Qwen3MoeDecoderLayer_forward(
     hidden_states, residual = self.post_attention_layernorm(
         hidden_states, residual)
     
-    hidden_states = self.mlp(hidden_states, sp_prefill=self.is_perifll, not_Dummy=_dp_metadata_for_padding.not_Dummy)
+    hidden_states = self.mlp(hidden_states, not_Dummy=_dp_metadata_for_padding.not_Dummy)
     
     return hidden_states, residual
 
@@ -307,10 +302,11 @@ def unpadding_aligned_wp(padded_data: torch.Tensor) -> torch.Tensor:
     lengths_sum_unpadding= _dp_metadata_for_padding.lengths_sum_unpadding
     return padded_data[:lengths_sum_unpadding]
 
+
 _dp_metadata_for_padding: Optional[MetadataForPadding] = None
 
 vllm.model_executor.models.qwen3_moe.Qwen3MoeSparseMoeBlock = AscendQwen3MoeSparseMoeBlock
 vllm.model_executor.models.qwen3_moe.Qwen3MoeForCausalLM.forward = Qwen3MoeForCausalLM_forward
 vllm.model_executor.models.qwen3_moe.Qwen3MoeModel.forward = Qwen3MoeModel_forward
-vllm.model_executor.models.qwen3_moe.Qwen3MoeDecoderLayer.__init__ = Qwen3MoeDecoderLayer_init_wrapper
+vllm.model_executor.models.qwen3_moe.Qwen3MoeDecoderLayer.__init__ = Qwen3MoeDecoderLayer_init_wrapper(vllm.model_executor.models.qwen3_moe.Qwen3MoeDecoderLayer.__init__)
 vllm.model_executor.models.qwen3_moe.Qwen3MoeDecoderLayer.forward = Qwen3MoeDecoderLayer_forward

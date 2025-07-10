@@ -57,7 +57,6 @@ ASCEND_QUATIZATION_METHOD = "ascend"
 
 CUSTOM_OP_ENABLED = None
 
-VLLM_ENABLE_SP: bool = envs.VLLM_ENABLE_SP
 
 def try_register_lib(lib_name: str, lib_info: str = ""):
     import importlib
@@ -289,7 +288,7 @@ class FusedMoEState(Enum):
 
 # TODO(zzzzwwjj): add soc_version to choose branch
 def get_fused_moe_state(ep_size: int, with_prefill: bool, not_Dummy=False):
-    if VLLM_ENABLE_SP == 1 and not_Dummy:
+    if envs.VLLM_ENABLE_SP and not_Dummy:
         return FusedMoEState.NO_OP
     elif ep_size == 1:
     # if ep_size == 1:
