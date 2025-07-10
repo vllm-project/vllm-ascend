@@ -79,8 +79,9 @@ def process_topk_ids(topk_ids: torch.Tensor, expert_num: int, ep_size: int,
                         experts_per_ep_rank_val).to(original_dtype)
     indices_arange = torch.arange(topk_ids.shape[0], device=device)
 
-    is_new_segment = torch.cat((torch.tensor([True], device=device),
-                                assigned_ep_rank[1:] != assigned_ep_rank[:-1]))
+    is_new_segment = torch.cat(
+        (torch.tensor([True], device=device), assigned_ep_rank[1:]
+         != assigned_ep_rank[:-1]))
     temp_start_markers = torch.full_like(indices_arange,
                                          -1,
                                          dtype=indices_arange.dtype)
@@ -469,13 +470,13 @@ def fused_experts_with_all2all_buffer(
         expert_idx_buffer_scatter.shape,
         dtype=expert_idx_buffer_scatter.dtype,
         device=expert_idx_buffer_scatter.device)
-    non_pad_len = torch.sum(
-        (expert_idx_buffer_scatter != global_num_experts).to(torch.int32))
-    hidden_states_pad_idx[
-        expert_idx_buffer_scatter != global_num_experts] = torch.arange(
-            non_pad_len,
-            dtype=expert_idx_buffer_scatter.dtype,
-            device=hidden_states.device)
+    non_pad_len = torch.sum((expert_idx_buffer_scatter
+                             != global_num_experts).to(torch.int32))
+    hidden_states_pad_idx[expert_idx_buffer_scatter !=
+                          global_num_experts] = torch.arange(
+                              non_pad_len,
+                              dtype=expert_idx_buffer_scatter.dtype,
+                              device=hidden_states.device)
 
     hidden_states_buffer_scatter = hidden_states[hidden_states_pad_idx]
     expert_idx_buffer_gather = torch.empty_like(
@@ -528,8 +529,8 @@ def fused_experts_with_all2all_buffer(
     dist.all_to_all_single(hidden_states_gatter,
                            hidden_states_scatter,
                            group=ep_group.device_group)
-    hidden_states_gatter = hidden_states_gatter[
-        expert_idx_buffer_scatter != global_num_experts]
+    hidden_states_gatter = hidden_states_gatter[expert_idx_buffer_scatter !=
+                                                global_num_experts]
     if hidden_states_gatter.shape[0] != row_idx_len:
         hidden_states = torch.zeros((row_idx_len, hidden_states.shape[1]),
                                     dtype=hidden_states.dtype,
