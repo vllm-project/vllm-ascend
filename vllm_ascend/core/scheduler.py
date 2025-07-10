@@ -32,6 +32,8 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
+from vllm_ascend.utils import vllm_version_is
+
 
 class AscendScheduler(Scheduler):
     """This Scheduler extends vllm's original v1 scheduler
@@ -232,7 +234,7 @@ class AscendScheduler(Scheduler):
             token_budget -= num_new_tokens
             request.status = RequestStatus.RUNNING
             request.num_computed_tokens = num_computed_tokens
-            # Count the number of prifix cached tokens.
+            # Count the number of prefix cached tokens.
             if request.num_cached_tokens < 0:
                 request.num_cached_tokens = num_computed_tokens
 
@@ -281,17 +283,23 @@ class AscendScheduler(Scheduler):
                     # allow the lower-priority requests to be scheduled.
                     req_index += 1
                     continue
-
-                num_draft_tokens = max(
-                    num_new_tokens + request.num_computed_tokens -
-                    request.num_tokens, 0)
+                if vllm_version_is("0.9.2"):
+                    num_draft_tokens = max(
+                        num_new_tokens + request.num_computed_tokens -
+                        request.num_tokens, 0)
 
                 while True:
-                    new_blocks = self.kv_cache_manager.allocate_slots(
-                        request,
-                        num_new_tokens,
-                        num_draft_tokens=num_draft_tokens,
-                        num_lookahead_tokens=self.num_lookahead_tokens)
+                    if vllm_version_is("0.9.2"):
+                        new_blocks = self.kv_cache_manager.allocate_slots(
+                            request,
+                            num_new_tokens,
+                            num_draft_tokens=num_draft_tokens,
+                            num_lookahead_tokens=self.num_lookahead_tokens)
+                    else:
+                        new_blocks = self.kv_cache_manager.allocate_slots(
+                            request,
+                            num_new_tokens,
+                            num_lookahead_tokens=self.num_lookahead_tokens)
                     if new_blocks is None:
                         # The request cannot be scheduled.
                         # Preempt the lowest-priority request.
@@ -364,27 +372,16 @@ class AscendScheduler(Scheduler):
                                         req_to_new_block_ids[req.request_id])
             for req in scheduled_new_reqs
         ]
-        resumed_reqs_data = [
-            self._make_cached_request_data(
-                req,
-                num_scheduled_tokens[req.request_id],
-                len(scheduled_spec_decode_tokens.get(req.request_id, ())),
-                req_to_new_block_ids[req.request_id],
-                resumed_from_preemption=True,
-            ) for req in scheduled_resumed_reqs
-        ]
-        running_reqs_data = [
-            self._make_cached_request_data(
-                req,
-                num_scheduled_tokens[req.request_id],
-                len(scheduled_spec_decode_tokens.get(req.request_id, ())),
-                req_to_new_block_ids[req.request_id],
-                resumed_from_preemption=False,
-            ) for req in scheduled_running_reqs
-        ]
+
+        cached_reqs_data = self._make_cached_request_data(
+            scheduled_running_reqs, scheduled_resumed_reqs,
+            num_scheduled_tokens, scheduled_spec_decode_tokens,
+            req_to_new_block_ids)
+        scheduled_cached_reqs = cached_reqs_data
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
-            scheduled_cached_reqs=resumed_reqs_data + running_reqs_data,
+            scheduled_cached_reqs=scheduled_cached_reqs,
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,

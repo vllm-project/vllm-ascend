@@ -70,6 +70,15 @@ class AscendAttentionBackend(AttentionBackend):
         return (2, num_blocks, block_size, num_kv_heads, head_size)
 
     @staticmethod
+    def get_bsh_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+    ) -> Tuple[int, ...]:
+        return (2, num_blocks, block_size, num_kv_heads * head_size)
+
+    @staticmethod
     def swap_blocks(
         src_kv_cache: List[torch.Tensor],
         dst_kv_cache: List[torch.Tensor],
@@ -265,6 +274,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             shape = [batch_size * seq_len, num_heads, head_size]
         """
         num_tokens = query.shape[0]
+        use_kv_cache_int8 = kv_cache.numel(
+        ) > 0 and kv_cache[0].dtype == torch.int8
         if output is None:
             output = torch.empty(num_tokens,
                                  self.num_heads,
@@ -279,6 +290,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 value=value,
                 output=output,
                 layer_name=layer.layer_name)
+
+        elif hasattr(layer, 'quant_method') and use_kv_cache_int8:
+            output = layer.quant_method.apply(layer, query, key, value,
+                                              kv_cache, attn_metadata,
+                                              self.attn_type, self.scale,
+                                              output)
+
         else:
             if attn_metadata is None:
                 return output.view(num_tokens, self.hidden_size)
@@ -308,11 +326,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     value_cache=self.value_cache,
                     slot_indices=slots)
 
-            if hasattr(layer, 'quant_method'):
-                # TODO: Add attr (num_prefills, prefill_metadata, decode_metadata) to AscendMetadata
-                pass
             # V0-Style scheduler situation.
-            elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+            if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
                 assert attn_metadata is not None
                 assert attn_metadata.attn_mask is not None
                 mask = attn_metadata.attn_mask
@@ -342,11 +357,13 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 assert attn_metadata is not None
                 assert attn_metadata.attn_mask is not None
                 compress_mask = attn_metadata.attn_mask
+                batch_size = attn_metadata.query_lens.shape[0]
+                block_table = attn_metadata.block_tables[:batch_size, :]
                 torch_npu._npu_flash_attention_qlens(
                     query=query,
                     key_cache=self.key_cache,
                     value_cache=self.value_cache,
-                    block_table=attn_metadata.block_tables,
+                    block_table=block_table,
                     mask=compress_mask,
                     seq_len=attn_metadata.query_lens,
                     context_lens=attn_metadata.seq_lens,
@@ -414,6 +431,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         out=output)
 
         # to make in-place change to the output tensor
+        if hasattr(layer, 'quant_method') and use_kv_cache_int8:
+            output = output.view(num_tokens, self.num_heads, self.head_size)
         ori_output[:, :, :] = output[:num_tokens, :, :]
         return output.view(num_tokens, self.hidden_size)
 

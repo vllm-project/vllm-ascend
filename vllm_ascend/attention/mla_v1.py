@@ -22,10 +22,10 @@ from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
 from vllm_ascend.utils import npu_stream_switch, npu_wait_tensor
+from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
-    from vllm.v1.worker.gpu_input_batch import InputBatch
 
 
 @dataclass
@@ -758,7 +758,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         if attn_metadata.attn_state in [
                 AscendAttentionState.ChunkedPrefill,
-                AscendAttentionState.SpecDecoding
+                AscendAttentionState.SpecDecoding,
+                AscendAttentionState.PrefillCacheHit
         ] and not ascend_config.chunked_prefill_for_mla:
             attn_output_torch = torch.empty(num_tokens,
                                             self.num_heads * self.v_head_dim,
@@ -783,7 +784,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                 causal=True)
         elif attn_metadata.attn_state in [
                 AscendAttentionState.ChunkedPrefill,
-                AscendAttentionState.SpecDecoding
+                AscendAttentionState.SpecDecoding,
+                AscendAttentionState.PrefillCacheHit
         ]:
             attn_lse = torch.empty(self.num_heads,
                                    num_tokens,
@@ -835,13 +837,14 @@ class AscendMLAImpl(MLAAttentionImpl):
             attn_output = attn_output.view(-1, self.num_heads, self.v_head_dim)
         else:
             raise RuntimeError(
-                "Unexpected path reached, AscendMLAImpl should only have PrefillNoCache, ChunkedPrefill and SpecDecoding scenario in forward prefill, please file a bug to vllm-ascend !"
+                "Unexpected path reached, AscendMLAImpl should only have PrefillNoCache, PrefillCacheHit, ChunkedPrefill and SpecDecoding scenario in forward prefill, please file a bug to vllm-ascend !"
             )
         attn_output = attn_output.reshape(
             [num_tokens, self.num_heads * self.v_head_dim])
         if attn_metadata.attn_state in [
                 AscendAttentionState.ChunkedPrefill,
-                AscendAttentionState.SpecDecoding
+                AscendAttentionState.SpecDecoding,
+                AscendAttentionState.PrefillCacheHit
         ] and not ascend_config.chunked_prefill_for_mla:
             attn_output = attn_output_torch
 

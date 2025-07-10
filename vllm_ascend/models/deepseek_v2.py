@@ -75,7 +75,7 @@ from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import (dispose_tensor, npu_stream_switch,
-                               npu_wait_tensor, vllm_version_is)
+                               npu_wait_tensor)
 
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
@@ -303,7 +303,6 @@ class CustomDeepseekV2MoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.routed_scaling_factor = config.routed_scaling_factor
         self.n_shared_experts = config.n_shared_experts
-        self.routed_scaling_factor = config.routed_scaling_factor
         if self.tp_size > config.n_routed_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
@@ -345,6 +344,8 @@ class CustomDeepseekV2MoE(nn.Module):
             e_score_correction_bias=self.gate.e_score_correction_bias)
 
         if config.n_shared_experts is not None:
+            self.all_reduce_merge = self.experts.all_reduce_merge
+            reduce_results = not self.all_reduce_merge
             intermediate_size = (config.moe_intermediate_size *
                                  config.n_shared_experts)
             self.shared_experts = CustomDeepseekV2MLP(
@@ -352,7 +353,7 @@ class CustomDeepseekV2MoE(nn.Module):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=True,
+                reduce_results=reduce_results,
                 force_replicate=self.enable_multistream_moe,
                 prefix=f"{prefix}.shared_experts",
             )
@@ -403,6 +404,9 @@ class CustomDeepseekV2MoE(nn.Module):
         hidden_states = (
             experts_hidden_states[0] * self.routed_scaling_factor +
             experts_hidden_states[1])
+        if self.all_reduce_merge:
+            # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
+            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
         return hidden_states
 
@@ -936,19 +940,12 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    if vllm_version_is("0.9.1"):
-                        weight_loader(param,
-                                      loaded_weight,
-                                      name,
-                                      shard_id=shard_id,
-                                      expert_id=expert_id)
-                    else:
-                        weight_loader(param,
-                                      loaded_weight,
-                                      name,
-                                      shard_id=shard_id,
-                                      expert_id=expert_id,
-                                      return_success=False)
+                    weight_loader(param,
+                                  loaded_weight,
+                                  name,
+                                  shard_id=shard_id,
+                                  expert_id=expert_id,
+                                  return_success=False)
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.

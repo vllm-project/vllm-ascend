@@ -18,6 +18,15 @@ from typing import Optional
 import vllm.envs as envs
 from vllm.logger import logger
 
+TORCHAIR_MODEL_LIST = ["deepseek", "pangu"]
+
+
+def _check_torchair_supported(model_type: str):
+    for supported_model in TORCHAIR_MODEL_LIST:
+        if supported_model in model_type.lower():
+            return True
+    return False
+
 
 class AscendConfig:
     """
@@ -138,13 +147,13 @@ def check_ascend_config(vllm_config, enforce_eager):
         else:
             # torchair_graph case
             if ascend_config.torchair_graph_config.enabled:
-                # torchair_graph is supported for deepseek model only currently.
+                # torchair_graph is supported for deepseek/pangu model only.
                 if vllm_config.model_config:
                     model_type = vllm_config.model_config.hf_config.model_type
-                    if "deepseek" not in model_type:
+                    if not _check_torchair_supported(model_type):
                         raise NotImplementedError(
-                            "Torchair graph mode only works with deepseek model."
-                        )
+                            "Torchair graph mode only works with following model types:"
+                            f"{TORCHAIR_MODEL_LIST}.")
             # aclgraph case
             else:
                 # aclgraph doesn't work with deepseek model and only qwen model is well tested.
