@@ -1178,7 +1178,7 @@ class AscendFusedMoE(FusedMoE):
             router_logits = get_dp_group().all_gather(router_logits, 0)
 
         # Matrix multiply.
-        e_hidden_states, expert_token_num, group_list_type = self.quant_method.apply(
+        e_hidden_states = self.quant_method.apply(
             layer=self,
             x=hidden_states,
             router_logits=router_logits,
@@ -1199,6 +1199,12 @@ class AscendFusedMoE(FusedMoE):
             shared_experts=shared_experts if self.torchair_graph_enabled
             and self.enable_multistream_moe and not is_prefill else None,
         )
+
+        if isinstance(e_hidden_states, tuple):
+            if len(e_hidden_states) == 4:
+                e_hidden_states, shared_hidden_states, expert_token_num, group_list_type = e_hidden_states
+            else:
+                e_hidden_states, expert_token_num, group_list_type = e_hidden_states
 
         if self.dynamic_eplb:
             self.moe_load += expert_token_num if group_list_type else \
