@@ -116,13 +116,6 @@ class NPUPoolingModelRunner(
             self.set_active_loras(model_input.lora_requests,
                                   model_input.lora_mapping)
 
-        if self.prompt_adapter_config:
-            assert model_input.prompt_adapter_requests is not None
-            assert model_input.prompt_adapter_mapping is not None
-            self.set_active_prompt_adapters(
-                model_input.prompt_adapter_requests,
-                model_input.prompt_adapter_mapping)
-
         assert model_input.attn_metadata is not None
         virtual_engine = model_input.virtual_engine
         model_executable = self.model

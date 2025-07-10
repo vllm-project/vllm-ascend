@@ -37,7 +37,6 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor import set_random_seed
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
-from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
 from vllm.utils import GiB_bytes, bind_kv_cache, get_ip
@@ -502,23 +501,6 @@ class NPUWorker(LocalOrDistributedWorkerBase):
 
     def list_loras(self) -> Set[int]:
         return self.model_runner.list_loras()
-
-    def add_prompt_adapter(
-            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
-        raise NotImplementedError(
-            "Prompt Adapter is not implemented for NPU backend currently.")
-
-    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        raise NotImplementedError(
-            "Prompt Adapter is not implemented for NPU backend currently.")
-
-    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
-        raise NotImplementedError(
-            "Prompt Adapter is not implemented for NPU backend currently.")
-
-    def list_prompt_adapters(self) -> Set[int]:
-        raise NotImplementedError(
-            "Prompt Adapter is not implemented for NPU backend currently.")
 
     @property
     def max_model_len(self) -> int:
