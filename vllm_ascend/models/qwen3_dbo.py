@@ -28,6 +28,7 @@ import torch
 import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
+import vllm.model_executor.models.qwen3_moe as qwen3
 from vllm.attention import AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -58,7 +59,7 @@ from vllm_ascend.multistream.layers import (MultiStreamPostTransformerLayer,
 from vllm_ascend.multistream.metadata import (MultiStreamConfig,
                                               MultiStreamStepMetadata,
                                               make_multistream_metadata_ds)
-from vllm_ascend.ops.fused_moe import apply_mlp, select_experts
+from vllm_ascend.ops.fused_moe import apply_mlp, select_experts, AscendSparseMoeBlock
 
 VLLM_ASCEND_ENABLE_DBO: bool = envs_ascend.VLLM_ASCEND_ENABLE_DBO
 
@@ -143,17 +144,7 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
             attn_metadata = get_forward_context().attn_metadata
         # when profile runs, force experts to load balanced tokens
         # to avoid high memory consumption on a single rank.
-        # TODO: need a better flag to indicate whether in profile run or not.
-        if attn_metadata is None:
-            # for profile run
-            self.is_prefill = True
-            self.enable_force_load_balance = True
-        else:
-            # is_prefill = attn_metadata.num_prefills > 0
-            is_prefill = False
-            self.enable_force_load_balance = False
-            if hasattr(attn_metadata, 'with_prefill_across_dp'):
-                self.is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
+        enable_force_load_balance = get_forward_context().in_profile_run
 
         num_tokens, hidden_dim = hidden_states.shape
 
@@ -212,7 +203,7 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
-        if self.enable_force_load_balance:
+        if enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, self.config.num_experts)
 
         return topk_weights, topk_ids, local_hidden_states, chunked_hidden_states_sizes
@@ -521,6 +512,7 @@ class CustomQwen3MoeForCausalLMDBO(Qwen3MoeForCausalLM):
         "experts":
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     }
+    qwen3.Qwen3MoeSparseMoeBlock = AscendSparseMoeBlock
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
