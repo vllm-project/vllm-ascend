@@ -2033,8 +2033,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 for num_tokens in reversed(self.aclgraph_batch_sizes):
                     for _ in range(self.vllm_config.compilation_config.
                                    cudagraph_num_of_warmups):
-                        self._dummy_run(num_tokens, skip_attn=skip_attn)
-                    self._dummy_run(num_tokens, skip_attn=skip_attn)
+                        self._dummy_run(num_tokens, skip_attn=skip_attn, with_prefill=False)
+                    self._dummy_run(num_tokens, skip_attn=skip_attn, with_prefill=False)
         else:
             logger.info("Skipping NPU graph capture for eager mode.")
             return

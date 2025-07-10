@@ -106,6 +106,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE", '0'))
                  ),
+    "VLLM_ENABLE_FlashComm":
+    lambda: int(os.getenv("VLLM_ENABLE_FlashComm", '0')),
     # MOE_ALL2ALL_BUFFER:
     #   0: default, normal init.
     #   1: enable moe_all2all_buffer.
