@@ -1691,6 +1691,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         torch._dynamo.mark_static(
                             get_forward_context().mc2_mask)
                         torch._dynamo.mark_static(attn_metadata.slot_mapping)
+                        if self.speculative_config:
+                            torch._dynamo.mark_static(
+                                attn_metadata.decode.attn_mask)
                         for kv in self.kv_caches:
                             assert isinstance(
                                 kv, tuple), "kv_cache must be a tuple"
@@ -1720,7 +1723,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         **model_kwargs)
             if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
                 assert isinstance(self.drafter, MtpProposer)
-                self.drafter.dummy_run(num_reqs)
+                self.drafter.dummy_run(num_reqs, with_prefill=with_prefill)
             return hidden_states
 
     @contextmanager

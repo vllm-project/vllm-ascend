@@ -211,7 +211,8 @@ class MtpProposer:
 
         with set_ascend_forward_context(attn_metadata,
                                         self.vllm_config,
-                                        num_tokens=num_input_tokens):
+                                        num_tokens=num_input_tokens,
+                                        with_prefill=self.runner.with_prefill):
             with ProfileExecuteDuration().capture_async('mtp_forward'):
                 model_kwargs = {}
                 model_kwargs["attn_metadata"] = attn_metadata
@@ -305,15 +306,13 @@ class MtpProposer:
                     ge_cache=False)
 
     @torch.inference_mode()
-    def dummy_run(
-        self,
-        num_tokens: int,
-    ) -> None:
+    def dummy_run(self, num_tokens: int, with_prefill: bool = False) -> None:
         attn_metadata = self.runner.attn_metadata_builder.build_torchair_graph_dummy(
             num_reqs=num_tokens, num_actual_tokens=1, is_mtp_model=True)
         with set_ascend_forward_context(None,
                                         self.vllm_config,
-                                        num_tokens=num_tokens):
+                                        num_tokens=num_tokens,
+                                        with_prefill=with_prefill):
             self.model(input_ids=self.input_ids[:num_tokens],
                        positions=self.positions[:num_tokens],
                        previous_hidden_states=self.hidden_states[:num_tokens],
