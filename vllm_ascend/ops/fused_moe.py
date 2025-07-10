@@ -1177,8 +1177,7 @@ class AscendFusedMoE(FusedMoE):
                 enable_force_load_balance: bool = False,
                 top_k: Optional[int] = None,
                 shared_experts: Optional[Any] = None,
-                not_Dummy=False,
-                sp_prefill=False):
+                not_Dummy=False):
         assert self.quant_method is not None
 
         if top_k:
@@ -1189,7 +1188,7 @@ class AscendFusedMoE(FusedMoE):
         num_tokens, hidden_size = hidden_states.shape
 
         fused_moe_state = get_fused_moe_state(self.moe_parallel_config.ep_size,
-                                              is_prefill, not_Dummy=not_Dummy, sp_prefill=sp_prefill)
+                                              is_prefill, not_Dummy=not_Dummy)
         if shared_experts:
             if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
                 shared_hidden_states = shared_experts(hidden_states)
@@ -1259,7 +1258,6 @@ class AscendFusedMoE(FusedMoE):
         # if tp_size > 1 and fused_moe_state != FusedMoEState.AllGather and fused_moe_state != FusedMoEState.NO_OP:
         if fused_moe_state == FusedMoEState.NO_OP:
             final_hidden_states = e_hidden_states
-            pass
         elif tp_size > 1 and fused_moe_state != FusedMoEState.AllGather:
             dist.all_gather(list(chunk_hidden_states), e_hidden_states,
                             self.tp_group)

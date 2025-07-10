@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 
+import os
 import atexit
 import math
 from contextlib import contextmanager, nullcontext
@@ -56,6 +57,7 @@ ASCEND_QUATIZATION_METHOD = "ascend"
 
 CUSTOM_OP_ENABLED = None
 
+VLLM_ENABLE_SP: bool = envs.VLLM_ENABLE_SP
 
 def try_register_lib(lib_name: str, lib_info: str = ""):
     import importlib
@@ -284,15 +286,10 @@ class FusedMoEState(Enum):
     MC2 = 2
     NO_OP = 3
 
-# from vllm.model_executor.models import qwen3_moe 
-import os
+
 # TODO(zzzzwwjj): add soc_version to choose branch
-def get_fused_moe_state(ep_size: int, with_prefill: bool, not_Dummy=False, sp_prefill=False):
-    enable_sp = int(os.getenv("VLLM_ENABLE_SP", "0"))
-    # print(f"666666666666 _qwen3_moe.dp_metadata_for_padding.not_Dummy {not_Dummy} ")
-    # print(f"666666666666 sp_prefill {sp_prefill} ")
-    # print(f"666666666666 enable_sp {enable_sp} ")
-    if enable_sp == 1 and sp_prefill and not_Dummy:
+def get_fused_moe_state(ep_size: int, with_prefill: bool, not_Dummy=False):
+    if VLLM_ENABLE_SP == 1 and not_Dummy:
         return FusedMoEState.NO_OP
     elif ep_size == 1:
     # if ep_size == 1:

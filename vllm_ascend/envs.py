@@ -126,7 +126,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "USE_OPTIMIZED_MODEL":
     lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
     "ENABLE_MOE_ALLTOALLV":
-    lambda: bool(int(os.getenv("ENABLE_MOE_ALLTOALLV", '0')))
+    lambda: bool(int(os.getenv("ENABLE_MOE_ALLTOALLV", '0'))),
+    "VLLM_ENABLE_SP":
+    lambda: bool(int(os.getenv("VLLM_ENABLE_SP", '0')))
 }
 
 # end-env-vars-definition
