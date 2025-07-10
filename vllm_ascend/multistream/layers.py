@@ -107,8 +107,8 @@ class MultiStreamPreQwen3TransformerLayer(torch.nn.Module):
 
         attn_state_pre: AscendAttentionState
         attn_state_post: AscendAttentionState
-        attn_mask_pre: Optional[Tensor] = None
-        attn_mask_post: Optional[Tensor] = None
+        attn_mask_pre: Optional[torch.Tensor] = None
+        attn_mask_post: Optional[torch.Tensor] = None
 
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache or attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
             attn_mask_pre = attn_mask_post = attn_metadata.attn_mask
