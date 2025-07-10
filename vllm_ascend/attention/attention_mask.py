@@ -68,7 +68,8 @@ class AttentionMaskBuilder:
             ) > 1 and self.attn_mask_cache[0][1] > 0:
                 attn_mask = self.get_attn_mask(  # type: ignore
                     max_seq_len, dtype, device)
-                attn_mask *= -10000
+                # Do not use in-place multiplication to avoid modifying `self.attn_mask_cache`!
+                attn_mask = attn_mask * -10000
             else:
                 attn_mask = self.attn_mask_cache
             return torch.index_select(attn_mask, dim=0,
