@@ -18,7 +18,7 @@ from vllm.model_executor.models.utils import (AutoWeightsLoader,
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.ops.layernorm import AddRMSNormQuant
+from vllm_ascend.ops.layernorm import AddRMSNormW8A8Quant
 
 
 class CustomQwen3DecoderLayer(Qwen3DecoderLayer):
@@ -43,15 +43,15 @@ class CustomQwen3DecoderLayer(Qwen3DecoderLayer):
         assert isinstance(quant_config, AscendQuantConfig), \
             "Expected quant_config to be an instance of AscendQuantConfig"
 
-        if isinstance(self.self_attn.qkv_proj.quant_method,
+        if isinstance(self.self_attn.qkv_proj.quant_method.quant_method,
                       AscendW8A8LinearMethod):
-            self.input_layernorm = AddRMSNormQuant(
+            self.input_layernorm = AddRMSNormW8A8Quant(
                 config.hidden_size,
                 layer=self.self_attn.qkv_proj,
                 eps=config.rms_norm_eps)
-        if isinstance(self.mlp.gate_up_proj.quant_method,
+        if isinstance(self.mlp.gate_up_proj.quant_method.quant_method,
                       AscendW8A8LinearMethod):
-            self.post_attention_layernorm = AddRMSNormQuant(
+            self.post_attention_layernorm = AddRMSNormW8A8Quant(
                 config.hidden_size,
                 layer=self.mlp.gate_up_proj,
                 eps=config.rms_norm_eps)
