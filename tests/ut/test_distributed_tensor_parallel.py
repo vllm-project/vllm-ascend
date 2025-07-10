@@ -13,7 +13,6 @@ from vllm_ascend.distributed.tensor_parallel import (
     all_to_all_hp2sp, all_to_all_sp2hp)
 
 
-# 测试用的固定数据
 @pytest.fixture
 def test_tensor():
     return torch.randn(8, 16)
@@ -29,7 +28,6 @@ def mock_group():
     return MagicMock()
 
 
-# 模拟分布式环境
 @pytest.fixture(autouse=True)
 def mock_dist():
     with patch("torch.distributed") as mock:
@@ -39,12 +37,11 @@ def mock_dist():
 
 
 class TestDistributedCommunication:
-    """测试分布式通信函数"""
 
     @pytest.mark.parametrize("world_size", [1, 4])
     def test_gather_along_first_dim(self, test_tensor, mock_group, mock_dist,
                                     world_size):
-        """测试_gather_along_first_dim"""
+        """test _gather_along_first_dim"""
         mock_dist.get_world_size.return_value = world_size
 
         result = _gather_along_first_dim(test_tensor, mock_group)
@@ -56,7 +53,7 @@ class TestDistributedCommunication:
 
     def test_gather_along_first_dim_unequal_split(self, test_tensor,
                                                   mock_group):
-        """测试不等分分割情况"""
+        """test unequal split"""
         output_split_sizes = [5, 10, 15, 2]
         result = _gather_along_first_dim(test_tensor, mock_group,
                                          output_split_sizes)
@@ -65,7 +62,7 @@ class TestDistributedCommunication:
     @pytest.mark.parametrize("world_size", [1, 4])
     def test_gather_along_last_dim(self, test_tensor_last_dim, mock_group,
                                    mock_dist, world_size):
-        """测试_gather_along_last_dim"""
+        """test _gather_along_last_dim"""
         mock_dist.get_world_size.return_value = world_size
 
         result = _gather_along_last_dim(test_tensor_last_dim, mock_group)
@@ -100,7 +97,7 @@ class TestDistributedCommunication:
     ])
     def test_wrapper_functions(self, mock_group, func, input_shape,
                                expected_shape):
-        """测试包装函数"""
+        """test wrapper funcs"""
         mod = importlib.import_module(
             'vllm_ascend.distributed.tensor_parallel')
         globals = mod.__dict__
