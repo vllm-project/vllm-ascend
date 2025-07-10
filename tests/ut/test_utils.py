@@ -123,16 +123,13 @@ class TestUtils(TestBase):
     @mock.patch('vllm.model_executor.layers.fused_moe.layer.FusedMoE',
                 new=mock.MagicMock)
     @mock.patch('vllm_ascend.utils.is_310p')
-    @mock.patch('vllm_ascend.utils.get_ascend_config')
-    def test_maybe_converting_weight_acl_format(self, mock_get_config,
-                                                mock_310p, mock_npu_cast,
+    def test_maybe_converting_weight_acl_format(self, mock_310p, mock_npu_cast,
                                                 mock_get_format):
         ACL_FORMAT_FRACTAL_NZ = 29
         mock_310p.return_value = True
 
         mock_config = mock.MagicMock()
         mock_config.torchair_graph_config.enabled = True
-        mock_get_config.return_value = mock_config
         mock_get_format.return_value = 1
 
         mock_npu_cast.return_value = 1
@@ -145,7 +142,7 @@ class TestUtils(TestBase):
         model = mock.MagicMock()
         model.modules.return_value = [fused_moe]
 
-        utils.maybe_converting_weight_acl_format(model, ACL_FORMAT_FRACTAL_NZ)
+        utils.converting_weight_acl_format(model, ACL_FORMAT_FRACTAL_NZ)
         self.assertEqual(fused_moe.w13_weight.data, 1)
 
     @mock.patch('torch_npu.get_npu_format')
@@ -153,15 +150,13 @@ class TestUtils(TestBase):
     @mock.patch('vllm.model_executor.layers.fused_moe.layer.FusedMoE',
                 new=mock.MagicMock)
     @mock.patch('vllm_ascend.utils.is_310p')
-    @mock.patch('vllm_ascend.utils.get_ascend_config')
     def test_maybe_converting_weight_acl_format_format_true(
-            self, mock_get_config, mock_310p, mock_npu_cast, mock_get_format):
+            self, mock_310p, mock_npu_cast, mock_get_format):
         ACL_FORMAT_FRACTAL_NZ = 29
         mock_310p.return_value = True
 
         mock_config = mock.MagicMock()
         mock_config.torchair_graph_config.enabled = True
-        mock_get_config.return_value = mock_config
         mock_get_format.return_value = ACL_FORMAT_FRACTAL_NZ
 
         mock_npu_cast.return_value = 1
@@ -176,20 +171,7 @@ class TestUtils(TestBase):
 
         mock_get_format.return_value = ACL_FORMAT_FRACTAL_NZ
 
-        utils.maybe_converting_weight_acl_format(model, ACL_FORMAT_FRACTAL_NZ)
-
-    @mock.patch('vllm_ascend.utils.get_ascend_config')
-    @mock.patch('vllm_ascend.utils.is_310p', return_value=False)
-    def test_maybe_converting_weight_acl_format_not_310_not_graph(
-            self, mock_310p, mock_get_config):
-        mock_config = mock.MagicMock()
-        mock_config.torchair_graph_config.enabled = False
-        mock_get_config.return_value = mock_config
-
-        mock_constant = mock.MagicMock()
-
-        mock_model = mock.MagicMock()
-        utils.maybe_converting_weight_acl_format(mock_model, mock_constant)
+        utils.converting_weight_acl_format(model, ACL_FORMAT_FRACTAL_NZ)
 
     @mock.patch('importlib.util.find_spec')
     @mock.patch('importlib.import_module')
@@ -279,27 +261,6 @@ class TestUtils(TestBase):
         self.assertEqual(
             3,
             len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
-
-    def test_get_torchair_current_work_dir(self):
-        cache_dir = utils.TORCHAIR_CACHE_DIR
-        work_dir = utils.get_torchair_current_work_dir()
-        self.assertEqual(cache_dir, work_dir)
-        work_dir = utils.get_torchair_current_work_dir("test")
-        self.assertEqual(os.path.join(cache_dir, "test"), work_dir)
-
-    def test_torchair_cache_dir(self):
-        utils.write_kv_cache_bytes_to_file(0, 100)
-        self.assertTrue(utils.check_torchair_cache_exist(),
-                        "Create torchair cache dir failed")
-        self.assertTrue(utils.check_kv_cache_bytes_cache_exist(),
-                        "Create kv cache bytes cache dir failed")
-        kv_cache_bytes = utils.read_kv_cache_bytes_from_file(0)
-        self.assertEqual(100, kv_cache_bytes)
-        utils.delete_torchair_cache_file()
-        self.assertFalse(utils.check_torchair_cache_exist(),
-                         "Delete torchair cache dir failed")
-        self.assertFalse(utils.check_kv_cache_bytes_cache_exist(),
-                         "Delete kv cache bytes cache dir failed")
 
 
 class TestProfileExecuteDuration(unittest.TestCase):

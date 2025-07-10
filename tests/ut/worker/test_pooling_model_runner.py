@@ -1,3 +1,4 @@
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -24,9 +25,10 @@ class TestPoolingModelRunner(unittest.TestCase):
     def setUp(self):
         """Initialize test fixtures and common mocks"""
         self.attn_backend = "npu"
-
+        model_path = os.path.join(os.path.dirname(__file__), "..",
+                                  "fake_weight")
         model_runner = self._create_model_runner(
-            "tests/ut/fake_weight",
+            model_path,
             trust_remote_code=True,
             enable_chunked_prefill=False,
         )
