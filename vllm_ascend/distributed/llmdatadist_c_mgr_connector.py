@@ -3,8 +3,8 @@ import json
 import math
 import threading
 import time
-from collections.abc import Iterator
 from collections import defaultdict
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
@@ -827,8 +827,7 @@ class LLMDataDistCMgrConnectorWorker():
                 raise RuntimeError(
                     "LLMDataDistCMgrConnectorWorker: Timeout during pull_blocks, you can try to increase the sync_kv_timeout config or checking your connect status"
                 )
-        self.send_finish_to_remote(remote_ip, remote_port + tp_offset,
-                                   request_id)
+        self.send_finish_to_remote(remote_ip, remote_port, request_id)
         with self.thread_lock:
             self.finished_reqs.add(request_id)
 
