@@ -29,9 +29,7 @@ from tests.conftest import VllmRunner
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 
-def _deepseek_torchair_test_fixture(
-    additional_config: Dict,
-):
+def _deepseek_torchair_test_fixture(additional_config: Dict):
     example_prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -97,9 +95,7 @@ def test_e2e_deepseekv3_with_torchair_ms_mla():
     _deepseek_torchair_test_fixture(additional_config)
 
 
-def _pangu_torchair_test_fixture(
-    additional_config: Dict,
-):
+def _pangu_torchair_test_fixture(additional_config: Dict):
     example_prompts = [
         "Hello, my name is",
         "The president of the United States is",
