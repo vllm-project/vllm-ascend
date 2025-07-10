@@ -17,11 +17,32 @@
 # Adapted from vllm/model_executor/models/qwen2_vl.py
 # This file is a part of the vllm-ascend project.
 
+import vllm
 import vllm.envs as envs
 from torch.distributed import ProcessGroup
 from vllm.config import ParallelConfig
 from vllm.distributed.utils import \
     stateless_init_torch_distributed_process_group
+
+
+def ascend_destroy_model_parallel():
+    """Set the groups to none and destroy them."""
+    from vllm.distributed.parallel_state import _DP, _EP, _PP, _TP
+    if _TP:
+        _TP.destroy()
+    _TP = None
+    if _PP:
+        _PP.destroy()
+    _PP = None
+    if _DP:
+        _DP.destroy()
+    _DP = None
+    if _EP:
+        _EP.destroy()
+    _EP = None
+    from vllm_ascend.distributed.parallel_state import \
+        destroy_ascend_model_parallel
+    destroy_ascend_model_parallel()
 
 
 def parallel_config_get_dp_port(self) -> int:
@@ -57,5 +78,6 @@ def stateless_init_dp_group(self) -> "ProcessGroup":
     return dp_group
 
 
+vllm.distributed.parallel_state.destroy_model_parallel = ascend_destroy_model_parallel
 ParallelConfig.get_next_dp_init_port = parallel_config_get_dp_port
 ParallelConfig.stateless_init_dp_group = stateless_init_dp_group
