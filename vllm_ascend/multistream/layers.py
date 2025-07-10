@@ -120,8 +120,9 @@ class MultiStreamPreQwen3TransformerLayer(torch.nn.Module):
             attn_state_pre = AscendAttentionState.ChunkedPrefill
             attn_state_post = AscendAttentionState.ChunkedPrefill
             if attn_metadata.attn_mask is not None:
-                attn_mask_pre = attn_metadata.attn_mask[:split_token_index, :max(
-                    seq_lens_pre)].contiguous()
+                attn_mask_pre = attn_metadata.attn_mask[:split_token_index, :
+                                                        max(seq_lens_pre
+                                                            )].contiguous()
                 attn_mask_post = attn_metadata.attn_mask[
                     split_token_index:, :max(seq_lens_post)].contiguous()
         else:
