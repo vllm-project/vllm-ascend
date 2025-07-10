@@ -18,6 +18,8 @@
 
 import pytest
 
+from modelscope import snapshot_download
+
 from tests.conftest import VllmRunner
 
 MODELS = [
@@ -29,9 +31,9 @@ MODELS = [
 @pytest.mark.parametrize("model", MODELS)
 def test_quant_W8A8(example_prompts, model):
     max_tokens = 5
-
+    model_path = snapshot_download(model)
     with VllmRunner(
-            model,
+            model_path,
             max_model_len=8192,
             enforce_eager=True,
             dtype="auto",
