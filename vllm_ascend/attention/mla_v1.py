@@ -11,7 +11,6 @@ from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
-from vllm.platforms import current_platform
 from vllm.utils import cdiv, round_down
 
 from vllm_ascend import envs
@@ -71,6 +70,7 @@ class AscendMLAPrefillMetadata:
         max_seq_lens: list[int]
         workspace: torch.Tensor
         chunk_seq_lens: torch.Tensor
+        chunk_seq_lens_npu: torch.Tensor
 
     attn_mask: torch.Tensor
     query_lens: list[int]
@@ -99,7 +99,6 @@ class AscendMLADecodeMetadata:
     attn_mask: Optional[torch.Tensor] = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
-    mc2_mask: Optional[torch.Tensor] = None
 
 
 @dataclass
@@ -214,13 +213,6 @@ class AscendMLAMetadataBuilder:
         self.rope_dim = self.runner.model_config.hf_text_config.qk_rope_head_dim
         self.cos_cache = None
         self.sin_cache = None
-
-    def generate_activate_mask(self, actual_seqs_num, batch_size):
-        mc2_mask = torch.zeros(batch_size,
-                               dtype=torch.bool,
-                               device=current_platform.device_type)
-        mc2_mask[:actual_seqs_num].fill_(True)
-        return mc2_mask
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -364,7 +356,6 @@ class AscendMLAMetadataBuilder:
                          self.rope_dim,
                          dtype=self.runner.dtype,
                          device=device)
-        mc2_mask = self.generate_activate_mask(num_actual_tokens, num_reqs)
         decode_metadata = AscendMLADecodeMetadata(
             input_positions=input_positions,
             block_table=block_table,
@@ -374,8 +365,7 @@ class AscendMLAMetadataBuilder:
             attn_mask=self.runner.spec_attn_mask,
             actual_seq_q_lens=self.runner.actual_seq_q_lens[:num_reqs],
             sin=sin,
-            cos=cos,
-            mc2_mask=mc2_mask)
+            cos=cos)
         return self.metadata_cls(  # type: ignore
             num_input_tokens=num_actual_tokens,
             num_actual_tokens=num_actual_tokens,
@@ -481,6 +471,7 @@ class AscendMLAMetadataBuilder:
                     seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
                     max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
                     chunk_seq_lens=chunk_seq_lens,
+                    chunk_seq_lens_npu=chunk_seq_lens.npu(),
                     workspace=self.chunked_prefill_workspace,
                 )
             prefill_input_positions = input_positions[tokens_start:]
@@ -547,6 +538,11 @@ class AscendMLAMetadataBuilder:
                 actual_seq_q_lens = query_start_loc[1:].tolist(
                 ) + self.runner.actual_seq_q_lens[num_reqs:num_reqs +
                                                   num_reqs_pad_size]
+                # mtp torchair + PD scenario, last element of actual_seq_q_lens must equal to num_reqs_pad_size
+                num_padded_token_size = slot_mapping.size(0)
+                if actual_seq_q_lens[-1] != num_padded_token_size:
+                    actual_seq_q_lens.append(num_padded_token_size)
+                    seq_lens_list.append(0)
             else:
                 seq_lens_list = seq_lens.tolist()
 
@@ -554,8 +550,6 @@ class AscendMLAMetadataBuilder:
                 1).unsqueeze(2)
             sin = self.sin_cache[input_positions].unsqueeze(  # type: ignore
                 1).unsqueeze(2)
-            mc2_mask = self.generate_activate_mask(
-                num_actual_tokens, num_reqs + num_reqs_pad_size)
 
             decode_metadata = AscendMLADecodeMetadata(
                 input_positions=input_positions,
@@ -566,8 +560,7 @@ class AscendMLAMetadataBuilder:
                 attn_mask=self.runner.spec_attn_mask,
                 actual_seq_q_lens=actual_seq_q_lens,
                 sin=sin,
-                cos=cos,
-                mc2_mask=mc2_mask)
+                cos=cos)
 
         return self.metadata_cls(  # type: ignore
             num_actual_tokens=num_actual_tokens,
@@ -749,6 +742,8 @@ class AscendMLAImpl(MLAAttentionImpl):
             toks = prefill_metadata.chunked_context.seq_tot[i]
 
             seq_len2 = prefill_metadata.chunked_context.chunk_seq_lens[i]
+            seq_len2_npu = prefill_metadata.chunked_context.chunk_seq_lens_npu[
+                i]
             seq_len = torch.stack([seq_len1, seq_len2])
             kv_c_normed = torch.empty(toks,
                                       num_heads,
@@ -765,7 +760,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 cache_kv_c,
                 cache_k_pe,
                 prefill_metadata.block_table,
-                seq_len2.to(query.device),
+                seq_len2_npu,
                 seq_starts=prefill_metadata.chunked_context.starts[i],
                 key=kv_c_normed,
                 value=k_pe,

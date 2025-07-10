@@ -15,21 +15,24 @@
 # limitations under the License.
 #
 
-import math
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
 import torch_npu
-from vllm.distributed import GroupCoordinator, get_ep_group, get_tp_group
+from vllm.distributed import GroupCoordinator, get_ep_group
 from vllm.forward_context import get_forward_context
 
+import vllm_ascend.envs as ascend_envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
+from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.fused_moe import select_experts
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
                                dispose_tensor, get_ascend_soc_version,
                                npu_stream_switch, npu_wait_tensor)
+
+CHUNK_SIZE: int = ascend_envs.VLLM_ASCEND_FUSED_MOE_MC2_CHUNK_SIZE
 
 
 def apply_mlp_decode(hidden_states_wrapper: List[torch.Tensor],
@@ -217,18 +220,15 @@ def fused_experts_with_mc2(
     dynamic_scale_for_share: Optional[Any] = None,
     mc2_mask: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-    if log2phy is not None:
+    assert mc2_mask is not None
+    if log2phy:
         topk_ids = log2phy[topk_ids]
     quant_mode = 2
-    ep_group = get_ep_group()
+    ep_group = get_mc2_group()
     ep_rank_id = ep_group.rank_in_group
     ep_world_size = ep_group.world_size
-    tp_world_size = get_tp_group().world_size
 
-    # NOTE: `global_bs` should be equal to `max_num_tokens_across_dp` * `ep_world_size`,
-    # and `max_num_tokens_across_dp` has been split into `tp_world_size` parts before.
-    global_bs = math.ceil(get_forward_context().max_tokens_across_dp /
-                          tp_world_size) * ep_world_size
+    global_bs = get_forward_context().global_bs
 
     # NOTE: Currently, when in A3 or in torchair graph, we need to pass in some extra param into dispatch & combine
     need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A3
@@ -334,6 +334,93 @@ def fused_experts_with_mc2(
             shared_output, _ = shared_experts.down_proj(
                 (shared_act, swiglu_out_scale))
         return hidden_states, shared_output
+
+
+def fused_prefill_experts_with_mc2(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    top_k: int,
+    expert_map: torch.Tensor = None,
+    moe_all_to_all_group_name: str = "",
+    log2phy: torch.Tensor = None,
+    global_redundant_expert_num: int = 0,
+    shared_experts: Optional[Any] = None,
+    is_torchair: bool = False,
+    w1_scale_bias: torch.Tensor = None,
+    w2_scale_bias: torch.Tensor = None,
+    quantized_x_for_share: Optional[Any] = None,
+    dynamic_scale_for_share: Optional[Any] = None,
+    mc2_mask: Optional[torch.Tensor] = None,
+) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    assert mc2_mask is not None
+    max_num_chunks = get_forward_context().max_num_chunks
+
+    hidden_states_outputs = torch.zeros(
+        (hidden_states.shape[0], hidden_states.shape[1]),
+        dtype=hidden_states.dtype,
+        device=hidden_states.device)
+    if shared_experts is not None:
+        shared_outputs = torch.zeros(
+            (hidden_states.shape[0],
+             hidden_states.shape[0] * hidden_states.shape[1]),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device)
+
+    hidden_states_chunks = torch.tensor_split(hidden_states,
+                                              max_num_chunks,
+                                              dim=0)
+    topk_weights_chunks = torch.tensor_split(topk_weights,
+                                             max_num_chunks,
+                                             dim=0)
+    topk_ids_chunks = torch.tensor_split(topk_ids, max_num_chunks, dim=0)
+    mc2_mask_chunks = torch.tensor_split(mc2_mask, max_num_chunks, dim=0)
+    start_indx = 0
+    end_indx = 0
+    for i in range(len(hidden_states_chunks)):
+        hidden_states_chunk = hidden_states_chunks[i]
+        topk_weights_chunk = topk_weights_chunks[i]
+        topk_ids_chunk = topk_ids_chunks[i]
+        mc2_mask_chunk = mc2_mask_chunks[i]
+        prefill_expert_outputs = fused_experts_with_mc2(
+            hidden_states=hidden_states_chunk,
+            w1=w1,
+            w2=w2,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+            topk_weights=topk_weights_chunk,
+            topk_ids=topk_ids_chunk,
+            top_k=top_k,
+            expert_map=expert_map,
+            moe_all_to_all_group_name=moe_all_to_all_group_name,
+            log2phy=log2phy,
+            global_redundant_expert_num=global_redundant_expert_num,
+            shared_experts=shared_experts,
+            is_torchair=is_torchair,
+            w1_scale_bias=w1_scale_bias,
+            w2_scale_bias=w2_scale_bias,
+            quantized_x_for_share=quantized_x_for_share,
+            dynamic_scale_for_share=dynamic_scale_for_share,
+            mc2_mask=mc2_mask_chunk)
+        end_indx += hidden_states_chunk.shape[0]
+        if shared_experts is None:
+            hidden_states_outputs[start_indx:end_indx,
+                                  ...] = prefill_expert_outputs
+        else:
+            hidden_states_outputs[start_indx:end_indx,
+                                  ...] = prefill_expert_outputs[0]
+            shared_outputs[start_indx:end_indx,
+                           ...] = prefill_expert_outputs[1]
+        start_indx = end_indx
+
+    if shared_experts is None:
+        return hidden_states_outputs
+    else:
+        return hidden_states_outputs, shared_outputs
 
 
 # currently expert parallelism implemented with all2all
@@ -677,7 +764,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         self.enable_weight_nz_layout = ascend_config.enable_weight_nz_layout
 
         try:
-            device_group = self.ep_group.device_group
+            device_group = get_mc2_group().device_group
             # TODO: Try local_rank = ep_group.rank_in_group
             local_rank = torch.distributed.get_rank(group=device_group)
             backend = device_group._get_backend(torch.device("npu"))
@@ -803,7 +890,6 @@ class AscendW8A8DynamicFusedMoEMethod:
         topk_weights = topk_weights.to(x.dtype)
 
         if fused_moe_state == FusedMoEState.MC2:
-            mc2_mask = kwargs.get("mc2_mask", None)
             return fused_experts_with_mc2(
                 hidden_states=x,
                 w1=layer.w13_weight,
@@ -821,7 +907,26 @@ class AscendW8A8DynamicFusedMoEMethod:
                 is_torchair=self.torchair_graph_enabled,
                 quantized_x_for_share=shared_gate_up,
                 dynamic_scale_for_share=shared_dequant_scale,
-                mc2_mask=mc2_mask)
+                mc2_mask=kwargs.get("mc2_mask", None))
+        elif fused_moe_state == FusedMoEState.MC2_PREFILL:
+            return fused_prefill_experts_with_mc2(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                w1_scale=layer.w13_weight_scale_fp32,
+                w2_scale=layer.w2_weight_scale,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                top_k=top_k,
+                expert_map=expert_map,
+                moe_all_to_all_group_name=self.moe_all_to_all_group_name,
+                log2phy=log2phy,
+                global_redundant_expert_num=global_redundant_expert_num,
+                shared_experts=shared_experts,
+                is_torchair=self.torchair_graph_enabled,
+                quantized_x_for_share=shared_gate_up,
+                dynamic_scale_for_share=shared_dequant_scale,
+                mc2_mask=kwargs.get("mc2_mask", None))
         elif fused_moe_state == FusedMoEState.AllGather:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
