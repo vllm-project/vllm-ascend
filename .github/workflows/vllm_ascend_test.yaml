@@ -19,38 +19,12 @@ name: 'test'
 
 on:
   push:
-    # Enable merged test per commit
     branches:
       - 'main'
-    paths:
-      - '*.txt'
-      - '**/*.py'
-      - '.github/workflows/vllm_ascend_test.yaml'
-      - '!docs/**'
-      - 'pytest.ini'
-      - '!benchmarks/**'
-      - 'tools/mypy.sh'
-      - 'mypy.ini'
-      - '.github/workflows/*.ya?ml'
-      - '.github/workflows/actionlint.*'
-      - '.github/workflows/matchers/actionlint.json'
   pull_request:
     branches:
       - 'main'
       - '*-dev'
-    paths:
-      - '*.txt'
-      - '**/*.py'
-      - '.github/workflows/vllm_ascend_test.yaml'
-      - '!docs/**'
-      - '!examples/**'
-      - 'pytest.ini'
-      - '!benchmarks/**'
-      - 'tools/mypy.sh'
-      - 'mypy.ini'
-      - '.github/workflows/*.ya?ml'
-      - '.github/workflows/actionlint.*'
-      - '.github/workflows/matchers/actionlint.json'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -71,11 +45,35 @@ jobs:
     if: ${{ github.event_name == 'pull_request' }}
     uses: ./.github/workflows/pre-commit.yml
 
+  changes:
+    # Only trigger changes on pull request
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    outputs:
+      e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
+      ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
+    steps:
+    - uses: dorny/paths-filter@v3
+      id: filter
+      with:
+        filters: |
+          e2e_tracker:
+            - 'vllm_ascend/**'
+            - 'csrc/**'
+            - 'cmake/**'
+            - 'tests/e2e/**'
+            - 'tests/conftest.py'
+            - 'tests/model_utils.py'
+            - 'tests/utils.py'
+          ut_tracker:
+            - 'tests/ut/**'
   ut:
-    needs: [lint]
+    needs: [lint, changes]
     name: unit test
-    # only trigger e2e test on [pull request after lint passed] and [merged commit]
-    if: ${{ needs.lint.result == 'success' || github.event_name == 'push' }}
+    # only trigger unit test after lint passed and the change is e2e and ut related. Or the PR is merged.
+    if: ${{ github.event_name == 'push' || (needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true')) }}
     runs-on: ubuntu-latest
     container:
       image: quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
@@ -134,9 +132,9 @@ jobs:
           verbose: true
 
   e2e:
-    needs: [lint]
-    # only trigger e2e test on pull request after lint passed
-    if: ${{ needs.lint.result == 'success' && github.event_name == 'pull_request' }}
+    needs: [lint, changes]
+    # only trigger e2e test after lint passed and the change is e2e related.
+    if: ${{ needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' }}
     strategy:
       max-parallel: 2
       matrix:
