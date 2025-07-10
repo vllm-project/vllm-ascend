@@ -1,4 +1,4 @@
-# Sleep Mode
+# Sleep Mode Guide
 
 ## Overview
 
