@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
-#
+# Adapted from vllm/.github/scripts/cleanup_pr_body.sh
 
 #!/bin/bash
 
@@ -34,11 +34,15 @@ NEW=/tmp/new_pr_body.txt
 gh pr view --json body --template "{{.body}}" "${PR_NUMBER}" > "${OLD}"
 cp "${OLD}" "${NEW}"
 
-# Remove "FIX #xxxx (*link existing issues this PR will resolve*)"
+# Remove notes in pr description and add vLLM version and commit
 sed -i '/<!--/,/-->/d' "${NEW}"
 sed -i '/- vLLM .*$/d' "${NEW}"
-echo "- vLLM version: $VLLM_VERSION" >> "${NEW}"
-echo "- vLLM main: $VLLM_COMMIT" >> "${NEW}"
+{
+    echo ""
+    echo "- vLLM version: $VLLM_VERSION"
+    echo "- vLLM main: $VLLM_COMMIT"
+    echo ""
+} >> "${NEW}"
 
 # Run this only if ${NEW} is different than ${OLD}
 if ! cmp -s "${OLD}" "${NEW}"; then
