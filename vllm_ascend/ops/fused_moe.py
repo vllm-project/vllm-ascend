@@ -44,8 +44,8 @@ from vllm_ascend.distributed.communication_op import \
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
-                               get_fused_moe_state, is_310p, npu_stream_switch,
-                               npu_wait_tensor)
+                               get_all_reduce_merge_state, get_fused_moe_state,
+                               is_310p, npu_stream_switch, npu_wait_tensor)
 
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
 
@@ -1146,6 +1146,10 @@ class AscendFusedMoE(FusedMoE):
         self.log2phy = None
         self.global_redundant_expert_num = 0
 
+        is_deepseek_v3_r1 = self.global_num_experts == 256
+        self.all_reduce_merge = get_all_reduce_merge_state(
+            self.moe_parallel_config.ep_size, is_deepseek_v3_r1)
+
         ascend_config = get_ascend_config()
         expert_map_path = ascend_config.expert_map_path
         if expert_map_path and os.path.exists(expert_map_path):
@@ -1250,6 +1254,7 @@ class AscendFusedMoE(FusedMoE):
                                               is_prefill, is_deepseek_v3_r1)
         if shared_experts:
             if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
+                # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
                 shared_hidden_states = shared_experts(hidden_states)
 
         tp_size = get_tensor_model_parallel_world_size()
@@ -1351,7 +1356,7 @@ class AscendFusedMoE(FusedMoE):
         else:
             final_hidden_states = e_hidden_states
 
-        if tp_size > 1 and fused_moe_state in [
+        if tp_size > 1 and not self.all_reduce_merge and fused_moe_state in [
                 FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
                 FusedMoEState.NaiveMulticast
         ]:
