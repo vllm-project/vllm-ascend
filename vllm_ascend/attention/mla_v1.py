@@ -321,7 +321,7 @@ class AscendMLAMetadataBuilder:
                                   dtype=torch.int32,
                                   device=device)
         block_table = self._get_graph_runner_block_tables(
-            num_reqs, block_table)
+            num_reqs, block_table) # 这里需要patch化一下输出
         seq_lens = torch.ones(num_reqs, dtype=torch.int32, device=device)
         input_positions = torch.zeros(num_reqs,
                                       dtype=torch.int32,
