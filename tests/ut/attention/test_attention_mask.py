@@ -105,3 +105,52 @@ class TestAttentionMaskBuilder(TestBase):
             device=torch.device("cpu"),
         )
         self.assertEqual(attn_mask.shape, (1, 512))
+
+    def test_use_multiple_masks(self):
+        max_seq_lens = [128, 512, 1024]
+        dtypes = [torch.float16, torch.bfloat16, torch.int8]
+        for max_seq_len, dtype in zip(max_seq_lens, dtypes):
+            with self.subTest(max_seq_len=max_seq_len, dtype=dtype):
+                self._test_use_multiple_masks(max_seq_len, dtype)
+
+    def _test_use_multiple_masks(self, max_seq_len, dtype):
+        expected_mask_value = torch.finfo(
+            torch.float32).min if dtype == torch.float16 else 1
+        if dtype == torch.float16:
+            expected_splitfuse_mask_value = expected_mask_value
+        elif dtype == torch.bfloat16:
+            expected_splitfuse_mask_value = -10000
+        else:
+            assert dtype == torch.int8, "Unsupported dtype for attention mask"
+            expected_splitfuse_mask_value = -16
+
+        attention_mask_builder = AttentionMaskBuilder(max_seq_len=max_seq_len,
+                                                      dtype=dtype)
+
+        splitfuse_attn_mask = attention_mask_builder.get_splitfuse_attn_mask(
+            seq_lens=[max_seq_len],
+            query_lens=[max_seq_len],
+            position=torch.tensor([0]),
+            dtype=dtype,
+            device=torch.device("cpu"),
+        )
+        self.assertEqual(splitfuse_attn_mask.shape, (1, max_seq_len))
+        self.assertEqual(
+            splitfuse_attn_mask[0][-1],
+            torch.tensor(expected_splitfuse_mask_value, dtype=dtype))
+        self.assertEqual(attention_mask_builder._seq_len_cached, max_seq_len)
+        self.assertEqual(attention_mask_builder.attn_mask_cache.shape,
+                         (max_seq_len, max_seq_len))
+        self.assertEqual(attention_mask_builder.attn_mask_cache[0][-1],
+                         torch.tensor(expected_mask_value, dtype=dtype))
+
+        attn_mask = attention_mask_builder.get_attn_mask(
+            max_seq_len=max_seq_len, dtype=dtype, device=torch.device("cpu"))
+        self.assertEqual(attn_mask.shape, (max_seq_len, max_seq_len))
+        self.assertEqual(attn_mask[0][-1],
+                         torch.tensor(expected_mask_value, dtype=dtype))
+        self.assertEqual(attention_mask_builder._seq_len_cached, max_seq_len)
+        self.assertEqual(attention_mask_builder.attn_mask_cache.shape,
+                         (max_seq_len, max_seq_len))
+        self.assertEqual(attention_mask_builder.attn_mask_cache[0][-1],
+                         torch.tensor(expected_mask_value, dtype=dtype))
