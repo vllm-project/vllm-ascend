@@ -213,8 +213,7 @@ class MultiStreamPostQwen3TransformerLayer(torch.nn.Module):
                 num_micro_batches = self.multistream_metadata.ms_config.num_micro_batches
             else:
                 num_micro_batches = 2
-            self.multistream_metadata.try_wait_event(
-                true_wait_layer,
-                num_micro_batches - 1,
-                MSEventKey.FFN_AR_FINISH)
+            self.multistream_metadata.try_wait_event(true_wait_layer,
+                                                     num_micro_batches - 1,
+                                                     MSEventKey.FFN_AR_FINISH)
         return self.multistream_metadata.merge_micro_batches(input_tensor)
