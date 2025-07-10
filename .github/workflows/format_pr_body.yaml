@@ -53,7 +53,7 @@ jobs:
 
       - name: Get vLLM release version
         run: |
-          VLLM_VERSION=$(python3 docs/source/conf.py | jq .vllm_version | tr -d '"')
+          VLLM_VERSION=$(python3 docs/source/conf.py | jq .ci_vllm_version | tr -d '"')
           echo "VLLM_VERSION=$VLLM_VERSION" >> $GITHUB_ENV
 
       - name: Update PR description
