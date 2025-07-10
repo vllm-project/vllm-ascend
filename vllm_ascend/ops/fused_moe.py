@@ -44,8 +44,9 @@ from vllm_ascend.distributed.communication_op import \
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
-                               get_all_reduce_merge_state, get_fused_moe_state, get_rm_router_logits_state,
-                               is_310p, npu_stream_switch, npu_wait_tensor)
+                               get_all_reduce_merge_state, get_fused_moe_state,
+                               get_rm_router_logits_state, is_310p,
+                               npu_stream_switch, npu_wait_tensor)
 
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
 
