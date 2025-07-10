@@ -42,8 +42,6 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16,
 from vllm_ascend.worker.model_runner import (
     ModelInputForNPUBuilder, ModelInputForNPUWithSamplingMetadata)
 
-_ALLOWED_NUM_QUERIES_PER_KV = [32, 64, 128]
-
 
 class AscendAttentionBackend(AttentionBackend):
 
@@ -933,15 +931,6 @@ class AscendMLAAttentionBackendImpl(MLAAttentionImpl):
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
-
-        # TODO: support numHeads / numKvHeads < 16 in MLA kernel
-        if self.torchair_graph_enabled:
-            assert self.num_queries_per_kv in _ALLOWED_NUM_QUERIES_PER_KV, \
-                ("The allowed number of queries per kv when enabling both MLA and Graph mode"
-                " only support {32, 64, 128}, Thus this is not supported for DeepSeek-V2-Lite,"
-                " as it only has 16 attention heads. And if you're using DeepSeek-V3 or DeepSeek-R1,"
-                " please make sure after the tensor parallel split, num_heads / num_kv_heads in "
-                "{32, 64, 128}.")
 
     def exec_kv(
         self,
