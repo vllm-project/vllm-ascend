@@ -129,8 +129,11 @@ class MultiStreamPreQwen3TransformerLayer(torch.nn.Module):
             attn_state_pre = AscendAttentionState.DecodeOnly
             attn_mask_pre = None
             attn_state_post = AscendAttentionState.ChunkedPrefill
-            attn_mask_post = attn_metadata.attn_mask[
-                split_bs_point:, :max(seq_lens_post)].contiguous()
+            if attn_metadata.attn_mask is not None:
+                attn_mask_post = attn_metadata.attn_mask[
+                    split_bs_point:, :max(seq_lens_post)].contiguous()
+            else:
+                attn_mask_pre = None
 
         block_tables_pre = attn_metadata.block_tables[:split_bs_point]
         block_tables_post = attn_metadata.block_tables[split_bs_point:]
@@ -206,8 +209,12 @@ class MultiStreamPostQwen3TransformerLayer(torch.nn.Module):
         )
         if layer_index >= 0:
             true_wait_layer = self.multistream_metadata.end_layer - 1 if wait_layer_index is None else wait_layer_index
+            if self.multistream_metadata is not None and self.multistream_metadata.ms_config is not None:
+                num_micro_batches = self.multistream_metadata.ms_config.num_micro_batches
+            else:
+                num_micro_batches = 2
             self.multistream_metadata.try_wait_event(
                 true_wait_layer,
-                self.multistream_metadata.ms_config.num_micro_batches - 1,
+                num_micro_batches - 1,
                 MSEventKey.FFN_AR_FINISH)
         return self.multistream_metadata.merge_micro_batches(input_tensor)
