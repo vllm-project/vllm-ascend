@@ -72,7 +72,7 @@ class TestDistributedCommunication(unittest.TestCase):
         output_split_sizes = [5, 10, 15, 2]
         result = _gather_along_first_dim(test_tensor, mock_group,
                                          output_split_sizes)
-        self.assertEqual(result.shape, (32, 16))   # 5+10+15+2=32
+        self.assertEqual(result.shape, (32, 16))  # 5+10+15+2=32
 
     @pytest.mark.parametrize("world_size", [1, 4])
     def test_gather_along_last_dim(self, test_tensor_last_dim, mock_group,
