@@ -8,7 +8,6 @@ This is the 1st release candidate of v0.9.2 for vLLM Ascend. Please follow the [
 - Pooling model works with V1 engine now. You can take a try with Qwen3 embedding model [#1359](https://github.com/vllm-project/vllm-ascend/pull/1359).
 - The performance on Atlas 300I series has been improved. [#1591](https://github.com/vllm-project/vllm-ascend/pull/1591)
 - aclgraph mode works with Moe models now. Currently, only Qwen3 Moe is well tested. [#1381](https://github.com/vllm-project/vllm-ascend/pull/1381)
-- Pipeline parallelism works with V1 Engine now. [#1700](https://github.com/vllm-project/vllm-ascend/pull/1700)
 
 ### Core
 - Ascend PyTorch adapter (torch_npu) has been upgraded to `2.5.1.post1.dev20250619`. Don’t forget to update it in your environment. [#1347](https://github.com/vllm-project/vllm-ascend/pull/1347)
@@ -27,9 +26,6 @@ This is the 1st release candidate of v0.9.2 for vLLM Ascend. Please follow the [
 - Ascend scheduler works with prefix cache now. [#1446](https://github.com/vllm-project/vllm-ascend/pull/1446)
 - DeepSeek now works with prefix cache now. [#1498](https://github.com/vllm-project/vllm-ascend/pull/1498)
 - Support prompt logprobs to recover ceval accuracy in V1 [#1483](https://github.com/vllm-project/vllm-ascend/pull/1483)
-
-### Known Issues
-- Pipeline parallelism is not working on ray in this version. It'll be supported in the next release. [#1751](https://github.com/vllm-project/vllm-ascend/issues/1751)
 
 ## v0.9.1rc1 - 2025.06.22
 
