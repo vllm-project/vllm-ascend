@@ -3,19 +3,19 @@
 ## Version Specific FAQs
 
 - [[v0.7.3.post1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1007)
-- [[v0.9.1rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1351)
+- [[v0.9.2rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1742)
 
 ## General FAQs
 
 ### 1. What devices are currently supported?
 
-Currently, **ONLY Atlas A2 series**  (Ascend-cann-kernels-910b) are supported:
+Currently, **ONLY** Atlas A2 series(Ascend-cann-kernels-910b) and Atlas 300I(Ascend-cann-kernels-310p) series are supported:
 
 - Atlas A2 Training series (Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 Box16, Atlas 300T A2)
 - Atlas 800I A2 Inference series (Atlas 800I A2)
+- Atlas 300I Inference series (Atlas 300I Duo)
 
 Below series are NOT supported yet:
-- Atlas 300I Duo、Atlas 300I Pro (Ascend-cann-kernels-310p) might be supported on 2025.Q2
 - Atlas 200I A2 (Ascend-cann-kernels-310b) unplanned yet
 - Ascend 910, Ascend 910 Pro B (Ascend-cann-kernels-910) unplanned yet
 
@@ -35,7 +35,7 @@ docker pull m.daocloud.io/quay.io/ascend/vllm-ascend:$TAG
 
 ### 3. What models does vllm-ascend supports?
 
-Find more details [<u>here</u>](https://vllm-ascend.readthedocs.io/en/latest/user_guide/supported_models.html).
+Find more details [<u>here</u>](https://vllm-ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_models.html).
 
 ### 4. How to get in touch with our community?
 
@@ -48,7 +48,7 @@ There are many channels that you can communicate with our community developers /
 
 ### 5. What features does vllm-ascend V1 supports?
 
-Find more details [<u>here</u>](https://github.com/vllm-project/vllm-ascend/issues/414).
+Find more details [<u>here</u>](https://vllm-ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_features.html).
 
 ### 6. How to solve the problem of "Failed to infer device type" or "libatb.so: cannot open shared object file"?
 
@@ -69,7 +69,7 @@ If all above steps are not working, feel free to submit a GitHub issue.
 
 ### 7. How does vllm-ascend perform?
 
-Currently, only some models are improved. Such as `Qwen2 VL`, `Deepseek  V3`. Others are not good enough. From 0.9.0rc2, Qwen and Deepseek works with graph mode to play a good performance. What's more, you can install `mindie-turbo` with `vllm-ascend v0.7.3` to speed up the inference as well.
+Currently, only some models are improved. Such as `Qwen2.5 VL`, `Qwen3`, `Deepseek  V3`. Others are not good enough. From 0.9.0rc2, Qwen and Deepseek works with graph mode to play a good performance. What's more, you can install `mindie-turbo` with `vllm-ascend v0.7.3` to speed up the inference as well.
 
 ### 8. How vllm-ascend work with vllm?
 vllm-ascend is a plugin for vllm. Basically, the version of vllm-ascend is the same as the version of vllm. For example, if you use vllm 0.7.3, you should use vllm-ascend 0.7.3 as well. For main branch, we will make sure `vllm-ascend` and `vllm` are compatible by each commit.
@@ -84,7 +84,7 @@ Currently, w8a8 quantization is already supported by vllm-ascend originally on v
 
 ### 11. How to run w8a8 DeepSeek model?
 
-Please following the [quantization inferencing tutorail](https://vllm-ascend.readthedocs.io/en/main/tutorials/multi_npu_quantization.html) and replace model to DeepSeek.
+Please following the [inferencing tutorail](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html) and replace model to DeepSeek.
 
 ### 12. There is no output in log when loading models using vllm-ascend, How to solve it?
 
@@ -94,9 +94,9 @@ If you're using vllm 0.7.3 version, this is a known progress bar display issue i
 
 vllm-ascend is tested by functional test, performance test and accuracy test.
 
-- **Functional test**: we added CI, includes portion of vllm's native unit tests and vllm-ascend's own unit tests，on vllm-ascend's test, we test basic functionality、popular models availability and [supported features](https://vllm-ascend.readthedocs.io/en/latest/user_guide/suppoted_features.html) via e2e test
+- **Functional test**: we added CI, includes portion of vllm's native unit tests and vllm-ascend's own unit tests，on vllm-ascend's test, we test basic functionality、popular models availability and [supported features](https://vllm-ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_features.html) via e2e test
 
-- **Performance test**: we provide [benchmark](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks) tools for end-to-end performance benchmark which can easily to re-route locally, we'll publish a perf website like [vllm](https://simon-mo-workspace.observablehq.cloud/vllm-dashboard-v0/perf) does to show the performance test results for each pull request
+- **Performance test**: we provide [benchmark](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks) tools for end-to-end performance benchmark which can easily to re-route locally, we'll publish a perf website to show the performance test results for each pull request
 
 - **Accuracy test**: we're working on adding accuracy test to CI as well.
 
