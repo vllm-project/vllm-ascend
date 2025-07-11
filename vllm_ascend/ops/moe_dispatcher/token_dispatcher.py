@@ -32,16 +32,6 @@ from vllm_ascend.distributed.tensor_parallel import (
     reduce_scatter_last_dim_to_tensor_parallel_region)
 from vllm_ascend.ops.comm_utils import async_all_to_all
 
-""" We use the following notation throughout this file:
-     H: hidden size
-     B: micro batch size
-     S: sequence length
-     TP: tensor model parallel size
-     EP: expert model parallel size
-     num_local_tokens: S/TP*B
-     num_global_tokens: num_local_tokens*TP*EP
-"""
-
 
 class MoEDispatcherConfig:
 
@@ -266,6 +256,10 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
                 group=self.ep_group).reshape(ep_size, self.num_experts)
             self.num_global_tokens_per_local_expert = num_global_tokens_per_expert[:, self.local_expert_indices[
                 0]:self.local_expert_indices[-1] + 1]
+            if self.num_global_tokens_per_local_expert is None:
+                raise ValueError(
+                    "num_global_tokens_per_local_expert must be set before sum."
+                )
             self.output_splits = (self.num_global_tokens_per_local_expert.sum(
                 axis=-1).to(torch.device("cpu"), non_blocking=True).numpy())
             num_tokens_per_local_expert = self.num_global_tokens_per_local_expert.sum(
@@ -281,6 +275,10 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
             num_tokens_per_local_expert = num_local_tokens_per_expert
 
         if self.num_local_experts > 1 and with_sync:
+            if self.num_global_tokens_per_local_expert is None:
+                raise ValueError(
+                    "num_global_tokens_per_local_expert must be set before operations."
+                )
             self.device_sync_point = "no_sync"
             self.global_input_tokens_local_experts_indices = torch.repeat_interleave(
                 self.expert_ids_per_ep_rank,

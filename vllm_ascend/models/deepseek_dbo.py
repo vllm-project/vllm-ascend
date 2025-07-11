@@ -147,7 +147,7 @@ class CustomDeepseekDBOMoE(CustomDeepseekV2MoE):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=not envs_ascend.VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ,  # shared experts tp comm is seperated in alltoallv for better overlap.
+                reduce_results=not envs_ascend.VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ,  # shared experts tp comm is separated in alltoallv for better overlap.
                 prefix=f"{prefix}.shared_experts",
             )
         CustomDeepseekDBOMoE.top_k = config.num_experts_per_tok
