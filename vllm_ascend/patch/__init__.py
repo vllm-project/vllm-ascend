@@ -24,9 +24,9 @@
 #           each worker's `__init__` function.
 #
 # Then in each kind of patch, there are three folders:
-# - patch_0_9_1: contains the patches applied when vllm version is 0.9.1.
+# - patch_0_9_2: contains the patches applied when vllm version is 0.9.2.
 # - patch_main: contains the patches applied when vllm version is main branch.
-# - patch_common: contains the patches applied in both 0.9.1 and main branch.
+# - patch_common: contains the patches applied in both 0.9.2 and main branch.
 #
 # Once a new patch is added in vllm-ascend, please add the patch description into this file as well.
 # ----------------------------------------------------------------------------------
@@ -104,32 +104,6 @@
 #       - https://github.com/vllm-project/vllm-ascend/pull/395
 #    Future Plan:
 #       Revert it when the related pr is merged in vllm and vllm-ascend.
-#
-# ** File: worker/patch_common/patch_sampler.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.sample.sampler.Sampler.apply_top_k_top_p`
-#    Why:
-#       We need to use the patched `apply_top_k_top_p` in `sample`.
-#       The mainly reason to overwrite `apply_top_k_top_p` is
-#       to improve performance.
-#    How：
-#       Re-implementation the `apply_top_k_top_p` function by pytorch
-#    Related PR (if no, explain why):
-#       - https://github.com/vllm-project/vllm-ascend/pull/970
-#    Future Plan:
-#       Revert it when the ascend scatter performance improves.
-#
-#   2. `vllm.v1.sample.sampler.Sampler.apply_min_p`
-#    Why:
-#       We need to use the patched `apply_min_p` in `sample`.
-#       The mainly reason to overwrite `apply_min_p` is
-#       to improve performance.
-#    How：
-#       Re-implementation the `apply_min_p` function by pytorch
-#    Related PR (if no, explain why):
-#       - https://github.com/vllm-project/vllm-ascend/pull/970
-#    Future Plan:
-#       Revert it when the ascend indexput performance improves.
 #
 # ** File: worker/patch_common/patch_distributed.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

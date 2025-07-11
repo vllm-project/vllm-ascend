@@ -1,4 +1,5 @@
 import pytest
+from modelscope import snapshot_download  # type: ignore
 
 from tests.conftest import VllmRunner
 from tests.e2e.singlecard.test_ilama_lora import (EXPECTED_LORA_OUTPUT,
@@ -7,7 +8,7 @@ from tests.e2e.singlecard.test_ilama_lora import (EXPECTED_LORA_OUTPUT,
 
 @pytest.mark.parametrize("distributed_executor_backend", ["mp"])
 def test_ilama_lora_tp2(distributed_executor_backend, ilama_lora_files):
-    with VllmRunner(model_name=MODEL_PATH,
+    with VllmRunner(snapshot_download(MODEL_PATH),
                     enable_lora=True,
                     max_loras=4,
                     max_model_len=1024,

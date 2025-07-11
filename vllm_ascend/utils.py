@@ -18,7 +18,10 @@
 #
 
 import atexit
+import fcntl
 import math
+import os
+import shutil
 from contextlib import contextmanager, nullcontext
 from enum import Enum
 from threading import Lock
@@ -31,6 +34,7 @@ from torch_npu.npu.streams import Event
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs
+from vllm_ascend.ascend_config import get_ascend_config
 
 try:
     # Recent release of torchair has moved these ops to `.scope`.
@@ -173,6 +177,28 @@ def aligned_16(tensor: torch.Tensor):
     new_tensor[:n] = tensor
 
     return new_tensor
+
+
+def maybe_converting_weight_acl_format(model, format=ACL_FORMAT_FRACTAL_NZ):
+    # currently, there are some operations which do not support ACL_FORMAT_FRACTAL_NZ
+    # in eager mode but support it in torchair graph mode. since ACL_FORMAT_FRACTAL_NZ
+    # is much more preferred than ACL_FORMAT_FRACTAL_ND on 300I Duo, we add this
+    # conversion when using torchair graph mode on 300I Duo platform.
+    # TODO: we will remove this conversion if npu_quant_grouped_matmul_dequant
+    # accepts weight format of ACL_FORMAT_FRACTAL_NZ in eager mode.
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+    use_torchair = get_ascend_config().torchair_graph_config.enabled
+    if not is_310p() or not use_torchair:
+        return
+    for module in model.modules():
+        if isinstance(module, FusedMoE):
+            if torch_npu.get_npu_format(module.w13_weight.data) == format:
+                return
+            module.w13_weight.data = torch_npu.npu_format_cast(
+                module.w13_weight.data, format)
+            module.w2_weight.data = torch_npu.npu_format_cast(
+                module.w2_weight.data, format)
 
 
 def try_register_lib(lib_name: str, lib_info: str = ""):
@@ -390,12 +416,57 @@ def npu_wait_tensor(self: torch.Tensor,
     return _npu_wait_tensor(self, dependency) if enabled else self
 
 
+# TODO(wxy): Move to ops module
+def npu_prefetch(input: torch.Tensor,
+                 dependency: torch.Tensor,
+                 max_size: int = 0,
+                 *,
+                 enabled: bool = True):
+    if not enabled:
+        return
+    input_size = input.element_size() * input.numel()
+    if max_size <= 0 or max_size > input_size:
+        max_size = input_size
+    torch_npu.npu_prefetch(input, dependency, max_size)
+
+
 # TODO(zzzzwwjj): move this into forward_context
 class FusedMoEState(Enum):
     AllGather = 0
     All2All = 1
     MC2 = 2
     AllGatherEP = 3
+    NaiveMulticast = 4
+
+
+# TODO(ttanzhiqiang): rm_router_logits
+# dp>1 will trigger
+# In theory, this solution is only applicable to AllGather and AllGatherEP, because in the dp scenario, the previous operation was gate + two communications, and now it is changed to one communication + gate operation, which can save some communication time. In theory, all moe AllGather and AllGatherEP solutions can follow this logic, but now other moe models (qwen3-235b) dp solutions are not adjusted, so use the switch to control it to prevent code errors.
+def get_rm_router_logits_state(ep_size: int, dp_size: int,
+                               is_deepseek_v3_r1: bool):
+    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
+    # only supports deepseek v3/r1
+    if dp_size > 1:
+        if (envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
+                and is_deepseek_v3_r1):
+            return True
+        elif ep_size == 1 and is_deepseek_v3_r1:
+            return True
+    return False
+
+
+# TODO(ttanzhiqiang): all_reduce merge
+# When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
+# Currently, all_reduce_merge is enabled by default in the AllGather, AllGatherEP and NaiveMulticast scenarios of the deepseek model.
+def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
+    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
+    # only supports deepseek v3/r1
+    if (envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
+            and is_deepseek_v3_r1):
+        return True
+    elif ep_size == 1 and is_deepseek_v3_r1:
+        return True
+    return False
 
 
 # TODO(zzzzwwjj): add soc_version to choose branch
@@ -407,9 +478,86 @@ def get_fused_moe_state(ep_size: int, with_prefill: bool,
             and is_deepseek_v3_r1):
         return FusedMoEState.AllGatherEP
     elif ep_size == 1:
-        return FusedMoEState.AllGather
+        if with_prefill:
+            return FusedMoEState.NaiveMulticast
+        else:
+            return FusedMoEState.AllGather
     # NOTE: mc2 need ep_size >= 16 & all2all can't use in torchair graph.
     elif ep_size < 16 or with_prefill:
         return FusedMoEState.All2All
     else:
         return FusedMoEState.MC2
+
+
+KV_CACHE_BYTES_CACHE_PATH_NAME = ".kv_cache_bytes"
+KV_CACHE_BYTES_CACHE_FILE_NAME = "kv_cache_bytes"
+TORCHAIR_CACHE_PATH_NAME = ".torchair_cache"
+TORCHAIR_CACHE_DIR = os.getenv(
+    'TORCHAIR_CACHE_HOME', os.path.join(os.getcwd(), TORCHAIR_CACHE_PATH_NAME))
+
+
+def get_torchair_current_work_dir(file_name=None):
+    if file_name is None:
+        return TORCHAIR_CACHE_DIR
+    return os.path.join(TORCHAIR_CACHE_DIR, file_name)
+
+
+def check_torchair_cache_exist():
+    res = False
+    torch_air_abs_path = get_torchair_current_work_dir()
+    if os.path.exists(torch_air_abs_path):
+        file_list = os.listdir(torch_air_abs_path)
+        if len(file_list) != 0:
+            res = True
+    return res
+
+
+def check_kv_cache_bytes_cache_exist():
+    res = False
+    kv_cache_bytes_cache_abs_path = get_torchair_current_work_dir(
+        KV_CACHE_BYTES_CACHE_PATH_NAME)
+    if os.path.exists(kv_cache_bytes_cache_abs_path):
+        file_list = os.listdir(kv_cache_bytes_cache_abs_path)
+        if len(file_list) != 0:
+            res = True
+    return res
+
+
+def read_kv_cache_bytes_from_file(rank) -> int:
+    kv_cache_bytes = -1
+    kv_cache_bytes_cache_abs_path = get_torchair_current_work_dir(
+        KV_CACHE_BYTES_CACHE_PATH_NAME)
+    kv_cache_bytes_file = os.path.join(
+        kv_cache_bytes_cache_abs_path,
+        f"{rank}_{KV_CACHE_BYTES_CACHE_FILE_NAME}")
+    with open(kv_cache_bytes_file, "r", encoding="utf-8") as f:
+        with file_lock(f, fcntl.LOCK_SH):
+            kv_cache_bytes = int(f.readline())
+    return kv_cache_bytes
+
+
+@contextmanager
+def file_lock(file_descriptor, lock_type):
+    fcntl.flock(file_descriptor, lock_type)
+    try:
+        yield
+    finally:
+        fcntl.flock(file_descriptor, fcntl.LOCK_UN)
+
+
+def write_kv_cache_bytes_to_file(rank, kv_cache_bytes):
+    kv_cache_bytes_cache_abs_path = get_torchair_current_work_dir(
+        KV_CACHE_BYTES_CACHE_PATH_NAME)
+    os.makedirs(kv_cache_bytes_cache_abs_path, exist_ok=True)
+    kv_cache_bytes_file = os.path.join(
+        kv_cache_bytes_cache_abs_path,
+        f"{rank}_{KV_CACHE_BYTES_CACHE_FILE_NAME}")
+    with open(kv_cache_bytes_file, "w", encoding="utf-8") as f:
+        with file_lock(f, fcntl.LOCK_EX):
+            f.write(f"{kv_cache_bytes}")
+
+
+def delete_torchair_cache_file():
+    torch_air_abs_path = get_torchair_current_work_dir()
+    if os.path.exists(torch_air_abs_path):
+        shutil.rmtree(torch_air_abs_path)

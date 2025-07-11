@@ -22,6 +22,7 @@ import torch
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import enable_custom_op, is_310p
 
 
@@ -38,6 +39,14 @@ def rope_forward_oot(
     offsets: Optional[torch.Tensor] = None,
     is_neox_style_override: Optional[bool] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    if get_ascend_config().torchair_graph_config.enabled:
+        return self.forward_native(
+            positions,
+            query,
+            key,
+            offsets,
+        )
+
     import torch_npu
     query_shape, key_shape = query.shape, key.shape
     if self.cos_sin_cache.device != query.device:

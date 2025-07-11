@@ -19,12 +19,13 @@
 
 import contextlib
 import gc
+import os
 from typing import Any, List, Optional, Tuple, TypeVar, Union
 
 import numpy as np
 import pytest
 import torch
-from huggingface_hub import snapshot_download
+from modelscope import snapshot_download  # type: ignore[import-untyped]
 from PIL import Image
 from torch import nn
 from transformers import (AutoConfig, AutoModelForCausalLM, AutoTokenizer,
@@ -58,6 +59,9 @@ _PromptMultiModalInput = Union[List[_M], List[List[_M]]]
 PromptImageInput = _PromptMultiModalInput[Image.Image]
 PromptAudioInput = _PromptMultiModalInput[Tuple[np.ndarray, int]]
 PromptVideoInput = _PromptMultiModalInput[np.ndarray]
+
+_TEST_DIR = os.path.dirname(__file__)
+_TEST_PROMPTS = [os.path.join(_TEST_DIR, "e2e", "prompts", "example.txt")]
 
 
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
@@ -367,9 +371,23 @@ def prompt_template(request):
     return PROMPT_TEMPLATES[request.param]
 
 
+def _read_prompts(filename: str) -> list[str]:
+    with open(filename) as f:
+        prompts = f.readlines()
+        return prompts
+
+
+@pytest.fixture
+def example_prompts() -> list[str]:
+    prompts = []
+    for filename in _TEST_PROMPTS:
+        prompts += _read_prompts(filename)
+    return prompts
+
+
 @pytest.fixture(scope="session")
 def ilama_lora_files():
-    return snapshot_download(repo_id="jeeejeee/ilama-text2sql-spider")
+    return snapshot_download(repo_id="vllm-ascend/ilama-text2sql-spider")
 
 
 class HfRunner:

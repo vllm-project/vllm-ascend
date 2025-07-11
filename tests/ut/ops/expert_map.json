@@ -1,0 +1,17 @@
+{
+    "moe_layer_count":
+    1,
+    "layer_list": [{
+        "layer_id":
+        0,
+        "device_count":
+        2,
+        "device_list": [{
+            "device_id": 0,
+            "device_expert": [7, 2, 0, 3, 5]
+        }, {
+            "device_id": 1,
+            "device_expert": [6, 1, 4, 7, 2]
+        }]
+    }]
+}

@@ -99,3 +99,63 @@ def test_e2e_deepseekv3_with_torchair_ms_mla():
         },
     }
     _deepseek_torchair_test_fixture(additional_config)
+
+
+def _pangu_torchair_test_fixture(
+    additional_config: Dict,
+    *,
+    tensor_parallel_size=4,
+):
+    example_prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
+    # torchair is only work without chunked-prefill now
+    kwargs = {
+        "ascend_scheduler_config": {
+            "enabled": True,
+        },
+        "refresh": True,
+    }
+    additional_config.update(**kwargs)
+
+    with VllmRunner(
+            "vllm-ascend/pangu-pro-moe-pruing",
+            dtype="half",
+            tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend="mp",
+            enforce_eager=False,
+            additional_config=additional_config,
+    ) as vllm_model:
+        # use greedy sampler to make sure the generated results are fix
+        vllm_output = vllm_model.generate_greedy(example_prompts, 5)
+
+    # NOTE: vllm-ascend/pangu-pro-moe-pruing is only part of PanguProMoE
+    # with 2 hidden layers, thus the golden results seems inaccurate.
+    # This will only change if accuracy changes with the official weights
+    # of PanguProMoE.
+    golden_results = [
+        'Hello, my name is Remempondeprecatedmiot忱',
+        'The president of the United States is Remem下的一个 rever ceremoni Segnali',
+        'The capital of France is Rememvoud administrativ Remem投',
+        'The future of AI isotope Segnali Zoeken精细化 supus',
+    ]
+
+    assert len(golden_results) == len(vllm_output)
+    for i in range(len(vllm_output)):
+        assert golden_results[i] == vllm_output[i][1]
+        print(f"Generated text: {vllm_output[i][1]!r}")
+
+
+@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
+                    reason="torchair graph is not supported on v0")
+def test_e2e_pangu_with_torchair():
+    additional_config = {
+        "torchair_graph_config": {
+            "enabled": True,
+        },
+    }
+    _pangu_torchair_test_fixture(additional_config)

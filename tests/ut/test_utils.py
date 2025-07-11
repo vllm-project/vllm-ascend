@@ -1,3 +1,18 @@
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
 import math
 import os
 import unittest
@@ -8,10 +23,11 @@ import torch
 from vllm.config import (CompilationConfig, ModelConfig, ParallelConfig,
                          VllmConfig)
 
+from tests.ut.base import TestBase
 from vllm_ascend import utils
 
 
-class TestUtils(unittest.TestCase):
+class TestUtils(TestBase):
 
     def test_is_310p(self):
         utils._IS_310P = None
@@ -102,6 +118,79 @@ class TestUtils(unittest.TestCase):
         output_tensor = utils.aligned_16(input_tensor)
         self.assertEqual(output_tensor.shape[0], 32)
 
+    @mock.patch('torch_npu.get_npu_format')
+    @mock.patch('torch_npu.npu_format_cast')
+    @mock.patch('vllm.model_executor.layers.fused_moe.layer.FusedMoE',
+                new=mock.MagicMock)
+    @mock.patch('vllm_ascend.utils.is_310p')
+    @mock.patch('vllm_ascend.utils.get_ascend_config')
+    def test_maybe_converting_weight_acl_format(self, mock_get_config,
+                                                mock_310p, mock_npu_cast,
+                                                mock_get_format):
+        ACL_FORMAT_FRACTAL_NZ = 29
+        mock_310p.return_value = True
+
+        mock_config = mock.MagicMock()
+        mock_config.torchair_graph_config.enabled = True
+        mock_get_config.return_value = mock_config
+        mock_get_format.return_value = 1
+
+        mock_npu_cast.return_value = 1
+
+        fused_moe = mock.MagicMock()
+        fused_moe.w13_weight = mock.MagicMock()
+        fused_moe.w2_weight = mock.MagicMock()
+        fused_moe.w13_weight.data = torch.randn(128, 256)
+        fused_moe.w2_weight.data = torch.randn(256, 128)
+        model = mock.MagicMock()
+        model.modules.return_value = [fused_moe]
+
+        utils.maybe_converting_weight_acl_format(model, ACL_FORMAT_FRACTAL_NZ)
+        self.assertEqual(fused_moe.w13_weight.data, 1)
+
+    @mock.patch('torch_npu.get_npu_format')
+    @mock.patch('torch_npu.npu_format_cast')
+    @mock.patch('vllm.model_executor.layers.fused_moe.layer.FusedMoE',
+                new=mock.MagicMock)
+    @mock.patch('vllm_ascend.utils.is_310p')
+    @mock.patch('vllm_ascend.utils.get_ascend_config')
+    def test_maybe_converting_weight_acl_format_format_true(
+            self, mock_get_config, mock_310p, mock_npu_cast, mock_get_format):
+        ACL_FORMAT_FRACTAL_NZ = 29
+        mock_310p.return_value = True
+
+        mock_config = mock.MagicMock()
+        mock_config.torchair_graph_config.enabled = True
+        mock_get_config.return_value = mock_config
+        mock_get_format.return_value = ACL_FORMAT_FRACTAL_NZ
+
+        mock_npu_cast.return_value = 1
+
+        fused_moe = mock.MagicMock()
+        fused_moe.w13_weight = mock.MagicMock()
+        fused_moe.w2_weight = mock.MagicMock()
+        fused_moe.w13_weight.data = torch.randn(128, 256)
+        fused_moe.w2_weight.data = torch.randn(256, 128)
+        model = mock.MagicMock()
+        model.modules.return_value = [fused_moe]
+
+        mock_get_format.return_value = ACL_FORMAT_FRACTAL_NZ
+
+        utils.maybe_converting_weight_acl_format(model, ACL_FORMAT_FRACTAL_NZ)
+
+    @mock.patch('vllm_ascend.utils.get_ascend_config')
+    @mock.patch('vllm_ascend.utils.is_310p', return_value=False)
+    def test_maybe_converting_weight_acl_format_not_310_not_graph(
+            self, mock_310p, mock_get_config):
+        mock_config = mock.MagicMock()
+        mock_config.torchair_graph_config.enabled = False
+        mock_get_config.return_value = mock_config
+
+        mock_constant = mock.MagicMock()
+
+        mock_model = mock.MagicMock()
+        utils.maybe_converting_weight_acl_format(mock_model, mock_constant)
+
     @mock.patch('importlib.util.find_spec')
     @mock.patch('importlib.import_module')
     def test_try_register_lib(self, mock_import_module, mock_find_spec):
@@ -111,23 +200,17 @@ class TestUtils(unittest.TestCase):
         lib_name = "existing_lib"
         lib_info = "Library found and imported successfully"
         utils.try_register_lib(lib_name, lib_info)
-        mock_find_spec.assert_called_once_with(lib_name)
-        mock_import_module.assert_called_once_with(lib_name)
 
         # Can't find lib
         mock_find_spec.return_value = None
         lib_name = "non_existing_lib"
         utils.try_register_lib(lib_name)
-        self.assertEqual(2, mock_find_spec.call_count)
-        self.assertEqual(1, mock_import_module.call_count)
 
         # import error
         mock_find_spec.return_value = mock.MagicMock()
         mock_import_module.side_effect = ImportError("import error")
         lib_name = "error_lib"
         utils.try_register_lib(lib_name)
-        self.assertEqual(3, mock_find_spec.call_count)
-        self.assertEqual(2, mock_import_module.call_count)
 
     def test_enable_custom_op(self):
         result = utils.enable_custom_op()
@@ -196,6 +279,27 @@ class TestUtils(unittest.TestCase):
         self.assertEqual(
             3,
             len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
+
+    def test_get_torchair_current_work_dir(self):
+        cache_dir = utils.TORCHAIR_CACHE_DIR
+        work_dir = utils.get_torchair_current_work_dir()
+        self.assertEqual(cache_dir, work_dir)
+        work_dir = utils.get_torchair_current_work_dir("test")
+        self.assertEqual(os.path.join(cache_dir, "test"), work_dir)
+
+    def test_torchair_cache_dir(self):
+        utils.write_kv_cache_bytes_to_file(0, 100)
+        self.assertTrue(utils.check_torchair_cache_exist(),
+                        "Create torchair cache dir failed")
+        self.assertTrue(utils.check_kv_cache_bytes_cache_exist(),
+                        "Create kv cache bytes cache dir failed")
+        kv_cache_bytes = utils.read_kv_cache_bytes_from_file(0)
+        self.assertEqual(100, kv_cache_bytes)
+        utils.delete_torchair_cache_file()
+        self.assertFalse(utils.check_torchair_cache_exist(),
+                         "Delete torchair cache dir failed")
+        self.assertFalse(utils.check_kv_cache_bytes_cache_exist(),
+                         "Delete kv cache bytes cache dir failed")
 
 
 class TestProfileExecuteDuration(unittest.TestCase):

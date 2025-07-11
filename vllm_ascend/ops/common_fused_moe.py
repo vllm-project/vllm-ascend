@@ -18,12 +18,25 @@
 from typing import Callable, Optional
 
 import torch
+from vllm.config import CompilationLevel, get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.layer import \
     UnquantizedFusedMoEMethod
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ops.fused_moe import (fused_experts, fused_experts_moge,
-                                       select_experts)
+                                       select_experts,
+                                       select_gating_top_k_softmax_experts)
 from vllm_ascend.utils import is_310p
+
+SELECT_GATING_TOPK_SOTFMAX_EXPERTS: bool = envs_ascend.SELECT_GATING_TOPK_SOTFMAX_EXPERTS
+original_unquantized_fused_moe_init_func = UnquantizedFusedMoEMethod.__init__
+
+
+def unquantized_fused_moe_init_func(self, *args, **kwargs):
+    original_unquantized_fused_moe_init_func(self, *args, **kwargs)
+    vllm_config = get_current_vllm_config()
+    self.max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+    self.use_aclgraph = vllm_config.compilation_config.level == CompilationLevel.PIECEWISE and not vllm_config.model_config.enforce_eager
 
 
 def forward_oot(
@@ -44,19 +57,27 @@ def forward_oot(
     apply_router_weight_on_input: bool = False,
     activation: str = "silu",
 ) -> torch.Tensor:
-    topk_weights, topk_ids = select_experts(
-        global_num_experts=global_num_experts,
-        hidden_states=x,
-        router_logits=router_logits,
-        top_k=top_k,
-        use_grouped_topk=use_grouped_topk,
-        renormalize=renormalize,
-        topk_group=topk_group,
-        num_expert_group=num_expert_group,
-        custom_routing_function=custom_routing_function,
-        scoring_func=scoring_func,
-        e_score_correction_bias=e_score_correction_bias,
-    )
+
+    if SELECT_GATING_TOPK_SOTFMAX_EXPERTS:
+        topk_weights, topk_ids = select_gating_top_k_softmax_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            top_k=top_k,
+            renormalize=renormalize)
+    else:
+        topk_weights, topk_ids = select_experts(
+            global_num_experts=global_num_experts,
+            hidden_states=x,
+            router_logits=router_logits,
+            top_k=top_k,
+            use_grouped_topk=use_grouped_topk,
+            renormalize=renormalize,
+            topk_group=topk_group,
+            num_expert_group=num_expert_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias,
+        )
 
     if topk_ids.shape[1] < top_k or is_310p():
         assert global_num_experts is not None
@@ -71,6 +92,10 @@ def forward_oot(
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input)
 
+    # If use aclgraph, we need to set max_num_tokens to make
+    # the input shape of `npu_moe_init_routing` fixed
+    max_num_tokens = self.max_num_batched_tokens if self.use_aclgraph else None
+
     return fused_experts(
         hidden_states=x,
         w1=layer.w13_weight,
@@ -79,7 +104,9 @@ def forward_oot(
         topk_ids=topk_ids,
         top_k=top_k,
         expert_map=expert_map,
-        apply_router_weight_on_input=apply_router_weight_on_input)
+        apply_router_weight_on_input=apply_router_weight_on_input,
+        max_num_tokens=max_num_tokens)
 
 
+UnquantizedFusedMoEMethod.__init__ = unquantized_fused_moe_init_func
 UnquantizedFusedMoEMethod.forward_oot = forward_oot

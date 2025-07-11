@@ -28,21 +28,28 @@ from vllm.distributed import (GroupCoordinator, get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import get_dp_group, get_tp_group
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.fused_moe.config import \
+    FusedMoEConfig  # isort: skip
+from vllm.model_executor.layers.fused_moe.config import \
+    FusedMoEParallelConfig  # isort: skip
 from vllm.model_executor.layers.fused_moe.layer import (
-    FusedMoE, FusedMoEParallelConfig, MoEConfig, UnquantizedFusedMoEMethod,
-    determine_expert_map)
+    FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.communication_op import \
+    data_parallel_reduce_scatter
 from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
-                               get_fused_moe_state, is_310p, npu_stream_switch,
-                               npu_wait_tensor)
+                               get_all_reduce_merge_state, get_fused_moe_state,
+                               get_rm_router_logits_state, is_310p,
+                               npu_stream_switch, npu_wait_tensor)
 
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
+SELECT_GATING_TOPK_SOTFMAX_EXPERTS: bool = envs_ascend.SELECT_GATING_TOPK_SOTFMAX_EXPERTS
 
 
 def process_topk_ids(topk_ids: torch.Tensor, expert_num: int, ep_size: int,
@@ -74,8 +81,9 @@ def process_topk_ids(topk_ids: torch.Tensor, expert_num: int, ep_size: int,
                         experts_per_ep_rank_val).to(original_dtype)
     indices_arange = torch.arange(topk_ids.shape[0], device=device)
 
-    is_new_segment = torch.cat((torch.tensor([True], device=device),
-                                assigned_ep_rank[1:] != assigned_ep_rank[:-1]))
+    is_new_segment = torch.cat(
+        (torch.tensor([True], device=device), assigned_ep_rank[1:]
+         != assigned_ep_rank[:-1]))
     temp_start_markers = torch.full_like(indices_arange,
                                          -1,
                                          dtype=indices_arange.dtype)
@@ -464,13 +472,13 @@ def fused_experts_with_all2all_buffer(
         expert_idx_buffer_scatter.shape,
         dtype=expert_idx_buffer_scatter.dtype,
         device=expert_idx_buffer_scatter.device)
-    non_pad_len = torch.sum(
-        (expert_idx_buffer_scatter != global_num_experts).to(torch.int32))
-    hidden_states_pad_idx[
-        expert_idx_buffer_scatter != global_num_experts] = torch.arange(
-            non_pad_len,
-            dtype=expert_idx_buffer_scatter.dtype,
-            device=hidden_states.device)
+    non_pad_len = torch.sum((expert_idx_buffer_scatter
+                             != global_num_experts).to(torch.int32))
+    hidden_states_pad_idx[expert_idx_buffer_scatter !=
+                          global_num_experts] = torch.arange(
+                              non_pad_len,
+                              dtype=expert_idx_buffer_scatter.dtype,
+                              device=hidden_states.device)
 
     hidden_states_buffer_scatter = hidden_states[hidden_states_pad_idx]
     expert_idx_buffer_gather = torch.empty_like(
@@ -523,8 +531,8 @@ def fused_experts_with_all2all_buffer(
     dist.all_to_all_single(hidden_states_gatter,
                            hidden_states_scatter,
                            group=ep_group.device_group)
-    hidden_states_gatter = hidden_states_gatter[
-        expert_idx_buffer_scatter != global_num_experts]
+    hidden_states_gatter = hidden_states_gatter[expert_idx_buffer_scatter !=
+                                                global_num_experts]
     if hidden_states_gatter.shape[0] != row_idx_len:
         hidden_states = torch.zeros((row_idx_len, hidden_states.shape[1]),
                                     dtype=hidden_states.dtype,
@@ -647,6 +655,7 @@ def fused_experts(
     top_k: int,
     expert_map: torch.Tensor = None,
     apply_router_weight_on_input: bool = False,
+    max_num_tokens: Optional[int] = None,
 ) -> torch.Tensor:
     """
     Fused experts with top-k routing.
@@ -740,11 +749,12 @@ def fused_experts(
                                 dtype=torch.int32,
                                 device=device).view(top_k, -1).permute(
                                     1, 0).contiguous())
+        active_num = max_num_tokens if max_num_tokens is not None else num_tokens
         sorted_hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
             hidden_states,
             row_idx=row_idx,
             expert_idx=topk_ids,
-            active_num=num_tokens)
+            active_num=active_num)
 
         expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
             expanded_expert_idx, num_experts)
@@ -810,6 +820,39 @@ def fused_experts(
         )
 
     return final_hidden_states
+
+
+def select_gating_top_k_softmax_experts(
+        hidden_states: torch.Tensor, router_logits: torch.Tensor, top_k: int,
+        renormalize: bool) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Select top-k experts based on router logits.
+    only supports float16、bfloat16、float32
+
+    Args:
+        hidden_states: Hidden states of shape (num_tokens, hidden_size).
+        router_logits: Router logits of shape (num_tokens, num_experts).
+        top_k: Number of experts to select.
+        renormalize: Whether to renormalize the routing weights.
+
+    Returns:
+        topk_weights: Routing weights of shape (num_tokens, top_k).
+        topk_ids: Selected expert IDs of shape (num_tokens, top_k).
+
+    Raises:
+        ValueError: If an unsupported scoring function is provided.
+    """
+    topk_weights, topk_ids, row_idx = torch_npu.npu_moe_gating_top_k_softmax(
+        router_logits, None, k=top_k)
+
+    # # Required by npu_moe_init_routing
+    # topk_weights = topk_weights.to(hidden_states.dtype)
+    # topk_ids = topk_ids.to(torch.int32)
+
+    if renormalize:
+        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+
+    return topk_weights, topk_ids
 
 
 def native_grouped_topk(
@@ -933,7 +976,7 @@ def select_experts(
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
-    def __init__(self, moe: MoEConfig = None):
+    def __init__(self, moe: FusedMoEConfig = None):
 
         super().__init__(moe=moe)
         vllm_config = get_current_vllm_config()
@@ -1004,6 +1047,12 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 # y2_flag=False, # old api; 第三个输出是否输出
                 routed_scaling_factor=1,
                 eps=float(1e-20))
+        elif SELECT_GATING_TOPK_SOTFMAX_EXPERTS:
+            topk_weights, topk_ids = select_gating_top_k_softmax_experts(
+                hidden_states=x,
+                router_logits=router_logits,
+                top_k=top_k,
+                renormalize=renormalize)
         else:
             topk_weights, topk_ids = select_experts(
                 hidden_states=x,
@@ -1038,7 +1087,9 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 expert_map=expert_map,
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name,
                 shared_experts=shared_experts)
-        elif fused_moe_state == FusedMoEState.AllGather:
+        elif fused_moe_state in [
+                FusedMoEState.AllGather, FusedMoEState.NaiveMulticast
+        ]:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
                                  w2=layer.w2_weight,
@@ -1110,13 +1161,12 @@ class AscendFusedMoE(FusedMoE):
 
         vllm_config = get_current_vllm_config()
 
-        self.moe_parallel_config: FusedMoEParallelConfig = (
-            FusedMoEParallelConfig.make(
-                tp_size_=(tp_size if tp_size is not None else
-                          get_tensor_model_parallel_world_size()),
-                dp_size_=(dp_size if dp_size is not None else
-                          get_dp_group().world_size),
-                vllm_parallel_config=vllm_config.parallel_config))
+        self.moe_parallel_config = FusedMoEParallelConfig.make(
+            tp_size_=(tp_size if tp_size is not None else
+                      get_tensor_model_parallel_world_size()),
+            dp_size_=(dp_size
+                      if dp_size is not None else get_dp_group().world_size),
+            vllm_parallel_config=vllm_config.parallel_config)
 
         self.top_k = top_k
         self.num_experts = num_experts
@@ -1137,6 +1187,12 @@ class AscendFusedMoE(FusedMoE):
         self.activation = activation
         self.log2phy = None
         self.global_redundant_expert_num = 0
+
+        is_deepseek_v3_r1 = self.global_num_experts == 256
+        self.rm_router_logits = get_rm_router_logits_state(
+            self.moe_parallel_config.ep_size, self.dp_size, is_deepseek_v3_r1)
+        self.all_reduce_merge = get_all_reduce_merge_state(
+            self.moe_parallel_config.ep_size, is_deepseek_v3_r1)
 
         ascend_config = get_ascend_config()
         expert_map_path = ascend_config.expert_map_path
@@ -1166,8 +1222,7 @@ class AscendFusedMoE(FusedMoE):
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
                              "non-grouped topk.")
-
-        moe = MoEConfig(
+        moe = FusedMoEConfig.make(
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
             hidden_dim=hidden_size,
@@ -1175,7 +1230,7 @@ class AscendFusedMoE(FusedMoE):
             moe_parallel_config=self.moe_parallel_config,
             # TODO (bnell): this needs to be fixed for quantized types.
             in_dtype=params_dtype,
-        )
+            quant_config=quant_config)
 
         if quant_config is None:
             self.quant_method = AscendUnquantizedFusedMoEMethod(moe)
@@ -1205,6 +1260,22 @@ class AscendFusedMoE(FusedMoE):
         self.tp_group = get_tp_group().device_group
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
+    def naive_multicast(self, x: torch.Tensor,
+                        cu_tokens_across_dp_cpu: torch.Tensor):
+        assert (len(x.shape) == 2)
+        buffer = torch.empty((cu_tokens_across_dp_cpu[-1], x.size(1)),
+                             device=x.device,
+                             dtype=x.dtype)
+        start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
+            self.dp_rank - 1]
+        end = cu_tokens_across_dp_cpu[self.dp_rank]
+        buffer[start:end, :].copy_(x)
+        for idx in range(self.dp_size):
+            start = 0 if idx == 0 else cu_tokens_across_dp_cpu[idx - 1]
+            end = cu_tokens_across_dp_cpu[idx]
+            get_dp_group().broadcast(buffer[start:end, :], idx)
+        return buffer
+
     def forward(self,
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
@@ -1212,7 +1283,9 @@ class AscendFusedMoE(FusedMoE):
                 enable_force_load_balance: bool = False,
                 top_k: Optional[int] = None,
                 shared_experts: Optional[Any] = None,
+                gate=None,
                 replace_allreduce: bool = False):
+
         assert self.quant_method is not None
 
         if top_k:
@@ -1227,12 +1300,14 @@ class AscendFusedMoE(FusedMoE):
                                               is_prefill, is_deepseek_v3_r1)
         if shared_experts:
             if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
+                # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
                 shared_hidden_states = shared_experts(hidden_states)
 
         tp_size = get_tensor_model_parallel_world_size()
-        if (tp_size > 1 and fused_moe_state != FusedMoEState.AllGather
-                and fused_moe_state != FusedMoEState.AllGatherEP
-                and not replace_allreduce):
+        if (tp_size > 1 and fused_moe_state not in [
+                FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
+                FusedMoEState.NaiveMulticast
+        ] and not replace_allreduce):
             if num_tokens < tp_size:
                 hidden_states = nn.functional.pad(
                     hidden_states, (0, 0, 0, tp_size - num_tokens))
@@ -1247,21 +1322,40 @@ class AscendFusedMoE(FusedMoE):
             tp_rank = get_tensor_model_parallel_rank()
             hidden_states = chunk_hidden_states[tp_rank]
             router_logits = chunk_router_logits[tp_rank]
-        if self.dp_size > 1 and fused_moe_state == FusedMoEState.AllGather:
-            # NOTE: When in torchair graph, it has been padded in model_runner_v1
-            if not self.torchair_graph_enabled or is_prefill:
-                attn_metadata = get_forward_context().attn_metadata
-                if attn_metadata is not None:
-                    max_num_tokens_across_dp = attn_metadata.max_num_tokens_across_dp
-                    if num_tokens < max_num_tokens_across_dp:
-                        hidden_states = nn.functional.pad(
-                            hidden_states,
-                            (0, 0, 0, max_num_tokens_across_dp - num_tokens))
-                        router_logits = nn.functional.pad(
-                            router_logits,
-                            (0, 0, 0, max_num_tokens_across_dp - num_tokens))
-            hidden_states = get_dp_group().all_gather(hidden_states, 0)
-            router_logits = get_dp_group().all_gather(router_logits, 0)
+
+        if self.dp_size > 1:
+            if fused_moe_state == FusedMoEState.AllGather:
+                # NOTE: When in torchair graph, it has been padded in model_runner_v1
+                if not self.torchair_graph_enabled:
+                    attn_metadata = get_forward_context().attn_metadata
+                    if attn_metadata is not None:
+                        max_num_tokens_across_dp = attn_metadata.max_num_tokens_across_dp
+                        if num_tokens < max_num_tokens_across_dp:
+                            hidden_states = nn.functional.pad(
+                                hidden_states,
+                                (0, 0, 0,
+                                 max_num_tokens_across_dp - num_tokens))
+                            if not self.rm_router_logits:
+                                router_logits = nn.functional.pad(
+                                    router_logits,
+                                    (0, 0, 0,
+                                     max_num_tokens_across_dp - num_tokens))
+                hidden_states = get_dp_group().all_gather(hidden_states, 0)
+                if self.rm_router_logits:
+                    router_logits, _ = gate(hidden_states)
+                else:
+                    router_logits = get_dp_group().all_gather(router_logits, 0)
+
+            elif fused_moe_state == FusedMoEState.NaiveMulticast:
+                cu_tokens_across_dp_cpu = get_forward_context(
+                ).dp_metadata.cu_tokens_across_dp_cpu
+                hidden_states = self.naive_multicast(hidden_states,
+                                                     cu_tokens_across_dp_cpu)
+                if self.rm_router_logits:
+                    router_logits, _ = gate(hidden_states)
+                else:
+                    router_logits = self.naive_multicast(
+                        router_logits, cu_tokens_across_dp_cpu)
 
         # Matrix multiply.
         e_hidden_states = self.quant_method.apply(
@@ -1290,28 +1384,37 @@ class AscendFusedMoE(FusedMoE):
             if isinstance(e_hidden_states, tuple):
                 e_hidden_states, shared_hidden_states = e_hidden_states
 
-        if (tp_size > 1 and fused_moe_state != FusedMoEState.AllGather
-                and fused_moe_state != FusedMoEState.AllGatherEP
-                and not replace_allreduce):
+        if (tp_size > 1 and fused_moe_state not in [
+                FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
+                FusedMoEState.NaiveMulticast
+        ] and not replace_allreduce):
             dist.all_gather(list(chunk_hidden_states), e_hidden_states,
                             self.tp_group)
             final_hidden_states = torch.cat(chunk_hidden_states, dim=0)
             if num_tokens < tp_size:
                 final_hidden_states = final_hidden_states[:num_tokens]
             dispose_tensor(e_hidden_states)
-        elif self.dp_size > 1 and fused_moe_state == FusedMoEState.AllGather:
-            final_hidden_states = dist._functional_collectives.reduce_scatter_tensor(
-                e_hidden_states,
-                "sum",
-                scatter_dim=0,
-                group=get_dp_group().device_group)
-            final_hidden_states = final_hidden_states[:num_tokens]
-            dispose_tensor(e_hidden_states)
+        elif self.dp_size > 1:
+            if fused_moe_state == FusedMoEState.NaiveMulticast:
+                start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
+                    self.dp_rank - 1]
+                end = cu_tokens_across_dp_cpu[self.dp_rank]
+                final_hidden_states = get_dp_group().all_reduce(
+                    e_hidden_states)
+                final_hidden_states = final_hidden_states[start:end, :]
+                dispose_tensor(e_hidden_states)
+            elif fused_moe_state == FusedMoEState.AllGather:
+                final_hidden_states = data_parallel_reduce_scatter(
+                    e_hidden_states, dim=0)
+                final_hidden_states = final_hidden_states[:num_tokens]
+                dispose_tensor(e_hidden_states)
         else:
             final_hidden_states = e_hidden_states
 
-        if tp_size > 1 and (fused_moe_state == FusedMoEState.AllGather
-                            or fused_moe_state == FusedMoEState.AllGatherEP):
+        if tp_size > 1 and not self.all_reduce_merge and fused_moe_state in [
+                FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
+                FusedMoEState.NaiveMulticast
+        ]:
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 
