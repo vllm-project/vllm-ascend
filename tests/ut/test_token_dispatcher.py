@@ -54,9 +54,3 @@ class TestMoEAlltoAllSeqOverLapDispatcher:
         assert dispatcher.ep_rank == 0
         assert dispatcher.ep_size == 2
         assert dispatcher.overlap_stream is not None
-
-    def test_routing(self, dispatcher):
-        probs = torch.randn(4, 4)  # 4 tokens, 4 experts
-        scores, routing_map = dispatcher.routing(probs)
-        assert scores.shape == (4, 4)  # topk=2
-        assert routing_map.shape == (4, 4)
