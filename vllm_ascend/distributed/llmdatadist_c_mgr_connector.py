@@ -338,7 +338,8 @@ class LLMDataDistCMgrConnectorWorker():
         self.finished_reqs: set[str] = set()
         self.soc_info = NPUSocInfo()
         # get decode tp size from extra config
-        self.done_receiving_counts: defaultdict[str, set[int]] = defaultdict(set)
+        self.done_receiving_counts: defaultdict[str,
+                                                set[int]] = defaultdict(set)
 
     def listen_for_agent_metadata_req(self, event: threading.Event):
         assert self.local_agent_metadata is not None
@@ -372,9 +373,11 @@ class LLMDataDistCMgrConnectorWorker():
                             f"LLMDataDistCMgrConnectorWorker: receiving unrecognized data {decode_msg}"
                         )
                 elif event_msg == LLMDataDistCMgrEvent.ReqForFinished:
-                    finished_req_id, decode_tp_rank, decode_tp_size = decode_msg[:3]
+                    finished_req_id = decode_msg[0]
+                    decode_tp_rank = decode_msg[1]
+                    decode_tp_size = decode_msg[2]
                     with self.thread_lock:
-                        if self._increment_task_count(finished_req_id, 
+                        if self._increment_task_count(finished_req_id,
                                                       decode_tp_rank,
                                                       decode_tp_size):
                             logger.debug(
@@ -387,7 +390,7 @@ class LLMDataDistCMgrConnectorWorker():
                         f"LLMDataDistCMgrConnectorWorker: Receiving unexpected request event {event_msg} from remote !"
                     )
 
-    def _increment_task_count(self, request_id: str, tp_rank: int, 
+    def _increment_task_count(self, request_id: str, tp_rank: int,
                               decode_tp_size: int):
         if tp_rank in self.done_receiving_counts[request_id]:
             logger.warning(
@@ -752,8 +755,10 @@ class LLMDataDistCMgrConnectorWorker():
         url = f"tcp://{host}:{port}"
         logger.debug(f"Sending finished to remote: {url}")
         msg_encoder = msgspec.msgpack.Encoder()
-        msg_send = msg_encoder.encode(
-            [LLMDataDistCMgrEvent.ReqForFinished, [request_id, self.tp_rank, self.tp_size]])
+        msg_send = msg_encoder.encode([
+            LLMDataDistCMgrEvent.ReqForFinished,
+            [request_id, self.tp_rank, self.tp_size]
+        ])
         with zmq_ctx(zmq.REQ, url) as sock:  # type: ignore[attr-defined]
             try:
                 sock.send(msg_send)
