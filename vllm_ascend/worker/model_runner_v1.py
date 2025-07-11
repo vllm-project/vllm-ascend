@@ -71,6 +71,11 @@ from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.utils import ProfileExecuteDuration
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 
+from vllm_ascend.eplb.eplb_updator import EplbUpdator
+from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+from vllm_ascend.eplb.core.loader.device_transfer_loader import D2DExpertWeightLoader
+
+
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -182,6 +187,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
             weakref.proxy(self))
+
+        # EPLB
+        self.dynamic_eplb = ascend_config.dynamic_eplb
+        if self.dynamic_eplb == True:
+            self.eplb_adaptor = None
+            self.is_eplb_warmuped = False
+            self.eplb_updator = EplbUpdator(ascend_config.expert_map_path)
 
         # Multi-modal data support
         self.input_registry = INPUT_REGISTRY
@@ -987,10 +999,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if not scheduler_output.total_num_scheduled_tokens:
                 # Return empty ModelRunnerOuptut if there's no work to do.
                 return EMPTY_MODEL_RUNNER_OUTPUT
+            if self.dynamic_eplb:
+                self.eplb_updator.forward_before()
             (attn_metadata, hidden_states, spec_decode_metadata, positions,
              num_scheduled_tokens,
              sample_indices) = (self._process_reqs(scheduler_output,
                                                    intermediate_tensors))
+            if self.dynamic_eplb:
+                self.eplb_updator.take_update_info_from_eplb_process()
 
         with ProfileExecuteDuration().capture_async("post process"):
             logits = self.model.compute_logits(hidden_states[sample_indices],
@@ -1100,6 +1116,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             captured_name = "Decode" if self.attn_state == AscendAttentionState.DecodeOnly else "Prefill"
             logger.info("Profile execute duration [%s]:%s", captured_name,
                         " ".join(dr_str))
+        if self.dynamic_eplb:
+            self.eplb_updator.forward_end()
 
         return model_runner_output
 
@@ -1235,6 +1253,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     for k, v in self.intermediate_tensors.items()
                 })
 
+            if not is_compile and not self.in_profile_run and self.dynamic_eplb:
+                self.eplb_updator.forward_before()
+
             with set_forward_context(None,
                                      self.vllm_config,
                                      num_tokens=num_tokens):
@@ -1271,6 +1292,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         positions=positions,
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=inputs_embeds)
+
+                if self.in_profile_run and self.dynamic_eplb:
+                    self.model.clear_all_moe_loads()
+                if not is_compile and not self.in_profile_run and self.dynamic_eplb:
+                    self.eplb_updator.take_update_info_from_eplb_process()
+                    self.eplb_updator.forward_end()
                 return hidden_states
 
     def profile_run(self) -> None:
@@ -1308,6 +1335,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         del hidden_states, logits
         self.encoder_cache.clear()
         gc.collect()
+
+    def do_get_expert_load(self) ->  tuple:
+        return self.eplb_updator.get_expert_load()
+
+    def do_update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
+        return self.eplb_updator.update_expert_load_statistical_period(num_expert_load_gather, num_iterations)
+
+    def eplb_warmup(self):
+        #EPLB
+        if self.dynamic_eplb and not self.is_eplb_warmuped:
+            self.is_eplb_warmuped = True
+            self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
+            self.eplb_updator.set_adaptor(self.eplb_adaptor)
+            self.eplb_updator.warm_up_eplb()
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)

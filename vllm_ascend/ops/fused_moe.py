@@ -246,13 +246,14 @@ def fused_experts_with_mc2(
 
     hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
 
+    group_list_type = 1
     if shared_experts is None:
-        return hidden_states
+        return hidden_states, group_list_type, expert_token_nums
     else:
         with npu_stream_switch("moe_secondary", 0):
             npu_wait_tensor(shared_act, down_out_list)
             shared_hidden_states, _ = shared_experts.down_proj(shared_act)
-        return hidden_states, shared_hidden_states
+        return hidden_states, shared_hidden_states, group_list_type, expert_token_nums
 
 
 def apply_mlp(hidden_states_wrapper: List[torch.Tensor],
@@ -443,7 +444,9 @@ def fused_experts_with_all2all(
         )
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
-    return final_hidden_states
+
+    group_list_type = 0
+    return final_hidden_states, group_list_type, expert_tokens
 
 
 # currently expert parallelism implemented with all2all
@@ -1140,6 +1143,11 @@ class AscendFusedMoE(FusedMoE):
         local_num_experts = torch.sum(self.expert_map != -1) \
             if self.expert_map is not None else num_experts
 
+        self.dynamic_eplb = ascend_config.dynamic_eplb
+        self.moe_load = None
+        if self.dynamic_eplb:
+            self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
+
         moe_quant_params = {
             "num_experts": local_num_experts,
             "hidden_size": hidden_size,
@@ -1225,7 +1233,7 @@ class AscendFusedMoE(FusedMoE):
             router_logits = get_dp_group().all_gather(router_logits, 0)
 
         # Matrix multiply.
-        e_hidden_states = self.quant_method.apply(
+        e_hidden_states, group_list_type, expert_token_num = self.quant_method.apply(
             layer=self,
             x=hidden_states,
             router_logits=router_logits,
@@ -1251,6 +1259,11 @@ class AscendFusedMoE(FusedMoE):
         if shared_experts:
             if isinstance(e_hidden_states, tuple):
                 e_hidden_states, shared_hidden_states = e_hidden_states
+
+        if self.dynamic_eplb:
+            self.moe_load += expert_token_num if group_list_type else \
+                torch.cat([expert_token_num[:1], expert_token_num[1:] - expert_token_num[:-1]])
+
 
         if tp_size > 1 and fused_moe_state != FusedMoEState.AllGather:
             dist.all_gather(list(chunk_hidden_states), e_hidden_states,
@@ -1278,6 +1291,18 @@ class AscendFusedMoE(FusedMoE):
             return final_hidden_states, shared_hidden_states
         else:
             return final_hidden_states
+
+    def update_map(self,new_expert_map):
+        self.expert_map = new_expert_map
+
+    def get_map(self):
+        return self.expert_map
+
+    def get_log2phy_map(self):
+        return self.log2phy
+
+    def clear_moe_load(self):
+        self.moe_load.zero_()
 
     # ----------------------------------------- TBO-related --------------------------------------------
 

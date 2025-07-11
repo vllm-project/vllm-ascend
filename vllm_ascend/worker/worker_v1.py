@@ -192,6 +192,7 @@ class NPUWorker(WorkerBase):
             self.model_runner.load_model()
 
     def compile_or_warm_up_model(self) -> None:
+        self.model_runner.eplb_warmup()
         warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
         if not self.model_config.enforce_eager:
             warmup_sizes = [
@@ -206,6 +207,12 @@ class NPUWorker(WorkerBase):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
+
+    def get_expert_load(self) -> tuple:
+        return self.model_runner.do_get_expert_load()
+
+    def update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
+        self.model_runner.do_update_expert_load_statistical_period(num_expert_load_gather, num_iterations)
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()

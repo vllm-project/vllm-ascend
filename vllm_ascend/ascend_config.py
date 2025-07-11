@@ -39,6 +39,7 @@ class AscendConfig:
         self.expert_tensor_parallel_size = int(
             additional_config.get("expert_tensor_parallel_size", 0))
         self.expert_map_path = additional_config.get("expert_map_path", None)
+        self.dynamic_eplb = additional_config.get("dynamic_eplb", False)
         self.chunked_prefill_for_mla = additional_config.get(
             "chunked_prefill_for_mla", False)
 
