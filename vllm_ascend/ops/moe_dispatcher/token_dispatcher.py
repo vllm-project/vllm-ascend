@@ -201,6 +201,8 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         self.cached_global_input_tokens = None
         self.cached_shared_expert_output = None
         self.tokens_per_expert = None
+        self.perm1_finish_event = None
+        self.global_input_tokens_local_experts_indices = None
 
         if MoEAlltoAllSeqOverLapDispatcher.overlap_stream is None:
             MoEAlltoAllSeqOverLapDispatcher.overlap_stream = torch.npu.Stream()
@@ -280,7 +282,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
                     "num_global_tokens_per_local_expert must be set before operations."
                 )
             self.device_sync_point = "no_sync"
-            self.global_input_tokens_local_experts_indices: Tensor = torch.repeat_interleave(
+            self.global_input_tokens_local_experts_indices = torch.repeat_interleave(
                 self.expert_ids_per_ep_rank,
                 self.num_global_tokens_per_local_expert.ravel())
 
@@ -426,7 +428,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
                 raise ValueError(
                     "num_global_tokens_per_local_expert must be set before operations."
                 )
-            self.global_input_tokens_local_experts_indices: Tensor = torch.repeat_interleave(
+            self.global_input_tokens_local_experts_indices = torch.repeat_interleave(
                 self.expert_ids_per_ep_rank,
                 self.num_global_tokens_per_local_expert.ravel())
 
@@ -462,6 +464,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
             global_input_tokens, self.reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(
                 self.cached_global_input_tokens,
                 self.global_input_tokens_local_experts_indices)
+            assert self.cached_global_input_tokens is not None
             self.cached_global_input_tokens.untyped_storage().resize_(0)
             self.cached_global_input_tokens = None
 

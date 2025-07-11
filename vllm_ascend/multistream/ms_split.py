@@ -308,21 +308,21 @@ def model_input_split_v1_attn(
     elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
         # should be none in decode only state
         attn_mask_pre = attn_mask_post = attn_metadata.attn_mask
-        attn_state_pre = attn_state_post = AscendAttentionState.DecodeOnly
+        attn_state_pre = attn_state_post = AscendAttentionState.DecodeOnly  # noqa
     else:
         # chunked prefill
         assert attn_metadata.attn_mask is not None
         if has_prefill_pre:
-            attn_state_pre = attn_state_post = AscendAttentionState.ChunkedPrefill
+            attn_state_pre = attn_state_post = AscendAttentionState.ChunkedPrefill   # noqa
             attn_mask_pre = attn_metadata.attn_mask[:token_index, :max(
                 seq_lens_pre)].contiguous()
-            attn_state_post = AscendAttentionState.ChunkedPrefill
+            attn_state_post = AscendAttentionState.ChunkedPrefill  # noqa
             attn_mask_post = attn_metadata.attn_mask[
                 token_index:, :max(seq_lens_post)].contiguous()
         else:
-            attn_state_pre = AscendAttentionState.DecodeOnly
+            attn_state_pre = AscendAttentionState.DecodeOnly  # noqa
             attn_mask_pre = None
-            attn_state_post = AscendAttentionState.ChunkedPrefill
+            attn_state_post = AscendAttentionState.ChunkedPrefill  # noqa
             attn_mask_post = attn_metadata.attn_mask[
                 token_index:, :max(seq_lens_post)].contiguous()
 
