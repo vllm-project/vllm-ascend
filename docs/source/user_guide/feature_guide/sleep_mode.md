@@ -40,7 +40,6 @@ The following is a simple example of how to use sleep mode.
     from vllm.utils import GiB_bytes
 
 
-    os.environ["VLLM_USE_V1"] = "1"
     os.environ["VLLM_USE_MODELSCOPE"] = "True"
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -77,7 +76,6 @@ The following is a simple example of how to use sleep mode.
 
     ```bash
     export VLLM_SERVER_DEV_MODE="1"
-    export VLLM_USE_V1="1"
     export VLLM_WORKER_MULTIPROC_METHOD="spawn"
     export VLLM_USE_MODELSCOPE="True"
 

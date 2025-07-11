@@ -35,9 +35,6 @@ export VLLM_USE_MODELSCOPE=True
 
 # Set `max_split_size_mb` to reduce memory fragmentation and avoid out of memory
 export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
-
-# For vllm-ascend 0.9.2+, the V1 engine is enabled by default and no longer needs to be explicitly specified.
-export VLLM_USE_V1=1
 ```
 
 ### Online Inference on Multi-NPU
