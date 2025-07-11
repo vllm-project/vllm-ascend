@@ -313,7 +313,7 @@ def model_input_split_v1_attn(
         # chunked prefill
         assert attn_metadata.attn_mask is not None
         if has_prefill_pre:
-            attn_state_pre = attn_state_post = AscendAttentionState.ChunkedPrefill   # noqa
+            attn_state_pre = attn_state_post = AscendAttentionState.ChunkedPrefill  # noqa
             attn_mask_pre = attn_metadata.attn_mask[:token_index, :max(
                 seq_lens_pre)].contiguous()
             attn_state_post = AscendAttentionState.ChunkedPrefill  # noqa
