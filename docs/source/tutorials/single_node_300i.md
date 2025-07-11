@@ -60,7 +60,6 @@ Run the following command to start the vLLM server:
 
 ```{code-block} bash
    :substitutions:
-export VLLM_USE_V1=1
 vllm serve Qwen/Qwen3-0.6B \
     --tensor-parallel-size 1 \
     --enforce-eager \
@@ -90,7 +89,6 @@ Run the following command to start the vLLM server:
 
 ```{code-block} bash
    :substitutions:
-export VLLM_USE_V1=1
 vllm serve Qwen/Qwen2.5-7B-Instruct \
     --tensor-parallel-size 2 \
     --enforce-eager \
@@ -129,7 +127,7 @@ Run the following command to start the vLLM server:
 ```{code-block} bash
    :substitutions:
 
-VLLM_USE_V1=1 vllm serve /home/pangu-pro-moe-mode/ \
+vllm serve /home/pangu-pro-moe-mode/ \
 --tensor-parallel-size 4 \
 --enable-expert-parallel \
 --dtype "float16" \
@@ -321,7 +319,7 @@ if __name__ == "__main__":
 
 Run script:
 ```bash
-VLLM_USE_V1=1 python example.py
+python example.py
 ```
 
 If you run this script successfully, you can see the info shown below:
