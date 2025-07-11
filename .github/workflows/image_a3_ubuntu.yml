@@ -9,7 +9,7 @@ name: 'image / Ubuntu / a3'
 #   - commits are merge into main/*-dev  ==> vllm-ascend:main / vllm-ascend:*-dev
 # 3. tags push trigger image publish
 #   - is for final release image
-#   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3|latest / vllm-ascend:v1.2.3rc1
+#   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3-a3|latest / vllm-ascend:v1.2.3rc1-a3
 on:
   pull_request:
     branches:

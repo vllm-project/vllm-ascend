@@ -9,7 +9,7 @@ name: 'image / openEuler / a3'
 #   - commits are merge into main/*-dev  ==> vllm-ascend:main / vllm-ascend:*-dev
 # 3. tags push trigger image publish
 #   - is for final release image
-#   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3-openeuler|latest / vllm-ascend:v1.2.3rc1-openeuler
+#   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3-a3-openeuler|latest / vllm-ascend:v1.2.3rc1-a3-openeuler
 on:
   pull_request:
     branches:
@@ -70,7 +70,7 @@ jobs:
         # TODO(yikun): the post release might be considered as latest release
         tags: |
           type=ref,event=branch,suffix=-a3-openeuler
-          type=ref,event=pr,suffix=-openeuler
+          type=ref,event=pr,suffix=-a3-openeuler
           type=pep440,pattern={{raw}},suffix=-a3-openeuler
     - name: Free up disk space
       uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
