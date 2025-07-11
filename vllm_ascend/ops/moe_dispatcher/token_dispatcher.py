@@ -203,7 +203,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         # at different points based on MoE settings as late as possible.
         # Valid sync points are "before_permutation_1", "before_ep_alltoall",
         # "before_finish", and "no_sync".
-        self.cuda_sync_point = "no_sync"
+        self.device_sync_point = "no_sync"
 
         # cached intermediate tensors.
         self.cached_permutated_local_input_tokens = None
@@ -248,11 +248,11 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         if self.ep_size > 1 or self.num_local_experts > 1:
             # Token dropless and enable ep. A synchronization is needed before expert parallel
             # AlltoAll communication to get the `input_splits` and `output_splits` CPU values.
-            self.cuda_sync_point = "before_ep_alltoall"
+            self.device_sync_point = "before_ep_alltoall"
         else:
             # Token dropless and no ep. A synchronization is needed to get the
             # `tokens_per_expert` CPU value.
-            self.cuda_sync_point = "before_finish"
+            self.device_sync_point = "before_finish"
 
         if ep_size > 1:
             # ===================================================
@@ -281,7 +281,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
             num_tokens_per_local_expert = num_local_tokens_per_expert
 
         if self.num_local_experts > 1 and with_sync:
-            self.cuda_sync_point = "no_sync"
+            self.device_sync_point = "no_sync"
             self.global_input_tokens_local_experts_indices = torch.repeat_interleave(
                 self.expert_ids_per_ep_rank,
                 self.num_global_tokens_per_local_expert.ravel())
@@ -324,7 +324,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
                                                  group=self.tp_ep_group)
             self.hidden_shape_before_permute = hidden_states.shape
 
-            if self.cuda_sync_point == "before_permutation_1":
+            if self.device_sync_point == "before_permutation_1":
                 torch.npu.current_stream().synchronize()
 
             permutated_local_input_tokens, reversed_local_input_permutation_mapping = torch_npu.npu_moe_token_permute(
@@ -342,7 +342,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         ep_group = self.ep_group
 
         # Perform expert parallel AlltoAll communication
-        if self.cuda_sync_point == "before_ep_alltoall":
+        if self.device_sync_point == "before_ep_alltoall":
             torch.npu.current_stream().synchronize()
         _, global_input_tokens, permute1_ep_all_to_all_handle = async_all_to_all(
             permutated_local_input_tokens,
@@ -372,7 +372,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
             if self.tp_ep_size > 1 and self.config.moe_grouped_gemm:
                 global_input_tokens = all_gather_last_dim_from_tensor_parallel_region(
                     global_input_tokens, self.tp_ep_group)
-            if self.cuda_sync_point == "before_finish":
+            if self.device_sync_point == "before_finish":
                 torch.npu.current_stream().synchronize()
 
             return global_input_tokens
@@ -398,7 +398,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         tokens_per_expert = self.preprocess(routing_map, with_sync=False)
         self.hidden_shape_before_permute = hidden_states.shape
 
-        if self.cuda_sync_point == "before_permutation_1":
+        if self.device_sync_point == "before_permutation_1":
             torch.npu.current_stream().synchronize()
 
         event = torch.npu.current_stream().record_event()
@@ -421,7 +421,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
 
         # repeat interleve will launch a sync on current_stream.
         if self.num_local_experts > 1:
-            self.cuda_sync_point = "no_sync"
+            self.device_sync_point = "no_sync"
             self.global_input_tokens_local_experts_indices = torch.repeat_interleave(
                 self.expert_ids_per_ep_rank,
                 self.num_global_tokens_per_local_expert.ravel())
@@ -433,7 +433,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         ep_group = self.ep_group
 
         # Perform expert parallel AlltoAll communication
-        if self.cuda_sync_point == "before_ep_alltoall":
+        if self.device_sync_point == "before_ep_alltoall":
             torch.npu.current_stream().synchronize()
 
         torch.npu.current_stream().wait_event(self.perm1_finish_event)
