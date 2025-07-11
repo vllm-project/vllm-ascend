@@ -21,7 +21,7 @@ import unittest
 from pytest_mock import MockerFixture
 
 from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
-    MoEAlltoAllSeqOverLapDispatcher, MoeDispatcherConfig)
+    MoEAlltoAllSeqOverLapDispatcher, MoEDispatcherConfig)
 from vllm_ascend.utils import adapt_patch  # noqa E402
 
 import vllm_ascend.patch.worker.patch_common.patch_utils # type: ignore[import]  # isort: skip  # noqa
@@ -35,7 +35,7 @@ class TestMoEAlltoAllSeqOverLapDispatcher(unittest.TestCase):
 
     @pytest.fixture
     def config(self):
-        config = MoeDispatcherConfig()
+        config = MoEDispatcherConfig()
         config.set_num_local_experts(2)
         config.set_num_moe_experts(4)
         config.set_moe_pad_expert_input_to_capacity(False)

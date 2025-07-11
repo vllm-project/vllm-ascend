@@ -109,7 +109,7 @@ class MoEDispatcherConfig:
 
 class MoEDispatcher:
 
-    def __init__(self, config: MoeDispatcherConfig) -> None:
+    def __init__(self, config: MoEDispatcherConfig) -> None:
         """
         Initialize the MoE Token Dispatcher.
         """
@@ -151,12 +151,12 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
 
     """
 
-    def __init__(self, config: MoeDispatcherConfig):
+    def __init__(self, config: MoEDispatcherConfig):
         """
         Initialize the AlltoAllSeq token dispatcher.
 
         Args:
-            config (MoeDispatcherConfig): Configuration for the transformer model.
+            config (MoEDispatcherConfig): Configuration for the transformer model.
         """
         super().__init__(config)
         self.num_local_experts = config.num_local_experts
