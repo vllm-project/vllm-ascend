@@ -1,9 +1,9 @@
 import contextlib
 import json
 import math
+import os
 import threading
 import time
-import os
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
