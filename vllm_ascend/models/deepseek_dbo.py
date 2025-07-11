@@ -147,7 +147,7 @@ class CustomDeepseekDBOMoE(CustomDeepseekV2MoE):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=True if not envs_ascend.VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ else False,
+                reduce_results=not envs_ascend.VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ,  # shared experts tp comm is seperated in alltoallv for better overlap.
                 prefix=f"{prefix}.shared_experts",
             )
         CustomDeepseekDBOMoE.top_k = config.num_experts_per_tok
@@ -245,15 +245,13 @@ class CustomDeepseekDBOMoE(CustomDeepseekV2MoE):
         if self.config.n_routed_experts == 256:
             topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
                 router_logits,
-                k=self.config.num_experts_per_tok,  # topk当前写8
+                k=self.config.num_experts_per_tok,  
                 bias=self.gate.e_score_correction_bias,
                 k_group=self.config.topk_group,  # fix: 4
                 group_count=self.config.n_group,  # fix 8
-                group_select_mode=1,  # 0: group中的最大; 1: topk2.sum(fix)
+                group_select_mode=1,  # 0: max in group; 1: topk2.sum(fix)
                 renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
                 norm_type=1,  # 0: softmax; 1: sigmoid(fix)
-                # out_flag=False, # todo new api; 第三个输出是否输出
-                # y2_flag=False, # old api; 第三个输出是否输出
                 routed_scaling_factor=1,
                 eps=float(1e-20))
         else:

@@ -1346,8 +1346,6 @@ class AscendFusedMoE(FusedMoE):
 
 class AscendSparseMoeBlock(nn.Module):
 
-    top_k: int
-
     def __init__(
         self,
         config: PretrainedConfig,
