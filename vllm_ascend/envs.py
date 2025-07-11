@@ -117,6 +117,11 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value to False to disable the optimized model.
     "USE_OPTIMIZED_MODEL":
     lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
+    # SELECT_GATING_TOPK_SOTFMAX_EXPERTS is the equivalent of select_experts in non-quantized scenarios.
+    # In theory, it should have better performance than select_experts.
+    # Subsequent versions will remove the SELECT_GATING_TOPK_SOTFMAX_EXPERTS tag and use it as the default mode.
+    "SELECT_GATING_TOPK_SOTFMAX_EXPERTS":
+    lambda: bool(int(os.getenv("SELECT_GATING_TOPK_SOTFMAX_EXPERTS", '0'))),
     # The tolerance of the kv cache size, if the difference between the
     # actual kv cache size and the cached kv cache size is less than this value,
     # then the cached kv cache size will be used.
