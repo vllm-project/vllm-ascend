@@ -71,7 +71,7 @@ jobs:
         # TODO(yikun): the post release might be considered as latest release
         tags: |
           type=ref,event=branch,suffix=-310p-openeuler
-          type=ref,event=pr,suffix=-openeuler
+          type=ref,event=pr,suffix=-310p-openeuler
           type=pep440,pattern={{raw}},suffix=-310p-openeuler
 
     - name: Free up disk space
