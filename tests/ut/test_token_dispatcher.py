@@ -1,13 +1,27 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+#
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
 
 import pytest
 import torch
+import unittest
 from pytest_mock import MockerFixture
 
 from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
-    MoEAlltoAllSeqOverLapDispatcher, MoeDispatcherConfig)
+    MoEAlltoAllSeqOverLapDispatcher, MoEDispatcherConfig)
 from vllm_ascend.utils import adapt_patch  # noqa E402
 
 import vllm_ascend.patch.worker.patch_common.patch_utils # type: ignore[import]  # isort: skip  # noqa
@@ -17,11 +31,11 @@ import vllm_ascend.patch.worker.patch_common.patch_utils # type: ignore[import] 
 adapt_patch(True)
 
 
-class TestMoEAlltoAllSeqOverLapDispatcher:
+class TestMoEAlltoAllSeqOverLapDispatcher(unittest.TestCase):
 
     @pytest.fixture
     def config(self):
-        config = MoeDispatcherConfig()
+        config = MoEDispatcherConfig()
         config.set_num_local_experts(2)
         config.set_num_moe_experts(4)
         config.set_moe_pad_expert_input_to_capacity(False)
@@ -48,15 +62,9 @@ class TestMoEAlltoAllSeqOverLapDispatcher:
         return MoEAlltoAllSeqOverLapDispatcher(config)
 
     def test_initialization(self, dispatcher, config):
-        assert dispatcher.num_local_experts == config.num_local_experts
-        assert dispatcher.num_experts == config.num_moe_experts
-        assert dispatcher.local_expert_indices == [0, 1]
-        assert dispatcher.ep_rank == 0
-        assert dispatcher.ep_size == 2
-        assert dispatcher.overlap_stream is not None
-
-    def test_routing(self, dispatcher):
-        probs = torch.randn(4, 4)  # 4 tokens, 4 experts
-        scores, routing_map = dispatcher.routing(probs)
-        assert scores.shape == (4, 4)  # topk=2
-        assert routing_map.shape == (4, 4)
+        self.assertEqual(dispatcher.num_local_experts, config.num_local_experts)
+        self.assertEqual(dispatcher.num_experts, config.num_moe_experts)
+        self.assertEqual(dispatcher.local_expert_indices, [0, 1])
+        self.assertEqual(dispatcher.ep_rank, 0)
+        self.assertEqual(dispatcher.ep_size, 2)
+        self.assertIsNotNone(dispatcher.overlap_stream)

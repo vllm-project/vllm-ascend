@@ -1,12 +1,6 @@
-# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # Copyright 2023 The vLLM team.
-# Copyright 2023 DeepSeek-AI and the HuggingFace Inc. team. All rights reserved.
 #
-# This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
-# and OPT implementations in this library. It has been modified from its
-# original forms to accommodate minor architectural differences compared
-# to GPT-NeoX and OPT used by the Meta AI team that trained the model.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -19,7 +13,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# # Adapted from
+# This file is a part of the vllm-ascend project.
+
 # """Inference-only Qwen3 model."""
 from types import SimpleNamespace
 from typing import List, Optional, Union
@@ -28,6 +23,7 @@ import torch
 import torch_npu
 from torch import nn
 from transformers import PretrainedConfig
+import vllm.model_executor.models.qwen3_moe as qwen3
 from vllm.attention import AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -58,7 +54,7 @@ from vllm_ascend.multistream.layers import (MultiStreamPostTransformerLayer,
 from vllm_ascend.multistream.metadata import (MultiStreamConfig,
                                               MultiStreamStepMetadata,
                                               make_multistream_metadata_ds)
-from vllm_ascend.ops.fused_moe import apply_mlp, select_experts
+from vllm_ascend.ops.fused_moe import apply_mlp, select_experts, AscendSparseMoeBlock
 
 VLLM_ASCEND_ENABLE_DBO: bool = envs_ascend.VLLM_ASCEND_ENABLE_DBO
 
@@ -143,17 +139,7 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
             attn_metadata = get_forward_context().attn_metadata
         # when profile runs, force experts to load balanced tokens
         # to avoid high memory consumption on a single rank.
-        # TODO: need a better flag to indicate whether in profile run or not.
-        if attn_metadata is None:
-            # for profile run
-            self.is_prefill = True
-            self.enable_force_load_balance = True
-        else:
-            # is_prefill = attn_metadata.num_prefills > 0
-            is_prefill = False
-            self.enable_force_load_balance = False
-            if hasattr(attn_metadata, 'with_prefill_across_dp'):
-                self.is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
+        enable_force_load_balance = get_forward_context().in_profile_run
 
         num_tokens, hidden_dim = hidden_states.shape
 
@@ -186,11 +172,9 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
                 bias=self.mlp.gate.e_score_correction_bias,
                 k_group=mlp_config.topk_group,  # fix: 4
                 group_count=mlp_config.n_group,  # fix 8
-                group_select_mode=1,  # 0: group中的最大; 1: topk2.sum(fix)
+                group_select_mode=1,  # 0: max in group; 1: topk2.sum(fix)
                 renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
                 norm_type=1,  # 0: softmax; 1: sigmoid(fix)
-                # out_flag=False, # todo new api; 第三个输出是否输出
-                # y2_flag=False, # old api; 第三个输出是否输出
                 routed_scaling_factor=1,
                 eps=float(1e-20))
         else:
@@ -212,7 +196,7 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
-        if self.enable_force_load_balance:
+        if enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, self.config.num_experts)
 
         return topk_weights, topk_ids, local_hidden_states, chunked_hidden_states_sizes
@@ -521,6 +505,7 @@ class CustomQwen3MoeForCausalLMDBO(Qwen3MoeForCausalLM):
         "experts":
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     }
+    qwen3.Qwen3MoeSparseMoeBlock = AscendSparseMoeBlock
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)

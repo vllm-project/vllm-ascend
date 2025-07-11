@@ -142,7 +142,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     #   1: enable moe all2all seq.
     "VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ":
     lambda: bool(int(os.getenv('VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ', '0'))),
-# ENABLE chunk mc2
+    # ENABLE chunk mc2
     "VLLM_ASCEND_ENABLE_CHUNK_MC2":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CHUNK_MC2", "0"))),
     # Batch MC2 in prefill: The number of tokens in each batch

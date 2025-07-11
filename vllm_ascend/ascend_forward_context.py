@@ -9,6 +9,8 @@ from vllm.distributed import get_dp_group, get_tp_group
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.platforms import current_platform
 
+import vllm_ascend.envs as envs
+
 import vllm_ascend.envs as envs_ascend
 
 
@@ -16,13 +18,13 @@ class FusedMoEState(Enum):
     AllGather = 0
     All2All = 1
     MC2 = 2
-    All2AllSeq = 3
-    MC2_PREFILL = 4
+    MC2_PREFILL = 3
+    All2AllSeq = 4
 
 
 # TODO(zzzzwwjj): add soc_version to choose branch
 def get_fused_moe_state(ep_size: int, with_prefill: bool):
-    enable_chunk_mc2 = envs_ascend.VLLM_ASCEND_ENABLE_CHUNK_MC2
+    enable_chunk_mc2 = envs.VLLM_ASCEND_ENABLE_CHUNK_MC2
     if ep_size == 1:
         return FusedMoEState.AllGather
     elif envs_ascend.VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ:
