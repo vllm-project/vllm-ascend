@@ -141,23 +141,23 @@ class CustomQwen3DecoderLayer(nn.Module):
                 "Expected quant_config to be an instance of AscendQuantConfig"
 
             if isinstance(self.self_attn.qkv_proj.quant_method.quant_method,
-                        AscendW8A8LinearMethod):
+                          AscendW8A8LinearMethod):
                 self.input_layernorm = AddRMSNormW8A8Quant(
                     config.hidden_size,
                     layer=self.self_attn.qkv_proj,
                     eps=config.rms_norm_eps)
             else:
                 self.input_layernorm = RMSNorm(config.hidden_size,
-                                           eps=config.rms_norm_eps)
+                                               eps=config.rms_norm_eps)
             if isinstance(self.mlp.gate_up_proj.quant_method.quant_method,
-                        AscendW8A8LinearMethod):
+                          AscendW8A8LinearMethod):
                 self.post_attention_layernorm = AddRMSNormW8A8Quant(
                     config.hidden_size,
                     layer=self.mlp.gate_up_proj,
                     eps=config.rms_norm_eps)
             else:
-                self.post_attention_layernorm = RMSNorm(config.hidden_size,
-                                                    eps=config.rms_norm_eps)
+                self.post_attention_layernorm = RMSNorm(
+                    config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
         self,
