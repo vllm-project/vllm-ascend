@@ -37,7 +37,7 @@ from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.ops.fused_moe import AscendUnquantizedFusedMoEMethod
+from vllm_ascend.ops.fused_moe import AscendDSUnquantizedFusedMoEMethod
 from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD
 
 from .quantizer import AscendQuantizer
@@ -104,7 +104,7 @@ class AscendQuantConfig(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
-                return AscendUnquantizedFusedMoEMethod()
+                return AscendDSUnquantizedFusedMoEMethod()
             return AscendFusedMoEMethod(self, prefix,
                                         self.packed_modules_mapping)
         return None
