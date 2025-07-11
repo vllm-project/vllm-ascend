@@ -74,6 +74,7 @@ def is_310p():
         _IS_310P = _build_info.__soc_version__.lower().startswith("ascend310p")
     return _IS_310P
 
+
 def sleep_mode_enabled():
     global _SLEEP_MODE_ENABLED
     if _SLEEP_MODE_ENABLED is None:
