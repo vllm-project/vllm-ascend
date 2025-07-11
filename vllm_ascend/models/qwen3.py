@@ -8,8 +8,8 @@ import torch.distributed as dist
 from transformers import Qwen3Config
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.attention import Attention, AttentionType
-from vllm.distributed import (get_pp_group, 
+from vllm.attention import AttentionType
+from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
                               get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_gather)
@@ -166,7 +166,9 @@ class CustomQwen3Attention(Qwen3Attention):
         if self.enable_fc:
             # pad input because AllGather requires token_num to be divisible by tp_size
             attn_output, pad_size = pad(attn_output, self.tp_size)
-            output = torch.empty(attn_output.shape, dtype=attn_output.dtype, device=attn_output.device)
+            output = torch.empty(attn_output.shape,
+                                 dtype=attn_output.dtype,
+                                 device=attn_output.device)
             dist.all_to_all_single(output, attn_output)
             attn_output = output.reshape(self.tp_size, -1, output.size(-1)) \
                                 .transpose(0, 1) \
@@ -247,8 +249,7 @@ class CustomQwen3DecoderLayer(nn.Module):
                 eps=config.rms_norm_eps)
 
     def pre_attention_process(self, hidden_states, residual, pad_size=0):
-        hidden_states, residual = self.input_layernorm(
-                hidden_states, residual)
+        hidden_states, residual = self.input_layernorm(hidden_states, residual)
         hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
         hidden_states = unpad(hidden_states, pad_size)
         return hidden_states, residual
@@ -267,20 +268,19 @@ class CustomQwen3DecoderLayer(nn.Module):
         hidden_states = unpad(hidden_states, pad_size)
         return hidden_states, residual
 
-    def forward(
-        self,
-        positions: torch.Tensor,
-        hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
-        pad_size: int = 0
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(self,
+                positions: torch.Tensor,
+                hidden_states: torch.Tensor,
+                residual: Optional[torch.Tensor],
+                pad_size: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             if self.enable_fc:
-                hidden_states, residual = self.pre_attention_process(hidden_states, residual, pad_size)
+                hidden_states, residual = self.pre_attention_process(
+                    hidden_states, residual, pad_size)
             else:
                 hidden_states, residual = self.input_layernorm(
                     hidden_states, residual)
@@ -291,7 +291,8 @@ class CustomQwen3DecoderLayer(nn.Module):
 
         # Fully Connected
         if self.enable_fc:
-            hidden_states, residual = self.pre_mlp_process(hidden_states, residual, pad_size)
+            hidden_states, residual = self.pre_mlp_process(
+                hidden_states, residual, pad_size)
         else:
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual)
@@ -342,12 +343,8 @@ class CustomQwen3Model(Qwen2Model):
             residual = intermediate_tensors["residual"]
         pad_size = 0
         for layer in self.layers[self.start_layer:self.end_layer]:
-            hidden_states, residual, pad_size = layer(
-                positions,
-                hidden_states,
-                residual,
-                pad_size
-            )
+            hidden_states, residual, pad_size = layer(positions, hidden_states,
+                                                      residual, pad_size)
         if self.enable_fc:
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
             residual = tensor_model_parallel_all_gather(residual, 0)
