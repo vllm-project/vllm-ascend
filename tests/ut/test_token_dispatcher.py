@@ -16,7 +16,6 @@
 # This file is a part of the vllm-ascend project.
 
 import pytest
-import torch
 import unittest
 from pytest_mock import MockerFixture
 
