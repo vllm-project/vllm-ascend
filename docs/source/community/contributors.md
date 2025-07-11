@@ -17,6 +17,23 @@ Updated on 2025-06-10:
 
 | Number | Contributor | Date | Commit ID |
 |:------:|:-----------:|:-----:|:---------:|
+| 83 | [@ZhengWG](https://github.com/) | 2025/7/7 | [3a469de](https://github.com/vllm-project/vllm-ascend/commit/9c886d0a1f0fc011692090b0395d734c83a469de) |
+| 82 | [@wm901115nwpu](https://github.com/) | 2025/7/7 | [a2a47d4](https://github.com/vllm-project/vllm-ascend/commit/f08c4f15a27f0f27132f4ca7a0c226bf0a2a47d4) |
+| 81 | [@Agonixiaoxiao](https://github.com/) | 2025/7/2 | [6f84576](https://github.com/vllm-project/vllm-ascend/commit/7fc1a984890bd930f670deedcb2dda3a46f84576) |
+| 80 | [@zhanghw0354](https://github.com/zhanghw0354) | 2025/7/2 | [d3df9a5](https://github.com/vllm-project/vllm-ascend/commit/9fb3d558e5b57a3c97ee5e11b9f5dba6ad3df9a5) |
+| 79 | [@GDzhu01](https://github.com/GDzhu01) | 2025/6/28 | [de256ac](https://github.com/vllm-project/vllm-ascend/commit/b308a7a25897b88d4a23a9e3d583f4ec6de256ac) |
+| 78 | [@leo-pony](https://github.com/leo-pony) | 2025/6/26 | [3f2a5f2](https://github.com/vllm-project/vllm-ascend/commit/10253449120307e3b45f99d82218ba53e3f2a5f2) |
+| 77 | [@zeshengzong](https://github.com/zeshengzong) | 2025/6/26 | [3ee25aa](https://github.com/vllm-project/vllm-ascend/commit/192dbbcc6e244a8471d3c00033dc637233ee25aa) |
+| 76 | [@sharonyunyun](https://github.com/sharonyunyun) | 2025/6/25 | [2dd8666](https://github.com/vllm-project/vllm-ascend/commit/941269a6c5bbc79f6c1b6abd4680dc5802dd8666) |
+| 75 | [@Pr0Wh1teGivee](https://github.com/Pr0Wh1teGivee) | 2025/6/25 | [c65dd40](https://github.com/vllm-project/vllm-ascend/commit/2fda60464c287fe456b4a2f27e63996edc65dd40) |
+| 74 | [@xleoken](https://github.com/xleoken) | 2025/6/23 | [c604de0](https://github.com/vllm-project/vllm-ascend/commit/4447e53d7ad5edcda978ca6b0a3a26a73c604de0) |
+| 73 | [@lyj-jjj](https://github.com/lyj-jjj) | 2025/6/23 | [5cbd74e](https://github.com/vllm-project/vllm-ascend/commit/5177bef87a21331dcca11159d3d1438075cbd74e) |
+| 72 | [@farawayboat](https://github.com/farawayboat)| 2025/6/21 | [bc7d392](https://github.com/vllm-project/vllm-ascend/commit/097e7149f75c0806774bc68207f0f6270bc7d392)
+| 71 | [@yuancaoyaoHW](https://github.com/yuancaoyaoHW) | 2025/6/20 | [7aa0b94](https://github.com/vllm-project/vllm-ascend/commit/00ae250f3ced68317bc91c93dc1f1a0977aa0b94)
+| 70 | [@songshanhu07](https://github.com/songshanhu07) | 2025/6/18 | [5e1de1f](https://github.com/vllm-project/vllm-ascend/commit/2a70dbbdb8f55002de3313e17dfd595e1de1f)
+| 69 | [@wangyanhui-cmss](https://github.com/wangyanhui-cmss) | 2025/6/12| [40c9e88](https://github.com/vllm-project/vllm-ascend/commit/2a5fb4014b863cee6abc3009f5bc5340c9e88) |
+| 68 | [@chenwaner](https://github.com/chenwaner) | 2025/6/11 | [c696169](https://github.com/vllm-project/vllm-ascend/commit/e46dc142bf1180453c64226d76854fc1ec696169) |
+| 67 | [@yzim](https://github.com/yzim) | 2025/6/11 | [aaf701b](https://github.com/vllm-project/vllm-ascend/commit/4153a5091b698c2270d160409e7fee73baaf701b) |
 | 66 | [@Yuxiao-Xu](https://github.com/Yuxiao-Xu) | 2025/6/9 | [6b853f1](https://github.com/vllm-project/vllm-ascend/commit/6b853f15fe69ba335d2745ebcf14a164d0bcc505) |
 | 65 | [@ChenTaoyu-SJTU](https://github.com/ChenTaoyu-SJTU) | 2025/6/7 | [20dedba](https://github.com/vllm-project/vllm-ascend/commit/20dedba5d1fc84b7ae8b49f9ce3e3649389e2193) |
 | 64 | [@zxdukki](https://github.com/zxdukki) | 2025/6/7 | [87ebaef](https://github.com/vllm-project/vllm-ascend/commit/87ebaef4e4e519988f27a6aa378f614642202ecf) |
