@@ -168,7 +168,6 @@ def generate_md(model_name, tasks_list, args, datasets):
 **Software Environment**: CANN: {args.cann_version}, PyTorch: {args.torch_version}, torch-npu: {args.torch_npu_version}  
 **Hardware Environment**: Atlas A2 Series  
 **Datasets**: {datasets}  
-**vLLM Engine**: V{args.vllm_use_v1}  
 **Parallel Mode**: {PARALLEL_MODE[model_name]}  
 **Execution Mode**: {EXECUTION_MODE[model_name]}  
 **Command**:  
@@ -310,6 +309,5 @@ if __name__ == "__main__":
     parser.add_argument("--cann_version", type=str, required=False)
     parser.add_argument("--vllm_commit", type=str, required=False)
     parser.add_argument("--vllm_ascend_commit", type=str, required=False)
-    parser.add_argument("--vllm_use_v1", type=str, required=False)
     args = parser.parse_args()
     main(args)
