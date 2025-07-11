@@ -304,12 +304,14 @@ def model_input_split_v1_attn(
         # the attn_mla kernel in torch npu only accept 128*128 attn mask
         attn_mask_pre = attn_mask_post = attn_metadata.attn_mask
         attn_state_pre = attn_state_post = attn_metadata.attn_state
+
     elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
         # should be none in decode only state
         attn_mask_pre = attn_mask_post = attn_metadata.attn_mask
         attn_state_pre = attn_state_post = AscendAttentionState.DecodeOnly
     else:
         # chunked prefill
+        assert attn_metadata.attn_mask is not None
         if has_prefill_pre:
             attn_state_pre = attn_state_post = AscendAttentionState.ChunkedPrefill
             attn_mask_pre = attn_metadata.attn_mask[:token_index, :max(

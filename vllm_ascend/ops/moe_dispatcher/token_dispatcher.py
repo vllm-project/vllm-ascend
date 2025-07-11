@@ -24,6 +24,7 @@ from typing import Optional
 
 import torch
 import torch_npu
+from torch import Tensor
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.distributed.tensor_parallel import (
@@ -279,7 +280,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
                     "num_global_tokens_per_local_expert must be set before operations."
                 )
             self.device_sync_point = "no_sync"
-            self.global_input_tokens_local_experts_indices = torch.repeat_interleave(
+            self.global_input_tokens_local_experts_indices: Tensor = torch.repeat_interleave(
                 self.expert_ids_per_ep_rank,
                 self.num_global_tokens_per_local_expert.ravel())
 
@@ -314,6 +315,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
 
         # Permutation 1: input to AlltoAll input
         def alltoall_token_permutation1(hidden_states, routing_map):
+            assert self.hidden_shape is not None
             hidden_states = hidden_states.view(-1, self.hidden_shape[-1])
             tokens_per_expert = self.preprocess(routing_map)
             if self.tp_ep_size > 1:
@@ -390,6 +392,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         self.top_indices = routing_map
         assert probs.dim() == 2, "Expected 2D tensor for probs"
         assert routing_map.dim() == 2, "Expected 2D tensor for routing map"
+        assert self.hidden_shape is not None
 
         hidden_states = hidden_states.view(-1, self.hidden_shape[-1])
         tokens_per_expert = self.preprocess(routing_map, with_sync=False)
@@ -401,6 +404,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         event = torch.npu.current_stream().record_event()
         self.perm1_finish_event = torch.npu.Event()
         with torch.npu.stream(self.overlap_stream):
+            assert self.overlap_stream is not None
             self.overlap_stream.wait_event(event)
 
             if shared_experts is not None:
@@ -418,7 +422,11 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         # repeat interleve will launch a sync on current_stream.
         if self.num_local_experts > 1:
             self.device_sync_point = "no_sync"
-            self.global_input_tokens_local_experts_indices = torch.repeat_interleave(
+            if self.num_global_tokens_per_local_expert is None:
+                raise ValueError(
+                    "num_global_tokens_per_local_expert must be set before operations."
+                )
+            self.global_input_tokens_local_experts_indices: Tensor = torch.repeat_interleave(
                 self.expert_ids_per_ep_rank,
                 self.num_global_tokens_per_local_expert.ravel())
 
@@ -441,6 +449,10 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
             ep_group,
         )
         permute1_ep_all_to_all_handle.wait()
+        if self.cached_permutated_local_input_tokens is None:
+            raise ValueError(
+                "cached_permutated_local_input_tokens must be set before operations."
+            )
         self.cached_permutated_local_input_tokens.untyped_storage().resize_(0)
         self.cached_permutated_local_input_tokens = None
 
