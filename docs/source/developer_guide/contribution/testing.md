@@ -156,7 +156,7 @@ There are several principles to follow when writing unit tests:
 ```bash
 # Run unit tests
 export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/$(uname -m)-linux/devlib
-VLLM_USE_V1=1 TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest -sv tests/ut
+TORCH_DEVICE_BACKEND_AUTOLOAD=0 pytest -sv tests/ut
 ```
 
 ::::
