@@ -59,10 +59,10 @@ function run_prefill_instance() {
     }')
 
   # start prefill instance
-  ASCEND_RT_VISIBLE_DEVICES=0 vllm serve $model_name \
+  ASCEND_RT_VISIBLE_DEVICES=0 vllm serve "$model_name" \
   --host 0.0.0.0 \
-  --port $prefill_port \
-  --tensor-parallel-size $tp_size \
+  --port "$prefill_port" \
+  --tensor-parallel-size "$tp_size" \
   --served-model-name Deepseek \
   --max-model-len 2000 \
   --trust-remote-code \
@@ -110,10 +110,10 @@ function run_decode_instance() {
     }')
 
   # start decode instance
-  ASCEND_RT_VISIBLE_DEVICES=1 vllm serve $model_name \
+  ASCEND_RT_VISIBLE_DEVICES=1 vllm serve "$model_name" \
     --host 0.0.0.0 \
-    --port $decode_port \
-    --tensor-parallel-size $tp_size \
+    --port "$decode_port" \
+    --tensor-parallel-size "$tp_size" \
     --seed 1024 \
     --served-model-name Deepseek \
     --max-model-len 2000 \
