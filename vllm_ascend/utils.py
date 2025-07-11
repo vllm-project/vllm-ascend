@@ -57,13 +57,14 @@ else:
 MAX_CAPTURE_SIZE = 1920
 
 ASCEND_QUATIZATION_METHOD = "ascend"
-SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3"]
+SOC_VERSION_INFERENCE_SERIES = ["Ascend310P3", "AscendA3"]
 
 ACL_FORMAT_FRACTAL_ND = 2
 ACL_FORMAT_FRACTAL_NZ = 29
 
 _CUSTOM_OP_ENABLED = None
 _IS_310P = None
+_IS_A3 = None
 _SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 
@@ -75,6 +76,12 @@ def is_310p():
         _IS_310P = _build_info.__soc_version__.lower().startswith("ascend310p")
     return _IS_310P
 
+def is_a3():
+    global _IS_A3
+    if _IS_A3 is None:
+        from vllm_ascend import _build_info  # type: ignore
+        _IS_A3 = _build_info.__soc_version__.lower().startswith("ascenda3")
+    return _IS_A3
 
 def sleep_mode_enabled():
     global _SLEEP_MODE_ENABLED
