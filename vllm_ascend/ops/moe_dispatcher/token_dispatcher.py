@@ -24,7 +24,6 @@ from typing import Optional
 
 import torch
 import torch_npu
-from torch import Tensor
 from vllm.distributed.parallel_state import get_ep_group
 
 from vllm_ascend.distributed.tensor_parallel import (
