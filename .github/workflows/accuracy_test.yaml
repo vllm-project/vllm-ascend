@@ -90,7 +90,6 @@ jobs:
       }}
     strategy:
       matrix:
-        vllm_use_version: [1]
         # the accuracy test will run:
         # 1. workflow_dispatch with models input
         #   - all: Qwen/Qwen3-30B-A3B, Qwen/Qwen2.5-VL-7B-Instruct, Qwen/Qwen3-8B-Base
@@ -122,7 +121,7 @@ jobs:
          ) }}
 
       fail-fast: false
-    name: ${{ matrix.model_name }} accuracy V${{ matrix.vllm_use_version }}
+    name: ${{ matrix.model_name }} accuracy
     container:
       image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
       env:
@@ -236,15 +235,14 @@ jobs:
           echo "vLLM: ${{ env.GHA_VLLM_VERSION }}"
           echo "vLLM Ascend: ${{ env.GHA_VLLM_ASCEND_VERSION }}"
 
-      - name: Run Accuracy Test for V${{ matrix.vllm_use_version }}
+      - name: Run Accuracy Test
         id: report
         working-directory: ./benchmarks
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
-          VLLM_USE_V1: ${{ matrix.vllm_use_version }}
         run: |
           model_base_name=$(basename ${{ matrix.model_name }})
-          markdown_name="${model_base_name}-V${{ matrix.vllm_use_version }}"
+          markdown_name="${model_base_name}"
           echo "markdown_name=$markdown_name"
           echo "markdown_name=$markdown_name" >> $GITHUB_OUTPUT
           mkdir -p ./accuracy
@@ -259,7 +257,6 @@ jobs:
             --vllm_version "${{ env.GHA_VLLM_VERSION }}" \
             --vllm_commit "${{ env.VLLM_COMMIT }}" \
             --vllm_ascend_commit "${{ env.VLLM_ASCEND_COMMIT }}" \
-            --vllm_use_v1 "$VLLM_USE_V1"
 
       - name: Generate step summary
         if: ${{ always() }}
@@ -282,7 +279,7 @@ jobs:
             echo "contains_fail=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Upload Report for V${{ matrix.vllm_use_version }}
+      - name: Upload Report 
         if: ${{ github.event_name == 'workflow_dispatch' && steps.check_report.outputs.contains_fail == 'false' }}
         uses: actions/upload-artifact@v4
         with:
