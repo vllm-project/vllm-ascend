@@ -33,7 +33,7 @@ on:
     tags:
       - 'v*'
     paths:
-      - '.github/workflows/image_310p.openeuler.yml'
+      - '.github/workflows/image_310p_openeuler.yml'
       - 'Dockerfile.310p.openEuler'
       - 'vllm_ascend/**'
 
