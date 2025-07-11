@@ -96,8 +96,8 @@ jobs:
       - name: Run vllm-project/vllm-ascend long term test
         run: |
           if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
-            pytest -sv tests/e2e/long_term/test_accuracy.py
-          # else
+            pytest -sv tests/e2e/long_term/accuracy/accuracy_singlecard.py
+          else
             # accuracy test multi card
-            # VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/long_term/test_deepseek_v2_lite_tp2_accuracy.py
+            pytest -sv tests/e2e/long_term/accuracy/accuracy_multicard.py
           fi
