@@ -39,7 +39,7 @@ from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils import is_list_of
 
-from tests.model_utils import (PROMPT_TEMPLATES, TokensTextLogprobs,
+from tests.e2e.model_utils import (PROMPT_TEMPLATES, TokensTextLogprobs,
                                TokensTextLogprobsPromptLogprobs)
 # TODO: remove this part after the patch merged into vllm, if
 # we not explicitly patch here, some of them might be effectiveless

@@ -5,7 +5,6 @@ from vllm import LLM, SamplingParams
 
 # enable dual-batch overlap for vllm ascend
 os.environ["VLLM_ASCEND_ENABLE_DBO"] = "1"
-os.environ["VLLM_USE_V1"] = "1"
 
 # Sample prompts.
 prompts = ["The president of the United States is"] * 41

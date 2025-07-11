@@ -2,12 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Compare the with and without prefix caching on V1 scheduler or AscendScheduler."""
 
-import os
-
 import pytest
 
-from tests.conftest import VllmRunner
-from tests.model_utils import check_outputs_equal
+from tests.e2e.conftest import VllmRunner
+from tests.e2e.model_utils import check_outputs_equal
 
 MODELS = [
     # for MHA
@@ -60,8 +58,6 @@ INPUT_PROMPTS = [
 ]
 
 
-@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
-                    reason="mtp is not supported on v1")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [50])
 def test_prefix_cache_with_v1_scheduler(model: str, max_tokens: int) -> None:
@@ -89,8 +85,6 @@ def test_prefix_cache_with_v1_scheduler(model: str, max_tokens: int) -> None:
     )
 
 
-@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
-                    reason="mtp is not supported on v1")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [50])
 def test_prefix_cache_with_ascend_scheduler(model: str,

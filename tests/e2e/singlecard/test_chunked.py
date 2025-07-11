@@ -20,8 +20,6 @@ Compare the outputs of vLLM with and without aclgraph.
 Run `pytest tests/compile/test_aclgraph.py`.
 """
 
-import os
-
 import pytest
 import torch
 from vllm import LLM, SamplingParams
@@ -29,8 +27,6 @@ from vllm import LLM, SamplingParams
 MODELS = ["deepseek-ai/DeepSeek-V2-Lite"]
 
 
-@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
-                    reason="new chunked only support on v1")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [1])
 def test_models(
@@ -39,36 +35,33 @@ def test_models(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     return
-    with monkeypatch.context() as m:
-        prompts = "The president of the United States is"
 
-        m.setenv("VLLM_USE_V1", "1")
+    prompts = "The president of the United States is"
 
-        sampling_params = SamplingParams(
-            max_tokens=max_tokens,
-            temperature=0.0,
-        )
+    sampling_params = SamplingParams(
+        max_tokens=max_tokens,
+        temperature=0.0,
+    )
 
-        vllm_model = LLM(model,
-                         long_prefill_token_threshold=4,
-                         enforce_eager=True)
-        output_chunked = vllm_model.generate(prompts, sampling_params)
-        logprobs_chunked = output_chunked.outputs[0].logprobs
-        del vllm_model
-        torch.npu.empty_cache()
+    vllm_model = LLM(model, long_prefill_token_threshold=4, enforce_eager=True)
+    output_chunked = vllm_model.generate(prompts, sampling_params)
+    logprobs_chunked = output_chunked.outputs[0].logprobs
+    del vllm_model
+    torch.npu.empty_cache()
 
-        vllm_model = LLM(model,
-                         enforce_eager=True,
-                         additional_config={
-                             'ascend_scheduler_config': {
-                                 'enabled': True
-                             },
-                         })
-        output = vllm_model.generate(prompts, sampling_params)
-        logprobs = output.outputs[0].logprobs
-        del vllm_model
-        torch.npu.empty_cache()
+    vllm_model = LLM(model,
+                     enforce_eager=True,
+                     additional_config={
+                         'ascend_scheduler_config': {
+                             'enabled': True
+                         },
+                     })
+    output = vllm_model.generate(prompts, sampling_params)
+    logprobs = output.outputs[0].logprobs
+    del vllm_model
+    torch.npu.empty_cache()
 
-        logprobs_similarity = torch.cosine_similarity(
-            logprobs_chunked.flatten(), logprobs.flatten(), dim=0)
-        assert logprobs_similarity > 0.95
+    logprobs_similarity = torch.cosine_similarity(logprobs_chunked.flatten(),
+                                                  logprobs.flatten(),
+                                                  dim=0)
+    assert logprobs_similarity > 0.95
