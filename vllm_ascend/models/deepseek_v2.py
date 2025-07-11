@@ -74,8 +74,7 @@ from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import (dispose_tensor, npu_stream_switch,
-                               npu_wait_tensor)
+from vllm_ascend.utils import dispose_tensor, npu_prefetch
 
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
@@ -567,12 +566,12 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                                   and attn_metadata.num_decodes > 0)
         forward_kwargs = {"enable_multistream_mla": enable_multistream_mla}
         if self.q_lora_rank is not None:
+            npu_prefetch(self.q_a_proj.weight,
+                         hidden_states,
+                         enabled=enable_multistream_mla)
             ckq = self.q_a_proj(hidden_states)[0]
-            npu_wait_tensor(hidden_states, ckq, enabled=enable_multistream_mla)
-            with npu_stream_switch("mla_secondary",
-                                   0,
-                                   enabled=enable_multistream_mla):
-                hidden_states_or_q_c = self.q_a_layernorm(ckq)
+            hidden_states_or_q_c = self.q_a_layernorm(ckq)
+            forward_kwargs['ckq'] = ckq
         else:
             hidden_states_or_q_c = hidden_states
         if self.torchair_graph_enabled:
