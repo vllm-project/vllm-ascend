@@ -766,6 +766,7 @@ class LLMDataDistCMgrConnectorWorker():
                 logger.debug(
                     f"Request id {request_id} finished message send to remote {url}"
                 )
+                _ = sock.recv()
             except Exception as e:
                 logger.error(
                     f"Failed to send reqest_id {request_id} to prefill: {e}")
