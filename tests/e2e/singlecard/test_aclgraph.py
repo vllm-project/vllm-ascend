@@ -35,8 +35,8 @@ MODELS = [
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("full_graph", [False])
+@pytest.mark.parametrize("max_tokens", [16])
+@pytest.mark.parametrize("full_graph", [True, False])
 def test_models_with_aclgraph(
     model: str,
     max_tokens: int,
