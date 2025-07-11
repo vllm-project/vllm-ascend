@@ -16,7 +16,7 @@ on:
       - 'main'
       - '*-dev'
     paths:
-      - '.github/workflows/image_a3.ubuntu.yml'
+      - '.github/workflows/image_a3_ubuntu.yml'
       - 'Dockerfile.a3'
       - 'vllm_ascend/**'
       - 'setup.py'
