@@ -372,21 +372,23 @@ class LLMDataDistCMgrConnectorWorker():
                             f"LLMDataDistCMgrConnectorWorker: receiving unrecognized data {decode_msg}"
                         )
                 elif event_msg == LLMDataDistCMgrEvent.ReqForFinished:
-                    finished_req_id = decode_msg[0]
-                    decode_tp_rank = decode_msg[1]
-                    decode_tp_size = decode_msg[2]
+                    finished_req_id, decode_tp_rank, decode_tp_size = decode_msg[:3]
                     with self.thread_lock:
-                        if self._increment_task_count(finished_req_id, decode_tp_rank, decode_tp_size):
+                        if self._increment_task_count(finished_req_id, 
+                                                      decode_tp_rank,
+                                                      decode_tp_size):
                             logger.debug(
                                 f"LLMDataDistCMgrConnectorWorker: Receiving request {finished_req_id} finished"
                             )
                             self.finished_reqs.add(finished_req_id)
+                    sock.send_multipart((identity, b"", msg_to_send))
                 else:
                     raise RuntimeError(
                         f"LLMDataDistCMgrConnectorWorker: Receiving unexpected request event {event_msg} from remote !"
                     )
 
-    def _increment_task_count(self, request_id: str, tp_rank: int, decode_tp_size: int):
+    def _increment_task_count(self, request_id: str, tp_rank: int, 
+                              decode_tp_size: int):
         if tp_rank in self.done_receiving_counts[request_id]:
             logger.warning(
                 f"Received duplicate done signal for request {request_id} "
