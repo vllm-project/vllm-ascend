@@ -26,12 +26,11 @@ from unittest.mock import patch
 from modelscope import snapshot_download  # type: ignore
 from vllm import SamplingParams
 
-from tests.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner
 
 
 @patch.dict(
     os.environ, {
-        "VLLM_USE_V1": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "TASK_QUEUE_ENABLE": "1",
         "VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP": "1"
@@ -56,12 +55,10 @@ def test_generate_with_allgather():
         vllm_model.generate(example_prompts, sampling_params)
 
 
-@patch.dict(
-    os.environ, {
-        "VLLM_USE_V1": "1",
-        "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
-        "TASK_QUEUE_ENABLE": "1"
-    })
+@patch.dict(os.environ, {
+    "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
+    "TASK_QUEUE_ENABLE": "1"
+})
 def test_generate_with_alltoall():
     example_prompts = ["Hello, my name is"]
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)

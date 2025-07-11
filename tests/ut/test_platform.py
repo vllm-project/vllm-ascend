@@ -373,7 +373,6 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.utils.is_310p", return_value=False)
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
-    @patch("vllm.envs.VLLM_USE_V1", True)
     def test_check_and_update_config_v1_worker_class_selection(
             self, mock_init_ascend, mock_check_ascend, mock_is_310p):
         mock_init_ascend.return_value = self.mock_ascend_config
@@ -392,7 +391,6 @@ class TestNPUPlatform(TestBase):
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.utils.is_310p", return_value=True)
-    @patch("vllm.envs.VLLM_USE_V1", True)
     def test_check_and_update_config_310p_no_custom_ops(
             self, mock_is_310p, mock_init_ascend, mock_check_ascend):
         mock_init_ascend.return_value = self.mock_ascend_config

@@ -120,7 +120,6 @@ def main(
     trust_remote_code,
 ):
     # DP only support on V1 engine
-    os.environ["VLLM_USE_V1"] = "1"
     os.environ["VLLM_DP_RANK"] = str(global_dp_rank)
     os.environ["VLLM_DP_RANK_LOCAL"] = str(local_dp_rank)
     os.environ["VLLM_DP_SIZE"] = str(dp_size)

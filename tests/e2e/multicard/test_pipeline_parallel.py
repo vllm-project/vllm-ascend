@@ -16,7 +16,7 @@
 #
 import pytest
 
-from tests.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner
 
 MODELS = [
     "Qwen/Qwen3-0.6B",

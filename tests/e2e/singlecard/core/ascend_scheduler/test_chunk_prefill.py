@@ -9,8 +9,8 @@ Run `pytest tests/e2e/singlecard/core/ascend_scheduler/test_chunk_prefill.py`.
 """
 import pytest
 
-from tests.conftest import VllmRunner
-from tests.model_utils import check_outputs_equal
+from tests.e2e.conftest import VllmRunner
+from tests.e2e.model_utils import check_outputs_equal
 
 MODELS = [
     "Qwen/Qwen3-0.6B-Base",
