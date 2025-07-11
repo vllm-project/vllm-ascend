@@ -232,7 +232,6 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
 
         ep_size = self.ep_size
 
-
         # Dropless
         self.num_out_tokens = indices.numel()
         if self.ep_size > 1 or self.num_local_experts > 1:
@@ -408,7 +407,6 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
                 shared_output = shared_experts(shared_experts_input)
                 self.cached_shared_expert_output = shared_output
 
-
             hidden_states, self.reversed_local_input_permutation_mapping = torch_npu.npu_moe_token_permute(
                 tokens=hidden_states,
                 indices=self.top_indices,
@@ -542,8 +540,8 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
 
             output = torch_npu.npu_moe_token_unpermute(
                 permuted_tokens=permutated_local_input_tokens,
-                sorted_indices=self.
-                reversed_local_input_permutation_mapping.to(torch.int32),
+                sorted_indices=self.reversed_local_input_permutation_mapping.
+                to(torch.int32),
                 probs=self.probs,
                 restore_shape=self.hidden_shape_before_permute)
 

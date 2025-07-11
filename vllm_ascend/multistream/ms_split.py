@@ -294,8 +294,8 @@ def model_input_split_v1_attn(
                                                  token_index)
 
     is_only_prefill_pre = is_only_prefill_post = attn_metadata.is_only_prefill
-    has_prefill_pre, _ = torch.any(
-        query_lens_pre > 1).item(), torch.any(query_lens_post > 1).item()
+    has_prefill_pre, _ = torch.any(query_lens_pre > 1).item(), torch.any(
+        query_lens_post > 1).item()
 
     if not attn_metadata.is_only_prefill:
         is_only_prefill_post = torch.all(query_lens_post > 1).item()

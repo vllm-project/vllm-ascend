@@ -147,7 +147,8 @@ class CustomDeepseekDBOMoE(CustomDeepseekV2MoE):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=not envs_ascend.VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ,  # shared experts tp comm is separated in alltoallv for better overlap.
+                reduce_results=not envs_ascend.
+                VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ,  # shared experts tp comm is separated in alltoallv for better overlap.
                 prefix=f"{prefix}.shared_experts",
             )
         CustomDeepseekDBOMoE.top_k = config.num_experts_per_tok
@@ -232,7 +233,9 @@ class CustomDeepseekDBOMoE(CustomDeepseekV2MoE):
             chunk_hidden_states = torch.tensor_split(hidden_states,
                                                      self.tp_size,
                                                      dim=0)
-            chunked_hidden_states_sizes = [x.shape[0] for x in chunk_hidden_states]
+            chunked_hidden_states_sizes = [
+                x.shape[0] for x in chunk_hidden_states
+            ]
             local_hidden_states = chunk_hidden_states[self.tp_rank]
         else:
             local_hidden_states = hidden_states
@@ -245,7 +248,7 @@ class CustomDeepseekDBOMoE(CustomDeepseekV2MoE):
         if self.config.n_routed_experts == 256:
             topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
                 router_logits,
-                k=self.config.num_experts_per_tok,  
+                k=self.config.num_experts_per_tok,
                 bias=self.gate.e_score_correction_bias,
                 k_group=self.config.topk_group,  # fix: 4
                 group_count=self.config.n_group,  # fix 8
@@ -273,7 +276,8 @@ class CustomDeepseekDBOMoE(CustomDeepseekV2MoE):
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
         if enable_force_load_balance:
-            topk_ids = torch.randint_like(topk_ids, 0, self.config.n_routed_experts)
+            topk_ids = torch.randint_like(topk_ids, 0,
+                                          self.config.n_routed_experts)
 
         return topk_weights, topk_ids, local_hidden_states, chunked_hidden_states_sizes
 
