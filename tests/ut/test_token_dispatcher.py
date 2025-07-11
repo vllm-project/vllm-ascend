@@ -15,17 +15,16 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-import pytest
 import unittest
+
+import pytest
 from pytest_mock import MockerFixture
 
 from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
     MoEAlltoAllSeqOverLapDispatcher, MoEDispatcherConfig)
 from vllm_ascend.utils import adapt_patch  # noqa E402
 
-import vllm_ascend.patch.worker.patch_common.patch_utils # type: ignore[import]  # isort: skip  # noqa
-
-
+import vllm_ascend.patch.worker.patch_common.patch_utils  # type: ignore[import]  # isort: skip  # noqa
 
 adapt_patch(True)
 
@@ -61,7 +60,8 @@ class TestMoEAlltoAllSeqOverLapDispatcher(unittest.TestCase):
         return MoEAlltoAllSeqOverLapDispatcher(config)
 
     def test_initialization(self, dispatcher, config):
-        self.assertEqual(dispatcher.num_local_experts, config.num_local_experts)
+        self.assertEqual(dispatcher.num_local_experts,
+                         config.num_local_experts)
         self.assertEqual(dispatcher.num_experts, config.num_moe_experts)
         self.assertEqual(dispatcher.local_expert_indices, [0, 1])
         self.assertEqual(dispatcher.ep_rank, 0)
