@@ -38,6 +38,17 @@ class TestUtils(TestBase):
         with mock.patch("vllm_ascend._build_info.__soc_version__",
                         "Ascend910P1"):
             self.assertFalse(utils.is_310p())
+            
+    def test_is_a3(self):
+        utils._IS_A3 = None
+        with mock.patch("vllm_ascend._build_info.__soc_version__", "AscendA3"):
+            self.assertTrue(utils.is_a3())
+        utils._IS_A3 = None
+        with mock.patch("vllm_ascend._build_info.__soc_version__", "Ascend310P3"):
+            self.assertFalse(utils.is_a3())
+        utils._IS_A3 = None
+        with mock.patch("vllm_ascend._build_info.__soc_version__", "Ascend910P1"):
+            self.assertFalse(utils.is_a3())
 
     def test_sleep_mode_enabled(self):
         utils._SLEEP_MODE_ENABLED = None
