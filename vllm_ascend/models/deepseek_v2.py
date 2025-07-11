@@ -68,8 +68,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import (dispose_tensor, npu_stream_switch,
-                               npu_wait_tensor)
+from vllm_ascend.utils import dispose_tensor, npu_prefetch
 
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
@@ -472,21 +471,22 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             hidden_states: torch.Tensor,
             kv_cache: Optional[torch.Tensor] = None,
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
+        forward_context = get_forward_context()
+        enable_multistream_mla = (self.enable_multistream_mla
+                                  and attn_metadata is not None
+                                  and not forward_context.with_prefill
+                                  and attn_metadata.num_decodes > 0)
+        forward_kwargs = {"enable_multistream_mla": enable_multistream_mla}
         if self.q_lora_rank is not None:
+            npu_prefetch(self.q_a_proj.weight,
+                         hidden_states,
+                         enabled=enable_multistream_mla)
             ckq = self.q_a_proj(hidden_states)[0]
-            use_multistream_mla = (self.enable_multistream_mla
-                                   and attn_metadata is not None
-                                   and attn_metadata.num_decodes > 0)
-            npu_wait_tensor(hidden_states, ckq, enabled=use_multistream_mla)
-            with npu_stream_switch("mla_secondary",
-                                   0,
-                                   enabled=use_multistream_mla):
-                hidden_states_or_q_c = self.q_a_layernorm(ckq)
+            hidden_states_or_q_c = self.q_a_layernorm(ckq)
         else:
             hidden_states_or_q_c = hidden_states
         is_mtp_model = attn_metadata is not None and attn_metadata.is_mtp_model
         if self.torchair_graph_enabled and not is_mtp_model:
-            forward_kwargs = {}
             if envs.VLLM_USE_V1:
                 output_shape = hidden_states.shape
                 output = torch.empty(output_shape,
