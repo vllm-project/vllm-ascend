@@ -144,7 +144,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_FUSED_MOE_MC2_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_ASCEND_FUSED_MOE_MC2_CHUNK_SIZE", "128")),
     "VLLM_ENABLE_FC":
-    lambda: int(os.getenv("VLLM_ENABLE_FC", 0))
+    lambda: int(os.getenv("VLLM_ENABLE_FC", '0'))
 }
 
 # end-env-vars-definition
