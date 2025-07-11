@@ -155,7 +155,7 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-2. Set the following enveriments parameters:
+1. Set the following enveriments parameters:
 
 ```bash
 export LCCL_DETERMINISTIC = 1
