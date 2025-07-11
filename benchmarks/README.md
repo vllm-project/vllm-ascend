@@ -146,7 +146,7 @@ Similarly, let’s take `Qwen2.5-VL-7B-Instruct` benchmark as an example:
    ```
 
 2. Running performance tests using cli
-   
+  
 ```shell
     vllm bench serve --model Qwen2.5-VL-7B-Instruct\
     --endpoint-type "openai-chat" --dataset-name hf \
