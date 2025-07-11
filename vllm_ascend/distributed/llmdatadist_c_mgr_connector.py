@@ -384,7 +384,8 @@ class LLMDataDistCMgrConnectorWorker():
                                 f"LLMDataDistCMgrConnectorWorker: Receiving request {finished_req_id} finished"
                             )
                             self.finished_reqs.add(finished_req_id)
-                    sock.send_multipart((identity, b"", b"receiving decode finished"))
+                    sock.send_multipart(
+                        (identity, b"", b"receiving decode finished"))
                 else:
                     raise RuntimeError(
                         f"LLMDataDistCMgrConnectorWorker: Receiving unexpected request event {event_msg} from remote !"
