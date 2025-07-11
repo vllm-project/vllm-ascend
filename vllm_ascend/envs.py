@@ -128,6 +128,11 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE":
     lambda: int(
         os.getenv("VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE", 64)),
+    # Whether to enable the topk optimization. It's disabled by default for experimental support
+    # We'll make it enabled by default in the future.
+    "VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION":
+    lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION", '0'))),
 }
 
 # end-env-vars-definition
