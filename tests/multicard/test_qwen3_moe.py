@@ -38,7 +38,7 @@ MODELS = ["vllm-ascend/Qwen3-30B-A3B-Puring"]
         "VLLM_ASCEND_ENABLE_DBO": "1"
     })
 def test_qwen3_moe_inference(model, max_tokens):
-    script = "examples/offline_data_parallel.py"
+    script = "examples/dp_offline/data_parallel.py"
 
     env = os.environ.copy()
 
@@ -56,7 +56,6 @@ def test_qwen3_moe_inference(model, max_tokens):
         "--node-rank",
         "0",
         "--trust-remote-code",
-        "--enforce-eager",
     ]
 
     print(f"Running subprocess: {' '.join(cmd)}")
