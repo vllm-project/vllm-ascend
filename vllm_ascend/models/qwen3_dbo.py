@@ -172,11 +172,9 @@ class Qwen3MoeDecoderLayerDBO(Qwen3MoeDecoderLayer):
                 bias=self.mlp.gate.e_score_correction_bias,
                 k_group=mlp_config.topk_group,  # fix: 4
                 group_count=mlp_config.n_group,  # fix 8
-                group_select_mode=1,  # 0: group中的最大; 1: topk2.sum(fix)
+                group_select_mode=1,  # 0: max in group; 1: topk2.sum(fix)
                 renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
                 norm_type=1,  # 0: softmax; 1: sigmoid(fix)
-                # out_flag=False, # todo new api; 第三个输出是否输出
-                # y2_flag=False, # old api; 第三个输出是否输出
                 routed_scaling_factor=1,
                 eps=float(1e-20))
         else:

@@ -43,7 +43,7 @@ from vllm_ascend.ops.comm_utils import async_all_to_all
 """
 
 
-class MoeDispatcherConfig:
+class MoEDispatcherConfig:
 
     def __init__(self):
         self.num_local_experts: int = 0

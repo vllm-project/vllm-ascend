@@ -46,7 +46,7 @@ from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
-    MoEAlltoAllSeqOverLapDispatcher, MoeDispatcherConfig)
+    MoEAlltoAllSeqOverLapDispatcher, MoEDispatcherConfig)
 from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
                                get_ascend_soc_version, npu_stream_switch,
                                npu_wait_tensor)
@@ -1164,7 +1164,7 @@ class AscendFusedMoE(FusedMoE):
                 self.quant_method, AscendUnquantizedFusedMoEMethod):
             self.reduce_results = False
             moe_dispatcher_config = (
-                MoeDispatcherConfig().set_num_moe_experts(
+                MoEDispatcherConfig().set_num_moe_experts(
                     self.global_num_experts).set_num_local_experts(
                         self.local_num_experts).set_moe_router_topk(
                             top_k).set_group_topk(topk_group).
