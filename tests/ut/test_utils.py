@@ -15,7 +15,6 @@
 
 import math
 import os
-import unittest
 from threading import Lock
 from unittest import mock
 
@@ -302,7 +301,7 @@ class TestUtils(TestBase):
                          "Delete kv cache bytes cache dir failed")
 
 
-class TestProfileExecuteDuration(unittest.TestCase):
+class TestProfileExecuteDuration(TestBase):
 
     def setUp(self):
         utils.ProfileExecuteDuration._instance = None
