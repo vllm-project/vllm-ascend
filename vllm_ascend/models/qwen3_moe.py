@@ -43,22 +43,16 @@ from vllm.model_executor.models.utils import ( extract_layer_index,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 from vllm.model_executor.models.qwen3_moe import (Qwen3MoeModel,
-                                                  Qwen3MoeDecoderLayer,
                                                   Qwen3MoeAttention,
                                                   Qwen3MoeMLP,
-                                                  Qwen3MoeSparseMoeBlock)
-
+                                                  Qwen3MoeForCausalLM)
+from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.ops.sequence_parallel import init_metadata_for_sp, MetadataForPadding
 import vllm_ascend.envs as envs_ascend
-
-from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
-from transformers import PretrainedConfig
-
-from vllm.sequence import IntermediateTensors
 
 
 class AscendQwen3MoeSparseMoeBlock(nn.Module):
