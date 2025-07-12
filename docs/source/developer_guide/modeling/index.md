@@ -7,4 +7,5 @@ This section provides tutorials of how to implement and register a new model int
 :maxdepth: 1
 adding_a_new_model
 adding_a_new_multimodal_model
+model_customization
 :::
