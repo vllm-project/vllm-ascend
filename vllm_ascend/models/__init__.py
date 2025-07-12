@@ -51,7 +51,7 @@ def register_model():
 
     ModelRegistry.register_model(
         "Qwen3MoeForCausalLM",
-        "vllm_ascend.models.qwen3_moe:CustomQwen3MoeForCausalLM")
+        "vllm_ascend.models.qwen3_moe:AscendQwen3MoeForCausalLM")
 
     ModelRegistry.register_model(
         "PanguProMoEForCausalLM",
