@@ -21,10 +21,10 @@ import torch
 import torch.distributed as dist
 import torch_npu
 from vllm.distributed import GroupCoordinator
+from vllm.distributed.parallel_state import get_ep_group
 
 import vllm_ascend.envs as envs
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import select_experts
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, FusedMoEState,
                                dispose_tensor, get_fused_moe_state,

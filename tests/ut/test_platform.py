@@ -28,7 +28,6 @@ class TestNPUPlatform(TestBase):
         self.mock_vllm_config.speculative_config = None
 
         self.mock_ascend_config = MagicMock()
-        self.mock_ascend_config.expert_tensor_parallel_size = 0
         self.mock_ascend_config.torchair_graph_config.enabled = False
         self.mock_ascend_config.ascend_scheduler_config.enabled = False
 
@@ -252,30 +251,6 @@ class TestNPUPlatform(TestBase):
 
         mock_init_ascend.assert_called_once_with(self.mock_vllm_config)
         mock_check_ascend.assert_called_once()
-
-    @patch("vllm_ascend.utils.is_310p", return_value=False)
-    @patch("vllm_ascend.ascend_config.check_ascend_config")
-    @patch("vllm_ascend.ascend_config.init_ascend_config")
-    def test_check_and_update_config_expert_parallel_enabled(
-            self, mock_init_ascend, mock_check_ascend, mock_is_310p):
-        mock_init_ascend.return_value = self.mock_ascend_config
-        self.mock_vllm_config.parallel_config.enable_expert_parallel = True
-        self.mock_vllm_config.parallel_config.tensor_parallel_size = 2
-        self.mock_vllm_config.parallel_config.world_size_across_dp = 4
-
-        from vllm_ascend import platform
-
-        importlib.reload(platform)
-
-        self.platform.check_and_update_config(self.mock_vllm_config)
-
-        self.assertEqual(
-            self.mock_vllm_config.parallel_config.expert_tensor_parallel_size,
-            1)
-        self.assertEqual(
-            self.mock_vllm_config.parallel_config.expert_parallel_size,
-            self.mock_vllm_config.parallel_config.world_size_across_dp,
-        )
 
     @patch("vllm_ascend.utils.is_310p", return_value=False)
     @patch("vllm_ascend.ascend_config.check_ascend_config")

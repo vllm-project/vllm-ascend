@@ -26,7 +26,8 @@ from vllm.config import get_current_vllm_config
 from vllm.distributed import (GroupCoordinator, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.distributed.parallel_state import get_dp_group, get_tp_group
+from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
+                                             get_tp_group)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import \
     FusedMoEConfig  # isort: skip
@@ -41,7 +42,6 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.communication_op import \
     data_parallel_reduce_scatter
-from vllm_ascend.distributed.parallel_state import get_ep_group, get_etp_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
                                get_all_reduce_merge_state, get_fused_moe_state,
@@ -142,22 +142,21 @@ def fused_experts_with_mc2(
     rank = torch.distributed.get_rank()
 
     quant_mode = 0
-    ep_group = get_ep_group().device_group
-    local_rank = torch.distributed.get_rank(group=ep_group)
-    all_to_all_group_size = torch.distributed.get_world_size(ep_group)
+    ep_group = get_ep_group()
+    ep_rank_id = ep_group.rank_in_group
+    ep_world_size = ep_group.world_size
 
-    tp_size = get_etp_group().world_size
-    tp_rank = rank % tp_size
+    tp_world_size = get_tp_group().world_size
+    tp_rank = rank % tp_world_size
 
     stage1_kwargs = {
         "scales": None,
         "quant_mode": quant_mode,
         "group_ep": moe_all_to_all_group_name,
-        "ep_world_size": all_to_all_group_size,
-        "ep_rank_id": local_rank,
-        # "group_tp": self.moe_rs_group_name,
+        "ep_world_size": ep_world_size,
+        "ep_rank_id": ep_rank_id,
         "group_tp": moe_all_to_all_group_name,
-        "tp_world_size": tp_size,
+        "tp_world_size": tp_world_size,
         "tp_rank_id": tp_rank,
     }
     kwargs_mc2.update(stage1_kwargs)
@@ -217,12 +216,12 @@ def fused_experts_with_mc2(
     stage3_kwargs = {
         "ep_send_counts": ep_recv_counts,
         "group_ep": moe_all_to_all_group_name,
-        "ep_world_size": all_to_all_group_size,
-        "ep_rank_id": local_rank,
+        "ep_world_size": ep_world_size,
+        "ep_rank_id": ep_rank_id,
         "tp_send_counts": tp_recv_counts,
         # "group_tp": self.moe_rs_group_name,
         "group_tp": moe_all_to_all_group_name,
-        "tp_world_size": tp_size,
+        "tp_world_size": tp_world_size,
         "tp_rank_id": tp_rank,
     }
     kwargs_mc2.update(stage3_kwargs)
