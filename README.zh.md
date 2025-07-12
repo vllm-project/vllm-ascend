@@ -20,6 +20,9 @@ vLLM Ascend Plugin
 ---
 *最新消息* 🔥
 
+- [2025/06] [用户案例](https://vllm-ascend.readthedocs.io/en/latest/community/user_stories/index.html)现已上线！展示了[LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory)/[verl](https://github.com/voidful/verl)/[TRL](https://github.com/huggingface/trl)/[GPUStack](https://github.com/alibaba/GPUStack)等用户案例，展示了vLLM Ascend如何帮助昇腾用户在模型微调、评估、强化学习 (RL) 以及部署等场景中提升体验。
+- [2025/06] [贡献者](https://vllm-ascend.readthedocs.io/en/latest/community/contributors.html)页面现已上线！所有的贡献都值得被记录，感谢所有的贡献者。
+- [2025/05] 我们发布了首个正式版本 [v0.7.3](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.7.3)！我们与 vLLM 社区合作发布了一篇博客文章，分享了我们的实践：[Introducing vLLM Hardware Plugin, Best Practice from Ascend NPU](https://blog.vllm.ai/2025/05/12/hardware-plugin.html)。
 - [2025/03] 我们和vLLM团队举办了[vLLM Beijing Meetup](https://mp.weixin.qq.com/s/CGDuMoB301Uytnrkc2oyjg)! 你可以在[这里](https://drive.google.com/drive/folders/1Pid6NSFLU43DZRi0EaTcPgXsAzDvbBqF)找到演讲材料.
 - [2025/02] vLLM社区正式创建了[vllm-project/vllm-ascend](https://github.com/vllm-project/vllm-ascend)仓库，让vLLM可以无缝运行在Ascend NPU。
 - [2024/12] 我们正在与 vLLM 社区合作，以支持 [[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162).
@@ -44,7 +47,12 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 
 ## 开始使用
 
-请查看[快速开始](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html)和[安装指南](https://vllm-ascend.readthedocs.io/en/latest/installation.html)了解更多.
+推荐您使用以下版本快速开始使用：
+
+| Version    | Release type | Doc                                  |
+|------------|--------------|--------------------------------------|
+|v0.9.2rc1| 最新RC版本 |请查看[快速开始](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html)和[安装指南](https://vllm-ascend.readthedocs.io/en/latest/installation.html)了解更多|
+|v0.7.3.post1| 最新正式/稳定版本 |请查看[快速开始](https://vllm-ascend.readthedocs.io/en/stable/quick_start.html)和[安装指南](https://vllm-ascend.readthedocs.io/en/stable/installation.html)了解更多|
 
 ## 贡献
 请参考 [CONTRIBUTING]((https://vllm-ascend.readthedocs.io/en/latest/developer_guide/contribution/index.html)) 文档了解更多关于开发环境搭建、功能测试以及 PR 提交规范的信息。
