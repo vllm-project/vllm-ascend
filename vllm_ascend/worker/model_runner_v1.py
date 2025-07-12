@@ -1009,6 +1009,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
 
+        is_only_prefill = np.all(num_valid_tokens != 1)
+        extra_builder_kwargs['is_only_prefill'] = is_only_prefill
+
         if self.dp_size > 1:
             max_num_tokens, with_prefill = self._get_forward_metadata_across_dp(
                 total_num_scheduled_tokens, with_prefill)
