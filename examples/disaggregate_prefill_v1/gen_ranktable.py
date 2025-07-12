@@ -45,18 +45,21 @@ def get_cmd_stdout(cmd):
 print(f"local_host: {local_host}")
 print("gen ranktable.json")
 
-num_cards = get_cmd_stdout("npu-smi info -l | grep \"Total Count\"").split(
-    ":")[1].strip()
-num_cards = int(num_cards)
 chips_per_card = get_cmd_stdout("npu-smi info -l | grep \"Chip Count\"").split(
     "\n")[0].split(":")[1].strip()
 chips_per_card = int(chips_per_card)
+
+def extract_id(d):
+    d = d.split(":")[1].strip()
+    return int(d)
+
+card_ids = [*map(extract_id, get_cmd_stdout("npu-smi info -l | grep \"NPU ID\"").split("\n"))]
 
 # generate local device list for local rank 0, and gather it to all ranks
 local_device_list: list[dict[str, str]] = list()
 if local_rank == "0":
     super_pod_id = "0"
-    for card_id in range(num_cards):
+    for card_id in card_ids:
         for chip_id in range(chips_per_card):
             device_id = card_id * chips_per_card + chip_id
             if soc_info.is_a3:
