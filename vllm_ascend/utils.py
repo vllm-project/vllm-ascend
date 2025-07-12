@@ -303,6 +303,19 @@ def npu_wait_tensor(self: torch.Tensor,
     return _npu_wait_tensor(self, dependency) if enabled else self
 
 
+def npu_prefetch(input: torch.Tensor,
+                 dependency: torch.Tensor,
+                 max_size: int = 0,
+                 *,
+                 enabled: bool = True):
+    if not enabled:
+        return
+    input_size = input.element_size() * input.numel()
+    if max_size <= 0 or max_size > input_size:
+        max_size = input_size
+    torch_npu.npu_prefetch(input, dependency, max_size)
+
+
 class AscendSocVersion(Enum):
     A2 = 0
     A3 = 1
