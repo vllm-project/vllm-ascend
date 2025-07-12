@@ -75,7 +75,9 @@ jobs:
           echo "Replacing /vllm-workspace/vllm-ascend/tests/e2e ..."
           rm -rf /vllm-workspace/vllm-ascend/tests/e2e
           mkdir -p /vllm-workspace/vllm-ascend/tests
+          # Overwrite e2e and examples
           cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
+          cp -r examples /vllm-workspace/vllm-ascend/
 
           # Simulate container to enter directory
           cd /workspace
