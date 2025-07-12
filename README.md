@@ -19,6 +19,10 @@ vLLM Ascend Plugin
 
 ---
 *Latest News* 🔥
+
+- [2025/06] [User stories](https://vllm-ascend.readthedocs.io/en/latest/community/user_stories/index.html) page is now live! It kicks off with ‌LLaMA-Factory/verl//TRL/GPUStack‌ to demonstrate how ‌vLLM Ascend‌ assists Ascend users in enhancing their experience across fine-tuning, evaluation, reinforcement learning (RL), and deployment scenarios.
+- [2025/06] [Contributors](https://vllm-ascend.readthedocs.io/en/latest/community/contributors.html) page is now live! All contributions deserve to be recorded, thanks for all contributors.
+- [2025/05] We've released first official version [v0.7.3](https://github.com/vllm-project/vllm-ascend/releases/tag/v0.7.3)! We collaborated with the vLLM community to publish a blog post sharing our practice: [Introducing vLLM Hardware Plugin, Best Practice from Ascend NPU](https://blog.vllm.ai/2025/05/12/hardware-plugin.html).
 - [2025/03] We hosted the [vLLM Beijing Meetup](https://mp.weixin.qq.com/s/VtxO9WXa5fC-mKqlxNUJUQ) with vLLM team! Please find the meetup slides [here](https://drive.google.com/drive/folders/1Pid6NSFLU43DZRi0EaTcPgXsAzDvbBqF).
 - [2025/02] vLLM community officially created [vllm-project/vllm-ascend](https://github.com/vllm-project/vllm-ascend) repo for running vLLM seamlessly on the Ascend NPU.
 - [2024/12] We are working with the vLLM community to support [[RFC]: Hardware pluggable](https://github.com/vllm-project/vllm/issues/11162).
@@ -43,7 +47,12 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
 
 ## Getting Started
 
-Please refer to [QuickStart](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/latest/installation.html) for more details.
+Please use the following recommended versions to get started quickly:
+
+| Version    | Release type | Doc                                  |
+|------------|--------------|--------------------------------------|
+|v0.9.2rc1|Latest release candidate|[QuickStart](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/latest/installation.html) for more details|
+|v0.7.3.post1|Latest stable version|[QuickStart](https://vllm-ascend.readthedocs.io/en/stable/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/stable/installation.html) for more details|
 
 ## Contributing
 See [CONTRIBUTING](https://vllm-ascend.readthedocs.io/en/latest/developer_guide/contribution/index.html) for more details, which is a step-by-step guide to help you set up development environment, build and test.
