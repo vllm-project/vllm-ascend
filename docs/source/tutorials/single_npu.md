@@ -66,6 +66,7 @@ for output in outputs:
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
+
 ::::
 
 ::::{tab-item} Eager Mode
@@ -92,6 +93,7 @@ for output in outputs:
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
+
 ::::
 :::::
 
@@ -131,6 +133,7 @@ docker run --rm \
 -it $IMAGE \
 vllm serve Qwen/Qwen3-8B --max_model_len 26240
 ```
+
 ::::
 
 ::::{tab-item} Eager Mode
@@ -156,6 +159,7 @@ docker run --rm \
 -it $IMAGE \
 vllm serve Qwen/Qwen3-8B --max_model_len 26240 --enforce-eager
 ```
+
 ::::
 :::::
 

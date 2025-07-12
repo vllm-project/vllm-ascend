@@ -172,6 +172,7 @@ pytest -sv tests/ut
 # Run single test
 pytest -sv tests/ut/test_ascend_config.py
 ```
+
 ::::
 
 ::::{tab-item} Multi cards test
@@ -185,6 +186,7 @@ pytest -sv tests/ut
 # Run single test
 pytest -sv tests/ut/test_ascend_config.py
 ```
+
 ::::
 
 :::::
@@ -218,10 +220,12 @@ VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/test_offline_inference.
 # Run a certain case in test script
 VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/singlecard/test_offline_inference.py::test_models
 ```
+
 ::::
 
 ::::{tab-item} Multi cards test
 :sync: multi
+
 ```bash
 cd /vllm-workspace/vllm-ascend/
 # Run all single card the tests
@@ -233,6 +237,7 @@ VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/multicard/test_dynamic_npugraph_ba
 # Run a certain case in test script
 VLLM_USE_MODELSCOPE=true pytest -sv tests/e2e/multicard/test_offline_inference.py::test_models
 ```
+
 ::::
 
 :::::

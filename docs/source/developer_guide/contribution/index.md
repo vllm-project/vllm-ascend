@@ -13,6 +13,7 @@ But you can still set up dev env on Linux/Windows/macOS for linting and basic
 test as following commands:
 
 #### Run lint locally
+
 ```bash
 # Choose a base dir (~/vllm-project/) and set up venv
 cd ~/vllm-project/
@@ -102,7 +103,6 @@ If the PR spans more than one category, please include all relevant prefixes.
 
 You may find more information about contributing to vLLM Ascend backend plugin on [<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing/overview.html).
 If you find any problem when contributing, you can feel free to submit a PR to improve the doc to help other developers.
-
 
 :::{toctree}
 :caption: Index
