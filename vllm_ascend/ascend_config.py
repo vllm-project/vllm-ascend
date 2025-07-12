@@ -50,6 +50,11 @@ class AscendConfig:
         self.expert_map_path = additional_config.get("expert_map_path", None)
         self.chunked_prefill_for_mla = additional_config.get(
             "chunked_prefill_for_mla", False)
+        max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        dp_size = vllm_config.parallel_config.data_parallel_size
+        self.fused_moe_max_chunk_size = int(
+            additional_config.get("fused_moe_max_chunk_size",
+                                  max_num_tokens * dp_size))
 
 
 class TorchairGraphConfig:
