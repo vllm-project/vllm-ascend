@@ -57,7 +57,7 @@ class MetadataForPadding:
 
 
 def init_metadata_for_sp(input_ids):
-    if envs.VLLM_ENABLE_SP:
+    if not envs.VLLM_ENABLE_SP:
         return MetadataForPadding(padding_flag=False, not_dummy_and_is_prefill=False)
     is_perifll = 0 
     attn_metadata = get_forward_context().attn_metadata
@@ -84,5 +84,5 @@ def init_metadata_for_sp(input_ids):
                                                         not_dummy_and_is_prefill=True)
 
             return _metadata_for_padding
-    else:
-        return MetadataForPadding(padding_flag=False, not_dummy_and_is_prefill=False)
+
+    return MetadataForPadding(padding_flag=False, not_dummy_and_is_prefill=False)

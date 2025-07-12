@@ -223,7 +223,6 @@ class AscendQwen3MoeDecoderLayer(nn.Module):
                 hidden_states, residual)
 
             if _metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill:
-                print("enable sppppppppp") 
                 hidden_states = _metadata_for_padding.allgather_unpadding_aligned(hidden_states)
         
         hidden_states = self.self_attn(
@@ -292,7 +291,7 @@ class AscendQwen3MoeModel(Qwen3MoeModel):
             residual = intermediate_tensors["residual"]
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            hidden_states, residual = layer(positions, hidden_states, residual, _metadata_for_padding)
+            hidden_states, residual = layer(positions, hidden_states, residual, _metadata_for_padding=_metadata_for_padding)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
@@ -301,7 +300,6 @@ class AscendQwen3MoeModel(Qwen3MoeModel):
         hidden_states, _ = self.norm(hidden_states, residual)
         
         if _metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill:
-            print("enable sppppppppp")  
             hidden_states = _metadata_for_padding.allgather_unpadding_aligned(hidden_states)
 
         return hidden_states
