@@ -21,6 +21,7 @@ set -eo errexit
 
 . $(dirname "$0")/common.sh
 
+export VLLM_USE_V1=1
 export VLLM_USE_MODELSCOPE=true
 export VLLM_LOGGING_LEVEL=ERROR
 
