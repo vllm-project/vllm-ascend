@@ -27,7 +27,7 @@ from modelscope import snapshot_download  # type: ignore
 from vllm import SamplingParams
 from vllm.model_executor.models.registry import ModelRegistry
 
-from tests.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 

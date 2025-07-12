@@ -18,14 +18,14 @@
 #
 import json
 import os
-import re
 
 import jsonschema
 import pytest
+import regex as re
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
-from tests.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -85,11 +85,7 @@ def sample_json_schema():
 
 
 def check_backend(guided_decoding_backend: str):
-    if guided_decoding_backend not in GuidedDecodingBackendV0 and os.getenv(
-            "VLLM_USE_V1") == "0":
-        pytest.skip(f"{guided_decoding_backend} does not support v0, skip it.")
-    if guided_decoding_backend not in GuidedDecodingBackendV1 and os.getenv(
-            "VLLM_USE_V1") == "1":
+    if guided_decoding_backend not in GuidedDecodingBackendV1:
         pytest.skip(f"{guided_decoding_backend} does not support v1, skip it.")
 
 
