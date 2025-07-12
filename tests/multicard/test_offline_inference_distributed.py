@@ -155,7 +155,10 @@ def test_models_distributed_DeepSeekV3_dbo():
 
 
 @pytest.mark.skip(reason="Due to OOM,waiting for 1311pr to merge in")
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DBO": "1", "VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ": "1"})
+@patch.dict(os.environ, {
+    "VLLM_ASCEND_ENABLE_DBO": "1",
+    "VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ": "1"
+})
 def test_models_distributed_DeepSeekV3_alltoallv_dbo():
     example_prompts = ["The president of the United States is"] * 10
     dtype = "half"
