@@ -16,7 +16,10 @@
 # Adapted from vllm/model_executor/models/qwen3_moe.py
 # This file is a part of the vllm-ascend project.
 
+import vllm.model_executor.models.qwen3_moe as qwen3
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
+
+from vllm_ascend.ops.fused_moe import AscendSparseMoeBlock
 
 
 class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
@@ -33,3 +36,4 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
         "experts":
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     }
+    qwen3.Qwen3MoeSparseMoeBlock = AscendSparseMoeBlock
