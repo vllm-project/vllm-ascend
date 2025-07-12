@@ -154,6 +154,27 @@ def test_models_distributed_DeepSeekV3_dbo():
         vllm_model.generate(example_prompts, sampling_params)
 
 
+@pytest.mark.skip(reason="Due to OOM,waiting for 1311pr to merge in")
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DBO": "1", "VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ": "1"})
+def test_models_distributed_DeepSeekV3_alltoallv_dbo():
+    example_prompts = ["The president of the United States is"] * 10
+    dtype = "half"
+    sampling_params = SamplingParams(max_tokens=30, temperature=0.0)
+    with VllmRunner(
+            "vllm-ascend/DeepSeek-V3-Pruning",
+            dtype=dtype,
+            tensor_parallel_size=4,
+            distributed_executor_backend="mp",
+    ) as vllm_model:
+        model_arch = 'DeepseekV3ForCausalLM'
+        registed_models = ModelRegistry.models
+        assert registed_models[
+            model_arch].module_name == "vllm_ascend.models.deepseek_dbo"
+        assert registed_models[
+            model_arch].class_name == "CustomDeepseekDBOForCausalLM"
+        vllm_model.generate(example_prompts, sampling_params)
+
+
 def test_models_distributed_DeepSeek_W8A8():
     example_prompts = [
         "Hello, my name is",
