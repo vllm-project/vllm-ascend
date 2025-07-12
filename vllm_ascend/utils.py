@@ -437,6 +437,7 @@ class FusedMoEState(Enum):
     MC2 = 2
     AllGatherEP = 3
     NaiveMulticast = 4
+    NO_OP = 5
 
 
 # TODO(ttanzhiqiang): rm_router_logits
@@ -471,10 +472,12 @@ def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
 
 # TODO(zzzzwwjj): add soc_version to choose branch
 def get_fused_moe_state(ep_size: int, with_prefill: bool,
-                        is_deepseek_v3_r1: bool):
+                        is_deepseek_v3_r1: bool, enable_sp=False):
     # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
     # only supports deepseek v3/r1
-    if (envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
+    if enable_sp:
+        return FusedMoEState.NO_OP
+    elif (envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
             and is_deepseek_v3_r1):
         return FusedMoEState.AllGatherEP
     elif ep_size == 1:

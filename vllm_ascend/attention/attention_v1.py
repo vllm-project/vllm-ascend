@@ -169,7 +169,8 @@ class AscendAttentionMetadataBuilder:
               max_query_len,
               common_prefix_len,
               max_num_tokens_across_dp: int = 0,
-              with_prefill_across_dp: bool = False):
+              with_prefill_across_dp: bool = False,
+              is_only_prefill:bool = False):
 
         block_table = self.runner.input_batch.block_table[0].get_device_tensor(
         )
@@ -207,7 +208,8 @@ class AscendAttentionMetadataBuilder:
             attn_mask=attn_mask,
             attn_state=attn_state,
             max_num_tokens_across_dp=max_num_tokens_across_dp,
-            with_prefill_across_dp=with_prefill_across_dp)
+            with_prefill_across_dp=with_prefill_across_dp,
+            is_only_prefill=is_only_prefill)
         return attn_metadata
 
 
