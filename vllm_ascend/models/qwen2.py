@@ -83,7 +83,6 @@ class AscendQwen2DecoderLayer(Qwen2DecoderLayer):
             hidden_states=hidden_states,
         )
         if _metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill:
-            print(f"11111111111 enable sp")
             hidden_states = _metadata_for_padding.padding_aligned_reduce_scatter(hidden_states)
 
         # Fully Connected
@@ -154,8 +153,6 @@ class AscendQwen2Model(Qwen2Model):
         hidden_states, _ = self.norm(hidden_states, residual)
         
         if _metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill:
-            print(f"11111111111 enable sp")
-
             hidden_states = _metadata_for_padding.allgather_unpadding_aligned(hidden_states)
         
         return hidden_states
