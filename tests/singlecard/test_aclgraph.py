@@ -35,8 +35,8 @@ MODELS = ["Qwen/Qwen2.5-0.5B-Instruct"]
 @pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
                     reason="aclgraph only support on v1")
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("full_graph", [False])
+@pytest.mark.parametrize("max_tokens", [12])
+@pytest.mark.parametrize("full_graph", [True, False])
 def test_models(
     model: str,
     max_tokens: int,
