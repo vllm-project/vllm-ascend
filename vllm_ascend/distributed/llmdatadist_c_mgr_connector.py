@@ -1,6 +1,7 @@
 import contextlib
 import json
 import math
+import os
 import threading
 import time
 from collections.abc import Iterator
@@ -334,6 +335,8 @@ class LLMDataDistCMgrConnectorWorker():
         self.init_llm_datadist()
         self.finished_reqs: set[str] = set()
         self.soc_info = NPUSocInfo()
+        # Set hccl deterministic for model execute
+        os.environ["HCCL_DETERMINISTIC"] = "true"
 
     def listen_for_agent_metadata_req(self, event: threading.Event):
         assert self.local_agent_metadata is not None
