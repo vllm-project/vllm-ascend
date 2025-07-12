@@ -246,3 +246,46 @@ def model_input_split_v1_mla_attn(
         enable_dbo_across_dp=attn_metadata.enable_dbo_across_dp,
     )
     return [attention_metadata_pre, attention_metadata_post]
+
+
+def find_best_split_point(query_lens: torch.Tensor):
+    batch_size = query_lens.size(0)
+    if batch_size == 1:
+        return -1, -1
+    cum_token_counts, split_bs_point = dense_recover_batch_info(query_lens)
+
+    split_token_index = cum_token_counts[split_bs_point - 1]
+
+    total_tokens = cum_token_counts[-1]
+    seq_len1 = split_token_index
+    seq_len2 = total_tokens - split_token_index
+    min_length = 1024
+    if seq_len1 < min_length or seq_len2 < min_length:
+        return -1, -1
+
+    diff = abs(seq_len1 - seq_len2) / min(seq_len1, seq_len2)
+    balance_threshold = 0.25  # balance_threshold = 0 means DBO only run in seq_len1 == seq_len2
+    if diff > balance_threshold:
+        return -1, -1
+
+    return split_bs_point, split_token_index
+
+
+def dense_recover_batch_info(query_lens: torch.Tensor):
+    batch_size = query_lens.size(0)
+    cum_token_counts = [0] * batch_size
+    cum_token_counts[0] = query_lens[0]
+
+    split_bs_point = 0
+    min_diff = float('inf')
+    target_half_tokens = sum(query_lens).item() // 2
+    for bid in range(1, batch_size):
+        cum_token_counts[bid] = cum_token_counts[bid -
+                                                 1] + query_lens[bid].item()
+
+        current_diff = abs(cum_token_counts[bid] - target_half_tokens)
+        if current_diff < min_diff:
+            min_diff = current_diff
+            split_bs_point = bid
+
+    return cum_token_counts, split_bs_point + 1
