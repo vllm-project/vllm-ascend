@@ -281,7 +281,6 @@ cleanup_on_error() {
 main() {
   START_TIME=$(date +%s)
   check_npus
-  python3 benchmarks/scripts/patch_benchmark_dataset.py
   
   # dependencies
   (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
