@@ -20,9 +20,10 @@ name: 'Benchmarks / Performance'
 
 on:
   schedule:
-    # Run at 02:00 everyday
-    - cron: '00 18 * * *'
-  
+    # Run benchmarks at 20:00 and 03:00 Beijing time (UTC+8)
+    - cron: "0 12 * * *"
+    - cron: "0 19 * * *"
+
   workflow_dispatch:
     # Allow manual triggering of the workflow
 
