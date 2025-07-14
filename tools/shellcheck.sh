@@ -21,7 +21,7 @@
 
 set -e
 
-scversion="stable"
+scversion="v0.10.0"
 
 if [ -d "shellcheck-${scversion}" ]; then
     PATH="$PATH:$(pwd)/shellcheck-${scversion}"
@@ -40,6 +40,9 @@ if ! [ -x "$(command -v shellcheck)" ]; then
     export PATH
 fi
 
-# should enable this
 find . -path ./.git -prune -o -name "*.sh" -print0 \
-| xargs -0 -I {} sh -c 'git check-ignore -q "{}" || shellcheck -s bash  -e SC1091 "{}"'
+| while IFS= read -r -d '' file; do
+    if ! git check-ignore -q "$file"; then
+        shellcheck -s bash -e SC1091 "$file"
+    fi
+done
