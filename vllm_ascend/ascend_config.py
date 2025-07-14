@@ -15,7 +15,6 @@
 # limitations under the License.
 from typing import Optional
 
-import vllm.envs as envs
 from vllm.logger import logger
 
 TORCHAIR_MODEL_LIST = ["deepseek", "pangu"]
@@ -126,46 +125,36 @@ def get_ascend_config():
 def check_ascend_config(vllm_config, enforce_eager):
     ascend_config = get_ascend_config()
 
-    # for v0 engine
-    if not envs.VLLM_USE_V1:
+    # for eager mode
+    if enforce_eager:
+        # torchair_graph cannot be enabled with eager mode.
         if ascend_config.torchair_graph_config.enabled:
-            raise NotImplementedError(
-                "Torchair graph mode is only supported for V1 Engine.")
-        if ascend_config.ascend_scheduler_config.enabled:
-            raise NotImplementedError(
-                "Ascend scheduler is only supported for V1 Engine.")
-    # for v1 engine
+            raise RuntimeError(
+                "Can't enable graph mode and eager mode at the same time. Please set `enforce_eager=False` if you attempt to enable NPU graph mode."
+            )
+    # for graph mode
     else:
-        # for eager mode
-        if enforce_eager:
-            # torchair_graph cannot be enabled with eager mode.
-            if ascend_config.torchair_graph_config.enabled:
-                raise RuntimeError(
-                    "Can't enable graph mode and eager mode at the same time. Please set `enforce_eager=False` if you attempt to enable NPU graph mode."
-                )
-        # for graph mode
+        # torchair_graph case
+        if ascend_config.torchair_graph_config.enabled:
+            # torchair_graph is supported for deepseek/pangu model only.
+            if vllm_config.model_config:
+                model_type = vllm_config.model_config.hf_config.model_type
+                if not _check_torchair_supported(model_type):
+                    raise NotImplementedError(
+                        "Torchair graph mode only works with following model types:"
+                        f"{TORCHAIR_MODEL_LIST}.")
+        # aclgraph case
         else:
-            # torchair_graph case
-            if ascend_config.torchair_graph_config.enabled:
-                # torchair_graph is supported for deepseek/pangu model only.
-                if vllm_config.model_config:
-                    model_type = vllm_config.model_config.hf_config.model_type
-                    if not _check_torchair_supported(model_type):
-                        raise NotImplementedError(
-                            "Torchair graph mode only works with following model types:"
-                            f"{TORCHAIR_MODEL_LIST}.")
-            # aclgraph case
-            else:
-                # aclgraph doesn't work with deepseek model and only qwen model is well tested.
-                if vllm_config.model_config:
-                    model_type = vllm_config.model_config.hf_config.model_type
-                    if "deepseek" in model_type:
-                        raise NotImplementedError(
-                            "ACL Graph does not support deepseek. Please "
-                            "try torchair graph mode to serve deepseek models on vllm-ascend."
-                            " Or set `enforce_eager=True` to use eager mode.")
-                    if "qwen" not in model_type:
-                        logger.warning(
-                            "ACL Graph is currently experimental. Please "
-                            "raise an issue on https://github.com/vllm-project/vllm-ascend/issues"
-                            " if you encourage any Error")
+            # aclgraph doesn't work with deepseek model and only qwen model is well tested.
+            if vllm_config.model_config:
+                model_type = vllm_config.model_config.hf_config.model_type
+                if "deepseek" in model_type:
+                    raise NotImplementedError(
+                        "ACL Graph does not support deepseek. Please "
+                        "try torchair graph mode to serve deepseek models on vllm-ascend."
+                        " Or set `enforce_eager=True` to use eager mode.")
+                if "qwen" not in model_type:
+                    logger.warning(
+                        "ACL Graph is currently experimental. Please "
+                        "raise an issue on https://github.com/vllm-project/vllm-ascend/issues"
+                        " if you encourage any Error")
