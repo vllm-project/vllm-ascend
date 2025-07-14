@@ -29,8 +29,6 @@ from vllm import LLM, SamplingParams
 MODELS = ["deepseek-ai/DeepSeek-V2-Lite"]
 
 
-@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
-                    reason="new chunked only support on v1")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [1])
 def test_models(

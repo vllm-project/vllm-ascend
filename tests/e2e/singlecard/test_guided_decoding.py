@@ -30,10 +30,8 @@ from tests.conftest import VllmRunner
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 
-GuidedDecodingBackendV0 = ["outlines", "lm-format-enforcer", "xgrammar"]
 GuidedDecodingBackendV1 = ["xgrammar", "guidance"]
-GuidedDecodingBackend = list(
-    set(GuidedDecodingBackendV0 + GuidedDecodingBackendV1))
+GuidedDecodingBackend = GuidedDecodingBackendV1
 
 
 @pytest.fixture(scope="module")
@@ -85,9 +83,6 @@ def sample_json_schema():
 
 
 def check_backend(guided_decoding_backend: str):
-    if guided_decoding_backend not in GuidedDecodingBackendV0 and os.getenv(
-            "VLLM_USE_V1") == "0":
-        pytest.skip(f"{guided_decoding_backend} does not support v0, skip it.")
     if guided_decoding_backend not in GuidedDecodingBackendV1 and os.getenv(
             "VLLM_USE_V1") == "1":
         pytest.skip(f"{guided_decoding_backend} does not support v1, skip it.")

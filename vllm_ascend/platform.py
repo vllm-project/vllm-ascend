@@ -180,18 +180,7 @@ class NPUPlatform(Platform):
             update_aclgraph_sizes(vllm_config)
 
         if parallel_config and parallel_config.worker_cls == "auto":
-            if envs.VLLM_USE_V1:
-                parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
-            elif vllm_config.speculative_config:
-                # NOTE: We set this var to `1` in vllm-ascend to avoid segment
-                # fault when using spec decode with V0 engine.
-                os.environ["ACL_OP_INIT_MODE"] = "1"
-                parallel_config.worker_cls = "vllm.spec_decode.spec_decode_worker.create_spec_worker"
-                parallel_config.sd_worker_cls = "vllm_ascend.worker.worker.NPUWorker"
-            elif vllm_config.scheduler_config.is_multi_step:
-                parallel_config.worker_cls = "vllm_ascend.worker.multi_step_worker.MultiStepWorker"
-            else:
-                parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
+            parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
 
         if cache_config:
             if cache_config.block_size is None:
@@ -202,34 +191,33 @@ class NPUPlatform(Platform):
                 )
                 cache_config.block_size = 128
 
-        if envs.VLLM_USE_V1:
-            # Activate custom ops for v1, except on 310P
-            if not is_310p():
-                compilation_config.custom_ops = ["all"]
+        # Activate custom ops for v1, except on 310P
+        if not is_310p():
+            compilation_config.custom_ops = ["all"]
 
-            # If ascend_scheduler_config is enabled,
-            # extents original scheduler_config to use AscendScheduler.
-            if ascend_config.ascend_scheduler_config.enabled:
-                from vllm_ascend.core.schedule_config import \
-                    AscendSchedulerConfig
-                ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
-                    vllm_config.scheduler_config,
-                    ascend_config.ascend_scheduler_config)
-                vllm_config.scheduler_config = ascend_scheduler_config
+        # If ascend_scheduler_config is enabled,
+        # extents original scheduler_config to use AscendScheduler.
+        if ascend_config.ascend_scheduler_config.enabled:
+            from vllm_ascend.core.schedule_config import \
+                AscendSchedulerConfig
+            ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
+                vllm_config.scheduler_config,
+                ascend_config.ascend_scheduler_config)
+            vllm_config.scheduler_config = ascend_scheduler_config
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla):
-        if use_v1 and use_mla:
-            return "vllm_ascend.attention.mla_v1.AscendMLABackend"
+        if not use_v1:
+            raise RuntimeError("V0 engine is not supported on vllm-ascend now!")
+        
         use_torchair = get_ascend_config().torchair_graph_config.enabled
-        if use_v1 and use_torchair:
-            return "vllm_ascend.attention.attention_v1_torchair.AscendAttentionTorchairBackend"
-        if use_v1:
-            return "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
         if use_mla:
-            return "vllm_ascend.attention.attention.AscendMLAAttentionBackend"
-        return "vllm_ascend.attention.attention.AscendAttentionBackend"
+            return "vllm_ascend.attention.mla_v1.AscendMLABackend"
+        elif use_torchair:
+            return "vllm_ascend.attention.attention_v1_torchair.AscendAttentionTorchairBackend"
+        else:
+            return "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
 
     @classmethod
     def get_punica_wrapper(cls) -> str:

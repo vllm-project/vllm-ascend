@@ -78,8 +78,6 @@ def _deepseek_torchair_test_fixture(
         print(f"Generated text: {vllm_output[i][1]!r}")
 
 
-@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
-                    reason="torchair graph is not supported on v0")
 def test_e2e_deepseekv3_with_torchair():
     additional_config = {
         "torchair_graph_config": {
@@ -89,8 +87,6 @@ def test_e2e_deepseekv3_with_torchair():
     _deepseek_torchair_test_fixture(additional_config)
 
 
-@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
-                    reason="torchair graph is not supported on v0")
 def test_e2e_deepseekv3_with_torchair_ms_mla():
     additional_config = {
         "torchair_graph_config": {
@@ -150,8 +146,6 @@ def _pangu_torchair_test_fixture(
         print(f"Generated text: {vllm_output[i][1]!r}")
 
 
-@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
-                    reason="torchair graph is not supported on v0")
 def test_e2e_pangu_with_torchair():
     additional_config = {
         "torchair_graph_config": {

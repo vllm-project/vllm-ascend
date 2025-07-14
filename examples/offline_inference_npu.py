@@ -34,7 +34,7 @@ prompts = [
 # Create a sampling params object.
 sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 # Create an LLM.
-llm = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
+llm = LLM(model="/shared/cache/modelscope/hub/models/Qwen/Qwen2.5-7B-Instruct")
 
 # Generate texts from the prompts.
 outputs = llm.generate(prompts, sampling_params)

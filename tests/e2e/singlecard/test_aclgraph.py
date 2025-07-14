@@ -36,8 +36,6 @@ MODELS = [
 ]
 
 
-@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
-                    reason="aclgraph only support on v1")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 def test_models(
@@ -86,8 +84,6 @@ def test_models(
     )
 
 
-@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
-                    reason="aclgraph only support on v1")
 def test_deepseek_raises_error(monkeypatch: pytest.MonkeyPatch) -> None:
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_MODELSCOPE", "True")
