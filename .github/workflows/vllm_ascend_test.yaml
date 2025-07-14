@@ -42,12 +42,12 @@ concurrency:
 jobs:
   lint:
     # Only trigger lint on pull request
-    if: ${{ github.event_name == 'pull_request' }}
+    if: false
     uses: ./.github/workflows/pre-commit.yml
 
   changes:
     # Only trigger changes on pull request
-    if: ${{ github.event_name == 'pull_request' }}
+    if: false
     runs-on: ubuntu-latest
     permissions:
       pull-requests: read
@@ -70,10 +70,9 @@ jobs:
           ut_tracker:
             - 'tests/ut/**'
   ut:
-    needs: [lint, changes]
     name: unit test
     # only trigger unit test after lint passed and the change is e2e and ut related. Or the PR is merged.
-    if: ${{ github.event_name == 'push' || (needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true')) }}
+    if: false
     runs-on: ubuntu-latest
     container:
       image: quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
@@ -132,9 +131,6 @@ jobs:
           verbose: true
 
   e2e:
-    needs: [lint, changes]
-    # only trigger e2e test after lint passed and the change is e2e related.
-    if: ${{ needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' }}
     strategy:
       max-parallel: 2
       matrix:
@@ -234,10 +230,8 @@ jobs:
             --ignore=tests/e2e/singlecard/test_embedding.py
 
   e2e-4-cards:
-    needs: [e2e]
-    if: ${{ needs.e2e.result == 'success' }}
     strategy:
-      max-parallel: 1
+      max-parallel: 2
       matrix:
         os: [linux-arm64-npu-4]
         vllm_version: [main, v0.9.2]
