@@ -1,12 +1,30 @@
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+
 from collections.abc import Iterable
-from typing import Any, Optional, Union
+from typing import Any, List, Optional, Union
 
 import torch
 import torch.nn.functional as F
+import vllm
 import vllm.envs as envs
 from torch import nn
 from transformers import Qwen2Config
-from vllm.attention import AttentionType
+from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
@@ -15,20 +33,32 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter)
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.layers.rotary_embedding import (RotaryEmbedding,
+                                                         get_rope)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
-from vllm.model_executor.models.qwen2 import (Qwen2Attention, Qwen2MLP,
-                                              Qwen2Model)
-from vllm.model_executor.models.utils import (AutoWeightsLoader,
-                                              PPMissingLayer, maybe_prefix)
+from vllm.model_executor.models.qwen2 import Qwen2Attention  # noqa: F401
+from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM  # noqa: F401
+from vllm.model_executor.models.qwen2 import Qwen2Model
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader, PPMissingLayer, extract_layer_index,
+    is_pp_missing_parameter, make_empty_intermediate_tensors_factory,
+    make_layers, maybe_prefix)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as ascend_envs
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
 
@@ -50,6 +80,43 @@ def maybe_pad_and_reduce_scatter(
         hidden_states = F.pad(hidden_states, (0, 0, 0, pad_size))
     hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
     return hidden_states
+
+
+class CustomQwen2MLP(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = RowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
+        )
+        if hidden_act != "silu":
+            raise ValueError(f"Unsupported activation: {hidden_act}. "
+                             "Only silu is supported for now.")
+        self.act_fn = SiluAndMul()
+
+    def forward(self, x):
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
 
 
 class CustomQwen2Attention(Qwen2Attention):
@@ -80,12 +147,76 @@ class CustomQwen2Attention(Qwen2Attention):
             prefix=prefix,
             attn_type=attn_type,
             dual_chunk_attention_config=dual_chunk_attention_config)
+        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = num_kv_heads
+        if self.total_num_kv_heads >= tp_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        self.head_dim = hidden_size // self.total_num_heads
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim**-0.5
+        self.rope_theta = rope_theta
+        self.dual_chunk_attention_config = dual_chunk_attention_config
 
-    def forward(self,
-                positions: torch.Tensor,
-                hidden_states: torch.Tensor,
-                cos: Optional[torch.Tensor] = None,
-                sin: Optional[torch.Tensor] = None) -> torch.Tensor:
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size,
+            self.head_dim,
+            self.total_num_heads,
+            self.total_num_kv_heads,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+        )
+        self.o_proj = RowParallelLinear(
+            self.total_num_heads * self.head_dim,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+        )
+
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            rotary_dim=self.head_dim,
+            max_position=max_position,
+            base=self.rope_theta,
+            rope_scaling=rope_scaling,
+            dual_chunk_attention_config=dual_chunk_attention_config,
+        )
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            attn_type=attn_type,
+            prefix=f"{prefix}.attn",
+            **{
+                "layer_idx": extract_layer_index(prefix),
+                "dual_chunk_attention_config": dual_chunk_attention_config,
+            } if dual_chunk_attention_config else {})
+        ascend_config = get_ascend_config()
+        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+
+    def forward(
+            self,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor,
+            cos: Optional[torch.Tensor] = None,
+            sin: Optional[torch.Tensor] = None,
+            kv_cache: Optional[torch.Tensor] = None,
+            attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         if type(self.rotary_emb) is RotaryEmbedding:
@@ -99,8 +230,28 @@ class CustomQwen2Attention(Qwen2Attention):
                                    is_cos_sin_cached=True)
         else:
             q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
+        if self.torchair_graph_enabled and attn_metadata is not None and attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            forward_kwargs = {}
+            if envs.VLLM_USE_V1:
+                output_shape = q.shape
+                output = torch.empty(output_shape,
+                                     dtype=q.dtype,
+                                     device=q.device)
+                forward_kwargs['output'] = output
+
+            attn_output = self.attn.impl.forward(self.attn,
+                                                 q,
+                                                 k,
+                                                 v,
+                                                 kv_cache=kv_cache,
+                                                 attn_metadata=attn_metadata,
+                                                 trace_flag=False,
+                                                 **forward_kwargs)
+            output, _ = self.o_proj(attn_output)
+            return output
+        else:
+            attn_output = self.attn(q, k, v)
+            output, _ = self.o_proj(attn_output)
         return output
 
 
@@ -144,7 +295,7 @@ class CustomQwen2DecoderLayer(nn.Module):
             attn_type=attn_type,
             dual_chunk_attention_config=dual_chunk_attention_config,
         )
-        self.mlp = Qwen2MLP(
+        self.mlp = CustomQwen2MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
@@ -165,11 +316,13 @@ class CustomQwen2DecoderLayer(nn.Module):
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        residual: Optional[torch.Tensor],
-        flashcomm_v1_enabled: bool,
-        pad_size: int,
+        residual: Optional[torch.Tensor] = None,
+        flashcomm_v1_enabled: bool = None,  # type: ignore
+        pad_size: int = None,  # type: ignore
         cos: Optional[torch.Tensor] = None,
         sin: Optional[torch.Tensor] = None,
+        kv_cache: Optional[torch.Tensor] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -189,7 +342,9 @@ class CustomQwen2DecoderLayer(nn.Module):
         hidden_states = self.self_attn(positions=positions,
                                        hidden_states=hidden_states,
                                        cos=cos,
-                                       sin=sin)
+                                       sin=sin,
+                                       kv_cache=kv_cache,
+                                       attn_metadata=attn_metadata)
         if flashcomm_v1_enabled:
             hidden_states = maybe_pad_and_reduce_scatter(
                 hidden_states, pad_size)
@@ -230,12 +385,66 @@ class CustomQwen2Model(Qwen2Model):
                          prefix=prefix,
                          decoder_layer_type=decoder_layer_type)
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.cos_sin_cache = self.layers[0].self_attn.rotary_emb.cos_sin_cache
+        self.cos_sin_cache = self.layer[0].self_attn.rotary_emb.cos_sin_cache
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
+        # TODO (@robertgshaw2): see if this can be moved out
+        if (cache_config.sliding_window is not None
+                and hasattr(config, "max_window_layers")):
+            assert config.max_window_layers == config.num_hidden_layers, (
+                "Sliding window for some but all layers is not supported. "
+                "This model uses sliding window but `max_window_layers` = {} "
+                "is less than `num_hidden_layers` = {}. Please open an issue "
+                "to discuss this feature.".format(
+                    config.max_window_layers,
+                    config.num_hidden_layers,
+                ))
+
+        self.config = config
+        self.quant_config = quant_config
+        self.vocab_size = config.vocab_size
+
+        if get_pp_group().is_first_rank or (config.tie_word_embeddings
+                                            and get_pp_group().is_last_rank):
+            self.embed_tokens = VocabParallelEmbedding(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=f"{prefix}.embed_tokens",
+            )
+        else:
+            self.embed_tokens = PPMissingLayer()
+
+        # Use the provided decoder layer type or default to Qwen2DecoderLayer
+        decoder_layer_type = CustomQwen2DecoderLayer
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: decoder_layer_type(config=config,
+                                              cache_config=cache_config,
+                                              quant_config=quant_config,
+                                              prefix=prefix),
+            prefix=f"{prefix}.layers",
+        )
+
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
+        if get_pp_group().is_last_rank:
+            self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        else:
+            self.norm = PPMissingLayer()
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        kv_caches: Optional[List[torch.Tensor]] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -274,16 +483,13 @@ class CustomQwen2Model(Qwen2Model):
             cos, sin = cos.view(1, -1, 1, last_dim).contiguous(), sin.view(
                 1, -1, 1, last_dim).contiguous()
 
-        for layer in self.layers[self.start_layer:self.end_layer]:
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-                flashcomm_v1_enabled,
-                pad_size,
-                cos=cos,
-                sin=sin,
-            )
+        for i in range(self.start_layer, self.end_layer):
+            layer = self.layers[i]
+            kv_c = kv_caches[i - self.start_layer] \
+                if kv_caches is not None else None
+            hidden_states, residual = layer(positions, hidden_states, residual,
+                                            flashcomm_v1_enabled, pad_size,
+                                            cos, sin, kv_c, attn_metadata)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
@@ -293,6 +499,62 @@ class CustomQwen2Model(Qwen2Model):
         if flashcomm_v1_enabled:
             hidden_states = all_gather_and_maybe_unpad(hidden_states, pad_size)
         return hidden_states
+
+    def load_weights(self, weights: Iterable[tuple[str,
+                                                   torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: set[str] = set()
+        for name, loaded_weight in weights:
+            if "rotary_emb.inv_freq" in name:
+                continue
+            if (self.quant_config is not None and
+                (scale_name := self.quant_config.get_cache_scale(name))):
+                # Loading kv cache quantization scales
+                param = params_dict[scale_name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                loaded_weight = (loaded_weight if loaded_weight.dim() == 0 else
+                                 loaded_weight[0])
+                weight_loader(param, loaded_weight)
+                loaded_params.add(scale_name)
+                continue
+            for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                # Remapping the name of FP8 kv-scale.
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
 class CustomQwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
@@ -346,10 +608,13 @@ class CustomQwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        kv_caches: Optional[List[torch.Tensor]] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   attn_metadata, intermediate_tensors,
                                    inputs_embeds)
         return hidden_states
 
@@ -370,3 +635,6 @@ class CustomQwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                            if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
+
+
+vllm.model_executor.models.qwen2.Qwen2ForCausalLM = CustomQwen2ForCausalLM
