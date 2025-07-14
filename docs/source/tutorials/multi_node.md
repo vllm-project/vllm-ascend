@@ -56,9 +56,10 @@ hccn_tool -i 0 -ping -g address 10.20.0.20
 ## Run with docker
 Assume you have two Atlas 800 A2(64G*8) nodes, and want to deploy the `deepseek-v3-w8a8` quantitative model across multi-node.
 
-```shell
-# Define the image and container name
-export IMAGE=quay.io/ascend/vllm-ascend:main
+```{code-block} bash
+   :substitutions:
+# Update the vllm-ascend image
+export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
