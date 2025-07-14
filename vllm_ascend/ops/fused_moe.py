@@ -1323,20 +1323,7 @@ class AscendFusedMoE(FusedMoE):
             if isinstance(e_hidden_states, tuple):
                 e_hidden_states, shared_hidden_states = e_hidden_states
 
-<<<<<<< HEAD
         if self.dp_size > 1 and fused_moe_state == FusedMoEState.AllGather:
-=======
-        if fused_moe_state != FusedMoEState.AllGather:
-            if tp_size > 1:
-                dist.all_gather(list(chunk_hidden_states), e_hidden_states,
-                                self.tp_group)
-                final_hidden_states = torch.cat(chunk_hidden_states, dim=0)
-            else:
-                final_hidden_states = e_hidden_states
-            if num_tokens < forward_context.padded_num_tokens:
-                final_hidden_states = final_hidden_states[:num_tokens]
-        elif self.dp_size > 1 and fused_moe_state == FusedMoEState.AllGather:
->>>>>>> upstream/v0.9.1-dev
             final_hidden_states = dist._functional_collectives.reduce_scatter_tensor(
                 e_hidden_states,
                 "sum",
