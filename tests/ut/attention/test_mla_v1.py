@@ -650,10 +650,33 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape, (B, N, D))
         mock_rope.assert_called_once_with(x.view(B, N, 1, D), cos, sin)
 
+    @patch("vllm_ascend.attention.mla_v1.AscendMLAImpl._v_up_proj_and_o_proj")
     @patch("torch_npu._npu_paged_attention_mla")
     @patch("vllm_ascend.multistream.context.get_multistream_comm_context")
-    def test_forward_decode_without_graph(self, mock_stream_context, mock_page_attention_mla):
-        q_nope = torch.randn()
+    def test_forward_decode_without_graph(self, mock_stream_context, mock_page_attention_mla, mock_up_proj):
+        self.impl.running_in_graph = False
+        num_tokens = 100
+        num_blocks = 256
+        block_size = 4
+        q_nope = torch.randn(num_tokens, self.impl.num_heads, self.impl.qk_nope_head_dim)
+        q_pe = torch.randn(num_tokens, self.impl.num_heads, self.impl.qk_rope_head_dim)
+        kv_c_and_k_pe_cache = torch.randn(num_blocks, block_size, self.impl.num_heads, self.impl.kv_lora_rank)
+        metadata = MagicMock()
+        metadata.decode = MagicMock()
+        metadata.decode.block_table = MagicMock()
+        metadata.decode.seq_lens = 10
+        mock_stream_context.return_value = MagicMock()
+        mock_page_attention_mla.return_value = torch.randn(num_tokens, self.impl.num_heads, self.impl.kv_lora_rank)
+        mock_up_proj.return_value = torch.randn(num_tokens, self.impl.num_heads, self.impl.v_head_dim)
+        result = self.impl._forward_decode(q_nope, q_pe, None, None, kv_c_and_k_pe_cache, metadata)
+        self.assertEqual(result.shape[0], num_tokens)
+        self.assertEqual(result.shape[1], self.impl.num_heads)
+        self.assertEqual(result.shape[2], self.impl.v_head_dim)
+        mock_up_proj.assert_called_once()
+        mock_page_attention_mla.assert_called_once()
+        mock_stream_context.assert_called_once()
+        
+        
         
 
 

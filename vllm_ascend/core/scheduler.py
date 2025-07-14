@@ -66,7 +66,7 @@ class AscendScheduler(Scheduler):
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Spec decode-related.
-        scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        scheduled_spec_decode_tokens: dict[str, list[int]] = {} #!投机解码，小模型模拟加大模型审核，用猜得快换算的少
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -76,7 +76,7 @@ class AscendScheduler(Scheduler):
 
         # Use a temporary deque to collect requests that need to be skipped
         # and put back at the head of the waiting queue later
-        skipped_waiting_requests: deque[Request] = deque()
+        skipped_waiting_requests: deque[Request] = deque() #! 从waiting队列中取出来prefill 后续放回
 
         # Schedule prefill requests first.
         while self.waiting and token_budget > 0:
@@ -89,7 +89,13 @@ class AscendScheduler(Scheduler):
                 self.waiting.popleft()
                 skipped_waiting_requests.appendleft(request)
 
-            num_prealloc_computed_tokens = 0
+            num_prealloc_computed_tokens = 0 #! 只在PD分离的场景下生效
+            
+            #NOTE P/D分离：
+            # Prefill阶段，在一个节点上生成KV_cache
+            # Decode阶段 在另一个节点上拉取kv_cache
+            
+
             # P/D: skip request if still waiting for remote kvs.
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 is_ready = self._update_waiting_for_remote_kv(request)
@@ -108,19 +114,21 @@ class AscendScheduler(Scheduler):
                  and request.lora_request.lora_int_id not in scheduled_loras)):
                 # Scheduling would exceed max_loras, skip.
                 skip_cur_request()
-                continue
+                continue # 如果超过最大的lora限制则跳过 不进行调度
 
             num_external_computed_tokens = 0
             load_kv_async = False
 
             # Get already-cached tokens.
             if num_prealloc_computed_tokens == 0:
+                #! 在无远程 KV 的场景下，统计本地和
+                #! 外部 KV 缓存中已命中的 token 数量，以最大化复用、减少重复计算，从而提升调度效率。
                 new_computed_blocks, num_native_computed_tokens = \
                     self.kv_cache_manager.get_computed_blocks(
                         request)
 
                 # Get externally-cached tokens if using a KVConnector.
-                if self.connector is not None:
+                if self.connector is not None: #! 外部已经计算得到的结果
                     num_external_computed_tokens, load_kv_async = (
                         self.connector.get_num_new_matched_tokens(
                             request, num_native_computed_tokens))
@@ -128,7 +136,7 @@ class AscendScheduler(Scheduler):
                 # Total computed tokens (local + external).
                 num_computed_tokens = (num_native_computed_tokens +
                                        num_external_computed_tokens)
-            else:
+            else: #! P/D分离 远程拉取
                 # P/D: skip checking prefix cache if loaded from remote kvs.
                 new_computed_blocks = KVCacheBlocks.create_empty()
                 num_native_computed_tokens = 0
@@ -139,7 +147,7 @@ class AscendScheduler(Scheduler):
             # P/D: loading remote KV, do not allocate for new work.
             if load_kv_async:
                 assert num_external_computed_tokens > 0
-                num_new_tokens = 0
+                num_new_tokens = 0 # KV 缓存尚未准备好，当前请求无法调度新的令牌
                 blocks = None
             # Number of tokens to be scheduled.
             else:
@@ -169,7 +177,7 @@ class AscendScheduler(Scheduler):
                     self.waiting.popleft()
                     continue
 
-                if num_new_tokens > token_budget:
+                if num_new_tokens > token_budget: #! 短期的 动态的资源调整
                     # Scheduling would exceed token_budget, skip.
                     skip_cur_request()
                     continue
@@ -252,7 +260,7 @@ class AscendScheduler(Scheduler):
                     # This request has already been scheduled.
                     req_index += 1
                     continue
-
+                #! spec decoding
                 num_new_tokens = (request.num_tokens_with_spec -
                                   request.num_computed_tokens)
                 assert (request.num_tokens - request.num_computed_tokens) == 1
@@ -271,7 +279,7 @@ class AscendScheduler(Scheduler):
                     # Scheduling would exceed max_loras, skip.
                     num_new_tokens = 0
 
-                if num_new_tokens == 0:
+                if num_new_tokens == 0: #! 不进行调度当前请求
                     # The request cannot be scheduled because one of the following
                     # reason:
                     # 1. No new tokens to schedule. This may happen when PP>1 and
@@ -293,7 +301,7 @@ class AscendScheduler(Scheduler):
                         request,
                         num_new_tokens,
                         num_draft_tokens=num_draft_tokens,
-                        num_lookahead_tokens=self.num_lookahead_tokens)
+                        num_lookahead_tokens=self.num_lookahead_tokens) #! 这两个传参是什么意思
                     if new_blocks is None:
                         # The request cannot be scheduled.
                         # Preempt the lowest-priority request.
@@ -329,7 +337,7 @@ class AscendScheduler(Scheduler):
                 req_index += 1
 
                 # Speculative decode related.
-                if request.spec_token_ids:
+                if request.spec_token_ids: #! 这是什么意思
                     num_scheduled_spec_tokens = (num_new_tokens +
                                                  request.num_computed_tokens -
                                                  request.num_tokens)

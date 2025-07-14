@@ -69,9 +69,9 @@ class NPUPiecewiseBackend:
         If a shape needs both compilation and aclgraph, we will
         compile it first, and then capture aclgraph.
         """
-        self.graph = graph
-        self.vllm_config = vllm_config
-        self.compilation_config = vllm_config.compilation_config
+        self.graph = graph # 特殊类型
+        self.vllm_config = vllm_config # 可能需要mock
+        self.compilation_config = vllm_config.compilation_config # config子类也需要mock
         self.graph_pool = graph_pool
         self.piecewise_compile_index = piecewise_compile_index
         self.total_piecewise_compiles = total_piecewise_compiles
@@ -82,7 +82,7 @@ class NPUPiecewiseBackend:
             piecewise_compile_index == total_piecewise_compiles - 1)
 
         self.compile_sizes: Set[int] = set(
-            self.compilation_config.compile_sizes)
+            self.compilation_config.compile_sizes) # 这两个size的列表需要进行指定
         self.aclgraph_capture_sizes: Set[int] = set(
             self.compilation_config.cudagraph_capture_sizes
         ) if self.compilation_config.use_cudagraph else set()
