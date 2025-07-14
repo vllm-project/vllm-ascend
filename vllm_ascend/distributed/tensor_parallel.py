@@ -13,6 +13,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# Adapts from: Megatron/megatron/core/tensor_parallel/mappings.py.
 # This file is a part of the vllm-ascend project.
 import torch
 
