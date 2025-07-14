@@ -93,6 +93,7 @@ class EplbUpdator:
         self.cur_iterations += 1
         if self.cur_iterations == (self.num_iterations_eplb_update +\
             self.num_wait_worker_iterations + self.num_moe_layers):
+            self.adaptor.model.clear_all_moe_loads()
             if not self.gate_eplb:
                 self.cur_iterations = 0
 
@@ -171,7 +172,6 @@ class EplbUpdator:
             moe_load = local_load.unsqueeze(1)
             self.shared_dict["moe_load"] = moe_load.cpu()
             logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
-        self.adaptor.model.clear_all_moe_loads()
         return moe_load
 
     def warm_up_eplb(self):
