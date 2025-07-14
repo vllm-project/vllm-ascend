@@ -1271,10 +1271,7 @@ class AscendFusedMoE(FusedMoE):
         tp_size = get_tensor_model_parallel_world_size()
 
         if tp_size > 1 and fused_moe_state != FusedMoEState.AllGather and mc2_mask is not None:
-          num_tokens = mc2_mask.shape[0]
-            if num_tokens < tp_size:
-                mc2_mask = nn.functional.pad(mc2_mask,
-                                             (0, tp_size - num_tokens))
+            num_tokens = mc2_mask.shape[0]
             tp_rank = get_tensor_model_parallel_rank()
             chunk_mc2_mask = torch.tensor_split(mc2_mask, tp_size, dim=0)
             mc2_mask = chunk_mc2_mask[tp_rank]

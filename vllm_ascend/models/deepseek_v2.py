@@ -97,6 +97,7 @@ class RowParallelScatterLinear(RowParallelLinear):
                                                   input_parallel,
                                                   bias=bias_)
         if self.reduce_results and self.tp_size > 1:
+            padded_num_tokens = get_forward_context().padded_num_tokens
             num_tokens, _ = output_parallel.shape
             if num_tokens % self.tp_size:
                 output_parallel = nn.functional.pad(output_parallel, (0, 0, 0, -num_tokens % self.tp_size))
