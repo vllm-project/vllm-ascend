@@ -21,7 +21,7 @@
 
 set -e
 
-scversion="v0.10.0"
+scversion="stable"
 
 if [ -d "shellcheck-${scversion}" ]; then
     PATH="$PATH:$(pwd)/shellcheck-${scversion}"
