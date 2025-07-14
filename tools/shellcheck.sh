@@ -40,9 +40,10 @@ if ! [ -x "$(command -v shellcheck)" ]; then
     export PATH
 fi
 
-find . -path ./.git -prune -o -name "*.sh" -print0 \
+find . \( -path ./.git -o -path ./vllm-empty \) -prune -o -name "*.sh" -print0 \
 | while IFS= read -r -d '' file; do
     if ! git check-ignore -q "$file"; then
         shellcheck -s bash -e SC1091 "$file"
     fi
 done
+
