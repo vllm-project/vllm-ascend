@@ -1733,7 +1733,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_actual_tokens=0,
             ):
                 model_kwargs = {}
-                if self.torchair_graph_enabled and not with_prefill:
+                if not self.torchair_graph_enabled and not with_prefill:
                     # Only mark static while compiling
                     if is_torchair_compile:
                         torch._dynamo.mark_static(input_ids)

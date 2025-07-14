@@ -373,11 +373,16 @@ class AscendAttentionBackendImpl(AttentionImpl):
     def update_kv_cache(self, key: torch.Tensor, value: torch.Tensor,
                         key_cache: torch.Tensor, value_cache: torch.Tensor,
                         slot_indices: torch.Tensor) -> None:
-        key = key.contiguous()
-        value = value.contiguous()
-        indices = slot_indices.view(-1, 1).to(torch.int64)
-        key_cache = key_cache.view(-1, self.num_kv_heads, self.head_size)
-        value_cache = value_cache.view(-1, self.num_kv_heads, self.head_size)
+
+        key = key.view(-1, 1, self.num_kv_heads, self.head_size).contiguous()
+        value = value.view(-1, 1, self.num_kv_heads, self.head_size).contiguous()
+
+        block_size = key_cache.shape[1]
+        slot_indices = slot_indices.view(-1, 1, 1).to(torch.int64)
+        block_idx = torch.div(slot_indices, block_size, rounding_mode='floor')
+        block_offset = slot_indices % block_size
+        indices = torch.cat([block_idx, block_offset], dim=2)
+        indices = indices.npu()
 
         torch_npu.npu_scatter_nd_update_(key_cache, indices, key)
         torch_npu.npu_scatter_nd_update_(value_cache, indices, value)

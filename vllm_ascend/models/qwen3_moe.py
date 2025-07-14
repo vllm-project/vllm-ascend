@@ -235,6 +235,7 @@ class CustomQwen3MoeAttention(Qwen3MoeAttention):
 
         if (self.torchair_graph_enabled and attn_metadata is not None and
                 attn_metadata.attn_state == AscendAttentionState.DecodeOnly):
+            q, k = self.rotary_emb(positions, q, k, is_prefill=False)
             forward_kwargs = {}
             if envs.VLLM_USE_V1:
                 output_shape = q.shape
@@ -254,6 +255,7 @@ class CustomQwen3MoeAttention(Qwen3MoeAttention):
             output, _ = self.o_proj(attn_output)
             return output
         else:
+            q, k = self.rotary_emb(positions, q, k)
             attn_output = self.attn(q, k, v)
             output, _ = self.o_proj(attn_output)
             return output
