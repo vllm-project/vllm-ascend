@@ -169,6 +169,23 @@ jobs:
         working-directory: ./vllm-empty
         run: VLLM_TARGET_DEVICE=empty pip install -e .
 
+      - name: Resolve vllm-ascend version
+        run: |
+          VERSION_INPUT="${{ github.event.inputs.vllm-ascend-version }}"
+          
+          if [[ "$VERSION_INPUT" == "main" ]]; then
+            TAGS=$(git ls-remote --tags --sort=-v:refname https://github.com/vllm-project/vllm-ascend "v*" | cut -f2 | sed 's|refs/tags/||')
+            LATEST_TAG=$(echo "$TAGS" | head -n1)
+            if [[ -z "$LATEST_TAG" ]]; then
+              RESOLVED_VERSION="main"
+            else
+              RESOLVED_VERSION="$LATEST_TAG"
+            fi
+          else
+            RESOLVED_VERSION="$VERSION_INPUT"
+          fi
+          echo "GHA_VLLM_ASCEND_VERSION=$RESOLVED_VERSION" >> $GITHUB_ENV
+
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
         with:
@@ -224,7 +241,6 @@ jobs:
             pip show torch | grep "Version:" | awk '{print "GHA_TORCH_VERSION="$2}'
             pip show torch_npu | grep "Version:" | awk '{print "GHA_TORCH_NPU_VERSION="$2}'
             pip show vllm | grep "Version:" | awk '{print "GHA_VLLM_VERSION="$2}' | sed 's/+.*//'
-            echo "GHA_VLLM_ASCEND_VERSION=${{ github.event.inputs.vllm-ascend-version || github.ref }}"
           } >> "$GITHUB_ENV"
       
       - name: Print versions
