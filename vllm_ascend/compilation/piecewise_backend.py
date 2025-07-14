@@ -23,6 +23,7 @@ from unittest.mock import patch
 
 import torch
 import torch.fx as fx
+import torch_npu
 import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.compilation.counter import compilation_counter
@@ -126,29 +127,33 @@ class NPUPiecewiseBackend:
 
     def update_attn_params(self, graph_params, forward_context, runtime_shape):
         for layer_idx in range(len(graph_params.handles[runtime_shape])):
-            query, key, value, actual_seq_lens, block_table, num_heads, scale, num_kv_heads, output, softmax_lse = graph_params.attn_params[
-                runtime_shape][layer_idx]
+            (
+                query,
+                key_cache,
+                value_cache,
+                num_kv_heads,
+                num_heads,
+                scale,
+                block_table,
+                seq_lens,
+                output,
+            ) = graph_params.attn_params[runtime_shape][layer_idx]
             block_table = forward_context.attn_metadata.block_tables
-            actual_seq_lens = forward_context.attn_metadata.seq_lens_list
+            seq_lens = forward_context.attn_metadata.seq_lens
 
             with torch.npu.stream(self.update_stream):
                 torch.npu.graph_task_update_begin(
                     self.update_stream,
                     graph_params.handles[runtime_shape][layer_idx])
-                torch.ops.npu.npu_fused_infer_attention_score.out(
-                    query,
-                    key,
-                    value,
-                    workspace=graph_params.workspaces[runtime_shape],
-                    actual_seq_lengths_kv=actual_seq_lens,
-                    block_table=block_table,
-                    num_heads=num_heads,
-                    scale=scale,
-                    input_layout="BSH",
-                    num_key_value_heads=num_kv_heads,
-                    block_size=128,
-                    out=[output, softmax_lse],
-                )
+                torch_npu._npu_paged_attention(query=query,
+                                               key_cache=key_cache,
+                                               value_cache=value_cache,
+                                               num_kv_heads=num_kv_heads,
+                                               num_heads=num_heads,
+                                               scale_value=scale,
+                                               block_table=block_table,
+                                               context_lens=seq_lens,
+                                               out=output)
                 torch.npu.graph_task_update_end(self.update_stream)
 
                 graph_params.events[runtime_shape][layer_idx].record(
