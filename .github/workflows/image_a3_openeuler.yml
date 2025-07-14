@@ -1,4 +1,4 @@
-name: 'image / openEuler / 310p'
+name: 'image / openEuler / a3'
 # This is a docker build check and publish job:
 # 1. PR Triggered docker image build check
 #   - is for image build check
@@ -9,15 +9,15 @@ name: 'image / openEuler / 310p'
 #   - commits are merge into main/*-dev  ==> vllm-ascend:main / vllm-ascend:*-dev
 # 3. tags push trigger image publish
 #   - is for final release image
-#   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3-openeuler|latest / vllm-ascend:v1.2.3rc1-openeuler
+#   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3-a3-openeuler|latest / vllm-ascend:v1.2.3rc1-a3-openeuler
 on:
   pull_request:
     branches:
       - 'main'
       - '*-dev'
     paths:
-      - '.github/workflows/image_310p_openeuler.yml'
-      - 'Dockerfile.310p.openEuler'
+      - '.github/workflows/image_a3_openeuler.yml'
+      - 'Dockerfile.a3.openEuler'
       - 'vllm_ascend/**'
       - 'setup.py'
       - 'pyproject.toml'
@@ -33,8 +33,8 @@ on:
     tags:
       - 'v*'
     paths:
-      - '.github/workflows/image_310p_openeuler.yml'
-      - 'Dockerfile.310p.openEuler'
+      - '.github/workflows/image_a3_openeuler.yml'
+      - 'Dockerfile.a3.openEuler'
       - 'vllm_ascend/**'
 
 jobs:
@@ -52,7 +52,6 @@ jobs:
     - name: Print
       run: |
         lscpu
-
     - name: Docker meta
       id: meta
       uses: docker/metadata-action@v5
@@ -70,10 +69,9 @@ jobs:
         #      which follow the rule from vLLM with prefix v
         # TODO(yikun): the post release might be considered as latest release
         tags: |
-          type=ref,event=branch,suffix=-310p-openeuler
-          type=ref,event=pr,suffix=-310p-openeuler
-          type=pep440,pattern={{raw}},suffix=-310p-openeuler
-
+          type=ref,event=branch,suffix=-a3-openeuler
+          type=ref,event=pr,suffix=-a3-openeuler
+          type=pep440,pattern={{raw}},suffix=-a3-openeuler
     - name: Free up disk space
       uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
       with:
@@ -94,7 +92,7 @@ jobs:
         username: ${{ vars.QUAY_USERNAME }}
         password: ${{ secrets.QUAY_PASSWORD }}
 
-    - name: Build and push 310p
+    - name: Build and push a3
       uses: docker/build-push-action@v6
       with:
         platforms: >-
@@ -109,6 +107,6 @@ jobs:
         push: ${{ github.event_name == 'push' && github.repository_owner == 'vllm-project' }}
         labels: ${{ steps.meta.outputs.labels }}
         tags: ${{ steps.meta.outputs.tags }}
-        file: Dockerfile.310p.openEuler
+        file: Dockerfile.a3.openEuler
         build-args: |
           PIP_INDEX_URL=https://pypi.org/simple
