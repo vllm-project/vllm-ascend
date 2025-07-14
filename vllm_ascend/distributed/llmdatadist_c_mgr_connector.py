@@ -337,7 +337,6 @@ class LLMDataDistCMgrConnectorWorker():
         self.init_llm_datadist()
         self.finished_reqs: set[str] = set()
         self.soc_info = NPUSocInfo()
-        # get decode tp size from extra config
         self.done_receiving_counts: defaultdict[str,
                                                 set[int]] = defaultdict(set)
 
@@ -393,12 +392,13 @@ class LLMDataDistCMgrConnectorWorker():
 
     def _increment_task_count(self, request_id: str, tp_rank: int,
                               decode_tp_size: int):
+        if request_id not in self.done_receiving_counts:
+            self.done_receiving_counts[request_id] = set()
         if tp_rank in self.done_receiving_counts[request_id]:
             logger.warning(
                 f"Received duplicate done signal for request {request_id} "
                 f"from tp rank {tp_rank}. Ignoring.")
             return False
-
         self.done_receiving_counts[request_id].add(tp_rank)
         if len(self.done_receiving_counts[request_id]) == decode_tp_size:
             self.done_receiving_counts.pop(request_id)
