@@ -63,7 +63,6 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (gather_mm_placeholders,
                                   sanity_check_mm_encoder_outputs,
@@ -83,10 +82,15 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                ProfileExecuteDuration,
                                check_torchair_cache_exist, is_310p,
                                maybe_converting_weight_acl_format,
-                               write_kv_cache_bytes_to_file)
+                               vllm_version_is, write_kv_cache_bytes_to_file)
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
+
+if vllm_version_is("0.9.2"):
+    from vllm.v1.utils import bind_kv_cache
+else:
+    from vllm.v1.worker.utils import bind_kv_cache
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
