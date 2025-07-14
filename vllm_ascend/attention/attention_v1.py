@@ -28,6 +28,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import direct_register_custom_op
 from vllm.v1.core.sched.output import SchedulerOutput
 
+from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d, nd_to_nz_spec)
@@ -149,6 +150,18 @@ class AscendMetadata:
     # and 1st slot in block 1, respectively.
     # (num_tokens,)
     slot_mapping: torch.Tensor = None
+
+    def split_metadata_for_multistream(
+        self,
+        ms_split_config: MSAttentionMetadataSplitConfig,
+    ) -> list["AscendMetadata"]:
+        """Split metadata for multi-stream with AscendMetadata"""
+        from vllm_ascend.multistream.ms_split import model_input_split_v1_attn
+        return model_input_split_v1_attn(
+            ms_split_config=ms_split_config,
+            attn_metadata=self,
+            _metadata_cls=AscendMetadata,
+        )
 
 
 class AscendAttentionMetadataBuilder:
