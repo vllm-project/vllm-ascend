@@ -11,6 +11,7 @@ def register_model():
     from .qwen2_5_vl import \
         AscendQwen2_5_VLForConditionalGeneration  # noqa: F401
     from .qwen2_vl import AscendQwen2VLForConditionalGeneration  # noqa: F401
+    from .qwen2 import CostomQwen2ForCausalLM
     from .qwen3 import CustomQwen3ForCausalLM  # noqa: F401
 
     ModelRegistry.register_model(
@@ -41,10 +42,6 @@ def register_model():
             "DeepseekV3ForCausalLM",
             "vllm_ascend.models.deepseek_dbo:CustomDeepseekDBOForCausalLM")
 
-        ModelRegistry.register_model(
-            "Qwen3MoeForCausalLM",
-            "vllm_ascend.models.qwen3_dbo:CustomQwen3MoeForCausalLMDBO")
-
     else:
         ModelRegistry.register_model(
             "DeepseekV2ForCausalLM",
@@ -54,9 +51,13 @@ def register_model():
             "DeepseekV3ForCausalLM",
             "vllm_ascend.models.deepseek_v2:CustomDeepseekV3ForCausalLM")
 
-        ModelRegistry.register_model(
-            "Qwen3MoeForCausalLM",
-            "vllm_ascend.models.qwen3_moe:CustomQwen3MoeForCausalLM")
+    ModelRegistry.register_model(
+        "Qwen3MoeForCausalLM",
+        "vllm_ascend.models.qwen3_moe:CustomQwen3MoeForCausalLM")
 
     ModelRegistry.register_model(
         "Qwen3ForCausalLM", "vllm_ascend.models.qwen3:CustomQwen3ForCausalLM")
+
+    ModelRegistry.register_model(
+        "Qwen2ForCausalLM",
+        "vllm_ascend.models.qwen2:CostomQwen2ForCausalLM")

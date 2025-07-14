@@ -169,13 +169,13 @@ def check_ascend_config(vllm_config, enforce_eager):
                         "Torchair graph mode is still experimental and not supported for V1 without mla currently, "
                         "it has been disabled automatically.")
                     ascend_config.torchair_graph_config.enabled = False
-                # torchair_graph is supported for deepseek model only currently.
+                # torchair_graph is supported for deepseek or qwen currently.
                 if vllm_config.model_config:
                     model_type = vllm_config.model_config.hf_config.model_type
-                    if "deepseek" not in model_type:
+                    if "deepseek" not in model_type and "qwen" not in model_type:
                         raise NotImplementedError(
-                            "Torchair graph mode only works with deepseek model."
-                        )
+                            "Torchair graph mode only works with deepseek or qwen model."
+                        ))
             # aclgraph case
             else:
                 # aclgraph doesn't work with deepseek model and only qwen model is well tested.
