@@ -82,7 +82,9 @@ jobs:
 
       - name: Config mirrors
         run: |
-          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
 
       - name: Install system dependencies
         run: |
