@@ -31,6 +31,7 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
 from vllm_ascend.core.scheduler import AscendScheduler
+from vllm_ascend.utils import vllm_version_is
 
 EOS_TOKEN_ID = 50256
 
@@ -213,6 +214,8 @@ def test_stop_via_update_from_output():
         scheduler.requests[req.request_id] = req
         scheduler.running.append(req)
         scheduler.scheduled_req_ids.add(req.request_id)
+        if not vllm_version_is("0.9.2"):
+            req.status = RequestStatus.RUNNING
 
     scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                        scheduled_cached_reqs=[],
@@ -263,6 +266,8 @@ def test_stop_via_update_from_output():
         scheduler.requests[req.request_id] = req
         scheduler.running.append(req)
         scheduler.scheduled_req_ids.add(req.request_id)
+        if not vllm_version_is("0.9.2"):
+            req.status = RequestStatus.RUNNING
 
     scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                        scheduled_cached_reqs=[],
@@ -311,6 +316,8 @@ def test_stop_via_update_from_output():
         scheduler.requests[req.request_id] = req
         scheduler.running.append(req)
         scheduler.scheduled_req_ids.add(req.request_id)
+        if not vllm_version_is("0.9.2"):
+            req.status = RequestStatus.RUNNING
 
     scheduler_output = SchedulerOutput(scheduled_new_reqs=[],
                                        scheduled_cached_reqs=[],
