@@ -170,7 +170,7 @@ class CustomQwen3Attention(Qwen3Attention):
                                k,
                                cos=cos,
                                sin=sin,
-                               skip_index_select=True)
+                               is_cos_sin_cached=True)
         attn_output = self.attn(q, k, v)
         pad_size = 0
         if self.enable_fc == 2:
