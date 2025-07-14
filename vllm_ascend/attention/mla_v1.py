@@ -1224,7 +1224,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                                                  key_cache=kv_cache[0],
                                                  value_cache=kv_cache[1],
                                                  slot_indices=slots)
-            
+
             if kv_cache[0].numel(
             ) > 0 and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill and has_decode:
                 slots = attn_metadata.slot_mapping[:num_decode_tokens]
