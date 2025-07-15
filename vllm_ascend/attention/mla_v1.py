@@ -674,7 +674,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         q_nope = query[..., :self.qk_nope_head_dim]
 
         seq_len1 = torch.tensor(prefill_metadata.query_lens, dtype=torch.int32)
-        latent_kv_dim = kv_c_and_k_pe_cache.size(3) - rope_dim # 96 -32 = 64
+        latent_kv_dim = kv_c_and_k_pe_cache.size(3) - rope_dim
         cache_kv_c = kv_c_and_k_pe_cache[:, :, :, :latent_kv_dim]
         cache_k_pe = kv_c_and_k_pe_cache[:, :, :, latent_kv_dim:]
         for i in range(iters):
