@@ -6,7 +6,7 @@ export HCCL_SOCKET_IFNAME="enp189s0f0"
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 
-export VLLM_USE_V1=0
+export VLLM_USE_V1=1
 
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
