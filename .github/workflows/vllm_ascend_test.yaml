@@ -49,24 +49,25 @@ jobs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
     steps:
-    - uses: dorny/paths-filter@v3
-      id: filter
-      with:
-        filters: |
-          e2e_tracker:
-            - '.github/workflows/vllm_ascend_test.yaml'
-            - 'vllm_ascend/**'
-            - 'csrc/**'
-            - 'cmake/**'
-            - 'tests/e2e/**'
-            - 'CMakeLists.txt'
-            - 'setup.py'
-            - 'requirements.txt'
-            - 'requirements-dev.txt'
-            - 'requirements-lint.txt'
-            - 'packages.txt'
-          ut_tracker:
-            - 'tests/ut/**'
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            e2e_tracker:
+              - '.github/workflows/vllm_ascend_test.yaml'
+              - 'vllm_ascend/**'
+              - 'csrc/**'
+              - 'cmake/**'
+              - 'tests/e2e/**'
+              - 'CMakeLists.txt'
+              - 'setup.py'
+              - 'requirements.txt'
+              - 'requirements-dev.txt'
+              - 'requirements-lint.txt'
+              - 'packages.txt'
+            ut_tracker:
+              - 'tests/ut/**'
   ut:
     needs: [lint, changes]
     name: unit test
