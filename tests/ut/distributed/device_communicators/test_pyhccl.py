@@ -1,6 +1,8 @@
-from vllm_ascend.distributed.device_communicators.pyhccl import PyHcclCommunicator
 import os
-from unittest.mock import patch,MagicMock
+from unittest.mock import MagicMock, patch
+
+from vllm_ascend.distributed.device_communicators.pyhccl import \
+    PyHcclCommunicator
 
 
 class MockHcclLib:
@@ -10,7 +12,7 @@ class MockHcclLib:
 
     def hcclGetUniqueId(self):
         uid = MagicMock()
-        uid.internal = list(range(128))   # 128 字节随意填充
+        uid.internal = list(range(128))  # 128 字节随意填充
         return uid
 
     def hcclCommInitRank(self, world_size, uid, rank):
@@ -22,12 +24,14 @@ class MockHcclLib:
 
 class MockUniqueId:
     def __init__(self):
-        self.internal = [0]*128
+        self.internal = [0] * 128
+
 
 class StatelessProcessGroup:
     def __init__(self, rank, world_size):
         self.rank = rank
         self.world_size = world_size
+
 
 class TestPyHcclCommunicator:
     @patch.dict(os.environ, {"RANK": "0", "WORLD_SIZE": "1"})
@@ -51,7 +55,6 @@ class TestPyHcclCommunicator:
                 device="npu:0",
             )
             assert comm.disabled is True
-
 
     @patch("vllm.distributed.pyhccl.HCCLLibrary", MockHcclLib)
     @patch("vllm.distributed.pyhccl.hcclUniqueId", MockUniqueId)
@@ -83,11 +86,11 @@ class TestPyHcclCommunicator:
     @patch("vllm.distributed.pyhccl.current_stream",
            return_value=MagicMock(npu_stream=1234))
     def test_multi_gpu_pg_torch(
-            self,
-            mock_stream,
-            mock_npu_ctx,
-            mock_dist_broadcast,
-            *_,
+        self,
+        mock_stream,
+        mock_npu_ctx,
+        mock_dist_broadcast,
+        *_,
     ):
         """使用 PyTorch 官方 ProcessGroup 的初始化路径"""
         fake_pg = MagicMock()
@@ -109,13 +112,6 @@ class TestPyHcclCommunicator:
         mock_stream.assert_called()
 
 
-
-
-
-
 if __name__ == "__main__":
     testHccl = TestPyHcclCommunicator()
     testHccl.test_world_size_1_return_early()
-
-
-

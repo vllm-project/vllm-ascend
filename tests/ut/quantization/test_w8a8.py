@@ -14,7 +14,6 @@ from vllm_ascend.quantization.w8a8 import (AscendC8KVCacheMethod,
 
 
 class TestQuantPerTensor(TestBase):
-
     @patch("torch_npu.npu_quantize")
     def test_quant_per_tensor(self, mock_npu_quantize):
         in_tensor = torch.randn(32, 128)
@@ -39,7 +38,6 @@ class TestQuantPerTensor(TestBase):
 
 
 class TestAscendW8A8LinearMethod(TestBase):
-
     def setUp(self):
         self.method = AscendW8A8LinearMethod()
 
@@ -155,7 +153,6 @@ class TestAscendW8A8LinearMethod(TestBase):
 
 
 class TestAscendW8A8FusedMoEMethod(TestBase):
-
     def setUp(self):
         self.moe_method = AscendW8A8FusedMoEMethod()
         self.num_experts = 4
@@ -271,7 +268,6 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
 
 
 class TestAscendC8KVCacheMethod(TestBase):
-
     def setUp(self):
         self.layer = MagicMock()
         self.layer.num_kv_heads = 4
@@ -510,7 +506,6 @@ class TestAscendC8KVCacheMethod(TestBase):
 
 
 class TestFusedExperts(TestBase):
-
     @patch("vllm_ascend.quantization.w8a8.quant_per_tensor")
     @patch('vllm_ascend.quantization.w8a8.get_ep_group')
     @patch('torch_npu.npu_moe_init_routing_v2')
@@ -643,7 +638,6 @@ class TestFusedExperts(TestBase):
 
 
 class TestFusedExperts310(TestBase):
-
     @patch('torch_npu.npu_quant_grouped_matmul_dequant')
     @patch("vllm_ascend.quantization.w8a8.quant_per_tensor")
     @patch('vllm_ascend.quantization.w8a8.get_ep_group')
@@ -704,7 +698,6 @@ class TestFusedExperts310(TestBase):
 
 
 class TestSelectExperts(TestBase):
-
     def setUp(self):
         # Common test data
         self.num_tokens = 10
@@ -856,7 +849,6 @@ class TestSelectExperts(TestBase):
 
 
 class TestNativeGroupedTopkPartialMock(TestBase):
-
     def test_basic_group_selection(self):
         topk_weights = torch.tensor([[0.1, 0.9, 0.2, 0.8, 0.3, 0.7, 0.4, 0.6],
                                      [0.6, 0.4, 0.7, 0.3, 0.8, 0.2, 0.9, 0.1],

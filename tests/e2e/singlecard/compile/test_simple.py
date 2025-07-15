@@ -46,7 +46,6 @@ direct_register_custom_op(
 
 @support_torch_compile
 class SillyModel(nn.Module):
-
     def __init__(self,
                  *,
                  vllm_config: VllmConfig,

@@ -27,10 +27,8 @@ from vllm_ascend.ascend_config import (_check_torchair_supported,
 
 
 class TestAscendConfig(TestBase):
-
     @staticmethod
     def _clean_up_ascend_config(func):
-
         def wrapper(*args, **kwargs):
             clear_ascend_config()
             func(*args, **kwargs)

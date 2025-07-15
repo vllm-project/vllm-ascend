@@ -15,7 +15,6 @@ from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD
 
 
 class TestNPUPlatform(TestBase):
-
     def setUp(self):
         self.platform = NPUPlatform()
 

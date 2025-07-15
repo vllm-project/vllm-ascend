@@ -25,7 +25,6 @@ def mock_cached_request_state(req_id="1", prompt=[1, 2, 3], output=[4, 5, 6]):
 
 
 class TestInputBatch(unittest.TestCase):
-
     def setUp(self):
         self.max_num_reqs = 10
         self.max_model_len = 32

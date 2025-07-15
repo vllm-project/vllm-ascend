@@ -61,7 +61,6 @@ def _apply_rotary_emb(
 # adapted from https://github.com/vllm-project/vllm/vllm/model_executor/layers/rotary_embedding.py
 class RotaryEmbedding(nn.Module):
     """Original rotary positional embedding."""
-
     def __init__(
         self,
         head_size: int,

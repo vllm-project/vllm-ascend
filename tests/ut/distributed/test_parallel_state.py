@@ -26,7 +26,6 @@ from vllm_ascend.distributed.parallel_state import (
 
 
 class TestParallelState(TestBase):
-
     @patch('vllm_ascend.distributed.parallel_state._EP',
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
     def test_get_ep_group_when_initialized(self, mock_ep):

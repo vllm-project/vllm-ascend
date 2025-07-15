@@ -1,23 +1,18 @@
+import ctypes
+import os
+import tempfile
 from unittest import mock
 from unittest.mock import MagicMock, patch
 
-from tests.ut.base import TestBase
 import torch
-import os
-import ctypes
 from torch.distributed import ReduceOp
-from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import (hcclUniqueId,
-                                            hcclRedOpTypeEnum, hcclDataTypeEnum,
-                                                                         Function,
-                                                                         HCCLLibrary,
-                                                                         hcclResult_t,
-                                                                         hcclComm_t,
-                                                                         buffer_type,
-                                                                         hcclDataType_t,
-                                                                         hcclRedOp_t,
-                                                                         aclrtStream_t)
 
-import tempfile
+from tests.ut.base import TestBase
+from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import (
+    Function, HCCLLibrary, aclrtStream_t, buffer_type, hcclComm_t,
+    hcclDataType_t, hcclDataTypeEnum, hcclRedOp_t, hcclRedOpTypeEnum,
+    hcclResult_t, hcclUniqueId)
+
 
 class TestHcclUniqueId(TestBase):
     def test_construct(self):
@@ -26,8 +21,8 @@ class TestHcclUniqueId(TestBase):
         self.assertEqual(len(uid.internal), 4108)
         self.assertEqual(uid.internal[0], 0xAB)
 
-class TestHcclDataTypeEnum(TestBase):
 
+class TestHcclDataTypeEnum(TestBase):
     def test_torch_dtype_mapping(self):
         expected = {
             torch.int8: hcclDataTypeEnum.hcclInt8,
@@ -42,30 +37,27 @@ class TestHcclDataTypeEnum(TestBase):
 
         for torch_dtype, expected_enum in expected.items():
             with self.subTest(torch_dtype=torch_dtype):
-                self.assertEqual(
-                    hcclDataTypeEnum.from_torch(torch_dtype),
-                    expected_enum
-                )
+                self.assertEqual(hcclDataTypeEnum.from_torch(torch_dtype),
+                                 expected_enum)
 
     def test_unsupported_dtype_raises(self):
         with self.assertRaises(ValueError):
             hcclDataTypeEnum.from_torch(torch.complex64)  # 举例一个目前不支持的 dtype
 
+
 class TestHcclRedOpTypeEnum(TestBase):
     def test_torch_reduce_op_mapping(self):
         expected = {
-            ReduceOp.SUM:     hcclRedOpTypeEnum.hcclSum,
+            ReduceOp.SUM: hcclRedOpTypeEnum.hcclSum,
             ReduceOp.PRODUCT: hcclRedOpTypeEnum.hcclProd,
-            ReduceOp.MAX:     hcclRedOpTypeEnum.hcclMax,
-            ReduceOp.MIN:     hcclRedOpTypeEnum.hcclMin,
+            ReduceOp.MAX: hcclRedOpTypeEnum.hcclMax,
+            ReduceOp.MIN: hcclRedOpTypeEnum.hcclMin,
         }
 
         for torch_op, expected_enum in expected.items():
             with self.subTest(torch_op=torch_op):
-                self.assertEqual(
-                    hcclRedOpTypeEnum.from_torch(torch_op),
-                    expected_enum
-                )
+                self.assertEqual(hcclRedOpTypeEnum.from_torch(torch_op),
+                                 expected_enum)
 
     def test_unsupported_op_raises(self):
         unsupported_op = "NOT_EXIST"
@@ -79,6 +71,7 @@ class TestFunction(TestBase):
         self.assertEqual(func.name, "foo")
         self.assertIs(func.restype, int)
         self.assertEqual(func.argtypes, [int, str, float])
+
 
 class TestHCLLLibrary(TestBase):
     def test_init_with_nonexistent_so(self):
@@ -135,9 +128,7 @@ class TestHCLLLibrary(TestBase):
         """测试：HcclCommInitRootInfo 成功返回"""
         # 创建一个 HCCLLibrary 实例
         lib = HCCLLibrary.__new__(HCCLLibrary)
-        lib._funcs = {
-            "HcclCommInitRootInfo": MagicMock(return_value=0)
-        }
+        lib._funcs = {"HcclCommInitRootInfo": MagicMock(return_value=0)}
 
         # 创建输入参数
         world_size = 4
@@ -150,8 +141,7 @@ class TestHCLLLibrary(TestBase):
         # 验证
         self.assertIsInstance(comm, hcclComm_t)
         lib._funcs["HcclCommInitRootInfo"].assert_called_once_with(
-            world_size, ctypes.byref(unique_id), rank, ctypes.byref(comm)
-        )
+            world_size, ctypes.byref(unique_id), rank, ctypes.byref(comm))
         mock_hccl_check.assert_called_once_with(0)
 
     def test_hccl_all_reduce(self, mock_hccl_check):
@@ -159,9 +149,7 @@ class TestHCLLLibrary(TestBase):
         # 创建输入参数
 
         lib = HCCLLibrary.__new__(HCCLLibrary)
-        lib._funcs = {
-            "HcclAllReduce": MagicMock(return_value=0)
-        }
+        lib._funcs = {"HcclAllReduce": MagicMock(return_value=0)}
         sendbuff = buffer_type()  # 假设 buffer_type 是 ctypes.c_void_p 或类似
         recvbuff = buffer_type()
         count = 10
@@ -171,12 +159,12 @@ class TestHCLLLibrary(TestBase):
         stream = aclrtStream_t()
 
         # 调用 hcclAllReduce
-        lib.hcclAllReduce(sendbuff, recvbuff, count, datatype, op, comm, stream)
+        lib.hcclAllReduce(sendbuff, recvbuff, count, datatype, op, comm,
+                          stream)
 
         # 验证
         lib._funcs["HcclAllReduce"].assert_called_once_with(
-            sendbuff, recvbuff, count, datatype, op, comm, stream
-        )
+            sendbuff, recvbuff, count, datatype, op, comm, stream)
         mock_hccl_check.assert_called_once_with(0)
 
     def test_hccl_broad_cast(self, mock_hccl_check):
@@ -184,9 +172,7 @@ class TestHCLLLibrary(TestBase):
         # 创建输入参数
 
         lib = HCCLLibrary.__new__(HCCLLibrary)
-        lib._funcs = {
-            "HcclAllReduce": MagicMock(return_value=0)
-        }
+        lib._funcs = {"HcclAllReduce": MagicMock(return_value=0)}
         buff = buffer_type()  # 假设 buffer_type 是 ctypes.c_void_p 或类似
         count = 10
         datatype = 1  # 假设 hcclDataType_t 是 ctypes.c_int
@@ -199,8 +185,7 @@ class TestHCLLLibrary(TestBase):
 
         # 验证
         lib._funcs["HcclBroadcast"].assert_called_once_with(
-            buff, count, datatype, root, comm, stream
-        )
+            buff, count, datatype, root, comm, stream)
         mock_hccl_check.assert_called_once_with(0)
 
     @patch.object(HCCLLibrary, "HCCL_CHECK")
@@ -208,14 +193,9 @@ class TestHCLLLibrary(TestBase):
         """测试：hcclCommDestroy 成功执行"""
         # 创建输入参数
         lib = HCCLLibrary.__new__(HCCLLibrary)
-        lib._funcs = {
-            "HcclCommDestroy": MagicMock(return_value=0)
-        }
+        lib._funcs = {"HcclCommDestroy": MagicMock(return_value=0)}
         comm = hcclComm_t()
         # 调用 hcclCommDestroy
         lib.hcclCommDestroy(comm)
         lib._funcs["HcclCommDestroy"].assert_called_once_with(comm)
         mock_hccl_check.assert_called_once_with(0)
-
-
-

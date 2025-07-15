@@ -13,7 +13,6 @@ from vllm_ascend.worker.pooling_model_runner import (
 
 class TestPoolingModelRunner(unittest.TestCase):
     """Unit tests for the NPUPoolingModelRunner class."""
-
     def _create_model_runner(self, model: str, *args,
                              **kwargs) -> NPUPoolingModelRunner:
         engine_args = EngineArgs(model, *args, **kwargs)

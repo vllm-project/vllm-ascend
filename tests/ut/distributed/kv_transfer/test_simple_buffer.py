@@ -9,7 +9,6 @@ from vllm_ascend.distributed.kv_transfer.simple_buffer import (SimpleBuffer,
 
 
 class MockSimplePipe:
-
     def __init__(self):
         self.cluster_id = 0
         self.send_tensor = MagicMock()
@@ -18,7 +17,6 @@ class MockSimplePipe:
 
 
 class TestSimpleBuffer(unittest.TestCase):
-
     def setUp(self):
         self.pipe = MockSimplePipe()
         self.buffer = SimpleBuffer(self.pipe)

@@ -9,7 +9,6 @@ from tests.ut.base import TestBase
 
 
 class TestTopKTopPSamplerOptimize(TestBase):
-
     @mock.patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "1"})
     @mock.patch("torch_npu.npu_top_k_top_p")
     def test_npu_topk_topp_called_when_optimized(self, mock_npu_op):

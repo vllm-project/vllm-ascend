@@ -1,6 +1,7 @@
 import unittest
 
-from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig, MSEventKey
+from vllm_ascend.multistream.base import (MSAttentionMetadataSplitConfig,
+                                          MSEventKey)
 
 
 class TestBase(unittest.TestCase):

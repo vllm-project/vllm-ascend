@@ -12,7 +12,6 @@ from vllm_ascend.distributed.kv_transfer.simple_pipe import SimplePipe
 
 
 class TestSimpleConnector(unittest.TestCase):
-
     def setUp(self):
         self.mock_pipe = MagicMock(spec=SimplePipe)
         self.mock_buffer = MagicMock(spec=SimpleBuffer)
