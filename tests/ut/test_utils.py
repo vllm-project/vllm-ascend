@@ -28,6 +28,7 @@ from vllm_ascend import utils
 
 
 class TestUtils(TestBase):
+
     def test_is_310p(self):
         utils._IS_310P = None
         with mock.patch("vllm_ascend._build_info.__soc_version__",
@@ -302,6 +303,7 @@ class TestUtils(TestBase):
 
 
 class TestProfileExecuteDuration(unittest.TestCase):
+
     def setUp(self):
         utils.ProfileExecuteDuration._instance = None
         utils.ProfileExecuteDuration._observations = []
