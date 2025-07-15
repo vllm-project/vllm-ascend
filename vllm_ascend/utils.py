@@ -458,6 +458,10 @@ def get_rm_router_logits_state(ep_size: int, dp_size: int,
 # TODO(ttanzhiqiang): all_reduce merge
 # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
 # Currently, all_reduce_merge is enabled by default in the AllGather, AllGatherEP and NaiveMulticast scenarios of the deepseek model.
+# 1. If Prefill/decode use AllGather or NaiveMulticast solution at the same time, this logic is normal, and this solution is used for optimization
+# 2. If Prefill/decode use All2All/MC2 solution at the same time, this logic is also normal, and this solution is not used for optimization
+# 3. Prefill uses AllGatherEP solution (use VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP switch), and Decode uses MC2 solution. (Prefill can be merged/Prefill and Decode strategies are different and cannot be merged)
+# 4. In the PD separation scenario, the strategies used by P and D are separate, so there will be no impact.
 def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
     # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
     # only supports deepseek v3/r1
