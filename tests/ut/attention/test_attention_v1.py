@@ -65,6 +65,7 @@ class TestAscendAttentionBackend(TestBase):
 
 
 class TestAscendAttentionMetadataBuilder(TestBase):
+
     def setUp(self):
         self.mock_runner = MagicMock()
         self.builder = AscendAttentionMetadataBuilder(self.mock_runner)
@@ -165,6 +166,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
 
 
 class TestAscendAttentionBackendImpl(TestBase):
+
     def setUp(self):
         self.layer = MagicMock()
         self.layer.layer_name = "test_layer"
