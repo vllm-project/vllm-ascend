@@ -66,7 +66,7 @@ class AscendScheduler(Scheduler):
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
         # Spec decode-related.
-        scheduled_spec_decode_tokens: dict[str, list[int]] = {} #!投机解码，小模型模拟加大模型审核，用猜得快换算的少
+        scheduled_spec_decode_tokens: dict[str, list[int]] = {}
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -76,7 +76,7 @@ class AscendScheduler(Scheduler):
 
         # Use a temporary deque to collect requests that need to be skipped
         # and put back at the head of the waiting queue later
-        skipped_waiting_requests: deque[Request] = deque() #! 从waiting队列中取出来prefill 后续放回
+        skipped_waiting_requests: deque[Request] = deque()
 
         # Schedule prefill requests first.
         while self.waiting and token_budget > 0:
@@ -114,15 +114,13 @@ class AscendScheduler(Scheduler):
                  and request.lora_request.lora_int_id not in scheduled_loras)):
                 # Scheduling would exceed max_loras, skip.
                 skip_cur_request()
-                continue # 如果超过最大的lora限制则跳过 不进行调度
+                continue
 
             num_external_computed_tokens = 0
             load_kv_async = False
 
             # Get already-cached tokens.
             if num_prealloc_computed_tokens == 0:
-                #! 在无远程 KV 的场景下，统计本地和
-                #! 外部 KV 缓存中已命中的 token 数量，以最大化复用、减少重复计算，从而提升调度效率。
                 new_computed_blocks, num_native_computed_tokens = \
                     self.kv_cache_manager.get_computed_blocks(
                         request)
