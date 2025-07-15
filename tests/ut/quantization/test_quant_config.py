@@ -14,6 +14,7 @@ ASCEND_QUATIZATION_METHOD = "ascend"
 
 
 class TestAscendQuantConfig(TestBase):
+
     def setUp(self):
         self.sample_config = {
             "weight": "INT8",
