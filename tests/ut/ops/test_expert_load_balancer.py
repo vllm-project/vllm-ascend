@@ -41,6 +41,7 @@ class MockData(TypedDict):
 
 
 class TestExpertLoadBalancer(TestBase):
+
     def setUp(self):
         _TEST_DIR = os.path.dirname(__file__)
         json_file = _TEST_DIR + "/expert_map.json"
