@@ -128,8 +128,8 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
     def init_device(self):
-        device = torch.device(f"npu:{self.local_rank}")
-        NPUPlatform.set_device(device)
+        self.device = torch.device(f"npu:{self.local_rank}")
+        NPUPlatform.set_device(self.device)
         NPUPlatform.empty_cache()
         self.init_npu_memory = NPUPlatform.mem_get_info()[0]
 
@@ -139,7 +139,7 @@ class NPUWorker(WorkerBase):
         NPUPlatform.seed_everything(self.model_config.seed)
 
         # Init ModelRunner here, so that we have access to self.device.
-        self.model_runner = NPUModelRunner(self.vllm_config, device)
+        self.model_runner = NPUModelRunner(self.vllm_config, self.device)
 
     def determine_available_memory(self) -> int:
         # Profile the memory usage of the model and get the maximum number of
