@@ -150,6 +150,7 @@ class TestAscendQuantConfig(TestBase):
 
 
 class TestAscendKVCacheMethod(TestBase):
+
     def setUp(self):
         # Setup common test fixtures
         self.mock_quant_config = MagicMock(spec=AscendQuantConfig)
