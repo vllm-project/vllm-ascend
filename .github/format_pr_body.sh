@@ -30,6 +30,7 @@ VLLM_VERSION=$2
 VLLM_COMMIT=$3
 OLD=/tmp/orig_pr_body.txt
 NEW=/tmp/new_pr_body.txt
+FINAL=/tmp/final_pr_body.txt
 
 gh pr view --json body --template "{{.body}}" "${PR_NUMBER}" > "${OLD}"
 cp "${OLD}" "${NEW}"
@@ -41,16 +42,18 @@ sed -i '/- vLLM .*$/d' "${NEW}"
     echo ""
     echo "- vLLM version: $VLLM_VERSION"
     echo "- vLLM main: $VLLM_COMMIT"
-    echo ""
 } >> "${NEW}"
 
+# Remove redundant empty lines
+uniq "${NEW}" > "${FINAL}"
+
 # Run this only if ${NEW} is different than ${OLD}
-if ! cmp -s "${OLD}" "${NEW}"; then
+if ! cmp -s "${OLD}" "${FINAL}"; then
     echo
     echo "Updating PR body:"
     echo
     cat "${NEW}"
-    gh pr edit --body-file "${NEW}" "${PR_NUMBER}"
+    gh pr edit --body-file "${FINAL}" "${PR_NUMBER}"
 else
     echo "No changes needed"
 fi
