@@ -1,8 +1,6 @@
 import os
 from unittest.mock import MagicMock, patch
 
-import torch
-
 from tests.ut.base import TestBase
 from vllm_ascend.distributed.device_communicators.pyhccl import \
     PyHcclCommunicator
