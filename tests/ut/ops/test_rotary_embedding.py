@@ -13,6 +13,7 @@ from vllm_ascend.ops.rotary_embedding import (custom_rotary_embedding_enabled,
 
 
 class TestCustomRotaryEmbeddingEnabled(unittest.TestCase):
+
     def setUp(self):
         # Common setup for tests
         self.positions = torch.tensor([1, 2, 3])
@@ -67,6 +68,7 @@ class TestCustomRotaryEmbeddingEnabled(unittest.TestCase):
 
 
 class TestRopeForwardOot(unittest.TestCase):
+
     def setUp(self):
         # Common setup for tests
         self.positions = torch.tensor([1, 2, 3])
@@ -179,6 +181,7 @@ class TestRopeForwardOot(unittest.TestCase):
 
 
 class MockRopeModule:
+
     def __init__(self, max_seq_len=2048, is_neox_style=True):
         self.max_seq_len = max_seq_len
         self.is_neox_style = is_neox_style
@@ -189,6 +192,7 @@ class MockRopeModule:
 
 
 class TestNativeRopeDeepseekForward(TestBase):
+
     @patch('vllm_ascend.ops.rotary_embedding.rope_forward_oot')
     def test_native_rope_deepseek_forward_base(self, mock_rope_forward_oot):
         module = MockRopeModule()
@@ -259,6 +263,7 @@ class TestNativeRopeDeepseekForward(TestBase):
 
 
 class TestRotateHalf(unittest.TestCase):
+
     def test_rotate_half_even_dim(self):
         # Test with even dimension
         x = torch.tensor([1.0, 2.0, 3.0, 4.0])
@@ -268,6 +273,7 @@ class TestRotateHalf(unittest.TestCase):
 
 
 class TestYarnFindCorrectionDim(unittest.TestCase):
+
     def test_basic_case(self):
         # Test with standard values
         num_rotations = 100
@@ -288,6 +294,7 @@ class TestYarnFindCorrectionDim(unittest.TestCase):
 
 
 class TestYarnGetMscale(unittest.TestCase):
+
     def test_scale_less_than_or_equal_1(self):
         self.assertEqual(yarn_get_mscale(scale=0.5), 1.0)
         self.assertEqual(yarn_get_mscale(scale=1.0), 1.0)
