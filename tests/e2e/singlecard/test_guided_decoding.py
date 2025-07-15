@@ -30,10 +30,7 @@ from tests.e2e.conftest import VllmRunner
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 
-GuidedDecodingBackendV0 = ["outlines", "lm-format-enforcer", "xgrammar"]
-GuidedDecodingBackendV1 = ["xgrammar", "guidance"]
-GuidedDecodingBackend = list(
-    set(GuidedDecodingBackendV0 + GuidedDecodingBackendV1))
+GuidedDecodingBackend = ["xgrammar", "guidance"]
 
 
 @pytest.fixture(scope="module")
@@ -84,16 +81,9 @@ def sample_json_schema():
     }
 
 
-def check_backend(guided_decoding_backend: str):
-    if guided_decoding_backend not in GuidedDecodingBackendV1:
-        pytest.skip(f"{guided_decoding_backend} does not support v1, skip it.")
-
-
 @pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
 def test_guided_json_completion(guided_decoding_backend: str,
                                 sample_json_schema):
-    check_backend(guided_decoding_backend)
-
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=500,
@@ -130,8 +120,6 @@ def test_guided_json_completion(guided_decoding_backend: str,
 
 @pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
 def test_guided_regex(guided_decoding_backend: str, sample_regex):
-    check_backend(guided_decoding_backend)
-
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,

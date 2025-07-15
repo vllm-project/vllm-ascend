@@ -481,45 +481,6 @@ class TestNPUPlatform(TestBase):
             result,
             "vllm_ascend.attention.attention_v1.AscendAttentionBackend")
 
-    @patch('vllm_ascend.platform.get_ascend_config')
-    def test_get_attn_backend_cls_use_mla_only(self, mock_get_ascend_config):
-        mock_config = MagicMock()
-        mock_config.torchair_graph_config.enabled = False
-
-        mock_get_ascend_config.return_value = mock_config
-
-        result = self.platform.get_attn_backend_cls(
-            selected_backend="ascend",
-            head_size=64,
-            dtype="float16",
-            kv_cache_dtype="float16",
-            block_size=64,
-            use_v1=False,
-            use_mla=True,
-        )
-        self.assertEqual(
-            result,
-            "vllm_ascend.attention.attention.AscendMLAAttentionBackend")
-
-    @patch('vllm_ascend.platform.get_ascend_config')
-    def test_get_attn_backend_cls_default_case(self, mock_get_ascend_config):
-        mock_config = MagicMock()
-        mock_config.torchair_graph_config.enabled = False
-
-        mock_get_ascend_config.return_value = mock_config
-
-        result = self.platform.get_attn_backend_cls(
-            selected_backend="ascend",
-            head_size=64,
-            dtype="float16",
-            kv_cache_dtype="float16",
-            block_size=64,
-            use_v1=False,
-            use_mla=False,
-        )
-        self.assertEqual(
-            result, "vllm_ascend.attention.attention.AscendAttentionBackend")
-
     def test_get_punica_wrapper(self):
         result = self.platform.get_punica_wrapper()
         self.assertEqual(

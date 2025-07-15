@@ -117,7 +117,7 @@ class NPUPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         if not envs.VLLM_USE_V1:
-            raise ValueError("vLLM Ascend does not support V0 engine")
+            raise ValueError("vLLM Ascend does not support V0 engine.")
         # initialize ascend config from vllm additional_config
         ascend_config = init_ascend_config(vllm_config)
 
@@ -208,16 +208,16 @@ class NPUPlatform(Platform):
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla):
-        if use_v1 and use_mla:
-            return "vllm_ascend.attention.mla_v1.AscendMLABackend"
+        if not use_v1:
+            raise ValueError("vLLM Ascend does not support V0 engine.")
+
         use_torchair = get_ascend_config().torchair_graph_config.enabled
-        if use_v1 and use_torchair:
-            return "vllm_ascend.attention.attention_v1_torchair.AscendAttentionTorchairBackend"
-        if use_v1:
-            return "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
         if use_mla:
-            return "vllm_ascend.attention.attention.AscendMLAAttentionBackend"
-        return "vllm_ascend.attention.attention.AscendAttentionBackend"
+            return "vllm_ascend.attention.mla_v1.AscendMLABackend"
+        elif use_torchair:
+            return "vllm_ascend.attention.attention_v1_torchair.AscendAttentionTorchairBackend"
+        else:
+            return "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
 
     @classmethod
     def get_punica_wrapper(cls) -> str:
