@@ -14,7 +14,6 @@
 #
 
 import os
-from unittest import mock
 
 from transformers import PretrainedConfig
 from vllm.config import ModelConfig, VllmConfig
@@ -170,25 +169,23 @@ class TestAscendConfig(TestBase):
         init_ascend_config(test_vllm_config)
         check_ascend_config(test_vllm_config, False)
 
-        # For V1 engine
-        with mock.patch.dict(os.environ, {"VLLM_USE_V1": "1"}):
-            test_vllm_config.additional_config = {
-                "torchair_graph_config": {
-                    "enabled": True,
-                },
-                "refresh": True
-            }
-            init_ascend_config(test_vllm_config)
-            check_ascend_config(test_vllm_config, False)
+        test_vllm_config.additional_config = {
+            "torchair_graph_config": {
+                "enabled": True,
+            },
+            "refresh": True
+        }
+        init_ascend_config(test_vllm_config)
+        check_ascend_config(test_vllm_config, False)
 
-            test_vllm_config.additional_config = {
-                "torchair_graph_config": {
-                    "enabled": False,
-                },
-                "refresh": True
-            }
-            init_ascend_config(test_vllm_config)
-            check_ascend_config(test_vllm_config, False)
+        test_vllm_config.additional_config = {
+            "torchair_graph_config": {
+                "enabled": False,
+            },
+            "refresh": True
+        }
+        init_ascend_config(test_vllm_config)
+        check_ascend_config(test_vllm_config, False)
 
     @_clean_up_ascend_config
     def test_check_ascend_config_wrong_case(self):

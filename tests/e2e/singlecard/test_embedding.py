@@ -21,8 +21,8 @@ from typing import Optional
 
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 
-from tests.conftest import HfRunner
-from tests.utils import check_embeddings_close, matryoshka_fy
+from tests.e2e.conftest import HfRunner
+from tests.e2e.utils import check_embeddings_close, matryoshka_fy
 
 
 def run_embedding_correctness_test(

@@ -39,8 +39,8 @@ from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils import is_list_of
 
-from tests.model_utils import (PROMPT_TEMPLATES, TokensTextLogprobs,
-                               TokensTextLogprobsPromptLogprobs)
+from tests.e2e.model_utils import (PROMPT_TEMPLATES, TokensTextLogprobs,
+                                   TokensTextLogprobsPromptLogprobs)
 # TODO: remove this part after the patch merged into vllm, if
 # we not explicitly patch here, some of them might be effectiveless
 # in pytest scenario
@@ -62,7 +62,7 @@ PromptAudioInput = _PromptMultiModalInput[Tuple[np.ndarray, int]]
 PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 
 _TEST_DIR = os.path.dirname(__file__)
-_TEST_PROMPTS = [os.path.join(_TEST_DIR, "e2e", "prompts", "example.txt")]
+_TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 
 
 def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
