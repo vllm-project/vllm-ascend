@@ -17,6 +17,7 @@ from tests.ut.base import TestBase
 
 
 class TestPatchDistributed(TestBase):
+
     def test_GroupCoordinator_patched(self):
         from vllm.distributed.parallel_state import GroupCoordinator
 
