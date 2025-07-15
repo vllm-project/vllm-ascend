@@ -6,6 +6,7 @@ from vllm_ascend.ops.cache import concat_and_cache_mla
 
 
 class TestCache(unittest.TestCase):
+
     def setUp(self):
         self.num_tokens = 4
         self.num_kv_head = 2

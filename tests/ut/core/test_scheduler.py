@@ -1,11 +1,9 @@
 from collections import deque
-from operator import truediv
 from unittest.mock import MagicMock, patch
 
-from sympy import false
 from vllm.config import VllmConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -16,6 +14,7 @@ from vllm_ascend.core.scheduler import AscendScheduler
 
 
 class TestAscendScheduler(TestBase):
+
     @patch("vllm.v1.core.sched.scheduler.Scheduler.__init__")
     def test_init(self, mock_super_init: MagicMock):
         mock_vllm_config = MagicMock(spec=VllmConfig)

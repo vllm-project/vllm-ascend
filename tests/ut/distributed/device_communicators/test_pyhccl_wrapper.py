@@ -15,6 +15,7 @@ from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import (
 
 
 class TestHcclUniqueId(TestBase):
+
     def test_construct(self):
         uid = hcclUniqueId()  # 构造
         uid.internal[0] = 0xAB
@@ -23,6 +24,7 @@ class TestHcclUniqueId(TestBase):
 
 
 class TestHcclDataTypeEnum(TestBase):
+
     def test_torch_dtype_mapping(self):
         expected = {
             torch.int8: hcclDataTypeEnum.hcclInt8,
@@ -46,6 +48,7 @@ class TestHcclDataTypeEnum(TestBase):
 
 
 class TestHcclRedOpTypeEnum(TestBase):
+
     def test_torch_reduce_op_mapping(self):
         expected = {
             ReduceOp.SUM: hcclRedOpTypeEnum.hcclSum,
@@ -66,6 +69,7 @@ class TestHcclRedOpTypeEnum(TestBase):
 
 
 class TestFunction(TestBase):
+
     def test_construct_with_valid_args(self):
         func = Function(name="foo", restype=int, argtypes=[int, str, float])
         self.assertEqual(func.name, "foo")
@@ -74,6 +78,7 @@ class TestFunction(TestBase):
 
 
 class TestHCLLLibrary(TestBase):
+
     def test_init_with_nonexistent_so(self):
         fake_path = "/definitely/not/exist/libhccl.so"
         with self.assertRaises(OSError):

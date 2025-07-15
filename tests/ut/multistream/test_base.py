@@ -5,6 +5,7 @@ from vllm_ascend.multistream.base import (MSAttentionMetadataSplitConfig,
 
 
 class TestBase(unittest.TestCase):
+
     def test_ms_event_key(self):
         self.assertEqual(MSEventKey.ATTN_COM_FINISH, 0)
         self.assertEqual(MSEventKey.ATTN_AR_FINISH, 1)

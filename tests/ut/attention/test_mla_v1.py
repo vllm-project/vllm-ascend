@@ -15,6 +15,7 @@ from vllm_ascend.attention.mla_v1 import (AscendMLABackend,
 
 
 class TestAscendMLABackend(TestBase):
+
     def test_get_name(self):
         self.assertEqual(AscendMLABackend.get_name(), "ASCEND")
 
@@ -35,8 +36,8 @@ class TestAscendMLABackend(TestBase):
 
 
 class TestAscendMLAPrefillMetadata(TestBase):
+
     def test_ascend_mla_prefill_metadata_default(self):
-        # 构造最小必要输入
         attn_mask = torch.tensor([[1, 0], [1, 1]], dtype=torch.bool)
         query_lens = [1, 2]
         seq_lens = [2, 2]
@@ -108,6 +109,7 @@ class TestAscendMLAPrefillMetadata(TestBase):
 
 
 class TestAscendMLADecodeMetadata(TestBase):
+
     def test_ascend_mla_decode_metadata_default(self):
         input_positions = torch.tensor([[1, 2, 3, 4], [1, 2, 3, 4]])
         block_table = torch.tensor([[0, 3, 2, 1], [0, 2, 1, 3]])
@@ -129,6 +131,7 @@ class TestAscendMLADecodeMetadata(TestBase):
 
 
 class TestAscendMLAMetadata(TestBase):
+
     def test_ascend_mla_metadata_default(self):
         num_actual_tokens = 100
         slot_mapping = torch.randn(100, 4, 1024)
@@ -180,6 +183,7 @@ class TestAscendMLAMetadata(TestBase):
 
 
 class TestAscendMLAMetadataBuilder(TestBase):
+
     def test_ascend_mla_metadata_builder_default(self):
         runner = MagicMock()
         runner.scheduler_config = MagicMock()
@@ -379,6 +383,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
 
 class TestAscendMLAImpl(TestBase):
+
     def setUp(self):
         self.patcher1 = patch("vllm_ascend.ascend_config.get_ascend_config")
         self.patcher2 = patch(

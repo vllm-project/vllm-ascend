@@ -1,6 +1,5 @@
 from dataclasses import asdict
 from typing import Callable
-from unittest import mock
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -13,6 +12,7 @@ from vllm_ascend.compilation.piecewise_backend import (ConcreteSizeEntry,
 
 
 class TestConcreteSizeEntry(TestBase):
+
     def test_init(self):
         entry = ConcreteSizeEntry(
             runtime_shape=10,
@@ -40,6 +40,7 @@ class TestConcreteSizeEntry(TestBase):
 
 
 class TestNPUPiecewiseBackend(TestBase):
+
     def setUp(self):
         # 创建模拟的依赖对象
         self.graph = MagicMock(spec=torch.fx.GraphModule)

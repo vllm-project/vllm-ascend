@@ -12,6 +12,7 @@ from vllm_ascend.multistream.ms_split import (compute_split_seq_index,
 
 
 class TestMsSplit(unittest.TestCase):
+
     def test_decode_only(self):
         result = compute_split_seq_index(
             query_lens=None,

@@ -11,6 +11,7 @@ from vllm_ascend.multistream.metadata import (MultiStreamConfig,
 
 
 class TestMetaData(TestBase):
+
     def setUp(self):
         self.test_tensors_list = [torch.randn(100, 1024) for i in range(3)]
         self.test_tensors = torch.randn(100, 1024)
