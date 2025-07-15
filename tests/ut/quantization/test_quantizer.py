@@ -9,6 +9,7 @@ SUPPORT_ASCEND_QUANTIZER_TYPE = {"test": "1"}
 
 
 class TestGetQuantizer(TestBase):
+
     def setUp(self):
         # Setup common test fixtures
         self.supported_types = {
@@ -94,6 +95,7 @@ class TestGetQuantizer(TestBase):
 
 
 class TestW8A8Quantizer(TestBase):
+
     def setUp(self):
         self.quantizer = W8A8Quantizer(quant_description={})
 
