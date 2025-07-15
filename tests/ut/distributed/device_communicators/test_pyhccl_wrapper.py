@@ -96,7 +96,7 @@ class TestHCLLLibrary(TestBase):
     def test_hccl_get_error_string(self):
         lib = MagicMock(sepc=HCCLLibrary)
         lib._funcs = {}
-        mock_fn = MagicMock
+        mock_fn = MagicMock()
         mock_fn.return_value = "HCCL internal error"
         lib._funcs["HcclGetErrorString"] = mock_fn
 

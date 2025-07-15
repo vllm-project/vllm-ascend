@@ -65,12 +65,12 @@ class TestAscendScheduler(TestBase):
         scheduler.scheduler_config.is_multi_step = False
 
         request = MagicMock(sepc=Request)
-        request.lora_request = True
+        request.lora_request = MagicMock()
         request.lora_request.long_lora_max_len = 1500
         res1 = scheduler._get_prompt_limit(request)
         self.assertEqual(res1, request.lora_request.long_lora_max_len)
 
-        request.lora_request = False
+        request.lora_request = None
         res2 = scheduler._get_prompt_limit(request)
         self.assertEqual(res2, scheduler.scheduler_config.max_model_len)
 

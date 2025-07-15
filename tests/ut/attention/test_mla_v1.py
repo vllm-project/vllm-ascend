@@ -10,7 +10,8 @@ from vllm_ascend.attention.mla_v1 import (AscendMLABackend,
                                           AscendMLADecodeMetadata,
                                           AscendMLAImpl, AscendMLAMetadata,
                                           AscendMLAMetadataBuilder,
-                                          AscendMLAPrefillMetadata)
+                                          AscendMLAPrefillMetadata,
+                                          CommonAttentionMetadata)
 
 
 class TestAscendMLABackend(TestBase):
@@ -344,7 +345,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         self.assertEqual(metadata.slot_mapping.shape[0], 3)
         self.assertEqual(metadata.query_start_loc.shape[0], 3)
 
-    def test_build():  #! 后续完善
+    def test_build(self):
         # 模拟 runner
         runner = MagicMock()
         runner.device = "cpu"
@@ -502,12 +503,8 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(q_pe.shape[2], self.impl.qk_rope_head_dim)
 
     def test_process_weights_after_loading(self):
-        weight = torch.randn(
-            self.impl.kv_lora_rank,
-            self.impl.num_heads *
-            (self.impl.v_head_dim + self.impl.qk_nope_head_dim))
         layer = MagicMock(spec=LinearBase)
-        layer.quant_method = type('FakeQuant', (), {})()  # 动态生成一个匿名类实例
+        layer.quant_method = type('FakeQuant', (), {})()
         shape_0 = self.impl.num_heads * (self.impl.qk_nope_head_dim +
                                          self.impl.v_head_dim)
         shape_1 = self.impl.kv_lora_rank

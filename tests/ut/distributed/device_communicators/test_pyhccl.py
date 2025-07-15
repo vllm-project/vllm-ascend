@@ -1,6 +1,8 @@
 import os
 from unittest.mock import MagicMock, patch
 
+import torch
+
 from vllm_ascend.distributed.device_communicators.pyhccl import \
     PyHcclCommunicator
 
@@ -31,6 +33,9 @@ class StatelessProcessGroup:
     def __init__(self, rank, world_size):
         self.rank = rank
         self.world_size = world_size
+
+    def broadcast_obj(self, unique_id, src):
+        pass
 
 
 class TestPyHcclCommunicator:
