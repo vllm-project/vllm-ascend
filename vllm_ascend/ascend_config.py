@@ -41,6 +41,15 @@ class AscendConfig:
             "chunked_prefill_for_mla", False)
         self.enable_weight_nz_layout = additional_config.get(
             "enable_weight_nz_layout", False)
+        self.o_proj_tp = additional_config.get(
+            "o_proj_tp", 1)
+        if self.o_proj_tp > 1:
+            world_size = vllm_config.parallel_config.data_parallel_size * vllm_config.parallel_config.tensor_parallel_size
+            assert world_size % self.o_proj_tp == 0, "o_proj_tp must be divisible by world size."
+            assert vllm_config.parallel_config.tensor_parallel_size == 1, \
+            "MLA o_proj TP is only supported when global tensor_parallel_size is 1"
+            assert vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer, \
+            "MLA o_proj TP is only supported in Disaggregated-prefill situation and can only be activated in D node."
 
 
 class TorchairGraphConfig:

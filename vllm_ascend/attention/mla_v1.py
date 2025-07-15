@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, Optional, Tuple, Type, TypeVar
 import numpy as np
 import torch
 import torch_npu
+import torch.distributed as dist
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
@@ -18,6 +19,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import \
     AscendCommonAttentionMetadata as CommonAttentionMetadata
+from vllm_ascend.distributed.parallel_state import get_oproj_tp_group
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
@@ -627,6 +629,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
+        self.o_proj_tp = ascend_config.o_proj_tp
+        if self.o_proj_tp > 1:
+            self.oproj_tp_group = get_oproj_tp_group()
 
         # Adapt torch air graph mode with spec decoding.
         speculative_config = get_current_vllm_config().speculative_config
@@ -634,19 +639,42 @@ class AscendMLAImpl(MLAAttentionImpl):
             self.spec_token_num = speculative_config.num_speculative_tokens
             assert self.spec_token_num > 0
 
-    def _v_up_proj_and_o_proj(self, x, enable_multistream_mla: bool = False):
+    def _v_up_proj_and_o_proj(
+        self,
+        x,
+        enable_multistream_mla: bool = False,
+    ):
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
         # Multiply (N, B, L) x (N, L, V) -> (N, B, V)
         x = torch.bmm(x, self.W_UV)
-        # Convert from (N, B, V) to (B, N * V)
-        x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
-        MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024  # 16MB
-        npu_prefetch(self.o_proj.weight,
-                     x,
-                     max_size=MAX_O_PROJ_PREFETCH_SIZE,
-                     enabled=enable_multistream_mla)
-        return self.o_proj(x)[0]
+        if self.o_proj_tp > 1:
+            bs = x.size(1)
+            num_heads = x.size(0)
+            num_heads_per_node = num_heads // self.o_proj_tp
+            x = x.view(self.o_proj_tp, num_heads_per_node, bs, -1).transpose(1, 2).view(bs * self.o_proj_tp, num_heads_per_node, -1).contiguous()
+            all2all_result = torch.empty_like(x)
+            dist.all_to_all_single(all2all_result, x.view(-1), group=self.oproj_tp_group.device_group)
+            o_proj_output = self.o_proj(all2all_result.view(bs*self.o_proj_tp, -1))[0]
+            rs_result = torch.empty([bs, o_proj_output.size(1)], dtype=o_proj_output.dtype, device=o_proj_output.device)
+            dist.reduce_scatter_tensor(rs_result, o_proj_output, group=self.oproj_tp_group.device_group)
+            # # Use all2all to convert two DP groups into one TP2 group.
+            # # x is converted from (N, B, V) -> (N/2, B*2, V)
+            # # x_tp2_dp1 = torch.empty([x.size(0) // 2, x.size(1) * 2, x.size(2)], dtype=x.dtype, device=x.device)
+            # x_tp2_dp1 = self.tp2_group.all_to_all(
+            #     x, scatter_dim=0, gather_dim=1)
+            # # Convert from (N/2, B*2, V) to (B*2, N/2 * V)
+            # x_tp2_dp1 = x_tp2_dp1.transpose(0, 1).reshape(bs*2, -1)
+            return rs_result
+        else:
+            # Convert from (N, B, V) to (B, N * V)
+            x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+            MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024  # 16MB
+            npu_prefetch(self.o_proj.weight,
+                        x,
+                        max_size=MAX_O_PROJ_PREFETCH_SIZE,
+                        enabled=enable_multistream_mla)
+            return self.o_proj(x)[0]
 
     # Return `ql_nope`, `q_pe`
     def _q_proj_and_k_up_proj(self, x):
