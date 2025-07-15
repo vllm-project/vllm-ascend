@@ -1102,7 +1102,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config,
                 num_tokens=padded_num_tokens_across_dp,
                 num_tokens_across_dp=num_tokens_across_dp,
-                with_prefill=with_prefill):
+                with_prefill=with_prefill,
+                num_actual_tokens=total_num_scheduled_tokens):
             with ProfileExecuteDuration().capture_async("forward"):
                 self.maybe_setup_kv_connector(scheduler_output)
                 model_kwargs = {}
