@@ -23,6 +23,7 @@ import vllm_ascend.patch.worker.patch_common.patch_utils  # type: ignore[import]
 
 
 class TestBase(unittest.TestCase):
+
     def setUp(self):
         # adapt patch by default.
         adapt_patch(True)
