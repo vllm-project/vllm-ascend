@@ -78,6 +78,7 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
 
 
 class VllmRunner:
+
     def __init__(
         self,
         model_name: str,
@@ -390,6 +391,7 @@ def ilama_lora_files():
 
 
 class HfRunner:
+
     def get_default_device(self):
         from vllm.platforms import current_platform
 
