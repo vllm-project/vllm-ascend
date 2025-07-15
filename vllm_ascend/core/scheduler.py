@@ -89,13 +89,7 @@ class AscendScheduler(Scheduler):
                 self.waiting.popleft()
                 skipped_waiting_requests.appendleft(request)
 
-            num_prealloc_computed_tokens = 0 #! 只在PD分离的场景下生效
-            
-            #NOTE P/D分离：
-            # Prefill阶段，在一个节点上生成KV_cache
-            # Decode阶段 在另一个节点上拉取kv_cache
-            
-
+            num_prealloc_computed_tokens = 0
             # P/D: skip request if still waiting for remote kvs.
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 is_ready = self._update_waiting_for_remote_kv(request)
