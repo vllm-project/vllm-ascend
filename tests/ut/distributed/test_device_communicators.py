@@ -9,11 +9,13 @@ from vllm_ascend.distributed.device_communicators.pyhccl import \
 
 
 class MockHcclUniqueId:
+
     def __init__(self, internal=None):
         self.internal = internal or [0] * 128
 
 
 class MockStatelessUniqueId:
+
     def __init__(self, internal=None):
         self.internal = internal or [0] * 128
 
@@ -47,6 +49,7 @@ def mock_stateless_group():
     group.world_size = 2
 
     class MockBroadcastObj:
+
         def __init__(self):
             self.unique_id = MockStatelessUniqueId()
 
@@ -87,14 +90,16 @@ patch_get_process_group_ranks = patch(
         1: 1
     })
 
-
 # ======== Test Cases ========
 
+
 @patch('torch.npu.device', lambda x: MagicMock())
-@patch('torch.npu.current_stream', lambda device=None: MagicMock(npu_stream=None))
+@patch('torch.npu.current_stream',
+       lambda device=None: MagicMock(npu_stream=None))
 @patch_get_process_group_ranks
 @patch.object(PyHcclCommunicator, 'all_reduce', return_value=None)
-def test_init_with_process_group(mock_all_reduce, mock_get_pgr, mock_dist, mock_hccl_library, mock_current_stream):
+def test_init_with_process_group(mock_all_reduce, mock_get_pgr, mock_dist,
+                                 mock_hccl_library, mock_current_stream):
     group = MagicMock()
     comm = PyHcclCommunicator(group, device="cpu")
     assert comm.rank == 0
@@ -104,7 +109,8 @@ def test_init_with_process_group(mock_all_reduce, mock_get_pgr, mock_dist, mock_
 
 
 @patch('torch.npu.device', lambda x: MagicMock())
-@patch('torch.npu.current_stream', lambda device=None: MagicMock(npu_stream=None))
+@patch('torch.npu.current_stream',
+       lambda device=None: MagicMock(npu_stream=None))
 @patch_get_process_group_ranks
 def test_all_reduce_disabled(mock_get_pgr, mock_dist, mock_hccl_library):
     comm = PyHcclCommunicator(MagicMock(), device="cpu")
@@ -114,10 +120,12 @@ def test_all_reduce_disabled(mock_get_pgr, mock_dist, mock_hccl_library):
 
 
 @patch('torch.npu.device', lambda x: MagicMock())
-@patch('torch.npu.current_stream', lambda device=None: MagicMock(npu_stream=None))
+@patch('torch.npu.current_stream',
+       lambda device=None: MagicMock(npu_stream=None))
 @patch_get_process_group_ranks
 @patch.object(PyHcclCommunicator, 'all_reduce', return_value=None)
-def test_all_reduce_device_mismatch(mock_all_reduce, mock_get_pgr, mock_dist, mock_hccl_library):
+def test_all_reduce_device_mismatch(mock_all_reduce, mock_get_pgr, mock_dist,
+                                    mock_hccl_library):
     comm = PyHcclCommunicator(MagicMock(), device="cpu")
     tensor = torch.rand(1)
     result = comm.all_reduce(tensor)
@@ -125,10 +133,12 @@ def test_all_reduce_device_mismatch(mock_all_reduce, mock_get_pgr, mock_dist, mo
 
 
 @patch('torch.npu.device', lambda x: MagicMock())
-@patch('torch.npu.current_stream', lambda device=None: MagicMock(npu_stream=None))
+@patch('torch.npu.current_stream',
+       lambda device=None: MagicMock(npu_stream=None))
 @patch_get_process_group_ranks
 @patch.object(PyHcclCommunicator, 'all_reduce', return_value=None)
-def test_all_reduce_normal(mock_all_reduce, mock_get_pgr, mock_dist, mock_hccl_library, mock_current_stream):
+def test_all_reduce_normal(mock_all_reduce, mock_get_pgr, mock_dist,
+                           mock_hccl_library, mock_current_stream):
     comm = PyHcclCommunicator(MagicMock(), device="cpu")
     tensor = torch.rand(1, device="cpu")
     result = comm.all_reduce(tensor)
@@ -137,10 +147,12 @@ def test_all_reduce_normal(mock_all_reduce, mock_get_pgr, mock_dist, mock_hccl_l
 
 
 @patch('torch.npu.device', lambda x: MagicMock())
-@patch('torch.npu.current_stream', lambda device=None: MagicMock(npu_stream=None))
+@patch('torch.npu.current_stream',
+       lambda device=None: MagicMock(npu_stream=None))
 @patch_get_process_group_ranks
 @patch.object(PyHcclCommunicator, 'broadcast', return_value=None)
-def test_broadcast_device_mismatch(mock_broadcast, mock_get_pgr, mock_dist, mock_hccl_library):
+def test_broadcast_device_mismatch(mock_broadcast, mock_get_pgr, mock_dist,
+                                   mock_hccl_library):
     comm = PyHcclCommunicator(MagicMock(), device="cpu")
     tensor = torch.rand(1)
     result = comm.broadcast(tensor, src=0)
@@ -148,10 +160,12 @@ def test_broadcast_device_mismatch(mock_broadcast, mock_get_pgr, mock_dist, mock
 
 
 @patch('torch.npu.device', lambda x: MagicMock())
-@patch('torch.npu.current_stream', lambda device=None: MagicMock(npu_stream=None))
+@patch('torch.npu.current_stream',
+       lambda device=None: MagicMock(npu_stream=None))
 @patch_get_process_group_ranks
 @patch.object(PyHcclCommunicator, 'broadcast', return_value=None)
-def test_broadcast_normal(mock_broadcast, mock_get_pgr, mock_dist, mock_hccl_library, mock_current_stream):
+def test_broadcast_normal(mock_broadcast, mock_get_pgr, mock_dist,
+                          mock_hccl_library, mock_current_stream):
     comm = PyHcclCommunicator(MagicMock(), device="cpu")
     tensor = torch.rand(1, device="cpu")
     result = comm.broadcast(tensor, src=0)
@@ -160,20 +174,26 @@ def test_broadcast_normal(mock_broadcast, mock_get_pgr, mock_dist, mock_hccl_lib
 
 
 @patch('torch.npu.device', lambda x: MagicMock())
-@patch('torch.npu.current_stream', lambda device=None: MagicMock(npu_stream=None))
+@patch('torch.npu.current_stream',
+       lambda device=None: MagicMock(npu_stream=None))
 @patch_get_process_group_ranks
 @patch.object(PyHcclCommunicator, 'broadcast', return_value=None)
-def test_init_with_custom_library_path(mock_broadcast, mock_get_pgr, mock_dist, mock_hccl_library):
+def test_init_with_custom_library_path(mock_broadcast, mock_get_pgr, mock_dist,
+                                       mock_hccl_library):
     library_path = "/custom/path/to/hccl.so"
-    comm = PyHcclCommunicator(MagicMock(), device="cpu", library_path=library_path)
+    comm = PyHcclCommunicator(MagicMock(),
+                              device="cpu",
+                              library_path=library_path)
     assert isinstance(comm.hccl, MagicMock)
 
 
 @patch('torch.npu.device', lambda x: MagicMock())
-@patch('torch.npu.current_stream', lambda device=None: MagicMock(npu_stream=None))
+@patch('torch.npu.current_stream',
+       lambda device=None: MagicMock(npu_stream=None))
 @patch_get_process_group_ranks
 @patch.object(PyHcclCommunicator, 'broadcast', return_value=None)
-def test_init_with_stateless_group(mock_broadcast, mock_get_pgr, mock_stateless_group, mock_hccl_library):
+def test_init_with_stateless_group(mock_broadcast, mock_get_pgr,
+                                   mock_stateless_group, mock_hccl_library):
     comm = PyHcclCommunicator(mock_stateless_group, device="cpu")
     assert comm.rank == 0
     assert comm.world_size == 2
@@ -181,7 +201,8 @@ def test_init_with_stateless_group(mock_broadcast, mock_get_pgr, mock_stateless_
 
 
 @patch('torch.npu.device', lambda x: MagicMock())
-@patch('torch.npu.current_stream', lambda device=None: MagicMock(npu_stream=None))
+@patch('torch.npu.current_stream',
+       lambda device=None: MagicMock(npu_stream=None))
 @patch_get_process_group_ranks
 @patch.object(PyHcclCommunicator, 'broadcast', return_value=None)
 def test_init_world_size_1(mock_broadcast, mock_get_pgr, mock_dist):
@@ -192,13 +213,14 @@ def test_init_world_size_1(mock_broadcast, mock_get_pgr, mock_dist):
 
 
 @patch('torch.npu.device', lambda x: MagicMock())
-@patch('torch.npu.current_stream', lambda device=None: MagicMock(npu_stream=None))
+@patch('torch.npu.current_stream',
+       lambda device=None: MagicMock(npu_stream=None))
 @patch_get_process_group_ranks
 @patch.object(PyHcclCommunicator, 'broadcast', return_value=None)
 def test_init_hccl_load_fail(mock_broadcast, mock_get_pgr, mock_dist):
     with patch(
-        'vllm_ascend.distributed.device_communicators.pyhccl.HCCLLibrary',
-        side_effect=OSError("Load failed")):
+            'vllm_ascend.distributed.device_communicators.pyhccl.HCCLLibrary',
+            side_effect=OSError("Load failed")):
         comm = PyHcclCommunicator(MagicMock(), device="cpu")
         assert comm.disabled
         assert not comm.available
