@@ -24,6 +24,8 @@ from vllm.logger import logger
 
 from .func_wrapper import (wrapper_load_model, wrapper_rmsnorm_forward_oot,
                            wrapper_rmsnorm_init)
+from .w4a8_dynamic import (AscendW4A8DynamicFusedMoEMethod,
+                           AscendW4A8DynamicLinearMethod)
 from .w8a8 import (AscendC8KVCacheMethod, AscendW8A8FusedMoEMethod,
                    AscendW8A8LinearMethod)
 from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
@@ -90,7 +92,6 @@ class VLLMAscendQuantizer:
 
     @staticmethod
     def apply_patch(target_module, target_function, wrappers):
-
         original_module, original_function = VLLMAscendQuantizer.parse_path(
             target_module, target_function, False)
 
@@ -99,6 +100,7 @@ class VLLMAscendQuantizer:
         candidate = original_function
         for wrapper in wrappers:
             candidate = wrapper(candidate)
+
         if target_function is not None:
             setattr(original_module, target_function, candidate)
 
@@ -267,6 +269,17 @@ class VLLMAscendQuantizer:
                                   f"{list(SUPPORT_ASCEND_QUANTIZER_TYPE.keys())}")
 
 
+class W4A8DYNAMICQuantizer(VLLMAscendQuantizer):
+
+    @staticmethod
+    def build_linear_method():
+        return AscendW4A8DynamicLinearMethod()
+
+    @staticmethod
+    def build_moe_method():
+        return AscendW4A8DynamicFusedMoEMethod()
+
+
 class W8A8Quantizer(VLLMAscendQuantizer):
 
     @staticmethod
@@ -294,6 +307,7 @@ class W8A8DYNAMICQuantizer(VLLMAscendQuantizer):
 
 
 SUPPORT_ASCEND_QUANTIZER_TYPE = {
+    "W4A8_DYNAMIC": W4A8DYNAMICQuantizer,
     "W8A8": W8A8Quantizer,
     "W8A8_DYNAMIC": W8A8DYNAMICQuantizer,
     "C8": W8A8Quantizer,
