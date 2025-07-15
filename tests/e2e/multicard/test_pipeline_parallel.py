@@ -24,6 +24,7 @@ MODELS = [
 
 TENSOR_PARALLELS = [2]
 PIPELINE_PARALLELS = [2]
+DIST_EXECUTOR_BACKEND = ["mp", "ray"]
 
 prompts = [
     "Hello, my name is",
@@ -34,10 +35,13 @@ prompts = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
 @pytest.mark.parametrize("pp_size", PIPELINE_PARALLELS)
-def test_models(model: str, tp_size: int, pp_size: int) -> None:
+@pytest.mark.parametrize("distributed_executor_backend", DIST_EXECUTOR_BACKEND)
+def test_models(model: str, tp_size: int, pp_size: int,
+                distributed_executor_backend: str) -> None:
     with VllmRunner(model,
                     tensor_parallel_size=tp_size,
                     pipeline_parallel_size=pp_size,
+                    distributed_executor_backend=distributed_executor_backend,
                     enforce_eager=True,
                     gpu_memory_utilization=0.7) as vllm_model:
         vllm_model.generate_greedy(prompts, 64)
