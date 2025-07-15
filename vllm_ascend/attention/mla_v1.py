@@ -321,7 +321,7 @@ class AscendMLAMetadataBuilder:
                                   dtype=torch.int32,
                                   device=device)
         block_table = self._get_graph_runner_block_tables(
-            num_reqs, block_table) # 这里需要patch化一下输出
+            num_reqs, block_table)
         seq_lens = torch.ones(num_reqs, dtype=torch.int32, device=device)
         input_positions = torch.zeros(num_reqs,
                                       dtype=torch.int32,
@@ -369,7 +369,7 @@ class AscendMLAMetadataBuilder:
         max_num_tokens_across_dp: int = 0,
         with_prefill_across_dp: bool = False,
     ) -> AscendMLAMetadata:
-        assert self._num_decodes + self._num_prefills == num_reqs # 构建builder的时候构建
+        assert self._num_decodes + self._num_prefills == num_reqs
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
         # function. We should avoid GPU -> CPU sync as much as possible because
@@ -669,25 +669,25 @@ class AscendMLAImpl(MLAAttentionImpl):
         if prefill_metadata is None or prefill_metadata.chunked_context is None:
             return prefix_output, prefix_lse
 
-        iters = len(prefill_metadata.chunked_context.seq_tot) # [8] 最终只调用一次
-        q_pe = query[..., self.qk_nope_head_dim:] # 最终得到[2 256 32]
-        q_nope = query[..., :self.qk_nope_head_dim] # 最终得到[2 256 64]
+        iters = len(prefill_metadata.chunked_context.seq_tot)
+        q_pe = query[..., self.qk_nope_head_dim:]
+        q_nope = query[..., :self.qk_nope_head_dim]
 
-        seq_len1 = torch.tensor(prefill_metadata.query_lens, dtype=torch.int32) # [8]
+        seq_len1 = torch.tensor(prefill_metadata.query_lens, dtype=torch.int32)
         latent_kv_dim = kv_c_and_k_pe_cache.size(3) - rope_dim # 96 -32 = 64
-        cache_kv_c = kv_c_and_k_pe_cache[:, :, :, :latent_kv_dim] # [4 8 256 64]
-        cache_k_pe = kv_c_and_k_pe_cache[:, :, :, latent_kv_dim:] # [4 8 256 32]
+        cache_kv_c = kv_c_and_k_pe_cache[:, :, :, :latent_kv_dim]
+        cache_k_pe = kv_c_and_k_pe_cache[:, :, :, latent_kv_dim:]
         for i in range(iters):
-            toks = prefill_metadata.chunked_context.seq_tot[i] # 8
+            toks = prefill_metadata.chunked_context.seq_tot[i]
 
-            seq_len2 = prefill_metadata.chunked_context.chunk_seq_lens[i] # torch.tensor([8])
-            seq_len = torch.stack([seq_len1, seq_len2]) # [[8],[8]]
+            seq_len2 = prefill_metadata.chunked_context.chunk_seq_lens[i]
+            seq_len = torch.stack([seq_len1, seq_len2])
             kv_c_normed = torch.empty(toks,
                                       kv_c_and_k_pe_cache.size(2),
-                                      latent_kv_dim, # [8 256 64]
+                                      latent_kv_dim,
                                       dtype=query.dtype,
                                       device=query.device)
-            k_pe = torch.empty(toks, # [8 256 32]
+            k_pe = torch.empty(toks,
                                kv_c_and_k_pe_cache.size(2),
                                rope_dim,
                                dtype=query.dtype,
@@ -703,11 +703,11 @@ class AscendMLAImpl(MLAAttentionImpl):
                 value=k_pe,
             )
 
-            kv_c_normed = kv_c_normed.squeeze() # [8 256 64]
+            kv_c_normed = kv_c_normed.squeeze()
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view( \
-                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim) # [8 256 64 + 128]
+                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim)
             k_nope, v = kv_nope\
-                .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1) # [8 256 64] [8 256 128]
+                .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
             mask = torch.triu(
                 torch.ones(512, 512, device=query.device, dtype=query.dtype),
@@ -947,7 +947,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         q = torch.cat([q_nope, q_pe], dim=-1)
         num_tokens = q.size(0)
         attn_output = torch.empty(
-            [num_tokens, self.num_heads, self.kv_lora_rank], # 与kv_cache进行attention计算之后的结果，维度是kv_lora_rank
+            [num_tokens, self.num_heads, self.kv_lora_rank],
             dtype=q.dtype,
             device=q.device)
         if self.running_in_graph:
@@ -1020,7 +1020,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 out=attn_output)
         current_ms_metadata = get_multistream_comm_context()
         if current_ms_metadata is None:
-            return self._v_up_proj_and_o_proj(attn_output) # 上投影到 [num_tokens, n * v_head_dim]
+            return self._v_up_proj_and_o_proj(attn_output)
         else:
             current_ms_metadata.before_comm_event.record()
             with torch.npu.stream(current_ms_metadata.comm_stream):
