@@ -112,7 +112,7 @@ export OMP_NUM_THREADS=100
 export HCCL_BUFFSIZE=1024
 
 # The w8a8 weight can obtained from https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3-W8A8
-# If you want to the quantization manually, please refer to https://vllm-ascend.readthedocs.io/en/latest/user_guide/quantization.html
+# If you want to the quantization manually, please refer to https://vllm-ascend.readthedocs.io/en/latest/user_guide/feature_guide/quantization.html
 vllm serve /root/.cache/ds_v3 \
 --host 0.0.0.0 \
 --port 8004 \
