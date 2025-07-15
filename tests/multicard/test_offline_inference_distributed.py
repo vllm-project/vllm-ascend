@@ -169,3 +169,21 @@ def test_models_distributed_DeepSeek_W8A8():
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM": "2"})
+def test_models_distributed_Qwen3_with_flashcomm2():
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+
+    with VllmRunner(
+            snapshot_download("Qwen/Qwen3-0.6B-Base"),
+            max_model_len=8192,
+            enforce_eager=True,
+            dtype="auto",
+            tensor_parallel_size=2,
+            quantization="ascend",
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
