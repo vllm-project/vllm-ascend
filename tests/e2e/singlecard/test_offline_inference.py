@@ -30,7 +30,7 @@ from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 
 import vllm_ascend  # noqa: F401
-from tests.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner
 
 MODELS = [
     "Qwen/Qwen2.5-0.5B-Instruct",

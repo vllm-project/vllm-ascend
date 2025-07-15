@@ -22,7 +22,6 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.utils import GiB_bytes
 
-os.environ["VLLM_USE_V1"] = "1"
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 

@@ -12,4 +12,5 @@ xgrammar
 zmq
 types-psutil
 pytest-cov
+regex
 sentence_transformers
