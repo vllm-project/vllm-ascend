@@ -3,7 +3,7 @@ import vllm
 from modelscope import snapshot_download  # type: ignore
 from vllm.lora.request import LoRARequest
 
-from tests.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner
 
 MODEL_PATH = "vllm-ascend/ilama-3.2-1B"
 
