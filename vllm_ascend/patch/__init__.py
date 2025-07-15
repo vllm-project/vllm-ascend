@@ -73,21 +73,6 @@
 #    Future Plan:
 #       Keep this patch in vllm-ascend.
 #
-# ** File: worker/patch_common/patch_spec_decode_worker.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.spec_decode.spec_decode_worker.SpecDecodeWorker.create_worker`
-#    Why:
-#       We need to use the patched `TP1DraftModelRunner` in `SpecDecodeWorker.create_worker`.
-#       The mainly reason to overwrite `TP1DraftModelRunner`is the hard code of
-#           `FlashAttentionMetadata`
-#    How：
-#       ditto
-#    Related PR (if no, explain why):
-#       - https://github.com/vllm-project/vllm/pull/15195
-#       - https://github.com/vllm-project/vllm-ascend/pull/395
-#    Future Plan:
-#       Revert it when the related pr is merged in vllm and vllm-ascend.
-#
 # ** File: worker/patch_common/patch_distributed.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.distributed.parallel_state.GroupCoordinator`
