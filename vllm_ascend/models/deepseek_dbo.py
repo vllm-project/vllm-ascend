@@ -30,7 +30,6 @@ from typing import Any, Dict, Iterable, List, Optional, Union
 import torch
 import torch.distributed as dist
 import torch_npu  # noqa: F401
-import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
@@ -397,20 +396,17 @@ class CustomDeepseekDBOMLAAttention(DeepseekV2MLAAttention):
             hidden_states_or_q_c = hidden_states
         if self.torchair_graph_enabled:
             forward_kwargs = {}
-            if envs.VLLM_USE_V1:
-                output_shape = hidden_states.shape
-                output = torch.empty(output_shape,
-                                     dtype=hidden_states_or_q_c.dtype,
-                                     device=hidden_states_or_q_c.device)
-                forward_kwargs['output'] = output
-
+            output_shape = hidden_states.shape
+            output = torch.empty(output_shape,
+                                 dtype=hidden_states_or_q_c.dtype,
+                                 device=hidden_states_or_q_c.device)
+            forward_kwargs['output'] = output
             output = self.mla_attn.impl.forward(self.mla_attn,
                                                 hidden_states_or_q_c,
                                                 hidden_states, None, kv_cache,
                                                 attn_metadata,
                                                 **forward_kwargs)
-            if envs.VLLM_USE_V1:
-                output = output.view(-1, output_shape[-1])
+            output = output.view(-1, output_shape[-1])
             return output
         else:
             kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
@@ -885,7 +881,7 @@ class CustomDeepseekDBOModel(nn.Module):
     def can_run_ms(self):
         attn_metadata = get_forward_context().attn_metadata
         # support mla attention and V1 engine at present
-        if not self.use_mla or not envs.VLLM_USE_V1:
+        if not self.use_mla:
             return False
         # enable prefill overlap
         if attn_metadata is None or attn_metadata.num_prefills == 0:
