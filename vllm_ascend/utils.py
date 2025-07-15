@@ -441,7 +441,15 @@ class FusedMoEState(Enum):
 
 # TODO(ttanzhiqiang): rm_router_logits
 # dp>1 will trigger
-# In theory, this solution is only applicable to AllGather and AllGatherEP, because in the dp scenario, the previous operation was gate + two communications, and now it is changed to one communication + gate operation, which can save some communication time. In theory, all moe AllGather and AllGatherEP solutions can follow this logic, but now other moe models (qwen3-235b) dp solutions are not adjusted, so use the switch to control it to prevent code errors.
+# In theory, this solution is only applicable to AllGather and AllGatherEP, because in the dp scenario, the previous operation was gate + two communications,
+# and now it is changed to one communication + gate operation, which can save some communication time.
+# In theory, all moe AllGather and AllGatherEP solutions can follow this logic,
+# but now other moe models (qwen3-235b) dp solutions are not adjusted, so use the switch to control it to prevent code errors.
+# rm_router_logits optimization scheme, AllGather/NaiveMulticast/All2All/MC2 are all used
+# 1. If Prefill/decode use AllGather or NaiveMulticast scheme at the same time, this logic is normal, and this scheme is used for optimization
+# 2. If Prefill/decode use All2All/MC2 scheme at the same time, this logic is also normal, and this scheme is used for optimization
+# 3. Prefill uses AllGatherEP scheme (use VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP switch), Decode uses MC2 scheme, and this scheme is used for optimization
+# 4. In the PD separation scenario, the strategies used by P and D are separate, and this scheme is used for optimization.
 def get_rm_router_logits_state(ep_size: int, dp_size: int,
                                is_deepseek_v3_r1: bool):
     # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
