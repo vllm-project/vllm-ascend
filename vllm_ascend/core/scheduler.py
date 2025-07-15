@@ -252,6 +252,7 @@ class AscendScheduler(Scheduler):
                     # This request has already been scheduled.
                     req_index += 1
                     continue
+
                 num_new_tokens = (request.num_tokens_with_spec -
                                   request.num_computed_tokens)
                 assert (request.num_tokens - request.num_computed_tokens) == 1
