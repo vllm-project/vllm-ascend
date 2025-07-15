@@ -41,6 +41,8 @@ class AscendConfig:
             "chunked_prefill_for_mla", False)
         self.enable_weight_nz_layout = additional_config.get(
             "enable_weight_nz_layout", False)
+        self.enable_prefill_optimizations = additional_config.get(
+            "enable_prefill_optimizations", False)
 
 
 class TorchairGraphConfig:

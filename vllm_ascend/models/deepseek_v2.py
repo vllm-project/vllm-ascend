@@ -41,8 +41,7 @@ from vllm.distributed import (get_dp_group, get_pp_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_reduce_scatter,
-                              split_tensor_along_last_dim,
-                              get_tp_group)
+                              split_tensor_along_last_dim, get_tp_group)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -77,6 +76,7 @@ from vllm_ascend.utils import dispose_tensor, npu_prefetch
 
 
 class RowParallelScatterLinear(RowParallelLinear):
+
     def forward(
         self, input_
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
@@ -100,8 +100,10 @@ class RowParallelScatterLinear(RowParallelLinear):
             padded_num_tokens = get_forward_context().padded_num_tokens
             num_tokens, _ = output_parallel.shape
             if num_tokens % self.tp_size:
-                output_parallel = nn.functional.pad(output_parallel, (0, 0, 0, -num_tokens % self.tp_size))
-            output = tensor_model_parallel_reduce_scatter(output_parallel, dim=0)
+                output_parallel = nn.functional.pad(
+                    output_parallel, (0, 0, 0, -num_tokens % self.tp_size))
+            output = tensor_model_parallel_reduce_scatter(output_parallel,
+                                                          dim=0)
         else:
             output = output_parallel
 
@@ -313,7 +315,8 @@ class CustomDeepseekV2MoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=True,
-                force_replicate=True,
+                force_replicate=self.enable_multistream_moe
+                or ascend_config.enable_prefill_optimizations,
                 prefix=f"{prefix}.shared_experts",
             )
         else:
@@ -447,18 +450,23 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj")
 
-        if int(prefix.split(".")[-2]) < 3:
+        ascend_config = get_ascend_config()
+        self.enable_prefill_optimizations = ascend_config.enable_prefill_optimizations
+
+        if not self.enable_prefill_optimizations or int(
+                prefix.split(".")[-2]) < 3:
             self.o_proj = RowParallelLinear(self.num_heads * self.v_head_dim,
                                             self.hidden_size,
                                             bias=False,
                                             quant_config=quant_config,
                                             prefix=f"{prefix}.o_proj")
         else:
-            self.o_proj = RowParallelScatterLinear(self.num_heads * self.v_head_dim,
-                                    self.hidden_size,
-                                    bias=False,
-                                    quant_config=quant_config,
-                                    prefix=f"{prefix}.o_proj")
+            self.o_proj = RowParallelScatterLinear(self.num_heads *
+                                                   self.v_head_dim,
+                                                   self.hidden_size,
+                                                   bias=False,
+                                                   quant_config=quant_config,
+                                                   prefix=f"{prefix}.o_proj")
 
         if rope_scaling:
             rope_scaling["rope_type"] = 'deepseek_yarn'
@@ -507,7 +515,6 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         self.prefix = prefix
         self.debug_layer_idx = int(self.prefix.split(".")[-2])
 
-        ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_multistream_mla = \
             ascend_config.torchair_graph_config.enable_multistream_mla and \
@@ -552,14 +559,15 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             return output
         else:
             kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]
-            if self.debug_layer_idx > 3 and self.debug_layer_idx < 61:
-                hidden_states_or_q_c = get_tp_group().all_gather(hidden_states_or_q_c, 0)
+            if self.enable_prefill_optimizations and self.debug_layer_idx > 3 and self.debug_layer_idx < 61:
+                hidden_states_or_q_c = get_tp_group().all_gather(
+                    hidden_states_or_q_c, 0)
                 kv_no_split = get_tp_group().all_gather(kv_no_split, 0)
-            
+
             kv_c, k_pe = kv_no_split.split(
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
             kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
-            if self.debug_layer_idx < 3:
+            if not self.enable_prefill_optimizations or self.debug_layer_idx < 3:
                 output_shape = hidden_states.shape
             else:
                 num_tokens = hidden_states_or_q_c.shape[0]
@@ -638,6 +646,8 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                                                 eps=config.rms_norm_eps)
         self.routed_scaling_factor = config.routed_scaling_factor
         self.tp_group = get_tp_group().device_group
+        ascend_config = get_ascend_config()
+        self.enable_prefill_optimizations = ascend_config.enable_prefill_optimizations
 
     def forward(
         self,
@@ -678,10 +688,12 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 residual *= 1. / self.routed_scaling_factor
 
         tp_size = get_tensor_model_parallel_world_size()
-        if (self.layer_idx == 3 or self.layer_idx == 61) and tp_size > 1:
+        if self.enable_prefill_optimizations and (
+                self.layer_idx == 3 or self.layer_idx == 61) and tp_size > 1:
             num_tokens, _ = residual.shape
             if num_tokens % tp_size:
-                residual = nn.functional.pad(residual, (0, 0, 0, -num_tokens % tp_size))
+                residual = nn.functional.pad(residual,
+                                             (0, 0, 0, -num_tokens % tp_size))
             chunk_residual = torch.tensor_split(residual, tp_size, dim=0)
             tp_rank = get_tensor_model_parallel_rank()
             residual = chunk_residual[tp_rank]
@@ -706,7 +718,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             hidden_states *= 1. / self.routed_scaling_factor
 
         # for last layer of main model and mtp layer.
-        if self.layer_idx >= 60 and tp_size > 1:
+        if self.enable_prefill_optimizations and self.layer_idx >= 60 and tp_size > 1:
             hidden_states = get_tp_group().all_gather(hidden_states, 0)
             residual = get_tp_group().all_gather(residual, 0)
             num_tokens = hidden_states.shape[0]
