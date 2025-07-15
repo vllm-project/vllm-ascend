@@ -7,11 +7,12 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import SequenceData, SequenceGroupMetadata
 
+from tests.ut.base import TestBase
 from vllm_ascend.worker.pooling_model_runner import (
     ModelInputForNPUWithPoolingMetadata, NPUPoolingModelRunner)
 
 
-class TestPoolingModelRunner(unittest.TestCase):
+class TestPoolingModelRunner(TestBase):
     """Unit tests for the NPUPoolingModelRunner class."""
 
     def _create_model_runner(self, model: str, *args,

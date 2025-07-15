@@ -1,9 +1,9 @@
-import unittest
 import zlib
 from unittest.mock import MagicMock
 
 import torch
 
+from tests.ut.base import TestBase
 from vllm_ascend.distributed.kv_transfer.simple_buffer import (SimpleBuffer,
                                                                int32_hash)
 
@@ -17,7 +17,7 @@ class MockSimplePipe:
         self.deallocate_buffer = MagicMock()
 
 
-class TestSimpleBuffer(unittest.TestCase):
+class TestSimpleBuffer(TestBase):
 
     def setUp(self):
         self.pipe = MockSimplePipe()
