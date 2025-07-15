@@ -16,7 +16,6 @@
 #
 
 import gc
-import os
 from datetime import timedelta
 from typing import TYPE_CHECKING, Optional, Tuple
 
@@ -117,6 +116,8 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        if not envs.VLLM_USE_V1:
+            raise ValueError("vLLM Ascend does not support V0 engine")
         # initialize ascend config from vllm additional_config
         ascend_config = init_ascend_config(vllm_config)
 
@@ -180,18 +181,7 @@ class NPUPlatform(Platform):
             update_aclgraph_sizes(vllm_config)
 
         if parallel_config and parallel_config.worker_cls == "auto":
-            if envs.VLLM_USE_V1:
-                parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
-            elif vllm_config.speculative_config:
-                # NOTE: We set this var to `1` in vllm-ascend to avoid segment
-                # fault when using spec decode with V0 engine.
-                os.environ["ACL_OP_INIT_MODE"] = "1"
-                parallel_config.worker_cls = "vllm.spec_decode.spec_decode_worker.create_spec_worker"
-                parallel_config.sd_worker_cls = "vllm_ascend.worker.worker.NPUWorker"
-            elif vllm_config.scheduler_config.is_multi_step:
-                parallel_config.worker_cls = "vllm_ascend.worker.multi_step_worker.MultiStepWorker"
-            else:
-                parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
+            parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
 
         if cache_config:
             if cache_config.block_size is None:
@@ -202,20 +192,18 @@ class NPUPlatform(Platform):
                 )
                 cache_config.block_size = 128
 
-        if envs.VLLM_USE_V1:
-            # Activate custom ops for v1, except on 310P
-            if not is_310p():
-                compilation_config.custom_ops = ["all"]
+        # Activate custom ops for v1, except on 310P
+        if not is_310p():
+            compilation_config.custom_ops = ["all"]
 
-            # If ascend_scheduler_config is enabled,
-            # extents original scheduler_config to use AscendScheduler.
-            if ascend_config.ascend_scheduler_config.enabled:
-                from vllm_ascend.core.schedule_config import \
-                    AscendSchedulerConfig
-                ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
-                    vllm_config.scheduler_config,
-                    ascend_config.ascend_scheduler_config)
-                vllm_config.scheduler_config = ascend_scheduler_config
+        # If ascend_scheduler_config is enabled,
+        # extents original scheduler_config to use AscendScheduler.
+        if ascend_config.ascend_scheduler_config.enabled:
+            from vllm_ascend.core.schedule_config import AscendSchedulerConfig
+            ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
+                vllm_config.scheduler_config,
+                ascend_config.ascend_scheduler_config)
+            vllm_config.scheduler_config = ascend_scheduler_config
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
