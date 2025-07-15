@@ -50,7 +50,7 @@ class PyHcclCommunicator:
         """
 
         if not isinstance(group, StatelessProcessGroup):
-            assert dist.is_initialized() #NOTE 就算传入这样的一个group 就能保证这个dist已经被初始化了吗
+            assert dist.is_initialized()
             assert dist.get_backend(group) != dist.Backend.HCCL, (
                 "PyHcclCommunicator should be attached to a non-HCCL group.")
             # note: this rank is the rank in the group
