@@ -13,18 +13,18 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from unittest.mock import patch
 
 import torch
 import importlib
 from tests.ut.base import TestBase
 from unittest.mock import MagicMock, patch
+
 from vllm.distributed.parallel_state import GroupCoordinator
 
 from vllm_ascend.ops import sequence_parallel
 
 
-class TestFusedExperts310(TestBase):
+class Test_Flash_Comm1(TestBase):
 
     @patch('vllm.distributed.tensor_model_parallel_all_gather')
     @patch('vllm.distributed.tensor_model_parallel_reduce_scatter')
@@ -39,13 +39,10 @@ class TestFusedExperts310(TestBase):
             hidden_size = 128
             tp_size = 4
             hidden_states = torch.randn(num_tokens, hidden_size)
+
             mock_tp_group = mock_get_tp_group.return_value
             assert mock_tp_group.world_size == 4  # 手动断言属性存在
             assert mock_tp_group.rank_in_group == 0
-
-            # mock_get_tp_group.return_value = MagicMock()
-            # mock_get_tp_group.return_value.world_size = 4
-            # mock_get_tp_group.return_value.rank_in_group = 0
 
             lengths_sum_unpadding = hidden_states.shape[0]
             lengths_sum_padding = ((lengths_sum_unpadding + tp_size - 1) // tp_size) * tp_size
