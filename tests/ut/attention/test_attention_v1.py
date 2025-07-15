@@ -12,6 +12,7 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
 
 
 class TestAscendAttentionBackend(TestBase):
+
     def test_get_name(self):
         self.assertEqual(AscendAttentionBackend.get_name(), "ASCEND")
 
