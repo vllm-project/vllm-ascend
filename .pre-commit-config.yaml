@@ -130,12 +130,12 @@ repos:
     types: [python]
     pass_filenames: false
     additional_dependencies: [regex]
-  # - id: python-init
-  #   name: Enforce __init__.py in Python packages
-  #   entry: python tools/check_python_pkg_init.py
-  #   language: python
-  #   types: [python]
-  #   pass_filenames: false
+  - id: python-init
+    name: Enforce __init__.py in Python packages
+    entry: python tools/check_python_pkg_init.py
+    language: python
+    types: [python]
+    pass_filenames: false
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion
