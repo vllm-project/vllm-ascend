@@ -289,10 +289,10 @@ void advance_step_flashattn_ascendc(
 void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y, const float scale)
 {
     at::ScalarType scalar_type = x.scalar_type();
-    void *x_ptr = x.data_ptr();
-    void *weight_ptr = weight.data_ptr();
-    void *indices_ptr = indices.data_ptr();
-    void *y_ptr = y.data_ptr();
+    void* x_ptr = x.data_ptr();
+    void* weight_ptr = weight.data_ptr();
+    void* indices_ptr = indices.data_ptr();
+    void* y_ptr = y.data_ptr();
     int batch_size = x.size(0);
     int input_hidden_token = x.size(1);
     uint32_t lora_rank = y.size(1);

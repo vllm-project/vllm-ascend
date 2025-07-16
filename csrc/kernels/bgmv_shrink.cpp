@@ -210,8 +210,8 @@ private:
 };
 
 #define BGMV_SHRINK_TYPE_DECLARE(TYPE)                                                                                 \
-    extern "C" __global__ __aicore__ void bgmv_shrink_##TYPE(__gm__ void *x, __gm__ void *weight, __gm__ void *indices,\
-                                                             __gm__ void *yOut, uint32_t batchSize,                    \
+    extern "C" __global__ __aicore__ void bgmv_shrink_##TYPE(__gm__ void* x, __gm__ void* weight, __gm__ void* indices,\
+                                                             __gm__ void* yOut, uint32_t batchSize,                    \
                                                              uint32_t numTokensPerCore, uint32_t inputHiddenDim,       \
                                                              uint32_t maxLoRARank, float scale)                        \
     {                                                                                                                  \
@@ -226,8 +226,8 @@ BGMV_SHRINK_TYPE_DECLARE(half)
 BGMV_SHRINK_TYPE_DECLARE(bfloat16_t)
 
 namespace vllm_ascend {
-extern void bgmv_shrink_impl(AscendType type, void *stream, void *x, void *weight, void *indices,
-                             void *yOut, uint32_t batchSize, uint32_t numTokensPerCore, uint32_t inputHiddenDim,
+extern void bgmv_shrink_impl(AscendType type, void* stream, void* x, void* weight, void* indices,
+                             void* yOut, uint32_t batchSize, uint32_t numTokensPerCore, uint32_t inputHiddenDim,
                              uint32_t maxLoRARank, float scale)
 {
     uint32_t blockDim = (batchSize + numTokensPerCore - 1) / numTokensPerCore;
