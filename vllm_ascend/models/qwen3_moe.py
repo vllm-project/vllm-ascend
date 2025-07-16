@@ -17,7 +17,14 @@
 # This file is a part of the vllm-ascend project.
 
 import vllm.model_executor.models.qwen3_moe as qwen3
-from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
+from torch import nn
+from vllm.config import VllmConfig
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.models.interfaces import SupportsPP
+from vllm.model_executor.models.qwen3_moe import (Qwen3MoeForCausalLM,
+                                                  Qwen3MoeModel)
+from vllm.model_executor.models.utils import maybe_prefix
 
 from vllm_ascend.ops.fused_moe import AscendSparseMoeBlock
 
@@ -34,6 +41,25 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
             "up_proj",
         ],
         "experts":
-        ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
+            ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     }
     qwen3.Qwen3MoeSparseMoeBlock = AscendSparseMoeBlock
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        nn.Module.__init__(self)
+        SupportsPP.__init__(self)
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        self.config = config
+        self.quant_config = quant_config
+        self.model = Qwen3MoeModel(vllm_config=vllm_config,
+                                   prefix=maybe_prefix(prefix, "model"))
+        self.lm_head = ParallelLMHead(config.vocab_size,
+                                      config.hidden_size,
+                                      quant_config=quant_config,
+                                      prefix=maybe_prefix(prefix, "lm_head"))
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
