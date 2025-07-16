@@ -15,7 +15,13 @@
 
 import unittest
 
+import pytest
+
 from vllm_ascend.utils import adapt_patch, register_ascend_customop
+
+# fused moe ops test will hit the infer_schema error, we need add the patch
+# here to make the test pass.
+import vllm_ascend.patch.worker.patch_common.patch_utils  # type: ignore[import]  # isort: skip  # noqa
 
 
 class TestBase(unittest.TestCase):
@@ -27,3 +33,16 @@ class TestBase(unittest.TestCase):
         register_ascend_customop()
         super().setUp()
         super(TestBase, self).__init__(*args, **kwargs)
+
+
+class PytestBase:
+    """Base class for pytest-based tests.
+    because pytest mocker and parametrize usage are not compatible with unittest.
+    so we need to use a separate base class for pytest tests.
+    """
+
+    @pytest.fixture(autouse=True)
+    def setup(self):
+        adapt_patch(True)
+        adapt_patch()
+        register_ascend_customop()
