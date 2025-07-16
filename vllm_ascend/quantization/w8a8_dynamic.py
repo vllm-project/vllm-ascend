@@ -391,6 +391,8 @@ def fused_experts_with_all2all_v2(x, topk_ids, topk_weight, w1, w2, w1_scale, w2
         expert_tokens_before_capacity_flag=False,
         quant_mode=1,
     )
+    
+    ep_size = 16
 
     tokens_per_expert_group = tokens_per_expert.new_empty(tokens_per_expert.shape[0])
     dist.all_to_all_single(tokens_per_expert_group, tokens_per_expert)  # (total_experts,) --> (total_ranks * n_routed_experts_per_rank)
@@ -400,20 +402,22 @@ def fused_experts_with_all2all_v2(x, topk_ids, topk_weight, w1, w2, w1_scale, w2
     # view: EP, E//EP
     # sum: EP, the number of tokens each rank receives from other cards
     # ep_size = get_expert_parallel_world_size()
-    ep_size = 16
+    
     combine_tokens = combine_tokens.view(2, ep_size, -1).sum(2)
-    all_tokens = combine_tokens[0].sum()
-    combine_tokens_cpu = combine_tokens.cpu().tolist()
-    # alltoall input splits, the total number of tokens routed from the current rank to other ranks
-    input_splits = combine_tokens_cpu[1]
-    # alltoall output splits, the number of tokens each rank receives from other cards
-    output_splits = combine_tokens_cpu[0]
+    combine_tokens_cpu = combine_tokens.to(torch.device("cpu"), non_blocking=True).numpy()
+    all_tokens = tokens_per_expert_group.sum()
     # alltoall output, unfolded into one dimension, the size is the sum of the number of tokens routed from other cards to the current rank.
     gathered_tokens = expanded_x.new_empty(
         all_tokens.item(), expanded_x.shape[1]
     )
-    dist.all_to_all_single(gathered_tokens, expanded_x, output_splits, input_splits)
     gathered_pertoken_scale = pertoken_scale.new_empty(gathered_tokens.shape[0])
+
+    # alltoall input splits, the total number of tokens routed from the current rank to other ranks
+    input_splits = combine_tokens_cpu[1]
+    # alltoall output splits, the number of tokens each rank receives from other cards
+    output_splits = combine_tokens_cpu[0]
+
+    dist.all_to_all_single(gathered_tokens, expanded_x, output_splits, input_splits)
     dist.all_to_all_single(gathered_pertoken_scale, pertoken_scale, output_splits, input_splits)
     # reroute
     # Tokens merged by experts, scales merged by experts, indices for FinalizeRouting, number of tokens processed by each expert
