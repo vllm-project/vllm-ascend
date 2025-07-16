@@ -47,14 +47,8 @@ class AscendQuantizer:
         if quantization_algorithm in CUSTOMIZED_QUANTIZER_TYPE:
             return
 
-        try:
-            module = importlib.import_module("mindie_turbo")
-            MindIETurboQuantizer = module.MindIETurboQuantizer
-            return MindIETurboQuantizer.get_quantizer(quant_config, prefix,
-                                                      packed_modules_mapping)
-        except ImportError:
-            return VLLMAscendQuantizer.get_quantizer(quant_config, prefix,
-                                                     packed_modules_mapping)
+        return VLLMAscendQuantizer.get_quantizer(quant_config, prefix,
+                                                 packed_modules_mapping)
 
     def build_linear_method(self):
         raise NotImplementedError
