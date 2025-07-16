@@ -86,7 +86,12 @@ def metadata_collect_trigger(poller, router_socket):
                 schedule_dict[key] = False
             first_start = False
             start_time = None
-            while not all(schedule_dict.values()):
+            while True:
+                # if all the worker finished their request, dp proxy just fallback to waiting
+                # and continue listen to worker's info
+                if not any(schedule_dict.values()):
+                    first_start = False
+                    start_time = None
                 if start_time is not None:
                     time_interval = time.time() - start_time
                     logger.debug("check time interval: ", time_interval)
@@ -114,7 +119,7 @@ def metadata_collect_trigger(poller, router_socket):
                             data = msgpack.loads(message)
                             http_addr = None
                             logger.debug(f"receive message {data}")
-                            if data.get("info") == "notify_step":
+                            if data.get("info") == "notify_step_start":
                                 http_addr = data.get("http_address")
                                 if http_addr in schedule_dict.keys():
                                     schedule_dict[http_addr] = True
@@ -125,6 +130,9 @@ def metadata_collect_trigger(poller, router_socket):
                                         start_time = time.time()
                                 else:
                                     logger.warning("Unrecognize http address")
+                            elif data.get("info") == "notify_step_end":
+                                if http_addr in schedule_dict.keys():
+                                    schedule_dict[http_addr] = False
                             else:
                                 logger.warning(
                                     "Got unrecognize info type! We only accept notify step info yet"
