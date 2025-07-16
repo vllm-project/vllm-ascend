@@ -159,6 +159,8 @@ def fused_experts_with_mc2(
     # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
     a3_need_extra_args = get_ascend_soc_version() == AscendSocVersion.A3
 
+    enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
+
     moe_expert_num = len(expert_map)
     kwargs_mc2 = {
         "x": hidden_states,
@@ -182,16 +184,19 @@ def fused_experts_with_mc2(
             "tp_world_size": 1,
             "tp_rank_id": 0,
         })
-    if a3_need_extra_args:
+    if a3_need_extra_args and enable_dispatch_v2:
         stage1_kwargs.update({
             "x_active_mask": mc2_mask,
         })
 
     kwargs_mc2.update(stage1_kwargs)
 
-    output = torch_npu.npu_moe_distribute_dispatch(**kwargs_mc2)
+    output = torch_npu.npu_moe_distribute_dispatch_v2(
+        **kwargs_mc2
+    ) if enable_dispatch_v2 else torch_npu.npu_moe_distribute_dispatch(
+        **kwargs_mc2)
     # comm_stream.wait_stream(torch.npu.current_stream())
-    expand_x, dynamic_scale, expand_idx, expert_token_nums, ep_recv_counts = output[
+    expand_x, dynamic_scale, assist_info_for_combine, expert_token_nums, ep_recv_counts = output[
         0:5]
 
     if shared_experts is not None:
@@ -234,7 +239,6 @@ def fused_experts_with_mc2(
     kwargs_mc2 = {
         "expand_x": down_out_list,
         "expert_ids": topk_ids,
-        "expand_idx": expand_idx,
         "expert_scales": topk_weights.to(torch.float32),
         "expert_shard_type": 0,
         "shared_expert_rank_num": 0,
@@ -248,6 +252,15 @@ def fused_experts_with_mc2(
         "ep_world_size": ep_world_size,
         "ep_rank_id": ep_rank_id,
     }
+    if enable_dispatch_v2:
+        stage3_kwargs.update({
+            "assist_info_for_combine":
+            assist_info_for_combine,
+        })
+    else:
+        stage3_kwargs.update({
+            "expand_idx": assist_info_for_combine,
+        })
     if need_extra_args:
         stage3_kwargs.update({
             "tp_send_counts": tp_recv_counts,
@@ -255,13 +268,16 @@ def fused_experts_with_mc2(
             "tp_world_size": 1,
             "tp_rank_id": 0,
         })
-    if a3_need_extra_args:
+    if a3_need_extra_args and enable_dispatch_v2:
         stage3_kwargs.update({
             "x_active_mask": mc2_mask,
         })
     kwargs_mc2.update(stage3_kwargs)
 
-    hidden_states = torch_npu.npu_moe_distribute_combine(**kwargs_mc2)
+    hidden_states = torch_npu.npu_moe_distribute_combine_v2(
+        **kwargs_mc2
+    ) if enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine(
+        **kwargs_mc2)
 
     if shared_experts is None:
         return hidden_states
