@@ -1270,15 +1270,18 @@ class AscendFusedMoE(FusedMoE):
         mc2_mask = forward_context.mc2_mask
         tp_size = get_tensor_model_parallel_world_size()
         if fused_moe_state != FusedMoEState.AllGather:
-            if num_tokens < forward_context.padded_num_tokens:
+            if fused_moe_state in {
+                    FusedMoEState.MC2, FusedMoEState.MC2_PREFILL
+            }:
+                padding_size = forward_context.padded_num_tokens
+            else:
+                # TODO: Determine if we can remove the padding
+                padding_size = tp_size
+            if num_tokens < padding_size:
                 hidden_states = nn.functional.pad(
-                    hidden_states,
-                    (0, 0, 0, forward_context.padded_num_tokens - num_tokens),
-                )
+                    hidden_states, (0, 0, 0, padding_size - num_tokens))
                 router_logits = nn.functional.pad(
-                    router_logits,
-                    (0, 0, 0, forward_context.padded_num_tokens - num_tokens),
-                )
+                    router_logits, (0, 0, 0, padding_size - num_tokens))
             if tp_size > 1:
                 chunk_hidden_states = torch.tensor_split(hidden_states,
                                                          tp_size,
