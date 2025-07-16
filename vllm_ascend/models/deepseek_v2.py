@@ -39,8 +39,8 @@ from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
 from vllm.distributed import (get_dp_group, get_pp_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_reduce_scatter,
-                              split_tensor_along_last_dim, get_tp_group)
+                              get_tp_group, split_tensor_along_last_dim,
+                              tensor_model_parallel_reduce_scatter)
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -68,6 +68,7 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
@@ -539,9 +540,24 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         else:
             hidden_states_or_q_c = hidden_states
         is_mtp_model = attn_metadata is not None and attn_metadata.is_mtp_model
-        if self.torchair_graph_enabled and not is_mtp_model:
+        with_decode = attn_metadata is not None and attn_metadata.attn_state in [
+            AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
+        ]
+        with_optimization_prefill = self.enable_prefill_optimizations and not with_decode
+        if self.torchair_graph_enabled and not is_mtp_model and not with_optimization_prefill:
+            if self.enable_prefill_optimizations and self.debug_layer_idx > 3 and self.debug_layer_idx < 61:
+                hidden_states_or_q_c = get_tp_group().all_gather(
+                    hidden_states_or_q_c, 0)
+                hidden_states = get_tp_group().all_gather(hidden_states, 0)
             if envs.VLLM_USE_V1:
-                output_shape = hidden_states.shape
+                if not self.enable_prefill_optimizations or self.debug_layer_idx < 3:
+                    output_shape = hidden_states.shape
+                else:
+                    num_tokens = hidden_states.shape[0]
+                    rows = num_tokens // self.tp_size
+                    if num_tokens % self.tp_size:
+                        rows += 1
+                    output_shape = (rows, hidden_states.shape[1])
                 output = torch.empty(output_shape,
                                      dtype=hidden_states_or_q_c.dtype,
                                      device=hidden_states_or_q_c.device)

@@ -627,6 +627,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
+        self.enable_prefill_optimizations = ascend_config.enable_prefill_optimizations
 
         # Adapt torch air graph mode with spec decoding.
         speculative_config = get_current_vllm_config().speculative_config
@@ -1140,7 +1141,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             # Inputs and outputs may be padded for CUDA graphs
             output_padded = output
             output = output[:num_actual_toks, ...]
-            if not self.torchair_graph_enabled:
+            if not self.torchair_graph_enabled or self.enable_prefill_optimizations:
                 kv_c_normed = kv_c_normed[:num_actual_toks, ...]
                 prefill_k_c_normed = kv_c_normed[num_decode_tokens:]
         if not self.running_in_graph:
@@ -1187,7 +1188,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 .view(-1, self.num_heads, self.qk_head_dim)
             prefill_q_pe = prefill_q[..., self.qk_nope_head_dim:]
             prefill_q_nope = prefill_q[..., :self.qk_nope_head_dim]
-            if self.torchair_graph_enabled:
+            if self.torchair_graph_enabled and not self.enable_prefill_optimizations:
                 num_tokens = prefill_hs_or_q_c.shape[0]
                 cos = attn_metadata.prefill.cos
                 sin = attn_metadata.prefill.sin
@@ -1203,6 +1204,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                                                  -1)
                 prefill_q = torch.cat([prefill_q_nope, prefill_q_pe], dim=-1)
             else:
+                num_tokens = prefill_hs_or_q_c.shape[0]
                 prefill_q_pe[...], prefill_k_pe[...] = self.rotary_emb(
                     attn_metadata.prefill.input_positions,
                     prefill_q_pe.contiguous(), prefill_k_pe)
