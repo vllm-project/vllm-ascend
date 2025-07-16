@@ -664,7 +664,7 @@ class AscendMLAImpl(MLAAttentionImpl):
     def _compute_prefill_context(
         self,
         query: torch.Tensor,
-        kv_c_and_k_pe_cache: Tuple[torch.Tensor],
+        kv_c_and_k_pe_cache: Tuple[torch.Tensor, torch.Tensor],
         rope_dim: int,
         attn_metadata: AscendMLAMetadata,
         prefix_output: torch.Tensor,
@@ -746,7 +746,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         query: torch.Tensor,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_c_and_k_pe_cache: Tuple[torch.Tensor],
+        kv_c_and_k_pe_cache: Tuple[torch.Tensor, torch.Tensor],
         attn_metadata: AscendMLAMetadata,
     ) -> torch.Tensor:
         assert attn_metadata.prefill is not None
@@ -943,7 +943,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         q_pe: torch.Tensor,
         k_nope: torch.Tensor,
         k_pe: torch.Tensor,
-        kv_c_and_k_pe_cache: Tuple[torch.Tensor],
+        kv_c_and_k_pe_cache: Tuple[torch.Tensor, torch.Tensor],
         attn_metadata: AscendMLAMetadata,
         enable_multistream_mla: bool = False,
     ) -> torch.Tensor:
@@ -1042,7 +1042,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         hidden_states_or_q_c: torch.Tensor,  # query in unified attn
         hidden_states_or_kv_c_normed: torch.Tensor,  # key in unified attn
         k_pe: torch.Tensor,  # value in unified attn
-        kv_cache: Tuple[torch.Tensor],
+        kv_cache: Tuple[torch.Tensor, torch.Tensor],
         attn_metadata: M,
         output: Optional[torch.Tensor] = None,
         enable_multistream_mla: bool = False,

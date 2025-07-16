@@ -1907,6 +1907,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             num_blocks, kv_cache_spec.block_size,
                             kv_cache_spec.num_kv_heads,
                             kv_cache_spec.head_size)
+                    dtype = kv_cache_spec.dtype
                     if self.torchair_graph_enabled:
                         if len(kv_cache_shape) == 3:
                             # for non MLA attention backend that use torchair, we consider to pass kv_cache layout
@@ -1960,8 +1961,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             kv_cache = torch.zeros(cache_shape,
                                                    dtype=dtype,
                                                    device=self.device)
-                            kv_cache = torch_npu.npu_format_cast(kv_cache,
-                                                                 acl_format)
+                            kv_cache = torch_npu.npu_format_cast(
+                                kv_cache, acl_format)
                             kv_cache_list.append(kv_cache)
                         kv_caches[layer_name] = kv_cache_list
                 else:

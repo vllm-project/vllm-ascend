@@ -139,6 +139,7 @@ def vanilla_chunked_prefill_mla(
         output: torch.Tensor,  # (num_tokens, num_heads, v_head_dim)
         query: torch.Tensor,  # (num_tokens, num_heads, nope_dim + rope_dim)
         kv_c_and_k_pe_cache: tuple[
+            torch.Tensor,
             torch.Tensor],  # (num_blocks, block_size, latent_kv/rope_dim)
         block_tables: torch.Tensor,  # (batch_size, max_num_blocks_per_seq)
         query_lens: torch.Tensor,  # (batch_size)
