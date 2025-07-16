@@ -72,4 +72,17 @@ namespace vllm_ascend {
         int32_t* slot_mapping_ptr,
         int32_t* block_tables_ptr,
         int64_t block_tables_stride);
+
+    extern void bgmv_shrink_impl(
+        AscendType type,
+        void *stream,
+        void *x,
+        void *weight,
+        void *indices,
+        void *y, 
+        uint32_t batch_size,
+        uint32_t num_tokens_per_core,
+        uint32_t input_hidden_dim,
+        uint32_t lora_rank,
+        float scale);
 }
