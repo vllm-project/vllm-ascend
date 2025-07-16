@@ -16,7 +16,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from tests.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner
 
 
 def test_models_distributed_DeepSeek_multistream_moe(example_prompts):
