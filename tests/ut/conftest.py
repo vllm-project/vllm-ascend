@@ -1,4 +1,7 @@
 #
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
+#
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -13,20 +16,10 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import unittest
+from vllm_ascend.utils import adapt_patch, register_ascend_customop  # noqa E402
 
-from vllm_ascend.utils import adapt_patch, register_ascend_customop
+adapt_patch()
+adapt_patch(True)
 
-# fused moe ops test will hit the infer_schema error, we need add the patch
-# here to make the test pass.
-import vllm_ascend.patch.worker.patch_common.patch_utils  # type: ignore[import]  # isort: skip  # noqa
-
-
-class TestBase(unittest.TestCase):
-
-    def setUp(self):
-        # adapt patch by default.
-        adapt_patch(True)
-        adapt_patch()
-        register_ascend_customop()
-        super().setUp()
+# register Ascend CustomOp here because uts will use this
+register_ascend_customop()
