@@ -14,7 +14,8 @@
  * limitations under the License.
  */
 
- #include "kernel_operator.h"
+#include "kernel_operator.h"
+#include "types.h"
 
 template <typename scalar_t>
 class BGMVShrink {
@@ -82,7 +83,7 @@ public:
 
 private:
     template <bool INCREMENTAL_MODE>
-    __aicore__ inline ProcessImpl(const int64_t idx)
+    __aicore__ inline void ProcessImpl(const int64_t idx)
     {
         AscendC::LocalTensor<float> yOutLocal = outBufferY_.Get<float>();
         if constexpr (!INCREMENTAL_MODE) {
@@ -98,7 +99,7 @@ private:
             float acc(0);
             for (int32_t j = 0; j < inputHiddenDim_ / TILE_LENGTH; j++) {
                 if constexpr (INCREMENTAL_MODE) {
-                    CopyInX(idx, j)
+                    CopyInX(idx, j);
                 }
                 CopyInW(i, j);
                 Compute<INCREMENTAL_MODE>(acc);
@@ -173,17 +174,17 @@ private:
     __aicore__ inline void ScaleOutput()
     {
         AscendC::LocalTensor<float> yLocal = outBufferY_.Get<float>();
-        AscnedC::LocalTensor<Y_T> yOutLocal = outQueueY_.AllocTensor<Y_T>();
+        AscendC::LocalTensor<Y_T> yOutLocal = outQueueY_.AllocTensor<Y_T>();
 
         Muls(yOutLocal, yLocal, scale_, maxLoRARank_);
         pipe_barrier(PIPE_V);
 
-        outQueueY_.EnQue<Y_T>(yOutLocal)
+        outQueueY_.EnQue<Y_T>(yOutLocal);
     }
 
     __aicore__ inline void CopyOut(const int64_t idx)
     {
-        AscnedC::LocalTensor<Y_T> yOutLocal = outQueueY_.DeQue<Y_T>();
+        AscendC::LocalTensor<Y_T> yOutLocal = outQueueY_.DeQue<Y_T>();
         DataCopy(yOutGm_[maxLoRARank_ * idx], yOutLocal, maxLoRARank_);
         outQueueY_.FreeTensor(yOutLocal);
     }
@@ -222,7 +223,7 @@ private:
 
 // declare all dtype kernel
 BGMV_SHRINK_TYPE_DECLARE(half)
-BGMV_SHRINK_TYPE_DECLARE(bfloat16)
+BGMV_SHRINK_TYPE_DECLARE(bfloat16_t)
 
 namespace vllm_ascend {
 extern void bgmv_shrink_impl(AscendType type, void *stream, void *x, void *weight, void *indices,

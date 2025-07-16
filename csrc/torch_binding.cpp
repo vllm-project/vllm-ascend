@@ -289,26 +289,25 @@ void advance_step_flashattn_ascendc(
 void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y, const float scale)
 {
     at::ScalarType scalar_type = x.scalar_type();
-    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
     void *x_ptr = x.data_ptr();
     void *weight_ptr = weight.data_ptr();
     void *indices_ptr = indices.data_ptr();
     void *y_ptr = y.data_ptr();
     int batch_size = x.size(0);
-
-    fe::PlatFormInfos platform_infos;
-    int device_id = 0;
-    fe::PlatformInfoManager::GeInstance().GetRuntimePlatformInfosByDevice(device_id, platform_infos);
-    uint32_t aiv_num = platform_infos.GetCoreNumByType("aiv");
-
-    int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
     int input_hidden_token = x.size(1);
     uint32_t lora_rank = y.size(1);
+    aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
     at_npu::native::OpCommand cmd;
     cmd.Name("bgmv_shrink");
-    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, indices_ptr, y_ptr, batch_size, num_tokens_per_core,
-                          input_hidden_token, lora_rank, scale]() -> int {
-        bgmv_shrink_impl(scalar_type, stream, x_ptr, weight_ptr, indices_ptr, y_ptr, batch_size, num_tokens_per_core,
+    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, indices_ptr, y_ptr, batch_size, input_hidden_token,
+                          lora_rank, scale]() -> int {
+        auto dtype = get_dtype_from_torch(scalar_type);
+        fe::PlatFormInfos platform_infos;
+        int device_id = 0;
+        fe::PlatformInfoManager::GeInstance().GetRuntimePlatformInfosByDevice(device_id, platform_infos);
+        uint32_t aiv_num = platform_infos.GetCoreNumByType("aiv");
+        int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
+        bgmv_shrink_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, y_ptr, batch_size, num_tokens_per_core,
                           input_hidden_token, lora_rank, scale);
         return 0;
     });
