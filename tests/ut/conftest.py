@@ -16,7 +16,8 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from vllm_ascend.utils import adapt_patch, register_ascend_customop  # noqa E402
+from vllm_ascend.utils import adapt_patch  # noqa E402
+from vllm_ascend.utils import register_ascend_customop
 
 adapt_patch()
 adapt_patch(True)
