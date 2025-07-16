@@ -308,7 +308,7 @@ void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
         uint32_t aiv_num = platform_infos.GetCoreNumByType("aiv");
         int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
         bgmv_shrink_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, y_ptr, batch_size, num_tokens_per_core,
-                          input_hidden_token, lora_rank, scale);
+                         input_hidden_token, lora_rank, scale);
         return 0;
     });
     cmd.Run();
@@ -345,6 +345,9 @@ TORCH_LIBRARY_EXPAND(_C, ops)
         "                               Tensor! input_tokens, Tensor! sampled_token_ids, Tensor! input_positions,"
         "                               Tensor! seq_lens, Tensor! slot_mapping, Tensor! block_tables) -> ()");
     ops.impl("advance_step_flashattn_ascendc", torch::kPrivateUse1, &vllm_ascend::advance_step_flashattn_ascendc);
+
+    ops.def("bgmv_shrink(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y, float scale) -> ()");
+    ops.impl("bgmv_shrink", torch::kPrivateUse1, &vllm_ascend::bgmv_shrink);
 }
 
 REGISTER_EXTENSION(_C)
