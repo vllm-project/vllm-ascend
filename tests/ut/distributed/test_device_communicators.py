@@ -3,27 +3,36 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 from vllm.distributed.utils import StatelessProcessGroup
-
 from vllm_ascend.distributed.device_communicators.pyhccl import \
     PyHcclCommunicator
 
 
-class MockHcclUniqueId:
+@pytest.fixture
+def MockHcclUniqueId():
 
-    def __init__(self, internal=None):
-        self.internal = internal or [0] * 128
+    class MockHcclUniqueId:
+
+        def __init__(self, internal=None):
+            self.internal = internal or [0] * 128
+
+    return MockHcclUniqueId
 
 
-class MockStatelessUniqueId:
+@pytest.fixture
+def MockStatelessUniqueId():
 
-    def __init__(self, internal=None):
-        self.internal = internal or [0] * 128
+    class MockStatelessUniqueId:
 
-    def __getstate__(self):
-        return {'internal': self.internal}
+        def __init__(self, internal=None):
+            self.internal = internal or [0] * 128
 
-    def __setstate__(self, state):
-        self.__dict__.update(state)
+        def __getstate__(self):
+            return {'internal': self.internal}
+
+        def __setstate__(self, state):
+            self.__dict__.update(state)
+
+    return MockStatelessUniqueId
 
 
 @pytest.fixture
@@ -43,7 +52,7 @@ def mock_dist():
 
 
 @pytest.fixture
-def mock_stateless_group():
+def mock_stateless_group(MockStatelessUniqueId):
     group = MagicMock(spec=StatelessProcessGroup)
     group.rank = 0
     group.world_size = 2
@@ -61,7 +70,7 @@ def mock_stateless_group():
 
 
 @pytest.fixture
-def mock_hccl_library():
+def mock_hccl_library(MockHcclUniqueId):
     with patch(
             'vllm_ascend.distributed.device_communicators.pyhccl.HCCLLibrary'
     ) as mock_lib:
@@ -78,7 +87,7 @@ def mock_hccl_library():
 def mock_current_stream():
     with patch('vllm_ascend.utils.current_stream') as mock_stream:
         stream = MagicMock()
-        stream.npu_stream = None  # 更适配 CPU
+        stream.npu_stream = None
         mock_stream.return_value = stream
         yield stream
 
@@ -89,8 +98,6 @@ patch_get_process_group_ranks = patch(
         0: 0,
         1: 1
     })
-
-# ======== Test Cases ========
 
 
 @patch('torch.npu.device', lambda x: MagicMock())
