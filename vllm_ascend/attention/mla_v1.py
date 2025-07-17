@@ -95,7 +95,7 @@ class AscendMLADecodeMetadata:
     seq_lens: torch.Tensor
     max_seq_lens: int
     seq_lens_list: list[int]
-    actual_seq_q_lens: Optional[list[int]] = None
+    actual_seq_lengths_q: Optional[list[int]] = None
     attn_mask: Optional[torch.Tensor] = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
@@ -132,7 +132,6 @@ class AscendMLAMetadata:
     num_input_tokens: int = 0  # Number of tokens including padding.
 
     enable_dbo_across_dp: bool = False
-    is_mtp_model: bool = False
 
     query_lens: Optional[list[int]] = None
     # The dimension of the attention heads
@@ -314,7 +313,6 @@ class AscendMLAMetadataBuilder:
         self,
         num_reqs: int,
         num_actual_tokens: int,
-        is_mtp_model: bool = False,
     ) -> AscendMLAMetadata:
         device = self.runner.device
         _, max_blocks = self.runner.graph_block_tables.shape
@@ -338,7 +336,7 @@ class AscendMLAMetadataBuilder:
                                      dtype=torch.int32,
                                      device=device)
         if self.runner.speculative_config is not None and\
-            self.runner.speculative_config.method == 'deepseek_mtp' and not is_mtp_model:
+            self.runner.speculative_config.method == 'deepseek_mtp':
             attn_state = AscendAttentionState.SpecDecoding
             num_decode_tokens = 2
         else:
@@ -363,7 +361,7 @@ class AscendMLAMetadataBuilder:
             seq_lens_list=seq_lens_list,
             max_seq_lens=1,
             attn_mask=self.runner.spec_attn_mask,
-            actual_seq_q_lens=self.runner.actual_seq_q_lens[:num_reqs],
+            actual_seq_lengths_q=self.runner.actual_seq_lengths_q[:num_reqs],
             sin=sin,
             cos=cos)
         return self.metadata_cls(  # type: ignore
@@ -381,7 +379,6 @@ class AscendMLAMetadataBuilder:
             query_start_loc=query_start_loc,
             seq_lens=seq_lens,
             block_tables=block_table,
-            is_mtp_model=is_mtp_model,
         )
 
     def build(
@@ -394,7 +391,6 @@ class AscendMLAMetadataBuilder:
         num_token_pad_size: int = -1,
         num_reqs_pad_size: int = 0,
         enable_dbo_across_dp: bool = False,
-        is_mtp_model: bool = False,
     ) -> AscendMLAMetadata:
         assert self._num_decodes + self._num_prefills == num_reqs
 
@@ -499,7 +495,7 @@ class AscendMLAMetadataBuilder:
         decode_metadata = None
         use_torchair_graph = num_token_pad_size != -1
         if self._num_decodes > 0:
-            actual_seq_q_lens = query_start_loc[1:].tolist()
+            actual_seq_lengths_q = query_start_loc[1:].tolist()
             max_seq_lens = seq_lens[:self._num_decodes].max().item()
             seq_lens = seq_lens[:self._num_decode_tokens]
             input_positions = input_positions[:self._num_decode_tokens]
@@ -535,16 +531,21 @@ class AscendMLAMetadataBuilder:
                                         dtype=input_positions.dtype,
                                         device=input_positions.device)
                 input_positions = torch.cat([input_positions, padding_0])
-                actual_seq_q_lens = query_start_loc[1:].tolist(
-                ) + self.runner.actual_seq_q_lens[num_reqs:num_reqs +
+                actual_seq_lengths_q = query_start_loc[1:].tolist(
+                ) + self.runner.actual_seq_lengths_q[num_reqs:num_reqs +
                                                   num_reqs_pad_size]
-                # mtp torchair + PD scenario, last element of actual_seq_q_lens must equal to num_padded_token_size
+                # mtp torchair + PD scenario, last element of actual_seq_lengths_q must equal to num_padded_token_size
                 num_padded_token_size = slot_mapping.size(0)
-                if actual_seq_q_lens[-1] != num_padded_token_size \
+                if actual_seq_lengths_q[-1] != num_padded_token_size \
                     and self.runner.attn_state == AscendAttentionState.SpecDecoding:
-                    actual_seq_q_lens[-1] = num_padded_token_size
+                    actual_seq_lengths_q[-1] = num_padded_token_size
             else:
                 seq_lens_list = seq_lens.tolist()
+            # mtp torchair + PD scenario, last element of actual_seq_lengths_q must equal to num_padded_token_size
+            num_padded_token_size = slot_mapping.size(0)
+            if actual_seq_lengths_q[-1] != num_padded_token_size \
+                and self.runner.attn_state == AscendAttentionState.SpecDecoding:
+                actual_seq_lengths_q[-1] = num_padded_token_size
 
             cos = self.cos_cache[input_positions].unsqueeze(  # type: ignore
                 1).unsqueeze(2)
@@ -558,7 +559,7 @@ class AscendMLAMetadataBuilder:
                 seq_lens_list=seq_lens_list,
                 max_seq_lens=max_seq_lens,
                 attn_mask=self.runner.spec_attn_mask,
-                actual_seq_q_lens=actual_seq_q_lens,
+                actual_seq_lengths_q=actual_seq_lengths_q,
                 sin=sin,
                 cos=cos)
 
@@ -578,7 +579,6 @@ class AscendMLAMetadataBuilder:
             block_tables=block_table,
             seq_lens=seq_lens,
             enable_dbo_across_dp=enable_dbo_across_dp,
-            is_mtp_model=is_mtp_model,
         )
 
 
@@ -1033,7 +1033,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 q_pe = q_pe.view(num_tokens, self.num_heads, -1)
                 sparse_mode = 3
                 spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
-                actual_seq_lengths = decode_meta.actual_seq_q_lens
+                actual_seq_lengths = decode_meta.actual_seq_lengths_q
             else:
                 if self.enable_kv_nz:
                     q_nope = q_nope.view(num_tokens, 1, self.num_heads, -1)
@@ -1118,7 +1118,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             # Profiling run.
             return output
         # mtp model is not support for graph mode yet
-        self.torchair_graph_enabled = self.torchair_graph_enabled and not attn_metadata.is_mtp_model
         self.running_in_graph = self.torchair_graph_enabled and attn_metadata.attn_state in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
