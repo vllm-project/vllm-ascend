@@ -752,7 +752,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 num_tokens = hidden_states.shape[0]
             if num_tokens < hidden_states.shape[0]:
                 hidden_states = hidden_states[:num_tokens]
-                kv_no_split = kv_no_split[:num_tokens]
+                residual = residual[:num_tokens]
 
         return hidden_states, residual
 
