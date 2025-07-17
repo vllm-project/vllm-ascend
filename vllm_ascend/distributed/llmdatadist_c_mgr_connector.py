@@ -3,11 +3,14 @@ import json
 import math
 import threading
 import time
+from collections import defaultdict
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Optional, Tuple
 
-import llm_datadist  # type: ignore[import-not-found]
+import llm_datadist  # type: ignore
 import msgspec
 import torch
 import zmq
@@ -36,6 +39,11 @@ TORCH_DTYPE_TO_NPU_DTYPE = {
     torch.int64: llm_datadist.DataType.DT_INT64,
     torch.int32: llm_datadist.DataType.DT_INT32
 }
+
+
+class LLMDataDistCMgrEvent(Enum):
+    ReqForMetadata = 0
+    ReqForFinished = 1
 
 
 class LLMDataDistCMgrAgentMetadata(msgspec.Struct):
@@ -261,9 +269,11 @@ class LLMDataDistCMgrConnectorScheduler():
         # we just transfer any data that computed from prefill node
         # note: there might be some issue on this, check it if there is any unexpected result
         computed_block_ids = block_ids
-        # If prompt < block_size, no xfer so free blocks immediately.
-
-        return False, dict(
+        delay_free_blocks = len(computed_block_ids) > 0
+        if delay_free_blocks:
+            logger.info("Delaying free of %d blocks for request %s",
+                        len(computed_block_ids), request.request_id)
+        return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
             remote_block_ids=computed_block_ids,
@@ -298,6 +308,8 @@ class LLMDataDistCMgrConnectorWorker():
         self.local_agent_metadata: Optional[
             LLMDataDistCMgrAgentMetadata] = None
         self.vllm_config = vllm_config
+        self.executor = ThreadPoolExecutor(1)
+        self.thread_lock = threading.Lock()
 
         self.llm_datadist_role = None
         self.llm_datadist_remote_role = None
@@ -325,6 +337,8 @@ class LLMDataDistCMgrConnectorWorker():
         self.init_llm_datadist()
         self.finished_reqs: set[str] = set()
         self.soc_info = NPUSocInfo()
+        self.done_receiving_counts: defaultdict[str,
+                                                set[int]] = defaultdict(set)
 
     def listen_for_agent_metadata_req(self, event: threading.Event):
         assert self.local_agent_metadata is not None
@@ -343,18 +357,56 @@ class LLMDataDistCMgrConnectorWorker():
             event.set()
             while True:
                 identity, _, msg = sock.recv_multipart()
-                decode_msg = msg_decoder.decode(msg)
-                if "cluster_id" in decode_msg:
-                    decode_msg = LLMDataDistCMgrAgentMetadata(**decode_msg)
-                    logger.info(
-                        f"LLMDataDistCMgrConnectorWorker: Receive message from cluster {decode_msg.cluster_id}"
-                    )
-                    sock.send_multipart((identity, b"", msg_to_send))
-                    self.add_remote_agent(decode_msg)
+                event_msg, decode_msg = msg_decoder.decode(msg)
+                event_msg = LLMDataDistCMgrEvent(event_msg)
+                if event_msg == LLMDataDistCMgrEvent.ReqForMetadata:
+                    if "cluster_id" in decode_msg:
+                        decode_msg = LLMDataDistCMgrAgentMetadata(**decode_msg)
+                        logger.info(
+                            f"LLMDataDistCMgrConnectorWorker: Receive message from cluster {decode_msg.cluster_id}"
+                        )
+                        sock.send_multipart((identity, b"", msg_to_send))
+                        self.add_remote_agent(decode_msg)
+                    else:
+                        logger.warning(
+                            f"LLMDataDistCMgrConnectorWorker: receiving unrecognized data {decode_msg}"
+                        )
+                elif event_msg == LLMDataDistCMgrEvent.ReqForFinished:
+                    finished_req_id = decode_msg[0]
+                    decode_tp_rank = decode_msg[1]
+                    decode_tp_size = decode_msg[2]
+                    with self.thread_lock:
+                        if self._increment_task_count(finished_req_id,
+                                                      decode_tp_rank,
+                                                      decode_tp_size):
+                            logger.debug(
+                                f"LLMDataDistCMgrConnectorWorker: Receiving request {finished_req_id} finished"
+                            )
+                            self.finished_reqs.add(finished_req_id)
+                    sock.send_multipart(
+                        (identity, b"", b"receiving decode finished"))
                 else:
-                    logger.warning(
-                        f"LLMDataDistCMgrConnectorWorker: receiving unrecognized data {decode_msg}"
+                    raise RuntimeError(
+                        f"LLMDataDistCMgrConnectorWorker: Receiving unexpected request event {event_msg} from remote !"
                     )
+
+    def _increment_task_count(self, request_id: str, tp_rank: int,
+                              decode_tp_size: int):
+        if request_id not in self.done_receiving_counts:
+            self.done_receiving_counts[request_id] = set()
+        if tp_rank in self.done_receiving_counts[request_id]:
+            logger.warning(
+                f"Received duplicate done signal for request {request_id} "
+                f"from tp rank {tp_rank}. Ignoring.")
+            return False
+        self.done_receiving_counts[request_id].add(tp_rank)
+        if len(self.done_receiving_counts[request_id]) == decode_tp_size:
+            self.done_receiving_counts.pop(request_id)
+            logger.info("All transfers completed for request: "
+                        f"{request_id}. Total ranks: "
+                        f"{decode_tp_size}.")
+            return True
+        return False
 
     def init_llm_datadist(self):
         assert self.local_agent_metadata is not None
@@ -517,13 +569,27 @@ class LLMDataDistCMgrConnectorWorker():
         self.ready_event.wait()
 
     def start_load_kv(self, metadata: LLMDataDistCMgrConnectorMetadata):
+        futures = []
         for req_id, meta in metadata.requests.items():
             logger.debug(f"Start to transmit {req_id}")
-            self._read_blocks(meta.local_block_ids,
-                              meta.remote_block_ids, meta.remote_host,
-                              int(meta.remote_port), meta.engine_id, req_id,
-                              meta.remote_tp_size)
-            self.finished_reqs.add(req_id)
+            future = self.executor.submit(
+                self._read_blocks,
+                local_block_ids=meta.local_block_ids,
+                remote_block_ids=meta.remote_block_ids,
+                remote_ip=meta.remote_host,
+                remote_port=int(meta.remote_port),
+                remote_engine_id=meta.engine_id,
+                request_id=req_id,
+                remote_tp_size=meta.remote_tp_size,
+            )
+            futures.append(future)
+
+        def handle_exception(future):
+            if future.exception():
+                logger.error(f"KV transfer task failed: {future.exception()}")
+
+        for future in futures:
+            future.add_done_callback(handle_exception)
 
     def add_remote_agent(self, metadata: LLMDataDistCMgrAgentMetadata) -> int:
         assert self.local_agent_metadata is not None
@@ -673,7 +739,8 @@ class LLMDataDistCMgrConnectorWorker():
         url = f"tcp://{host}:{port}"
         logger.debug(f"Querying metadata from url: {url}")
         msg_encoder = msgspec.msgpack.Encoder()
-        msg_send = msg_encoder.encode(self.local_agent_metadata)
+        msg_send = msg_encoder.encode(
+            [LLMDataDistCMgrEvent.ReqForMetadata, self.local_agent_metadata])
         with zmq_ctx(zmq.REQ, url) as sock:  # type: ignore[attr-defined]
             logger.info("Try request remote metadata from socket......")
             sock.send(msg_send)
@@ -684,6 +751,25 @@ class LLMDataDistCMgrConnectorWorker():
             logger.info(f"recving metadata: {metadata}")
             cluster_id = self.add_remote_agent(metadata)
         return cluster_id
+
+    def send_finish_to_remote(self, host: str, port: int, request_id):
+        url = f"tcp://{host}:{port}"
+        logger.debug(f"Sending finished to remote: {url}")
+        msg_encoder = msgspec.msgpack.Encoder()
+        msg_send = msg_encoder.encode([
+            LLMDataDistCMgrEvent.ReqForFinished,
+            [request_id, self.tp_rank, self.tp_size]
+        ])
+        with zmq_ctx(zmq.REQ, url) as sock:  # type: ignore[attr-defined]
+            try:
+                sock.send(msg_send)
+                logger.debug(
+                    f"Request id {request_id} finished message send to remote {url}"
+                )
+                _ = sock.recv()
+            except Exception as e:
+                logger.error(
+                    f"Failed to send reqest_id {request_id} to prefill: {e}")
 
     def _read_blocks(
         self,
@@ -750,14 +836,18 @@ class LLMDataDistCMgrConnectorWorker():
                 raise RuntimeError(
                     "LLMDataDistCMgrConnectorWorker: Timeout during pull_blocks, you can try to increase the sync_kv_timeout config or checking your connect status"
                 )
+        self.send_finish_to_remote(remote_ip, remote_port, request_id)
+        with self.thread_lock:
+            self.finished_reqs.add(request_id)
 
     def get_finished(
         self, finished_req_ids: set[str]
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         """Get the finished recving and sending requuests."""
         import copy
-        req_ids_to_ret = copy.deepcopy(self.finished_reqs)
-        self.finished_reqs.clear()
+        with self.thread_lock:
+            req_ids_to_ret = copy.deepcopy(self.finished_reqs)
+            self.finished_reqs.clear()
         if self.llm_datadist_role == LLMRole.PROMPT:
             return req_ids_to_ret, None
         else:
