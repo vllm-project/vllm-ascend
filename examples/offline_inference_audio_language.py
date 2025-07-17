@@ -24,6 +24,8 @@ For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
 
+import os
+
 from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 

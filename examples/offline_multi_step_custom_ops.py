@@ -17,6 +17,8 @@
 # limitations under the License.
 #
 
+import os
+
 from vllm import LLM, SamplingParams
 
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
