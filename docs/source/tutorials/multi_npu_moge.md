@@ -54,7 +54,11 @@ vllm serve /path/to/pangu-pro-moe-model \
 
 Once your server is started, you can query the model with input prompts:
 
-```bash
+:::::{tab-set}
+::::{tab-item} v1/completions
+
+```{code-block} bash
+   :substitutions:
 export question="你是谁？"
 curl http://localhost:8000/v1/completions \
   -H "Content-Type: application/json" \
@@ -66,6 +70,28 @@ curl http://localhost:8000/v1/completions \
     "temperature": 0.6
   }'
 ```
+::::
+
+::::{tab-item} v1/chat/completions
+
+```{code-block} bash
+   :substitutions:
+curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "messages": [
+      {"role": "system", "content": ""},
+      {"role": "user", "content": "你是谁？"}
+    ],
+        "max_tokens": "64",
+        "top_p": "0.95",
+        "top_k": "50",
+        "temperature": "0.6",
+        "add_special_tokens" : true
+    }'
+```
+::::
+:::::
 
 If you run this successfully, you can see the info shown below:
 
@@ -77,15 +103,21 @@ If you run this successfully, you can see the info shown below:
 
 Run the following script to execute offline inference on multi-NPU:
 
-```python
+:::::{tab-set}
+::::{tab-item} Graph Mode
+
+```{code-block} python
+   :substitutions:
 import gc
 from transformers import AutoTokenizer
 import torch
+import os
 
 from vllm import LLM, SamplingParams
 from vllm.distributed.parallel_state import (destroy_distributed_environment,
                                              destroy_model_parallel)
 
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 def clean_up():
     destroy_model_parallel()
     destroy_distributed_environment()
@@ -106,7 +138,72 @@ if __name__ == "__main__":
         {"role": "system", "content": ""},    # Optionally customize system content
         {"role": "user", "content": text}
     ]
-        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)        # 推荐使用官方的template
+        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        prompts.append(prompt)
+
+    sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40)
+
+    llm = LLM(model="/path/to/pangu-pro-moe-model",
+            tensor_parallel_size=4,
+            distributed_executor_backend="mp",
+            max_model_len=1024,
+            trust_remote_code=True,
+            additional_config={
+            'torchair_graph_config': {
+            'enabled': True,
+            },
+            'ascend_scheduler_config':{
+            'enabled': True,
+            'enable_chunked_prefill' : False,
+            'chunked_prefill_enabled': False
+            },
+            })
+
+    outputs = llm.generate(prompts, sampling_params)
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+    del llm
+    clean_up()
+```
+::::
+
+::::{tab-item} Eager Mode
+```{code-block} python
+   :substitutions:
+import gc
+from transformers import AutoTokenizer
+import torch
+import os
+
+from vllm import LLM, SamplingParams
+from vllm.distributed.parallel_state import (destroy_distributed_environment,
+                                             destroy_model_parallel)
+
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+def clean_up():
+    destroy_model_parallel()
+    destroy_distributed_environment()
+    gc.collect()
+    torch.npu.empty_cache()
+
+
+if __name__ == "__main__":
+
+    tokenizer = AutoTokenizer.from_pretrained("/path/to/pangu-pro-moe-model", trust_remote_code=True)
+    tests = [
+        "Hello, my name is",
+        "The future of AI is",
+    ]
+    prompts = []
+    for text in tests:
+        messages = [
+        {"role": "system", "content": ""},    # Optionally customize system content
+        {"role": "user", "content": text}
+    ]
+        prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         prompts.append(prompt)
 
     sampling_params = SamplingParams(temperature=0.6, top_p=0.95, top_k=40)
@@ -127,6 +224,8 @@ if __name__ == "__main__":
     del llm
     clean_up()
 ```
+::::
+:::::
 
 If you run this script successfully, you can see the info shown below:
 
