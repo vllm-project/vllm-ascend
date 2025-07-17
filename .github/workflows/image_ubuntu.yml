@@ -9,7 +9,7 @@ name: 'image / Ubuntu'
 #   - commits are merge into main/*-dev  ==> vllm-ascend:main / vllm-ascend:*-dev
 # 3. tags push trigger image publish
 #   - is for final release image
-#   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3|latest / vllm-ascend:v1.2.3rc1
+#   - Publish when tag with v* (pep440 version)  ===>  vllm-ascend:v1.2.3 / vllm-ascend:v1.2.3rc1
 on:
   pull_request:
     branches:
@@ -69,6 +69,8 @@ jobs:
             type=ref,event=branch
             type=ref,event=pr
             type=pep440,pattern={{raw}}
+        flavor:
+          latest=true
 
     - name: Free up disk space
       uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
@@ -108,3 +110,4 @@ jobs:
         tags: ${{ steps.meta.outputs.tags }}
         build-args: |
           PIP_INDEX_URL=https://pypi.org/simple
+        provenance: false
