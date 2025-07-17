@@ -98,7 +98,7 @@ class AscendQuantConfig(QuantizationConfig):
                                       self.packed_modules_mapping)
         elif isinstance(layer, Attention) and \
             'fa_quant_type' in self.quant_description.keys() and \
-             self.quant_description['fa_quant_type'] is not None:
+            self.quant_description['fa_quant_type'] is not None:
             return AscendKVCacheMethod(self, prefix)
         elif isinstance(layer, Attention) and self.quant_description.get(
                 'kv_quant_type') == 'C8':
