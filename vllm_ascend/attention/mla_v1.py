@@ -29,6 +29,12 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
+try:
+    from torch_npu.atb import npu_mla_prefill  # noqa: F401
+    ATB_MLA_PREFILL_ENABLED = True
+except ImportError:
+    ATB_MLA_PREFILL_ENABLED = False
+
 
 class AscendMLABackend(AttentionBackend):
 
@@ -891,17 +897,41 @@ class AscendMLAImpl(MLAAttentionImpl):
                 query, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse)
 
         elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-            key = torch.cat((k_nope, k_pe), dim=-1)
-            torch_npu._npu_flash_attention(
-                query=query,
-                key=key,
-                value=value,
-                mask=attn_metadata.attn_mask,
-                seq_len=attn_metadata.prefill.context_lens,
-                scale_value=self.scale,
-                num_heads=self.num_heads,
-                num_kv_heads=self.num_heads,
-                out=attn_output)
+            if not self.enable_prefill_optimizations or not ATB_MLA_PREFILL_ENABLED:
+                key = torch.cat((k_nope, k_pe), dim=-1)
+                torch_npu._npu_flash_attention(
+                    query=query,
+                    key=key,
+                    value=value,
+                    mask=attn_metadata.attn_mask,
+                    seq_len=attn_metadata.prefill.context_lens,
+                    scale_value=self.scale,
+                    num_heads=self.num_heads,
+                    num_kv_heads=self.num_heads,
+                    out=attn_output)
+            else:
+                q_pe = query[..., self.qk_nope_head_dim:]
+                q_nope = query[..., :self.qk_nope_head_dim]
+                mask = torch.triu(
+                    torch.ones(512,
+                               512,
+                               device=query.device,
+                               dtype=query.dtype),
+                    1)  # 512: mask only support 512
+                torch_npu.atb.npu_mla_prefill(
+                    q=q_nope,
+                    q_rope=q_pe,
+                    k=k_nope,
+                    k_rope=k_pe,
+                    v=value,
+                    q_seqlen=attn_metadata.prefill.context_lens,
+                    kv_seqlen=attn_metadata.prefill.context_lens,
+                    q_headnum=self.num_heads,
+                    qk_scale=self.scale,
+                    kv_headnum=self.num_heads,
+                    mask=mask,
+                    mask_type="mask_type_free",
+                    output=attn_output)
             attn_output = attn_output.view(-1, self.num_heads, self.v_head_dim)
         attn_output = attn_output.reshape(
             [num_tokens, self.num_heads * self.v_head_dim])
