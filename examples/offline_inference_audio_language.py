@@ -24,8 +24,13 @@ For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
 
+import os
+
 from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
+
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
 question_per_audio_count = {

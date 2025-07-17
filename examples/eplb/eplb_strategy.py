@@ -8,6 +8,9 @@ import matplotlib.pyplot as plt  # type: ignore
 import numpy as np
 import torch
 
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
 logger = logging.getLogger("msit_logger")
 
 

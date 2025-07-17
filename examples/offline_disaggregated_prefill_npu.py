@@ -21,6 +21,8 @@ import os
 import time
 from multiprocessing import Event, Process
 
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 def clean_up():
     import gc

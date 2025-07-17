@@ -13,6 +13,9 @@ import msgpack  # type: ignore
 import zmq
 from quart import Quart, make_response, request
 
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
 DP_PROXY_HTTP_PORT = 10004
 DP_PROXY_ZMQ_REG_PORT = 30006
 DP_PROXY_ZMQ_NOTIFY_PORT = 30005
