@@ -232,11 +232,11 @@ extern void bgmv_shrink_impl(AscendType type, void* stream, void* x, void* weigh
 {
     uint32_t blockDim = (batchSize + numTokensPerCore - 1) / numTokensPerCore;
     if (type == AscendType::FP16) {
-        bgmv_shrink_##half<<<blockDim, nullptr, stream>>>(x, weight, indices, yOut, batchSize, numTokensPerCore, 
-                                                          inputHiddenDim, maxLoRARank, scale);
+        bgmv_shrink_half<<<blockDim, nullptr, stream>>>(x, weight, indices, yOut, batchSize, numTokensPerCore, 
+                                                        inputHiddenDim, maxLoRARank, scale);
     } else if (type == AscendType::BF16) {
-        bgmv_shrink_##bfloat16<<<blockDim, nullptr, stream>>>(x, weight, indices, yOut, batchSize, numTokensPerCore, 
-                                                          inputHiddenDim, maxLoRARank, scale);
+        bgmv_shrink_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, indices, yOut, batchSize, numTokensPerCore, 
+                                                              inputHiddenDim, maxLoRARank, scale);
     } else {
         return;
     }

@@ -286,7 +286,7 @@ void advance_step_flashattn_ascendc(
     return ;
 }
 
-void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y, const float scale)
+void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y, double scale)
 {
     at::ScalarType scalar_type = x.scalar_type();
     void* x_ptr = x.data_ptr();
