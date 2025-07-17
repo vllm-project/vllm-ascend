@@ -177,7 +177,12 @@ class CustomQwen3DBOAttention(Qwen3Attention):
         k_by_head = self.k_norm(k_by_head)
 
         k = k_by_head.view(k.shape)
-        q, k = self.rotary_emb(positions, q, k, cos=cos, sin=sin, skip_index_select=True)
+        q, k = self.rotary_emb(positions,
+                               q,
+                               k,
+                               cos=cos,
+                               sin=sin,
+                               skip_index_select=True)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -375,7 +380,8 @@ class CustomQwen3DBOModel(Qwen2Model):
         config = vllm_config.model_config.hf_config
 
         if VLLM_ASCEND_ENABLE_DBO:
-            self.multistream_config = MultiStreamConfig(min_total_tokens_to_split=128, imbalance_ratio=1)
+            self.multistream_config = MultiStreamConfig(
+                min_total_tokens_to_split=128, imbalance_ratio=1)
             multistream_metadata = make_multistream_metadata_ds(
                 start_layer=self.start_layer,
                 end_layer=self.end_layer,

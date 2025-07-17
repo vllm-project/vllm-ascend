@@ -360,11 +360,9 @@ def model_input_split_v1_attn(
 
     return [attention_metadata_pre, attention_metadata_post]
 
-def find_best_split_point(
-        query_lens: torch.Tensor,
-        min_total_tokens_to_split: int,
-        imbalance_ratio: float
-):
+def find_best_split_point(query_lens: torch.Tensor,
+                          min_total_tokens_to_split: int,
+                          imbalance_ratio: float):
     batch_size = query_lens.size(0)
     if batch_size == 1:
         return -1, -1
