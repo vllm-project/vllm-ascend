@@ -328,6 +328,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
 
+
 class AscendEmbeddingMethod(AscendLinearMethod):
     """Embedding method for Ascend quantization.
 
