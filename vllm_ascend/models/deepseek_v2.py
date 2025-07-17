@@ -749,9 +749,9 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             if attn_metadata is not None:
                 num_tokens = attn_metadata.num_actual_tokens
             else:
-                num_tokens = hidden_states_or_q_c.shape[0]
-            if num_tokens < hidden_states_or_q_c.shape[0]:
-                hidden_states_or_q_c = hidden_states_or_q_c[:num_tokens]
+                num_tokens = hidden_states.shape[0]
+            if num_tokens < hidden_states.shape[0]:
+                hidden_states = hidden_states[:num_tokens]
                 kv_no_split = kv_no_split[:num_tokens]
 
         return hidden_states, residual
