@@ -1,6 +1,7 @@
 import contextlib
 import json
 import math
+import os
 import threading
 import time
 from collections import defaultdict
@@ -337,6 +338,8 @@ class LLMDataDistCMgrConnectorWorker():
         self.init_llm_datadist()
         self.finished_reqs: set[str] = set()
         self.soc_info = NPUSocInfo()
+        # Set hccl deterministic for model execute
+        os.environ["HCCL_DETERMINISTIC"] = "true"
         self.done_receiving_counts: defaultdict[str,
                                                 set[int]] = defaultdict(set)
 
