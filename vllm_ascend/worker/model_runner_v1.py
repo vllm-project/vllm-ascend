@@ -59,6 +59,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
+from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -76,7 +77,6 @@ from vllm_ascend.attention.attention_v1_torchair import AscendTorchairMetadata
 from vllm_ascend.attention.mla_v1 import (AscendMLAMetadata,
                                           CommonAttentionMetadata)
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.pool.metadata import PoolingMetadata
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                ProfileExecuteDuration,
@@ -571,7 +571,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table.commit(num_reqs)
+        if vllm_version_is("0.9.2"):
+            self.input_batch.block_table.commit(num_reqs)
+        else:
+            self.input_batch.block_table.commit_block_table(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         req_ids = self.input_batch.req_ids
@@ -902,7 +905,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table.commit(num_reqs)
+        if vllm_version_is("0.9.2"):
+            self.input_batch.block_table.commit(num_reqs)
+        else:
+            self.input_batch.block_table.commit_block_table(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
