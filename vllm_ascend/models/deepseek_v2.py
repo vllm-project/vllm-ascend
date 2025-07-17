@@ -485,8 +485,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             hidden_states_or_q_c = self.q_a_layernorm(ckq)
         else:
             hidden_states_or_q_c = hidden_states
-        is_mtp_model = attn_metadata is not None and attn_metadata.is_mtp_model
-        if self.torchair_graph_enabled and not is_mtp_model:
+        if self.torchair_graph_enabled:
             if envs.VLLM_USE_V1:
                 output_shape = hidden_states.shape
                 output = torch.empty(output_shape,

@@ -212,7 +212,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Set up speculative decoding.
         self.use_spec_decode = False
         self.spec_attn_mask = None
-        self.actual_seq_q_lens = []
+        self.actual_seq_lengths_q = []
         self.spec_token_num = 0
         self.decode_token_per_req = 1
         if self.speculative_config:
@@ -232,7 +232,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 elif self.speculative_config.method == 'deepseek_mtp':
                     self.drafter = MtpProposer(self.vllm_config, self)
                     self.decode_token_per_req = 1 + self.spec_token_num
-                    self.actual_seq_q_lens = [
+                    self.actual_seq_lengths_q = [
                         len for len in
                         range(self.decode_token_per_req, self.max_num_tokens +
                               1, self.decode_token_per_req)
@@ -1009,6 +1009,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         common_attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start_loc,
             seq_lens=self.seq_lens_cpu[:num_reqs])
+        self.common_attn_metadata = common_attn_metadata
         self.seq_lens_list = self.seq_lens_np.tolist()[:num_input_tokens]
         with_prefill = attn_state not in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
@@ -1040,7 +1041,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             extra_builder_kwargs['num_token_pad_size'] = num_token_pad_size
             extra_builder_kwargs['num_reqs_pad_size'] = num_reqs_pad_size
             self.num_reqs_pad_size = num_reqs_pad_size
+            self.num_token_pad_size = num_token_pad_size
         self.extra_builder_kwargs = extra_builder_kwargs
+        self.num_tokens_across_dp = num_tokens_across_dp
 
         if self.vllm_config.model_config.use_mla:
             attn_metadata = self.attn_metadata_builder.build(  # type: ignore
@@ -1740,7 +1743,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         **model_kwargs)
             if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
                 assert isinstance(self.drafter, MtpProposer)
-                self.drafter.dummy_run(num_reqs, with_prefill=with_prefill)
+                self.drafter.dummy_run(
+                    num_tokens=num_tokens,
+                    with_prefill=with_prefill,
+                    skip_attn=skip_attn,
+                    num_reqs=num_reqs,
+                    num_tokens_across_dp=num_tokens_across_dp)
             return hidden_states
 
     @contextmanager
@@ -2123,7 +2131,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         next_token_ids = torch.tensor(next_token_ids,
                                       dtype=torch.int32,
                                       device=self.device)
-
+        token_indices = None
         if spec_decode_metadata is None:
             # input_ids can be None for multimodal models.
             target_token_ids = self.input_ids[:num_scheduled_tokens]
@@ -2146,12 +2154,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             cu_num_tokens, token_indices = self.drafter.prepare_inputs(
                 attn_metadata.query_start_loc,
                 num_rejected_tokens,
-                force_one_token=True,
-            )
-            target_token_ids = self.input_ids[token_indices]
-            target_positions = positions[token_indices]
-            target_hidden_states = hidden_states[token_indices]
-            target_slot_mapping = attn_metadata.slot_mapping[token_indices]
+                force_one_token=False,
+                is_torchair_graph=self.torchair_graph_enabled)
+            if self.torchair_graph_enabled:
+                # the seq len of each bath is padded to 2, thus input is same as the main model
+                target_token_ids = self.input_ids[:num_scheduled_tokens]
+                target_positions = positions[:num_scheduled_tokens]
+                target_hidden_states = hidden_states[:num_scheduled_tokens]
+                target_slot_mapping = attn_metadata.slot_mapping[:
+                                                                 num_scheduled_tokens]
+            else:
+                target_token_ids = self.input_ids[token_indices]
+                target_positions = positions[token_indices]
+                target_hidden_states = hidden_states[token_indices]
+                target_slot_mapping = attn_metadata.slot_mapping[token_indices]
 
         draft_token_ids = self.drafter.propose(
             target_token_ids=target_token_ids,
@@ -2162,7 +2178,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             cu_num_tokens=cu_num_tokens,
             block_table=attn_metadata.block_tables,
             sampling_metadata=sampling_metadata,
-        )
+            token_indices=token_indices)
         spec_token_ids = draft_token_ids.tolist()
         return spec_token_ids
 
