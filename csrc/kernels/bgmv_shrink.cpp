@@ -125,7 +125,7 @@ private:
     {
         AscendC::LocalTensor<W_T> wLocal = inQueueW_.AllocTensor<W_T>();
         DataCopy(wLocal, wGm_[reqLoRAWeightOffset_ + rowIdx * inputHiddenDim_ + colIdx * TILE_LENGTH], numElements);
-        inQueueX_.EnQue(wLocal);
+        inQueueW_.EnQue(wLocal);
     }
 
     template <bool INCREMENTAL_MODE>
