@@ -173,7 +173,7 @@ class MultiStreamPreQwen3TransformerLayer(torch.nn.Module):
     def forward(self, input_tensors: List[torch.Tensor]
                 ):  # input_tensors = [positions, hidden_states, residual]
         attn_metadata = get_forward_context().attn_metadata
-        if self.multistream_metadata is None:
+        if self.multistream_metadata is None or self.multistream_metadata.ms_config is None:
             set_multistream_layer_context(-1, None, None)
             return input_tensors
 
