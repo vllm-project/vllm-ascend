@@ -33,8 +33,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
-
-from vllm_ascend.pool.metadata import PoolingMetadata
+from vllm.v1.pool.metadata import PoolingMetadata
 
 _SAMPLING_EPS = 1e-5
 
