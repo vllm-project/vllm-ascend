@@ -8,6 +8,9 @@ import msgpack  # type: ignore
 import zmq
 from quart import Quart, make_response, request
 
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
 prefill_instances: dict[str, str] = {}  # http_address: zmq_address
 decode_instances: dict[str, str] = {}  # http_address: zmq_address
 

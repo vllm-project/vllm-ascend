@@ -3,6 +3,8 @@ import time
 
 from vllm import LLM, SamplingParams
 
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 # enable dual-batch overlap for vllm ascend
 os.environ["VLLM_ASCEND_ENABLE_DBO"] = "1"
 
