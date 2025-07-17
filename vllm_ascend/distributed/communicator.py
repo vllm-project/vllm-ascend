@@ -18,8 +18,15 @@ from typing import List, Optional
 
 import torch
 import torch.distributed as dist
+from torch import nn
 from vllm.distributed.device_communicators.base_device_communicator import \
     DeviceCommunicatorBase
+from vllm.distributed.parallel_state import get_dp_group
+from vllm.forward_context import get_forward_context
+
+from vllm_ascend.distributed.communication_op import \
+    data_parallel_reduce_scatter
+from vllm_ascend.utils import dispose_tensor
 
 
 class NPUCommunicator(DeviceCommunicatorBase):
@@ -73,3 +80,38 @@ class NPUCommunicator(DeviceCommunicatorBase):
         dist.all_to_all(output_list, input_list, group=self.device_group)
         output_tensor = torch.cat(output_list, dim=gather_dim).contiguous()
         return output_tensor
+
+    def dispatch(
+            self, hidden_states: torch.Tensor,
+            router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Dispatch the hidden states and router logits to the appropriate device.
+        This is a no-op in the base class.
+        """
+        num_tokens, _ = hidden_states.shape
+        attn_metadata = get_forward_context().attn_metadata
+        if attn_metadata is not None:
+            max_num_tokens_across_dp = attn_metadata.max_num_tokens_across_dp
+            if num_tokens < max_num_tokens_across_dp:
+                hidden_states = nn.functional.pad(
+                    hidden_states,
+                    (0, 0, 0, max_num_tokens_across_dp - num_tokens))
+                router_logits = nn.functional.pad(
+                    router_logits,
+                    (0, 0, 0, max_num_tokens_across_dp - num_tokens))
+        hidden_states = get_dp_group().all_gather(hidden_states, 0)
+        router_logits = get_dp_group().all_gather(router_logits, 0)
+
+        return hidden_states, router_logits
+
+    def combine(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """
+        Combine the hidden states and router logits from the appropriate device.
+        This is a no-op in the base class.
+        """
+        num_tokens, _ = hidden_states.shape
+        final_hidden_states = data_parallel_reduce_scatter(hidden_states,
+                                                           dim=0)
+        final_hidden_states = final_hidden_states[:num_tokens]
+        dispose_tensor(hidden_states)
+        return hidden_states
