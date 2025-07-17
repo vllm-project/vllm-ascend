@@ -15,7 +15,7 @@
 
 import unittest
 
-from vllm_ascend.utils import adapt_patch
+from vllm_ascend.utils import adapt_patch, register_ascend_customop
 
 # fused moe ops test will hit the infer_schema error, we need add the patch
 # here to make the test pass.
@@ -28,4 +28,5 @@ class TestBase(unittest.TestCase):
         # adapt patch by default.
         adapt_patch(True)
         adapt_patch()
+        register_ascend_customop()
         super().setUp()
