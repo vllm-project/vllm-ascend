@@ -343,4 +343,3 @@ class AscendEmbeddingMethod(AscendLinearMethod):
         self.quantizer = AscendQuantizer.get_quantizer(
             quant_config.quant_description, prefix, packed_modules_mapping)
         self.quant_method = self.quantizer.build_linear_method()
-        
