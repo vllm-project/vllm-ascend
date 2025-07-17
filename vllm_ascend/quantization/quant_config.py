@@ -97,8 +97,8 @@ class AscendQuantConfig(QuantizationConfig):
             return AscendLinearMethod(self, prefix,
                                       self.packed_modules_mapping)
         elif isinstance(layer, Attention) and \
-                'fa_quant_type' in self.quant_description.keys() and \
-                self.quant_description['fa_quant_type'] is not None:
+            'fa_quant_type' in self.quant_description.keys() and \
+             self.quant_description['fa_quant_type'] is not None:
             return AscendKVCacheMethod(self, prefix)
         elif isinstance(layer, Attention) and self.quant_description.get(
                 'kv_quant_type') == 'C8':
@@ -118,9 +118,9 @@ class AscendQuantConfig(QuantizationConfig):
         return None
 
     def is_layer_skipped_ascend(
-            self,
-            prefix: str,
-            fused_mapping: Mapping[str, List[str]] = MappingProxyType({})):
+        self,
+        prefix: str,
+        fused_mapping: Mapping[str, List[str]] = MappingProxyType({})):
         # adapted from vllm.model_executor.layers.quantization.utils.quant_utils.is_layer_skipped
         proj_name = prefix.split(".")[-1]
         if proj_name in fused_mapping:
@@ -168,14 +168,14 @@ class AscendLinearMethod(LinearMethodBase):
         self.quant_method = self.quantizer.build_linear_method()
 
     def create_weights(
-            self,
-            layer: torch.nn.Module,
-            input_size_per_partition: int,
-            output_partition_sizes: List[int],
-            input_size: int,
-            output_size: int,
-            params_dtype: torch.dtype,
-            **extra_weight_attrs,
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: List[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
     ) -> None:
         output_size_per_partition = sum(output_partition_sizes)
         weight_loader = extra_weight_attrs.get("weight_loader")
@@ -210,10 +210,10 @@ class AscendLinearMethod(LinearMethodBase):
             self.quant_method.process_weights_after_loading(layer)
 
     def apply(
-            self,
-            layer: torch.nn.Module,
-            x: torch.Tensor,
-            bias: Optional[torch.Tensor] = None,
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if isinstance(layer, RowParallelLinear):
             tp_rank = get_tensor_model_parallel_rank()
@@ -270,13 +270,13 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
         self.quant_method = self.quantizer.build_moe_method()
 
     def create_weights(
-            self,
-            layer: torch.nn.Module,
-            num_experts: int,
-            hidden_size: int,
-            intermediate_size_per_partition: int,
-            params_dtype: torch.dtype,
-            **extra_weight_attrs,
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
     ) -> None:
         weight_param = self.quant_method.get_weight(
             num_experts, intermediate_size_per_partition, hidden_size,
@@ -297,25 +297,25 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             set_weight_attrs(param, extra_weight_attrs)
 
     def apply(
-            self,
-            layer: torch.nn.Module,
-            x: torch.Tensor,
-            router_logits: torch.Tensor,
-            top_k: int,
-            renormalize: bool,
-            use_grouped_topk: bool = False,
-            global_num_experts: int = -1,
-            expert_map: Optional[torch.Tensor] = None,
-            topk_group: Optional[int] = None,
-            num_expert_group: Optional[int] = None,
-            custom_routing_function: Optional[Callable] = None,
-            scoring_func: str = "softmax",
-            e_score_correction_bias: Optional[torch.Tensor] = None,
-            is_prefill: bool = True,
-            enable_force_load_balance: bool = False,
-            log2phy: torch.Tensor = None,
-            global_redundant_expert_num=0,
-            **kwargs,
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        router_logits: torch.Tensor,
+        top_k: int,
+        renormalize: bool,
+        use_grouped_topk: bool = False,
+        global_num_experts: int = -1,
+        expert_map: Optional[torch.Tensor] = None,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        is_prefill: bool = True,
+        enable_force_load_balance: bool = False,
+        log2phy: torch.Tensor = None,
+        global_redundant_expert_num=0,
+        **kwargs,
     ) -> torch.Tensor:
         return self.quant_method.apply(
             layer, x, router_logits, top_k, renormalize, use_grouped_topk,
