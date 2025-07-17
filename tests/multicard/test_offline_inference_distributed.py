@@ -154,6 +154,30 @@ def test_models_distributed_DeepSeekV3_dbo():
         vllm_model.generate(example_prompts, sampling_params)
 
 
+@pytest.mark.skip(reason="Due to OOM,waiting for 1311pr to merge in")
+@patch.dict(os.environ, {
+    "VLLM_ASCEND_ENABLE_DBO": "1",
+    "VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ": "1"
+})
+def test_models_distributed_DeepSeekV3_alltoallv_dbo():
+    example_prompts = ["The president of the United States is"] * 10
+    dtype = "half"
+    sampling_params = SamplingParams(max_tokens=30, temperature=0.0)
+    with VllmRunner(
+            "vllm-ascend/DeepSeek-V3-Pruning",
+            dtype=dtype,
+            tensor_parallel_size=4,
+            distributed_executor_backend="mp",
+    ) as vllm_model:
+        model_arch = 'DeepseekV3ForCausalLM'
+        registed_models = ModelRegistry.models
+        assert registed_models[
+            model_arch].module_name == "vllm_ascend.models.deepseek_dbo"
+        assert registed_models[
+            model_arch].class_name == "CustomDeepseekDBOForCausalLM"
+        vllm_model.generate(example_prompts, sampling_params)
+
+
 def test_models_distributed_DeepSeek_W8A8():
     example_prompts = [
         "Hello, my name is",
@@ -167,5 +191,40 @@ def test_models_distributed_DeepSeek_W8A8():
             dtype="auto",
             tensor_parallel_size=4,
             quantization="ascend",
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@pytest.mark.parametrize("enforce_eager", [True, False])
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM": "1"})
+def test_models_distributed_QwQ_with_flashcomm_v1(enforce_eager: bool):
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+
+    with VllmRunner(
+            snapshot_download("Qwen/QwQ-32B"),
+            max_model_len=8192,
+            enforce_eager=enforce_eager,
+            dtype="auto",
+            tensor_parallel_size=4,
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM": "2"})
+def test_models_distributed_Qwen3_with_flashcomm_v2():
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+
+    with VllmRunner(
+            snapshot_download("Qwen/Qwen3-0.6B-Base"),
+            max_model_len=8192,
+            enforce_eager=True,
+            dtype="auto",
+            tensor_parallel_size=2,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)

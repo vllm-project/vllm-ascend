@@ -24,13 +24,17 @@ async def lifespan(app: FastAPI):
     # Startup: Initialize client pools for prefiller and decoder services
     app.state.prefill_clients = []
     app.state.decode_clients = []
+    limit = httpx.Limits(max_connections=100000,
+                         max_keepalive_connections=100000)
 
     # Create prefill clients
     for i, (host, port) in enumerate(global_args.prefiller_instances):
         prefiller_base_url = f'http://{host}:{port}/v1'
         app.state.prefill_clients.append({
             'client':
-            httpx.AsyncClient(timeout=None, base_url=prefiller_base_url),
+            httpx.AsyncClient(timeout=None,
+                              base_url=prefiller_base_url,
+                              limits=limit),
             'host':
             host,
             'port':
@@ -44,7 +48,9 @@ async def lifespan(app: FastAPI):
         decoder_base_url = f'http://{host}:{port}/v1'
         app.state.decode_clients.append({
             'client':
-            httpx.AsyncClient(timeout=None, base_url=decoder_base_url),
+            httpx.AsyncClient(timeout=None,
+                              base_url=decoder_base_url,
+                              limits=limit),
             'host':
             host,
             'port':
@@ -196,8 +202,7 @@ async def stream_service_response(client_info: dict, endpoint: str,
             yield chunk
 
 
-@app.post("/v1/completions")
-async def handle_completions(request: Request):
+async def _handle_completions(api: str, request: Request):
     try:
         req_data = await request.json()
         request_id = str(uuid.uuid4())
@@ -206,9 +211,8 @@ async def handle_completions(request: Request):
         prefill_client_info = get_next_client(request.app, 'prefill')
 
         # Send request to prefill service
-        response = await send_request_to_service(prefill_client_info,
-                                                 "/completions", req_data,
-                                                 request_id)
+        response = await send_request_to_service(prefill_client_info, api,
+                                                 req_data, request_id)
 
         # Extract the needed fields
         response_json = response.json()
@@ -224,7 +228,7 @@ async def handle_completions(request: Request):
         # Stream response from decode service
         async def generate_stream():
             async for chunk in stream_service_response(decode_client_info,
-                                                       "/completions",
+                                                       api,
                                                        req_data,
                                                        request_id=request_id):
                 yield chunk
@@ -237,10 +241,20 @@ async def handle_completions(request: Request):
         import traceback
         exc_info = sys.exc_info()
         print("Error occurred in disagg prefill proxy server"
-              " - completions endpoint")
+              f" - {api} endpoint")
         print(e)
         print("".join(traceback.format_exception(*exc_info)))
         raise
+
+
+@app.post("/v1/completions")
+async def handle_completions(request: Request):
+    return await _handle_completions("/completions", request)
+
+
+@app.post("/v1/chat/completions")
+async def handle_chat_completions(request: Request):
+    return await _handle_completions("/chat/completions", request)
 
 
 @app.get("/healthcheck")

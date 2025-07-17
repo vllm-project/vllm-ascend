@@ -106,11 +106,11 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE", '0'))
                  ),
-    # MOE_ALL2ALL_BUFFER:
+    # VLLM_ASCEND_MOE_ALL2ALL_BUFFER:
     #   0: default, normal init.
     #   1: enable moe_all2all_buffer.
-    "MOE_ALL2ALL_BUFFER":
-    lambda: bool(int(os.getenv("MOE_ALL2ALL_BUFFER", '0'))),
+    "VLLM_ASCEND_MOE_ALL2ALL_BUFFER":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_MOE_ALL2ALL_BUFFER", '0'))),
     # Some models are optimized by vllm ascend. While in some case, e.g. rlhf
     # training, the optimized model may not be suitable. In this case, set this
     # value to False to disable the optimized model.
@@ -137,12 +137,20 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # and the mla_pa will be the default path of deepseek decode path.
     "VLLM_ASCEND_MLA_PA":
     lambda: int(os.getenv("VLLM_ASCEND_MLA_PA", 0)),
+    # VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ:
+    #   0: default, normal init.
+    #   1: enable moe all2all seq.
+    "VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ":
+    lambda: bool(int(os.getenv('VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ', '0'))),
     # ENABLE chunk mc2
     "VLLM_ASCEND_ENABLE_CHUNK_MC2":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CHUNK_MC2", "0"))),
     # Batch MC2 in prefill: The number of tokens in each batch
     "VLLM_ASCEND_FUSED_MOE_MC2_CHUNK_SIZE":
     lambda: int(os.getenv("VLLM_ASCEND_FUSED_MOE_MC2_CHUNK_SIZE", "128")),
+    # FlashComm optimization: Enable v1 and v2 by setting this flag to 1 or 2 respectively
+    "VLLM_ASCEND_ENABLE_FLASHCOMM":
+    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))
 }
 
 # end-env-vars-definition
