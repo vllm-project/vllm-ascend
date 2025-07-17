@@ -16,7 +16,7 @@
 # Adapted from vllm/model_executor/models/qwen3_moe.py
 # This file is a part of the vllm-ascend project.
 
-from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
+from molink.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
 
 
 class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
