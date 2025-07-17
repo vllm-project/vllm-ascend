@@ -19,6 +19,9 @@
 
 from vllm import LLM, SamplingParams
 
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
 
 def main():
     prompts = [

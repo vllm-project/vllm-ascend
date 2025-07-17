@@ -60,6 +60,9 @@ from time import sleep
 from vllm import LLM, SamplingParams
 from vllm.utils import get_open_port
 
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
 
 def parse_args():
     import argparse
