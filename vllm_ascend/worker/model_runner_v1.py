@@ -24,7 +24,7 @@ import types
 import weakref
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import numpy as np
 import numpy.typing as npt
@@ -1206,7 +1206,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # Compute the logits indices.
         # [4, 1, 3, 1, 2]
-        num_sampled_tokens = num_draft_tokens + 1
+        num_sampled_tokens: Any = num_draft_tokens + 1
         # Step 1. [4, 5, 8, 9, 11]
         cu_num_sampled_tokens = np.cumsum(num_sampled_tokens, dtype=np.int32)
         total_num_sampled_tokens = cu_num_sampled_tokens[-1]
