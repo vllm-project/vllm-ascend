@@ -296,11 +296,12 @@ void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
     int batch_size = x.size(0);
     int input_hidden_token = x.size(1);
     uint32_t lora_rank = y.size(1);
+    float scale_f = static_cast<float>(scale);
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
     at_npu::native::OpCommand cmd;
     cmd.Name("bgmv_shrink");
     cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, indices_ptr, y_ptr, batch_size, input_hidden_token,
-                          lora_rank, scale]() -> int {
+                          lora_rank, scale_f]() -> int {
         auto dtype = get_dtype_from_torch(scalar_type);
         fe::PlatFormInfos platform_infos;
         int device_id = 0;
@@ -308,7 +309,7 @@ void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
         uint32_t aiv_num = platform_infos.GetCoreNumByType("aiv");
         int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
         bgmv_shrink_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, y_ptr, batch_size, num_tokens_per_core,
-                         input_hidden_token, lora_rank, scale);
+                         input_hidden_token, lora_rank, scale_f);
         return 0;
     });
     cmd.Run();
