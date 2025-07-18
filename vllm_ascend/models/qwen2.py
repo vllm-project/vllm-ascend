@@ -3,6 +3,7 @@ from typing import Optional, Union
 
 import torch
 import torch.nn.functional as F
+import vllm.envs as envs
 from torch import nn
 from transformers import Qwen2Config
 from vllm.compilation.decorators import support_torch_compile
@@ -154,6 +155,7 @@ class CustomQwen2Model(Qwen2Model):
         flashcomm_v1_enabled = False
         attn_metadata = get_forward_context().attn_metadata
         if ascend_envs.VLLM_ASCEND_ENABLE_FLASHCOMM == 1 and \
+            envs.VLLM_USE_V1 and \
             attn_metadata is not None and \
             attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
             flashcomm_v1_enabled = True
