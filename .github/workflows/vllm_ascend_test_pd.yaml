@@ -78,6 +78,7 @@ jobs:
           pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
           apt-get update -y
           apt install git -y
+          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
