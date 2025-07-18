@@ -36,7 +36,7 @@ MODELS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-def test_models(
+def test_models_with_aclgraph(
     model: str,
     max_tokens: int,
 ) -> None:
@@ -48,12 +48,12 @@ def test_models(
     sampling_params = SamplingParams(max_tokens=max_tokens, temperature=0.0)
     # TODO: change to use vllmrunner when the registry of custom op is solved
     # while running pytest
-    vllm_model = LLM(model)
+    vllm_model = LLM(model, max_model_len=1024)
     vllm_aclgraph_outputs = vllm_model.generate(prompts, sampling_params)
     del vllm_model
     torch.npu.empty_cache()
 
-    vllm_model = LLM(model, enforce_eager=True)
+    vllm_model = LLM(model, enforce_eager=True, max_model_len=1024)
     vllm_eager_outputs = vllm_model.generate(prompts, sampling_params)
     del vllm_model
     torch.npu.empty_cache()
