@@ -1228,7 +1228,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                     prefill_hs, cos, sin, kv_cache,
                     attn_metadata.slot_mapping[num_decode_tokens:])
 
-                kv_c_normed = prefill_k_nope[:num_actual_toks, ...]
+                kv_c_normed_prefill = prefill_k_nope[:num_actual_toks, ...]
                 prefill_k_c_normed = prefill_k_nope
                 prefill_k_pe = prefill_k_pe.view(num_tokens, self.num_kv_heads,
                                                  -1)
@@ -1247,9 +1247,20 @@ class AscendMLAImpl(MLAAttentionImpl):
             ) > 0 and attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
                 slots = attn_metadata.slot_mapping
                 # NOTE: Separate the kv cache in advance to avoid OOM or other issues
-                torch_npu._npu_reshape_and_cache(key=kv_c_normed.view(
+                torch_npu._npu_reshape_and_cache(key=kv_c_normed_prefill.view(
                     num_tokens, self.num_kv_heads, -1),
                                                  value=prefill_k_pe,
+                                                 key_cache=kv_cache[0],
+                                                 value_cache=kv_cache[1],
+                                                 slot_indices=slots)
+
+            if kv_cache[0].numel(
+            ) > 0 and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill and has_decode:
+                slots = attn_metadata.slot_mapping[:num_decode_tokens]
+                k_c_normed_decode = kv_c_normed[:num_decode_tokens]
+                torch_npu._npu_reshape_and_cache(key=k_c_normed_decode.view(
+                    num_decode_tokens, self.num_kv_heads, -1),
+                                                 value=decode_k_pe,
                                                  key_cache=kv_cache[0],
                                                  value_cache=kv_cache[1],
                                                  slot_indices=slots)
