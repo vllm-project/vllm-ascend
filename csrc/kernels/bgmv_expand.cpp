@@ -29,7 +29,7 @@ public:
     static constexpr uint64_t LORA_RANK_32 = 32;
     static constexpr uint64_t LORA_RANK_64 = 64;
     static constexpr uint64_t SUPPORTED_RANKS[] = {LORA_RANK_8, LORA_RANK_16, LORA_RANK_32, LORA_RANK_64};
-    static constexpr uint64_t BUFFER_NUM = 2;
+    static constexpr int32_t BUFFER_NUM = 2;
 
     // The vector unit reads 8 blocks (32 bytes each and 256 bytes in total) of contiguous data each time.
     static constexpr int32_t NUM_BYTES_PER_REPEAT = 256;
@@ -63,10 +63,10 @@ public:
         outputHiddenDim_ = outputHiddenDim;
         sliceOffset_ = sliceOffset;
         outputFullDim_ = outputFullDim;
-        singleLoRAWeightLen_ = maxLoRARank_ * outputFullDim;
+        singleLoRAWeightLen_ = maxLoRARank_ * outputHiddenDim_;
 
         xGm_.SetGlobalBuffer((__gm__ X_T *)x);
-        wGm_.SetGlobalBuffer((__gm__ W_T *)w);
+        wGm_.SetGlobalBuffer((__gm__ W_T *)weight);
         yGm_.SetGlobalBuffer((__gm__ Y_T *)y);
         indicesGm_.SetGlobalBuffer((__gm__ int64_t *)indices);
 
@@ -76,7 +76,7 @@ public:
         pipe_->InitBuffer(outQueueY_, BUFFER_NUM, Y_OUT_TILE_NUM_ELEMENTS * sizeof(Y_T));
 
         pipe_->InitBuffer(dupBufferX_, NUM_ELEMENTS_PER_REPEAT * sizeof(float));
-        pipe_->InitBuffer(tmpBufferX_, W_IN_TILE_NUM_ELEMENTS * sizeof(float));
+        pipe_->InitBuffer(tmpBufferW_, W_IN_TILE_NUM_ELEMENTS * sizeof(float));
         pipe_->InitBuffer(inBufferY_, Y_OUT_TILE_NUM_ELEMENTS * sizeof(float));
         pipe_->InitBuffer(tmpBufferY_, Y_OUT_TILE_NUM_ELEMENTS * sizeof(float));
 
@@ -216,7 +216,7 @@ private:
         AscendC::LocalTensor<float> yLocal = tmpBufferY_.Get<float>();
         AscendC::LocalTensor<Y_T> yInLocal = inQueueY_.DeQue<Y_T>();
         AscendC::LocalTensor<float> yInLocalFP32 = inBufferY_.Get<float>();
-        Cast(yInLocalFP32, yInLocal, AscendC::RoundMode::CAST_NONE, numElements);
+        Cast(yInLocalFP32, yInLocal, AscendC::RoundMode::CAST_RINT, numElements);
         pipe_barrier(PIPE_V);
         inQueueY_.FreeTensor(yInLocal);
 
@@ -290,7 +290,7 @@ private:
     AscendC::TQue<AscendC::QuePosition::VECIN, BUFFER_NUM> inQueueY_, inQueueW_;
     AscendC::TQue<AscendC::QuePosition::VECIN, 1> inQueueX_;
     AscendC::TQue<AscendC::QuePosition::VECOUT, BUFFER_NUM> outQueueY_;
-    AscendC::TBuf<AscendC::QuePosition::VECCALC> tmpBufferW, dupBufferX_, inBufferY_, tmpBufferY_;
+    AscendC::TBuf<AscendC::QuePosition::VECCALC> tmpBufferW_, dupBufferX_, inBufferY_, tmpBufferY_;
     AscendC::GlobalTensor<X_T> xGm_;
     AscendC::GlobalTensor<W_T> wGm_;
     AscendC::GlobalTensor<Y_T> yGm_;
