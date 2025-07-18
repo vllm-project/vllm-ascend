@@ -147,8 +147,7 @@ class CustomDeepseekDBOMoE(CustomDeepseekV2MoE):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=not envs_ascend.
-                VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ,  # shared experts tp comm is separated in alltoallv for better overlap.
+                reduce_results=True,
                 prefix=f"{prefix}.shared_experts",
             )
         CustomDeepseekDBOMoE.top_k = config.num_experts_per_tok
@@ -717,6 +716,7 @@ class CustomDeepseekDBODecoderLayer(CustomDeepseekV2DecoderLayer):
         assert len(hidden_states) == num_micro_batchs
         assert residual is not None
         assert attn_metadata is not None
+        self.mlp.shared_experts.down_proj.reduce_results = False
         num_tokens = [None] * num_micro_batchs
         hidden_dims = [None] * num_micro_batchs
         topk_weights, topk_ids = [None] * num_micro_batchs, [

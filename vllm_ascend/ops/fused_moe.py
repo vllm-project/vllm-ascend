@@ -1282,9 +1282,6 @@ class AscendFusedMoE(FusedMoE):
         if shared_experts:
             if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
                 shared_hidden_states = shared_experts(hidden_states)
-                if not shared_experts.down_proj.reduce_results and shared_experts.down_proj.tp_size > 1:
-                    shared_hidden_states = tensor_model_parallel_all_reduce(
-                        shared_hidden_states)
 
         mc2_mask = forward_context.mc2_mask
         tp_size = get_tensor_model_parallel_world_size()
