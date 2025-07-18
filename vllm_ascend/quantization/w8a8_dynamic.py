@@ -866,7 +866,7 @@ class AscendW8A8DynamicFusedMoEMethod:
             # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
             if global_num_experts == 256:
                 topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
-                    router_logits.float(),
+                    router_logits,
                     k=top_k,  # topk当前写8
                     bias=e_score_correction_bias,
                     k_group=topk_group,  # fix: 4

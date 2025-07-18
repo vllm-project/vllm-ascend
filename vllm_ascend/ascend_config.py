@@ -101,7 +101,6 @@ class TorchairGraphConfig:
                 raise RuntimeError(
                     "enable_super_kernel is valid only when Torchair graph mode and enable_multistream_moe is enabled"
                 )
-
         if not self.enable_multistream_moe:
             if self.enable_super_kernel:
                 raise RuntimeError(
