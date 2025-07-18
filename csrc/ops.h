@@ -85,4 +85,18 @@ namespace vllm_ascend {
         uint32_t input_hidden_dim,
         uint32_t lora_rank,
         float scale);
+
+    extern void bgmv_expand_impl(
+        AscendType type,
+        void *stream,
+        void *x,
+        void *weight,
+        void *indices,
+        void *y, 
+        uint32_t batch_size,
+        uint32_t num_tokens_per_core,
+        uint32_t lora_rank,
+        uint32_t output_hidden_dim,
+        uint32_t slice_offset,
+        uint32_t output_full_dim);
 }
