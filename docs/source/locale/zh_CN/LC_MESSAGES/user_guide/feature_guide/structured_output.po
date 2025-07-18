@@ -1,0 +1,220 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../user_guide/feature_guide/structured_output.md:1
+msgid "Structured Output Guide"
+msgstr "结构化输出指南"
+
+#: ../../user_guide/feature_guide/structured_output.md:3
+msgid "Overview"
+msgstr "概述"
+
+#: ../../user_guide/feature_guide/structured_output.md:5
+msgid "What is Structured Output?"
+msgstr "什么是结构化输出？"
+
+#: ../../user_guide/feature_guide/structured_output.md:7
+msgid ""
+"LLMs can be unpredictable when you need output in specific formats. Think of"
+" asking a model to generate JSON - without guidance, it might produce valid "
+"text that breaks JSON specification. **Structured Output (also called Guided"
+" Decoding)** enables LLMs to generate outputs that follow a desired "
+"structure while preserving the non-deterministic nature of the system."
+msgstr ""
+"当你需要特定格式输出时，大型语言模型（LLMs）可能表现出不可预测性。比如让模型生成 "
+"JSON，如果没有指导，模型可能会生成有效的文本，但这些文本却不符合 JSON 规范。**结构化输出（也称为引导解码）** "
+"能让大型语言模型生成符合预期结构的输出，同时保留系统的非确定性特性。"
+
+#: ../../user_guide/feature_guide/structured_output.md:9
+msgid ""
+"In simple terms, structured decoding gives LLMs a “template” to follow. "
+"Users provide a schema that “influences” the model’s output, ensuring "
+"compliance with the desired structure."
+msgstr "简单来说，结构化解码为LLM提供了一个“模板”来遵循。用户提供一个模式来“影响”模型的输出，从而确保输出符合期望的结构。"
+
+#: ../../user_guide/feature_guide/structured_output.md:11
+msgid "![structured decoding](./images/structured_output_1.png)"
+msgstr "![结构化解码](./images/structured_output_1.png)"
+
+#: ../../user_guide/feature_guide/structured_output.md:11
+msgid "structured decoding"
+msgstr "结构化解码"
+
+#: ../../user_guide/feature_guide/structured_output.md:13
+msgid "Structured Output in vllm-ascend"
+msgstr "vllm-ascend 中的结构化输出"
+
+#: ../../user_guide/feature_guide/structured_output.md:15
+msgid ""
+"Currently, vllm-ascend supports **xgrammar** and **guidance** backend for "
+"structured output with vllm v1 engine."
+msgstr "目前，vllm-ascend 支持 vllm v1 引擎的结构化输出，后端包括 **xgrammar** 和 **guidance**。"
+
+#: ../../user_guide/feature_guide/structured_output.md:17
+msgid ""
+"XGrammar introduces a new technique that batch constrained decoding via "
+"pushdown automaton (PDA). You can think of a PDA as a “collection of FSMs, "
+"and each FSM represents a context-free grammar (CFG).” One significant "
+"advantage of PDA is its recursive nature, allowing us to execute multiple "
+"state transitions. They also include additional optimisation (for those who "
+"are interested) to reduce grammar compilation overhead. Besides, you can "
+"also find more details about guidance by yourself."
+msgstr ""
+"XGrammar 引入了一种通过下推自动机（PDA）进行批量约束解码的新技术。你可以把 PDA 理解为“有限状态机（FSM）的集合，每个 FSM "
+"代表一个上下文无关文法（CFG）。” PDA 的一个重要优点是其递归特性，使我们能够执行多次状态转移。此外，PDA "
+"还包含了额外的优化（供感兴趣的用户参考），以减少语法编译的开销。除此之外，你还可以自己找到更多关于指导的信息。"
+
+#: ../../user_guide/feature_guide/structured_output.md:19
+msgid "How to Use Structured Output?"
+msgstr "如何使用结构化输出？"
+
+#: ../../user_guide/feature_guide/structured_output.md:21
+msgid "Online Inference"
+msgstr "在线推理"
+
+#: ../../user_guide/feature_guide/structured_output.md:23
+msgid ""
+"You can also generate structured outputs using the OpenAI's Completions and "
+"Chat API. The following parameters are supported, which must be added as "
+"extra parameters:"
+msgstr "你也可以使用 OpenAI 的 Completions 和 Chat API 生成结构化输出。支持以下参数，这些参数必须作为额外参数添加："
+
+#: ../../user_guide/feature_guide/structured_output.md:25
+msgid "`guided_choice`: the output will be exactly one of the choices."
+msgstr "`guided_choice`：输出将会是其中一个选项。"
+
+#: ../../user_guide/feature_guide/structured_output.md:26
+msgid "`guided_regex`: the output will follow the regex pattern."
+msgstr "`guided_regex`：输出将遵循正则表达式模式。"
+
+#: ../../user_guide/feature_guide/structured_output.md:27
+msgid "`guided_json`: the output will follow the JSON schema."
+msgstr "`guided_json`：输出将遵循 JSON 架构。"
+
+#: ../../user_guide/feature_guide/structured_output.md:28
+msgid "`guided_grammar`: the output will follow the context free grammar."
+msgstr "`guided_grammar`：输出将遵循上下文无关文法。"
+
+#: ../../user_guide/feature_guide/structured_output.md:30
+msgid ""
+"Structured outputs are supported by default in the OpenAI-Compatible Server."
+" You can choose to specify the backend to use by setting the `--guided-"
+"decoding-backend` flag to vllm serve. The default backend is `auto`, which "
+"will try to choose an appropriate backend based on the details of the "
+"request. You may also choose a specific backend, along with some options."
+msgstr ""
+"OpenAI 兼容服务器默认支持结构化输出。你可以通过设置 `--guided-decoding-backend` 标志为 vllm serve "
+"来指定要使用的后端。默认后端为 `auto`，它会根据请求的详细信息尝试选择合适的后端。你也可以选择特定的后端，并设置一些选项。"
+
+#: ../../user_guide/feature_guide/structured_output.md:32
+msgid ""
+"Now let´s see an example for each of the cases, starting with the "
+"guided_choice, as it´s the easiest one:"
+msgstr "现在让我们来看每种情况的示例，首先是 guided_choice，因为它是最简单的："
+
+#: ../../user_guide/feature_guide/structured_output.md:51
+msgid ""
+"The next example shows how to use the guided_regex. The idea is to generate "
+"an email address, given a simple regex template:"
+msgstr "下一个例子展示了如何使用 guided_regex。其思路是基于一个简单的正则表达式模板生成一个电子邮件地址："
+
+#: ../../user_guide/feature_guide/structured_output.md:67
+msgid ""
+"One of the most relevant features in structured text generation is the "
+"option to generate a valid JSON with pre-defined fields and formats. For "
+"this we can use the guided_json parameter in two different ways:"
+msgstr ""
+"在结构化文本生成中，最相关的特性之一是能够生成具有预定义字段和格式的有效 JSON。为此，我们可以通过两种不同的方式使用 guided_json 参数："
+
+#: ../../user_guide/feature_guide/structured_output.md:69
+msgid "Using a JSON Schema."
+msgstr "使用 JSON 架构。"
+
+#: ../../user_guide/feature_guide/structured_output.md:70
+msgid "Defining a Pydantic model and then extracting the JSON Schema from it."
+msgstr "定义一个 Pydantic 模型，然后从中提取 JSON Schema。"
+
+#: ../../user_guide/feature_guide/structured_output.md:72
+msgid ""
+"The next example shows how to use the guided_json parameter with a Pydantic "
+"model:"
+msgstr "下一个示例展示了如何将 guided_json 参数与 Pydantic 模型一起使用："
+
+#: ../../user_guide/feature_guide/structured_output.md:104
+msgid ""
+"Finally we have the guided_grammar option, which is probably the most "
+"difficult to use, but it´s really powerful. It allows us to define complete "
+"languages like SQL queries. It works by using a context free EBNF grammar. "
+"As an example, we can use to define a specific format of simplified SQL "
+"queries:"
+msgstr ""
+"最后，我们有 guided_grammar 选项，这可能是最难使用的，但它非常强大。它允许我们定义完整的语言，比如 SQL 查询。它通过使用上下文无关的"
+" EBNF 语法来实现。例如，我们可以用它来定义一种简化 SQL 查询的特定格式："
+
+#: ../../user_guide/feature_guide/structured_output.md:134
+msgid ""
+"Find more examples [here](https://github.com/vllm-"
+"project/vllm/blob/main/examples/offline_inference/structured_outputs.py)."
+msgstr ""
+"在[这里](https://github.com/vllm-"
+"project/vllm/blob/main/examples/offline_inference/structured_outputs.py)可以找到更多示例。"
+
+#: ../../user_guide/feature_guide/structured_output.md:136
+msgid "Offline Inference"
+msgstr "离线推理"
+
+#: ../../user_guide/feature_guide/structured_output.md:138
+msgid ""
+"To use Structured Output, we'll need to configure the guided decoding using "
+"the class `GuidedDecodingParams` inside `SamplingParams`. The main available"
+" options inside `GuidedDecodingParams` are:"
+msgstr ""
+"要使用结构化输出，我们需要在 `SamplingParams` 内通过 `GuidedDecodingParams` "
+"类配置引导解码。`GuidedDecodingParams` 中主要可用的选项有："
+
+#: ../../user_guide/feature_guide/structured_output.md:140
+msgid "json"
+msgstr "json"
+
+#: ../../user_guide/feature_guide/structured_output.md:141
+msgid "regex"
+msgstr "正则表达式"
+
+#: ../../user_guide/feature_guide/structured_output.md:142
+msgid "choice"
+msgstr "选择"
+
+#: ../../user_guide/feature_guide/structured_output.md:143
+msgid "grammar"
+msgstr "语法"
+
+#: ../../user_guide/feature_guide/structured_output.md:145
+msgid "One example for the usage of the choice parameter is shown below:"
+msgstr "choice 参数用法的一个示例如下："
+
+#: ../../user_guide/feature_guide/structured_output.md:163
+msgid ""
+"Find more examples of other usages [here](https://github.com/vllm-"
+"project/vllm/blob/main/examples/offline_inference/structured_outputs.py)."
+msgstr ""
+"查看更多其他用法的示例 [在这里](https://github.com/vllm-"
+"project/vllm/blob/main/examples/offline_inference/structured_outputs.py)。"
