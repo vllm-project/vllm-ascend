@@ -25,7 +25,7 @@ public:
     using Y_T = float;
 
     static constexpr uint64_t BUFFER_NUM = 1;
-    static constexpr uint64_t TILE_LENGTH = 11776;
+    static constexpr uint64_t TILE_LENGTH = 11776;  // optimal performance tile length
 
 public:
     __aicore__ inline BGMVShrink(AscendC::TPipe *pipe) : pipe_(pipe) {}
@@ -64,6 +64,7 @@ public:
             endIdx = batchSize_;
         }
         for (int64_t idx = startIdx; idx < endIdx; idx++) {
+            // set up LoRA index
             CopyInIndex(idx);
             if (reqLoRAIndex_ < 0) {
                 continue;
@@ -111,6 +112,7 @@ private:
 
     __aicore__ inline void CopyInIndex(const int64_t idx)
     {
+        // look up the LoRA index
         reqLoRAIndex_ = indicesGm_.GetValue(idx);
     }
 
@@ -147,9 +149,10 @@ private:
             pipe_barrier(PIPE_V);
             inQueueW_.FreeTensor(wLocal);
         }
-
+        // dot product of the one tile of X and W 
         Mul(wTmpTensor, xTmpTensor, wTmpTensor, numElements);
         pipe_barrier(PIPE_V);
+        // reduce sum generate one number, which is the summation of all the dot product
         ReduceSum<float>(wTmpTensor, wTmpTensor, wTmpTensor, numElements);
         pipe_barrier(PIPE_V);
 

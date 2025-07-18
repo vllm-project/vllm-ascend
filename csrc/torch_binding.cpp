@@ -289,6 +289,16 @@ void advance_step_flashattn_ascendc(
 void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y, double scale)
 {
     at::ScalarType scalar_type = x.scalar_type();
+    TORCH_CHECK(scalar_type == torch::KHalf || scalar_type == torch::KBFloat16, "only support half and bf16");
+    TORCH_CHECK(x.dim() == 2, "x should be [batch_size, hidden_in]");
+    TORCH_CHECK(weight.dim() == 3 || weight.dim() == 4,
+                "weight should be [num_loras, hidden_out, hidden_in] or [num_loras, 1, hidden_out, hidden_in]");
+    TORCH_CHECK(y.dim() == 2, "y should be [batch_size, hidden_out]");
+    TORCH_CHECK(indices.dim() == 1, "indices should be [batch_size]");
+    TORCH_CHECK(x.size(0) == y.size(0) && x.size(0) == indices.size(0),
+                "the first dimension of x, y, indices should be same");
+    TORCH_CHECK(x.size(1) > y.size(1), "hidden in should be greater than hidden out");
+    TORCH_CHECK(slice_offset >= 0, "slice offset should be no smaller than 0");
     void* x_ptr = x.data_ptr();
     void* weight_ptr = weight.data_ptr();
     void* indices_ptr = indices.data_ptr();
@@ -308,6 +318,7 @@ void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
         fe::PlatformInfoManager::GeInstance().GetRuntimePlatformInfosByDevice(device_id, platform_infos);
         uint32_t aiv_num = platform_infos.GetCoreNumByType("aiv");
         int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
+        TORCH_CHECK("num_tokens_per_core != 0", "num_tokens_per_core should not be 0");
         bgmv_shrink_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, y_ptr, batch_size, num_tokens_per_core,
                          input_hidden_token, lora_rank, scale_f);
         return 0;
@@ -319,7 +330,20 @@ void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
 void bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y,
                  int64_t slice_offset, int64_t slice_size)
 {
-    at::ScalarType scalar_type = x.scalar_type();
+    at::ScalarType scalar_type = y.scalar_type();
+    TORCH_CHECK(scalar_type == torch::KHalf || scalar_type == torch::KBFloat16, "only support half and bf16");
+    TORCH_CHECK(x.dim() == 2, "x should be [batch_size, hidden_in]");
+    TORCH_CHECK(weight.dim() == 3 || weight.dim() == 4,
+                "weight should be [num_loras, hidden_out, hidden_in] or [num_loras, 1, hidden_out, hidden_in]");
+    TORCH_CHECK(y.dim() == 2, "y should be [batch_size, hidden_out]");
+    TORCH_CHECK(indices.dim() == 1, "indices should be [batch_size]");
+    TORCH_CHECK(x.size(0) == y.size(0) && x.size(0) == indices.size(0),
+                "the first dimension of x, y, indices should be same");
+    TORCH_CHECK(x.size(1) <= slice_size, "hidden in should be smaller than hidden out");
+    TORCH_CHECK(slice_offset >= 0, "slice offset should be no smaller than 0");
+    TORCH_CHECK((slice_size + slice_offset) <= y.size(1),
+                "slice_size + slice_offset should be smaller than the second dimension of y")
+    
     void* x_ptr = x.data_ptr();
     void* weight_ptr = weight.data_ptr();
     void* indices_ptr = indices.data_ptr();
@@ -338,6 +362,7 @@ void bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
         fe::PlatformInfoManager::GeInstance().GetRuntimePlatformInfosByDevice(device_id, platform_infos);
         uint32_t aiv_num = platform_infos.GetCoreNumByType("aiv");
         int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
+        TORCH_CHECK("num_tokens_per_core != 0", "num_tokens_per_core should not be 0");
         bgmv_expand_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, y_ptr, batch_size, num_tokens_per_core,
                          lora_rank, slice_size, slice_offset, output_full_dim);
         return 0;
