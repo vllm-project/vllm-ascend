@@ -242,6 +242,7 @@ class CustomDeepseekV2MoE(nn.Module):
                                      config.n_routed_experts,
                                      bias=False,
                                      quant_config=None,
+                                     params_dtype=torch.float32,
                                      prefix=f"{prefix}.gate")
         if config.topk_method == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(

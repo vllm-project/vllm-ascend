@@ -63,6 +63,8 @@ class TorchairGraphConfig:
         self.enable_view_optimize = torchair_graph_config.get(
             "enable_view_optimize", True)
         self.enable_kv_nz = torchair_graph_config.get("enable_kv_nz", False)
+        self.enable_super_kernel = torchair_graph_config.get(
+            "enable_super_kernel", False)
 
         if not isinstance(self.graph_batch_sizes, list):
             raise TypeError("graph_batch_sizes must be list[int]")
@@ -94,6 +96,16 @@ class TorchairGraphConfig:
             if self.enable_kv_nz:
                 raise RuntimeError(
                     "enable_kv_nz is valid only when Torchair graph mode is enabled"
+                )
+            if self.enable_super_kernel:
+                raise RuntimeError(
+                    "enable_super_kernel is valid only when Torchair graph mode and enable_multistream_moe is enabled"
+                )
+
+        if not self.enable_multistream_moe:
+            if self.enable_super_kernel:
+                raise RuntimeError(
+                    "enable_super_kernel is valid only when Torchair graph mode and enable_multistream_moe is enabled"
                 )
 
 
