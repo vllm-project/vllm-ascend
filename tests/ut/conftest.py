@@ -1,5 +1,6 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,28 +16,11 @@
 # This file is a part of the vllm-ascend project.
 #
 
-import torch
-from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
+from vllm_ascend.utils import adapt_patch  # noqa E402
+from vllm_ascend.utils import register_ascend_customop
 
+adapt_patch()
+adapt_patch(True)
 
-class AscendQuickGELU(QuickGELU):
-
-    def forward_oot(self, x: torch.tensor) -> torch.Tensor:
-        import torch_npu
-
-        out = torch_npu.npu_fast_gelu(x)
-        return out
-
-
-class AscendSiluAndMul(SiluAndMul):
-
-    def forward_oot(self, x: torch.Tensor) -> torch.Tensor:
-        import torch_npu
-
-        from vllm_ascend.utils import is_310p
-
-        if is_310p():
-            out = torch_npu.npu_swiglu(x.to(torch.float32)).to(torch.float16)
-        else:
-            out = torch_npu.npu_swiglu(x)
-        return out
+# register Ascend CustomOp here because uts will use this
+register_ascend_customop()

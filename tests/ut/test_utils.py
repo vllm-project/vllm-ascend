@@ -301,6 +301,24 @@ class TestUtils(TestBase):
         self.assertFalse(utils.check_kv_cache_bytes_cache_exist(),
                          "Delete kv cache bytes cache dir failed")
 
+    @mock.patch("vllm.model_executor.custom_op.CustomOp")
+    @mock.patch("vllm_ascend.ops.activation.AscendQuickGELU")
+    @mock.patch("vllm_ascend.ops.activation.AscendSiluAndMul")
+    def test_register_ascend_customop(self, mock_ascend_silu_and_mul,
+                                      mock_ascend_quick_gelu, mock_customop):
+        utils._ASCEND_CUSTOMOP_IS_REIGISTERED = False
+
+        # ascend custom op is not registered
+        utils.register_ascend_customop()
+        # should call register_oot twice
+        self.assertEqual(mock_customop.register_oot.call_count, 2)
+        self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
+
+        # ascend custom op is already registered
+        utils.register_ascend_customop()
+        # should not register_oot again, thus only called twice in this ut
+        self.assertEqual(mock_customop.register_oot.call_count, 2)
+
 
 class TestProfileExecuteDuration(unittest.TestCase):
 
