@@ -41,7 +41,8 @@ from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 
 
-from vllm.distributed.parallel_state import get_dp_group, get_pp_group, get_tp_group
+from vllm.distributed.parallel_state import (get_dp_group, get_pp_group,
+                                             get_tp_group)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
@@ -351,7 +352,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         torch._logging.set_logs(
             recompiles=envs_ascend.VLLM_ASCEND_TRACE_RECOMPILES)
 
-        # kv role 
+        # kv role
         self.is_kv_producer = False
         if vllm_config.kv_transfer_config is not None:
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
