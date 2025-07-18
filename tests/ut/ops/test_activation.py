@@ -1,0 +1,46 @@
+from unittest.mock import patch
+
+import pytest
+import torch
+from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
+
+
+@pytest.fixture
+def dummy_tensor():
+    return torch.randn(4, 8, dtype=torch.float16)
+
+
+@patch("torch_npu.npu_fast_gelu", side_effect=lambda x: x + 1)
+def test_QuickGELU_forward(mock_gelu, dummy_tensor):
+    layer = QuickGELU()
+    out = layer.forward(dummy_tensor)
+
+    expected_out = dummy_tensor + 1
+    assert torch.allclose(out, expected_out)
+
+    mock_gelu.assert_called_once()
+
+
+@pytest.mark.parametrize("is_310p_return", [True, False])
+@patch("torch_npu.npu_swiglu", side_effect=lambda x: x + 1)
+def test_SiluAndMul_forward(mock_swiglu, is_310p_return, dummy_tensor):
+
+    with patch("vllm_ascend.utils.is_310p", return_value=is_310p_return):
+        layer = SiluAndMul()
+        out = layer.forward(dummy_tensor)
+
+        if is_310p_return:
+            expected_arg = dummy_tensor.to(torch.float32)
+        else:
+            expected_arg = dummy_tensor
+
+        # assert mock_swiglu.call_count == 1
+        mock_swiglu.assert_called_once()
+
+        actual_arg = mock_swiglu.call_args[0][0]
+        assert torch.allclose(
+            actual_arg,
+            expected_arg), "npu_swiglu called with unexpected input"
+
+        expected_out = dummy_tensor + 1
+        assert torch.allclose(out, expected_out)

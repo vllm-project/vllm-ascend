@@ -114,7 +114,7 @@ class TestAscendQuantConfig(TestBase):
 
         # Test skipped layer
         with patch.object(self.ascend_config, 'is_layer_skipped_ascend', return_value=True), \
-            patch('vllm_ascend.quantization.quant_config.AscendUnquantizedFusedMoEMethod', return_value=MagicMock()) as mock_ascend_moe:
+            patch('vllm_ascend.quantization.quant_config.AscendDSUnquantizedFusedMoEMethod', return_value=MagicMock()) as mock_ascend_moe:
             method = self.ascend_config.get_quant_method(
                 fused_moe_layer, "moe_layer")
             self.assertIs(method, mock_ascend_moe.return_value)
