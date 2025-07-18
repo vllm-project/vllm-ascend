@@ -1,7 +1,6 @@
 import unittest
 from unittest.mock import MagicMock, patch
 
-import pytest
 import torch
 from vllm.distributed.utils import StatelessProcessGroup
 
@@ -22,21 +21,21 @@ class TestPyHcclCommunicator(unittest.TestCase):
             self.internal = internal or [0] * 128
 
         def __getstate__(self):
-            return {'internal': self.internal}
+            return {"internal": self.internal}
 
         def __setstate__(self, state):
             self.__dict__.update(state)
 
     def setUp(self):
-        self.mock_dist_patcher = patch('torch.distributed.is_initialized',
+        self.mock_dist_patcher = patch("torch.distributed.is_initialized",
                                        return_value=True)
-        self.mock_backend_patcher = patch('torch.distributed.get_backend',
-                                          return_value='nccl')
-        self.mock_rank_patcher = patch('torch.distributed.get_rank',
+        self.mock_backend_patcher = patch("torch.distributed.get_backend",
+                                          return_value="nccl")
+        self.mock_rank_patcher = patch("torch.distributed.get_rank",
                                        return_value=0)
         self.mock_world_size_patcher = patch(
-            'torch.distributed.get_world_size', return_value=2)
-        self.mock_broadcast_patcher = patch('torch.distributed.broadcast',
+            "torch.distributed.get_world_size", return_value=2)
+        self.mock_broadcast_patcher = patch("torch.distributed.broadcast",
                                             return_value=None)
 
         self.mock_is_initialized = self.mock_dist_patcher.start()
@@ -52,7 +51,7 @@ class TestPyHcclCommunicator(unittest.TestCase):
         self.addCleanup(self.mock_broadcast_patcher.stop)
 
         # Patch get_process_group_ranks
-        self.patch_get_pgr = patch('torch.distributed.get_process_group_ranks',
+        self.patch_get_pgr = patch("torch.distributed.get_process_group_ranks",
                                    return_value={
                                        0: 0,
                                        1: 1
@@ -62,7 +61,7 @@ class TestPyHcclCommunicator(unittest.TestCase):
 
         # Mock HCCLLibrary
         self.mock_hccl_patcher = patch(
-            'vllm_ascend.distributed.device_communicators.pyhccl.HCCLLibrary')
+            "vllm_ascend.distributed.device_communicators.pyhccl.HCCLLibrary")
         self.mock_hccl_lib = self.mock_hccl_patcher.start()
         self.addCleanup(self.mock_hccl_patcher.stop)
 
@@ -75,17 +74,17 @@ class TestPyHcclCommunicator(unittest.TestCase):
         self.mock_hccl_lib.return_value = self.hccl_instance
 
         # Mock current_stream
-        self.mock_stream_patcher = patch('vllm_ascend.utils.current_stream')
+        self.mock_stream_patcher = patch("vllm_ascend.utils.current_stream")
         self.mock_stream = self.mock_stream_patcher.start()
         self.addCleanup(self.mock_stream_patcher.stop)
 
-        self.mock_npu_device_patcher = patch('torch.npu.device',
+        self.mock_npu_device_patcher = patch("torch.npu.device",
                                              lambda x: MagicMock())
         self.mock_npu_device = self.mock_npu_device_patcher.start()
         self.addCleanup(self.mock_npu_device_patcher.stop)
 
         self.mock_npu_current_stream_patcher = patch(
-            'torch.npu.current_stream',
+            "torch.npu.current_stream",
             lambda device=None: MagicMock(npu_stream=None))
         self.mock_npu_current_stream = self.mock_npu_current_stream_patcher.start(
         )
@@ -151,8 +150,8 @@ class TestPyHcclCommunicator(unittest.TestCase):
             def __call__(self, obj, src):
                 return self.unique_id
 
-        group.broadcast_obj.return_value = TestPyHcclCommunicator.MockStatelessUniqueId(
-        )
+        group.broadcast_obj.return_value = (
+            TestPyHcclCommunicator.MockStatelessUniqueId())
         comm = PyHcclCommunicator(group, device="cpu")
         self.assertEqual(comm.rank, 0)
         self.assertEqual(comm.world_size, 2)
@@ -167,8 +166,9 @@ class TestPyHcclCommunicator(unittest.TestCase):
     def test_init_hccl_load_fail(self):
         self.mock_hccl_patcher.stop()
         self.mock_hccl_patcher = patch(
-            'vllm_ascend.distributed.device_communicators.pyhccl.HCCLLibrary',
-            side_effect=OSError("Load failed"))
+            "vllm_ascend.distributed.device_communicators.pyhccl.HCCLLibrary",
+            side_effect=OSError("Load failed"),
+        )
         self.mock_hccl_patcher.start()
 
         try:
