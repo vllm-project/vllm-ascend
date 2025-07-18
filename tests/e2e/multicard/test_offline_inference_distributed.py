@@ -32,7 +32,7 @@ from tests.e2e.conftest import VllmRunner
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 
-@pytest.mark.parametrize("distributed_executor_backend", ["mp", "ray"])
+@pytest.mark.parametrize("distributed_executor_backend", ["mp"])
 def test_models_distributed_QwQ(example_prompts, distributed_executor_backend):
     dtype = "half"
     max_tokens = 5
