@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import torch
 from vllm.config import VllmConfig
-from vllm.distributed import get_dp_group, get_tp_group, get_ep_group
+from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.platforms import current_platform
 
