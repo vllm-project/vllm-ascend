@@ -5,7 +5,7 @@ from typing import Any, Optional
 
 import torch
 from vllm.config import VllmConfig
-from vllm.distributed import get_dp_group, get_tp_group
+from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.platforms import current_platform
 
@@ -63,7 +63,7 @@ def set_ascend_forward_context(
     ):
         forward_context = get_forward_context()
         forward_context.with_prefill = with_prefill
-        ep_size = (torch.distributed.get_world_size() if
+        ep_size = (get_ep_group().world_size if
                    vllm_config.parallel_config.enable_expert_parallel else 1)
 
         fused_moe_state = get_fused_moe_state(ep_size, with_prefill)

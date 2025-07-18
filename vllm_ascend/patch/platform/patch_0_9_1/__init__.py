@@ -17,5 +17,8 @@
 
 # patch_utils should be the first import, because it will be used by other
 # patch files.
+import vllm.envs as envs
+
 import vllm_ascend.patch.worker.patch_common.patch_utils  # noqa isort:skip
-import vllm_ascend.patch.platform.patch_0_9_1.patch_decorator  # noqa
+if envs.VLLM_USE_V1:
+    import vllm_ascend.patch.platform.patch_0_9_1.patch_decorator  # noqa
