@@ -380,8 +380,9 @@ TORCH_LIBRARY_EXPAND(_C, ops)
     ops.def("bgmv_shrink(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y, float scale) -> ()");
     ops.impl("bgmv_shrink", torch::kPrivateUse1, &vllm_ascend::bgmv_shrink);
 
-    ops.def("bgmv_expand(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y,"
-            "            int64 slice_offset, int64 slice_size) -> ()");
+    ops.def(
+        "bgmv_expand(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y,"
+        "            int slice_offset, int slice_size) -> ()");
     ops.impl("bgmv_expand", torch::kPrivateUse1, &vllm_ascend::bgmv_expand);
 }
 
