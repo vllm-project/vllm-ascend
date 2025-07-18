@@ -29,7 +29,7 @@ from vllm.platforms import Platform, PlatformEnum
 from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
 from vllm_ascend.utils import (ASCEND_QUATIZATION_METHOD, is_310p,
-                               update_aclgraph_sizes)
+                               register_ascend_customop, update_aclgraph_sizes)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -204,6 +204,9 @@ class NPUPlatform(Platform):
                 vllm_config.scheduler_config,
                 ascend_config.ascend_scheduler_config)
             vllm_config.scheduler_config = ascend_scheduler_config
+
+        # register Ascend CustomOp
+        register_ascend_customop()
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,

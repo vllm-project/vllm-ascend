@@ -561,3 +561,26 @@ def delete_torchair_cache_file():
     torch_air_abs_path = get_torchair_current_work_dir()
     if os.path.exists(torch_air_abs_path):
         shutil.rmtree(torch_air_abs_path)
+
+
+_ASCEND_CUSTOMOP_IS_REIGISTERED = False
+
+
+def register_ascend_customop():
+    """Register Ascend CustomOP
+
+    NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`, 
+    and ensure this will execute after model config is initilazed.
+    """
+    global _ASCEND_CUSTOMOP_IS_REIGISTERED
+    if _ASCEND_CUSTOMOP_IS_REIGISTERED:
+        return
+    from vllm.model_executor.custom_op import CustomOp
+
+    from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
+    CustomOp.register_oot(_decorated_op_cls=AscendQuickGELU, name="QuickGELU")
+    CustomOp.register_oot(_decorated_op_cls=AscendSiluAndMul,
+                          name="SiluAndMul")
+
+    # NOTE: Keep this at last to ensure all custom actions are registered
+    _ASCEND_CUSTOMOP_IS_REIGISTERED = True
