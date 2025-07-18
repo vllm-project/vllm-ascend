@@ -637,6 +637,21 @@ class PanguProMoEAttention(nn.Module):
         output, _ = self.o_proj(attn_output)
         return output
 
+def is_the_first_4_cards():
+    # True [0,3]
+    # False [4,7]
+    ep_group = get_ep_group()
+    device_group = ep_group.device_group
+    local_rank = torch.distributed.get_rank(group=device_group)
+    if local_rank < 4:
+        return True
+    return False
+
+def get_local_rank():
+    ep_group = get_ep_group()
+    device_group = ep_group.device_group
+    local_rank = torch.distributed.get_rank(group=device_group)
+    return local_rank
 
 class PanguProMoEDecoderLayer(nn.Module):
 
@@ -653,37 +668,40 @@ class PanguProMoEDecoderLayer(nn.Module):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
-
-        self.self_attn = PanguProMoEAttention(
-            hidden_size=self.hidden_size,
-            num_heads=config.num_attention_heads,
-            num_kv_heads=config.num_key_value_heads,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
-            max_position_embeddings=max_position_embeddings,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
-        )
-
-        # `mlp_only_layers` in the config.
-        layer_idx = extract_layer_index(prefix)
-        mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
-                           config.mlp_only_layers)
-        if (layer_idx not in mlp_only_layers) and (config.num_experts > 0):
-            self.mlp = PanguProMoESparseMoeBlock(
-                config=config,
+        # Attention
+        if is_the_first_4_cards():
+            self.mlp = None
+            self.self_attn = PanguProMoEAttention(
+                hidden_size=self.hidden_size,
+                num_heads=config.num_attention_heads,
+                num_kv_heads=config.num_key_value_heads,
+                rope_theta=rope_theta,
+                rope_scaling=rope_scaling,
+                max_position_embeddings=max_position_embeddings,
+                cache_config=cache_config,
                 quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
+                prefix=f"{prefix}.self_attn",
             )
+        # Export
         else:
-            self.mlp = PanguProMoEMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=config.intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
-            )
+            # `mlp_only_layers` in the config.
+            layer_idx = extract_layer_index(prefix)
+            mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
+                               config.mlp_only_layers)
+            if (layer_idx not in mlp_only_layers) and (config.num_experts > 0):
+                self.mlp = PanguProMoESparseMoeBlock(
+                    config=config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.mlp",
+                )
+            else:
+                self.mlp = PanguProMoEMLP(
+                    hidden_size=config.hidden_size,
+                    intermediate_size=config.intermediate_size,
+                    hidden_act=config.hidden_act,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.mlp",
+                )
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
@@ -723,13 +741,45 @@ class PanguProMoEDecoderLayer(nn.Module):
                 if need_h2p_pad:
                     hidden_states = hidden_states.index_select(
                         dim=0, index=h2p_unpad_idx)
+        # 如果是Attn就计算一次Attn，否则就不计算
+        if self.self_attn is not None:
+            # 计算attention
+            hidden_states = self.self_attn(
+                positions=positions,
+                hidden_states=hidden_states,
+                kv_cache=kv_cache,
+                attn_metadata=attn_metadata,
+            )
+            # Fully Connected
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual)
+            # 发送给对应的exprot
+            # AE分离场景下，attention 所在的卡（例如卡0）需要将hidden_states、attn_metadata、
+            # mla_moe_communication send 给export所在的卡（例如卡8）
+            local_rank = get_local_rank()
+            dst_rank = local_rank + 4
+            ep_group = get_ep_group()
+            matedata_list = [hidden_states, attn_metadata]
+            ep_group.send_object(matedata_list, dst_rank)
+        # export
+        else:
+            # recv
+            # 接收attn发送的数据
+            local_rank = get_local_rank()
+            src_rank = local_rank - 4
+            ep_group = get_ep_group()
+            recv_matedata_list = ep_group.recv_object(src_rank)
+            hidden_states, attn_metadata, mla_moe_communication = recv_matedata_list
+            # 计算
+            hidden_states = self.mlp(hidden_states, attn_metadata=attn_metadata)
+            # send
+            local_rank = get_local_rank()
+            dst_rank = local_rank - 4
+            ep_group = get_ep_group()
+            matedata_list = [hidden_states]
+            ep_group.send_object(matedata_list, dst_rank)
+        hidden_states = matedata_list[0]
 
-        hidden_states = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-            kv_cache=kv_cache,
-            attn_metadata=attn_metadata,
-        )
 
         if use_h2p():
             if need_h2p_pad:
@@ -741,10 +791,6 @@ class PanguProMoEDecoderLayer(nn.Module):
                     "sum",
                     scatter_dim=0,
                     group=get_tp_group().device_group)
-
-        # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
 
         if use_h2p():
             all_rank_group = get_world_group().device_group
@@ -761,7 +807,6 @@ class PanguProMoEDecoderLayer(nn.Module):
                                         group=all_rank_group)
             hidden_states = output_tensor
 
-        hidden_states = self.mlp(hidden_states, attn_metadata=attn_metadata)
 
         if use_h2p():
             hidden_states = dist._functional_collectives.reduce_scatter_tensor(
