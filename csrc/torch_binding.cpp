@@ -204,31 +204,6 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
     cmd.Run();
     return {masked_input, mask};
 }
-
-void verify_tensor(std::string const& name, at::Tensor const& t,
-                          int64_t const size_0, int64_t const size_1,
-                          c10::ScalarType const type) {
-    bool size_0_cond = true;
-    if (size_0 != -1) {
-        size_0_cond = t.size(0) == size_0;
-    }
-
-    bool size_1_cond = true;
-    if (size_1 != -1) {
-        size_1_cond = t.size(1) == size_1;
-    }
-
-    bool is_contiguous = t.is_contiguous();
-    bool same_type = t.dtype() == type;
-
-    bool pass = size_0_cond && size_1_cond && is_contiguous && same_type;
-    if (!pass) {
-        TORCH_CHECK(false, "tensor: name = ", name, ", shape = ", t.sizes(),
-                " is_cont = ", t.is_contiguous(), ", type = ", t.dtype(),
-                " is not as expected: shape = [", size_0, ", ", size_1,
-                "], type = ", type);
-    }
-}
 } // namespace vllm_ascend
 
 TORCH_LIBRARY_EXPAND(_C, ops)
