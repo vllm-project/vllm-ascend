@@ -82,6 +82,8 @@ jobs:
 
       - name: Config mirrors
         run: |
+          # keep using tuna's proxy since linux-arm64-npu-static-8 is in another region
+          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
           pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 
       - name: Install system dependencies
