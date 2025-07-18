@@ -124,14 +124,12 @@ def gmm_expert(x, expert_tokens, w1, w2, w1_scale, w2_scale, dynamic_scale=None,
                                             output_dtype=torch.int32, group_type=0,
                                             group_list_type=1, tuning_config=avg_tokens_per_expert)[0]
     # dequant_swiglu_quant
-    # op[DequantSwigluQuant], ScaleShape[0] be groupNum[16], but is [256]
-    scale_2 = torch.ones((16, w1_scale.shape[-1]//2), dtype=torch.float32, device=x.device)
     # op[DequantSwigluQuant], weight_scale dtype only support float32, please check
     w1_scale = w1_scale.to(torch.float32)
 
     intermediate_h, pertoken_scale = torch_npu.npu_dequant_swiglu_quant(
         x=mm1_mm3, weight_scale=w1_scale,
-        activation_scale=pertoken_scale.squeeze(0), bias=None, quant_scale=scale_2, quant_offset=None,
+        activation_scale=pertoken_scale.squeeze(0), bias=None, quant_scale=None, quant_offset=None,
         group_index=expert_tokens, activate_left=True, quant_mode=1)
 
     if pertoken_scale.dim() > 1:
@@ -392,7 +390,11 @@ def fused_experts_with_mc2(
         return hidden_states, shared_output
 
 
-def fused_experts_with_all2all_v2(x, topk_ids, topk_weight, w1, w2, w1_scale, w2_scale):
+def fused_experts_with_all2all_v2(x, topk_ids, topk_weight, w1, w2, w1_scale, w2_scale, ep_group, log2phy=None, global_redundant_expert_num=0):
+    if log2phy is not None:
+        topk_ids = log2phy[topk_ids]
+    global_num_experts = global_redundant_expert_num + 256
+    
     _, h = x.shape
     hidden_states = x.view(-1, h)
     topk_weight = topk_weight.to(x.dtype)
@@ -401,14 +403,14 @@ def fused_experts_with_all2all_v2(x, topk_ids, topk_weight, w1, w2, w1_scale, w2
         expert_idx=topk_ids.to(torch.int32),
         active_num=0,
         expert_capacity=0,
-        expert_num=256,
+        expert_num=global_num_experts,
         drop_pad_mode=0,
         expert_tokens_count_or_cumsum_flag=2,
         expert_tokens_before_capacity_flag=False,
         quant_mode=1,
     )
     
-    ep_size = 16
+    ep_size = ep_group.world_size
 
     tokens_per_expert_group = tokens_per_expert.new_empty(tokens_per_expert.shape[0])
     dist.all_to_all_single(tokens_per_expert_group, tokens_per_expert)  # (total_experts,) --> (total_ranks * n_routed_experts_per_rank)
@@ -1070,6 +1072,9 @@ class AscendW8A8DynamicFusedMoEMethod:
                 w2=layer.w2_weight,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
+                ep_group=self.ep_group,
+                log2phy=log2phy,
+                global_redundant_expert_num=global_redundant_expert_num
             )
         else:
             # The current implementation of deepseek moe splits hidden_states
