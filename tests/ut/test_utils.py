@@ -239,17 +239,27 @@ class TestUtils(TestBase):
     def test_vllm_version_is(self):
         with mock.patch.dict(os.environ, {"VLLM_VERSION": "1.0.0"}):
             with mock.patch("vllm.__version__", "1.0.0"):
-                self.assertTrue(utils.vllm_version_is("1.0.0"))
-                self.assertFalse(utils.vllm_version_is("2.0.0"))
+                self.assertTrue(utils.vllm_version_is.__wrapped__("1.0.0"))
+                self.assertFalse(utils.vllm_version_is.__wrapped__("2.0.0"))
             with mock.patch("vllm.__version__", "2.0.0"):
-                self.assertTrue(utils.vllm_version_is("1.0.0"))
-                self.assertFalse(utils.vllm_version_is("2.0.0"))
+                self.assertTrue(utils.vllm_version_is.__wrapped__("1.0.0"))
+                self.assertFalse(utils.vllm_version_is.__wrapped__("2.0.0"))
         with mock.patch("vllm.__version__", "1.0.0"):
-            self.assertTrue(utils.vllm_version_is("1.0.0"))
-            self.assertFalse(utils.vllm_version_is("2.0.0"))
+            self.assertTrue(utils.vllm_version_is.__wrapped__("1.0.0"))
+            self.assertFalse(utils.vllm_version_is.__wrapped__("2.0.0"))
         with mock.patch("vllm.__version__", "2.0.0"):
-            self.assertTrue(utils.vllm_version_is("2.0.0"))
-            self.assertFalse(utils.vllm_version_is("1.0.0"))
+            self.assertTrue(utils.vllm_version_is.__wrapped__("2.0.0"))
+            self.assertFalse(utils.vllm_version_is.__wrapped__("1.0.0"))
+        # Test caching takes effect
+        utils.vllm_version_is.cache_clear()
+        utils.vllm_version_is("1.0.0")
+        misses = utils.vllm_version_is.cache_info().misses
+        hits = utils.vllm_version_is.cache_info().hits
+        self.assertEqual(misses, 1)
+        self.assertEqual(hits, 0)
+        utils.vllm_version_is("1.0.0")
+        hits = utils.vllm_version_is.cache_info().hits
+        self.assertEqual(hits, 1)
 
     def test_update_aclgraph_sizes(self):
         # max_num_batch_sizes < len(original_sizes)

@@ -19,6 +19,7 @@
 
 import atexit
 import fcntl
+import functools
 import math
 import os
 import shutil
@@ -280,6 +281,7 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import worker  # noqa: F401
 
 
+@functools.cache
 def vllm_version_is(target_vllm_version: str):
     if envs.VLLM_VERSION is not None:
         vllm_version = envs.VLLM_VERSION
