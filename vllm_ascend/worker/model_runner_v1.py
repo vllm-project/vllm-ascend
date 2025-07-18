@@ -39,13 +39,11 @@ from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-
-
-from vllm.distributed.parallel_state import (get_dp_group, get_pp_group,
-                                             get_tp_group)
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
+from vllm.distributed.parallel_state import (get_dp_group, get_pp_group,
+                                             get_tp_group)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import logger
