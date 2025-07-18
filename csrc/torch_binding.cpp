@@ -289,7 +289,7 @@ void advance_step_flashattn_ascendc(
 void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y, double scale)
 {
     at::ScalarType scalar_type = x.scalar_type();
-    TORCH_CHECK(scalar_type == torch::KHalf || scalar_type == torch::KBFloat16, "only support half and bf16");
+    TORCH_CHECK(scalar_type == torch::kHalf || scalar_type == torch::kBFloat16, "only support half and bf16");
     TORCH_CHECK(x.dim() == 2, "x should be [batch_size, hidden_in]");
     TORCH_CHECK(weight.dim() == 3 || weight.dim() == 4,
                 "weight should be [num_loras, hidden_out, hidden_in] or [num_loras, 1, hidden_out, hidden_in]");
@@ -298,7 +298,6 @@ void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
     TORCH_CHECK(x.size(0) == y.size(0) && x.size(0) == indices.size(0),
                 "the first dimension of x, y, indices should be same");
     TORCH_CHECK(x.size(1) > y.size(1), "hidden in should be greater than hidden out");
-    TORCH_CHECK(slice_offset >= 0, "slice offset should be no smaller than 0");
     void* x_ptr = x.data_ptr();
     void* weight_ptr = weight.data_ptr();
     void* indices_ptr = indices.data_ptr();
@@ -331,7 +330,7 @@ void bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
                  int64_t slice_offset, int64_t slice_size)
 {
     at::ScalarType scalar_type = y.scalar_type();
-    TORCH_CHECK(scalar_type == torch::KHalf || scalar_type == torch::KBFloat16, "only support half and bf16");
+    TORCH_CHECK(scalar_type == torch::kHalf || scalar_type == torch::kBFloat16, "only support half and bf16");
     TORCH_CHECK(x.dim() == 2, "x should be [batch_size, hidden_in]");
     TORCH_CHECK(weight.dim() == 3 || weight.dim() == 4,
                 "weight should be [num_loras, hidden_out, hidden_in] or [num_loras, 1, hidden_out, hidden_in]");
