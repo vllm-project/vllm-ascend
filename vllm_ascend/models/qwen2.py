@@ -248,6 +248,7 @@ class CustomQwen2DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
 
+        self.enable_fc = ascend_envs.VLLM_ASCEND_ENABLE_FLASHCOMM
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.self_attn.o_proj.reduce_results = False
@@ -307,7 +308,7 @@ class CustomQwen2DecoderLayer(nn.Module):
         if flashcomm_v1_enabled:
             hidden_states = maybe_pad_and_reduce_scatter(
                 hidden_states, pad_size)
-        else:
+        elif self.enable_fc != 2:
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         # Fully Connected
         if self.enable_fc == 2:
@@ -322,7 +323,7 @@ class CustomQwen2DecoderLayer(nn.Module):
         if flashcomm_v1_enabled:
             hidden_states = maybe_pad_and_reduce_scatter(
                 hidden_states, pad_size)
-        else:
+        elif self.enable_fc != 2:
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         return hidden_states, residual, pad_size
 
@@ -349,6 +350,7 @@ class CustomQwen2Model(Qwen2Model):
                          decoder_layer_type=decoder_layer_type)
         self.tp_size = get_tensor_model_parallel_world_size()
         self.cos_sin_cache = self.layers[0].self_attn.rotary_emb.cos_sin_cache
+        self.enable_fc = ascend_envs.VLLM_ASCEND_ENABLE_FLASHCOMM
 
     def forward(
         self,
@@ -389,7 +391,7 @@ class CustomQwen2Model(Qwen2Model):
             1, -1, 1, last_dim).contiguous()
 
         for layer in self.layers[self.start_layer:self.end_layer]:
-            hidden_states, residual = layer(
+            hidden_states, residual, pad_size = layer(
                 positions,
                 hidden_states,
                 residual,
