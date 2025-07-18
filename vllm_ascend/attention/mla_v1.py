@@ -15,7 +15,6 @@ from vllm.model_executor.layers.linear import (LinearBase,
 from vllm.utils import cdiv, round_down
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention import _ALLOWED_NUM_QUERIES_PER_KV
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
@@ -26,6 +25,8 @@ from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
+
+_ALLOWED_NUM_QUERIES_PER_KV = [32, 64, 128]
 
 
 @dataclass
