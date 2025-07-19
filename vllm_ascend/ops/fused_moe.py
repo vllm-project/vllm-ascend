@@ -1284,7 +1284,8 @@ class AscendFusedMoE(FusedMoE):
                 top_k: Optional[int] = None,
                 shared_experts: Optional[Any] = None,
                 gate=None,
-                replace_allreduce: bool = False):
+                replace_allreduce: bool = False,
+                enable_sp: bool = False):
 
         assert self.quant_method is not None
 
@@ -1297,14 +1298,16 @@ class AscendFusedMoE(FusedMoE):
         is_deepseek_v3_r1 = self.global_num_experts == 256
 
         fused_moe_state = get_fused_moe_state(self.moe_parallel_config.ep_size,
-                                              is_prefill, is_deepseek_v3_r1)
+                                              is_prefill, is_deepseek_v3_r1, enable_sp=enable_sp)
         if shared_experts:
             if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
                 # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
                 shared_hidden_states = shared_experts(hidden_states)
 
         tp_size = get_tensor_model_parallel_world_size()
-        if (tp_size > 1 and fused_moe_state not in [
+        if enable_sp:
+            pass
+        elif (tp_size > 1 and fused_moe_state not in [
                 FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
                 FusedMoEState.NaiveMulticast
         ] and not replace_allreduce):
@@ -1323,7 +1326,7 @@ class AscendFusedMoE(FusedMoE):
             hidden_states = chunk_hidden_states[tp_rank]
             router_logits = chunk_router_logits[tp_rank]
 
-        if self.dp_size > 1:
+        if self.dp_size > 1 and not enable_sp:
             if fused_moe_state == FusedMoEState.AllGather:
                 # NOTE: When in torchair graph, it has been padded in model_runner_v1
                 if not self.torchair_graph_enabled:
@@ -1384,7 +1387,9 @@ class AscendFusedMoE(FusedMoE):
             if isinstance(e_hidden_states, tuple):
                 e_hidden_states, shared_hidden_states = e_hidden_states
 
-        if (tp_size > 1 and fused_moe_state not in [
+        if enable_sp:
+            final_hidden_states = e_hidden_states
+        elif (tp_size > 1 and fused_moe_state not in [
                 FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
                 FusedMoEState.NaiveMulticast
         ] and not replace_allreduce):
