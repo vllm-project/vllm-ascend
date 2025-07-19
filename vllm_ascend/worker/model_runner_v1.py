@@ -86,6 +86,8 @@ from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.utils import ProfileExecuteDuration
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 
+from ..quantization.func_wrapper import wrapper_load_model
+
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -1776,6 +1778,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.encoder_cache.clear()
         gc.collect()
 
+    @wrapper_load_model
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
 
