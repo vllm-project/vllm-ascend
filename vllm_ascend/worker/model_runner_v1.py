@@ -1032,6 +1032,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         with_prefill = attn_state not in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
+        self.with_prefill = with_prefill
 
         if self.dp_size > 1:
             max_num_tokens, with_prefill = self._get_forward_metadata_across_dp(
@@ -1047,10 +1048,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             else:
                 padded_batch_size = self.select_torchair_padded_batch_size(
                     total_num_scheduled_tokens)
+            self.padded_batch_size = padded_batch_size
             graph_pad_size = padded_batch_size - total_num_scheduled_tokens
 
             extra_builder_kwargs['graph_pad_size'] = graph_pad_size
-
+        self.extra_builder_kwargs = extra_builder_kwargs
         if self.vllm_config.model_config.use_mla:
             query_start_loc = self.query_start_loc[:num_reqs + 1]
             seq_lens = self.seq_lens[:num_reqs]
