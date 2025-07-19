@@ -546,8 +546,7 @@ class NPUWorker(LocalOrDistributedWorkerBase):
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size)
-        init_ascend_model_parallel(parallel_config.expert_parallel_size,
-                                   parallel_config.world_size_across_dp)
+        init_ascend_model_parallel(parallel_config.expert_parallel_size)
         ensure_kv_transfer_initialized(vllm_config)
 
 
