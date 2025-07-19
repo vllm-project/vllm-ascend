@@ -651,8 +651,8 @@ def fused_experts_with_all2all_v2(
         w2: torch.Tensor,
         w1_scale: torch.Tensor,
         w2_scale: torch.Tensor,
-        expert_map: List[int],
-        ep_group,
+        expert_map: torch.Tensor = None,
+        ep_group: GroupCoordinator = None,
         log2phy: Optional[torch.Tensor] = None,
         global_redundant_expert_num: int = 0) -> torch.Tensor:
     if log2phy is not None:
