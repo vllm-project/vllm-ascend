@@ -5,6 +5,9 @@ from vllm_ascend.utils import enable_custom_op
 
 enable_custom_op()
 
+DEFAULT_ATOL = 1e-3
+DEFAULT_RTOL = 1e-3
+
 def bgmv_shrink_cpu_impl(
     x: torch.Tensor,
     w: torch.Tensor,
