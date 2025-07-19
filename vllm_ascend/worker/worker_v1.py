@@ -259,7 +259,7 @@ class NPUWorker(WorkerBase):
         # the model initialization and profiling.
         NPUPlatform.seed_everything(self.model_config.seed)
 
-    def get_supported_pooling_tasks(self) -> list[PoolingTask]:
+    def get_supported_pooling_tasks(self) -> "list[PoolingTask]":
         return self.model_runner.get_supported_pooling_tasks()
 
     def get_model(self) -> nn.Module:

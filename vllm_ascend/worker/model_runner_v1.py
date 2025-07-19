@@ -703,7 +703,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def get_model(self) -> nn.Module:
         return self.model
 
-    def get_supported_pooling_tasks(self) -> list[PoolingTask]:
+    def get_supported_pooling_tasks(self) -> "list[PoolingTask]":
         model = self.get_model()
         if not is_pooling_model(model):
             return []
