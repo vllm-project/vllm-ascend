@@ -152,6 +152,7 @@ class AscendMetadata:
     num_input_tokens: int = 0  # Number of tokens including padding.
 
     with_prefill_across_dp: bool = False
+    enable_dbo_across_dp: bool = False
 
 
 class AscendAttentionMetadataBuilder:
@@ -169,7 +170,8 @@ class AscendAttentionMetadataBuilder:
               max_query_len,
               common_prefix_len,
               max_num_tokens_across_dp: int = 0,
-              with_prefill_across_dp: bool = False):
+              with_prefill_across_dp: bool = False,
+              enable_dbo_across_dp: bool = False):
 
         block_table = self.runner.input_batch.block_table[0].get_device_tensor(
         )
@@ -207,7 +209,8 @@ class AscendAttentionMetadataBuilder:
             attn_mask=attn_mask,
             attn_state=attn_state,
             max_num_tokens_across_dp=max_num_tokens_across_dp,
-            with_prefill_across_dp=with_prefill_across_dp)
+            with_prefill_across_dp=with_prefill_across_dp,
+            enable_dbo_across_dp=enable_dbo_across_dp)
         return attn_metadata
 
 
