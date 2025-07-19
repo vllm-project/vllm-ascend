@@ -22,7 +22,7 @@ def bgmv_expand_cpu_impl(
     return y
 
 @torch.inference_mode()
-def test_bgmv_shrink() -> None:
+def test_bgmv_expand() -> None:
     B = 1
     x = torch.randn([B, 16], dtype=torch.float)
     w = torch.randn([64, 128, 16], dtype=torch.float16)
@@ -35,7 +35,7 @@ def test_bgmv_shrink() -> None:
     y_npu = y.npu()
 
     y = bgmv_expand_cpu_impl(x, w, indices, y, 0, 128)
-    torch.ops._C.bgmv_shrink(x_npu, w_npu, indices_npu, y_npu, 0, 128)
+    torch.ops._C.bgmv_expand(x_npu, w_npu, indices_npu, y_npu, 0, 128)
 
     # Compare the results.
     torch.testing.assert_close(y_npu.cpu(), y, atol=DEFAULT_ATOL, rtol=DEFAULT_RTOL)

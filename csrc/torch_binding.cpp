@@ -245,7 +245,7 @@ void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
     return;
 }
 
-void bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y,
+at::Tensor bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y,
                  int64_t slice_offset, int64_t slice_size)
 {
     at::ScalarType scalar_type = y.scalar_type();
@@ -261,18 +261,20 @@ void bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
     TORCH_CHECK(slice_offset >= 0, "slice offset should be no smaller than 0");
     TORCH_CHECK((slice_size + slice_offset) <= y.size(1),
                 "slice_size + slice_offset should be smaller than the second dimension of y")
-    
+
+    at::Tensor y_out = at::empty_like(y);
     void* x_ptr = x.data_ptr();
     void* weight_ptr = weight.data_ptr();
     void* indices_ptr = indices.data_ptr();
     void* y_ptr = y.data_ptr();
+    void* y_out_ptr = y_out.data_ptr();
     int batch_size = x.size(0);
     int lora_rank = x.size(1);
     int output_full_dim = y.size(1);
     aclrtStream stream = c10_npu::getCurrentNPUStream().stream();
     at_npu::native::OpCommand cmd;
     cmd.Name("bgmv_expand");
-    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, indices_ptr, y_ptr, batch_size, lora_rank,
+    cmd.SetCustomHandler([scalar_type, stream, x_ptr, weight_ptr, indices_ptr, y_ptr, y_out_ptr, batch_size, lora_rank,
                           slice_offset, slice_size, output_full_dim]() -> int {
         auto dtype = get_dtype_from_torch(scalar_type);
         fe::PlatFormInfos platform_infos;
@@ -281,12 +283,12 @@ void bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
         uint32_t aiv_num = platform_infos.GetCoreNumByType("aiv");
         int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
         TORCH_CHECK("num_tokens_per_core != 0", "num_tokens_per_core should not be 0");
-        bgmv_expand_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, y_ptr, batch_size, num_tokens_per_core,
-                         lora_rank, slice_size, slice_offset, output_full_dim);
+        bgmv_expand_impl(dtype, stream, x_ptr, weight_ptr, indices_ptr, y_ptr, y_out_ptr, batch_size,
+                         num_tokens_per_core, lora_rank, slice_size, slice_offset, output_full_dim);
         return 0;
     });
     cmd.Run();
-    return;
+    return y_out;
 }
 } // namespace vllm_ascend
 
@@ -318,7 +320,7 @@ TORCH_LIBRARY_EXPAND(_C, ops)
 
     ops.def(
         "bgmv_expand(Tensor! x, Tensor! weight, Tensor! indices, Tensor! y,"
-        "            int slice_offset, int slice_size) -> ()");
+        "            int slice_offset, int slice_size) -> Tensor");
     ops.impl("bgmv_expand", torch::kPrivateUse1, &vllm_ascend::bgmv_expand);
 }
 
