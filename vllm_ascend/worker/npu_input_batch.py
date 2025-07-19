@@ -627,9 +627,15 @@ class InputBatch:
             copy_slice(self.repetition_penalties_cpu_tensor,
                        self.repetition_penalties, num_reqs)
 
-        needs_prompt_token_ids = (not self.no_penalties or
-                                  (self.num_reqs > 0
-                                   and self.logits_processing_needs_token_ids))
+        if isinstance(self.logits_processing_needs_token_ids, np.ndarray):
+            needs_prompt_token_ids = (
+                not self.no_penalties
+                or self.logits_processing_needs_token_ids[:num_reqs].any())
+        else:
+            # TPDO: remove this once we drop support for v0.9.2
+            needs_prompt_token_ids = (not self.no_penalties or
+                                      self.logits_processing_needs_token_ids)
+
         if needs_prompt_token_ids:
             # The prompt tokens are used only for applying penalties or
             # step pooling during the sampling/pooling process.

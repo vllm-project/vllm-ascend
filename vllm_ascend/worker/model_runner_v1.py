@@ -45,11 +45,10 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.models.interfaces_base import is_pooling_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
-from vllm.pooling_params import PoolingParams, PoolingTask
+from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
@@ -88,8 +87,11 @@ from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if vllm_version_is("0.9.2"):
+    from vllm.model_executor.models.interfaces import has_step_pooler
     from vllm.v1.utils import bind_kv_cache
 else:
+    from vllm.model_executor.models.interfaces_base import is_pooling_model
+    from vllm.pooling_params import PoolingTask
     from vllm.v1.worker.utils import bind_kv_cache
 
 if TYPE_CHECKING:
@@ -1779,8 +1781,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             module.weight.data, ACL_FORMAT_FRACTAL_NZ)
             # TODO: Remove this once vLLM supports v0.9.2
             if vllm_version_is("0.9.2"):
-                from vllm.model_executor.models.interfaces import \
-                    has_step_pooler
                 if has_step_pooler(self.model):
                     self.input_batch.logits_processing_needs_token_ids = True
             if self.drafter:
