@@ -35,6 +35,8 @@ from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 
+from vllm_ascend.utils import vllm_version_is
+
 _SAMPLING_EPS = 1e-5
 
 
@@ -83,7 +85,6 @@ class InputBatch:
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
-        logits_processing_needs_token_ids: bool = False,
         is_spec_decode: bool = False,
     ):
         self.is_spec_decode = is_spec_decode
@@ -93,8 +94,6 @@ class InputBatch:
         self.device = device
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
-        self.logits_processing_needs_token_ids = (
-            logits_processing_needs_token_ids)
 
         self._req_ids: list[Optional[str]] = []
         self.req_id_to_index: dict[str, int] = {}
@@ -247,6 +246,11 @@ class InputBatch:
 
         # req_index -> bad_words_token_ids
         self.bad_words_token_ids: dict[int, list[list[int]]] = {}
+        if vllm_version_is("0.9.2"):
+            self.logits_processing_needs_token_ids_bool = False
+        else:
+            self.logits_processing_needs_token_ids = np.zeros(max_num_reqs,
+                                                              dtype=bool)
 
         self.req_output_token_ids: list[Optional[list[int]]] = []
 
@@ -383,9 +387,15 @@ class InputBatch:
             if sampling_params.bad_words_token_ids:
                 self.bad_words_token_ids[
                     req_index] = sampling_params.bad_words_token_ids
-        else:
+        elif vllm_version_is("0.9.2"):
             assert request.pooling_params is not None
             self.pooling_params[req_id] = request.pooling_params
+        elif pooling_params := request.pooling_params:
+            self.pooling_params[req_id] = pooling_params
+            self.logits_processing_needs_token_ids[req_index] = (
+                pooling_params.requires_token_ids)
+        else:
+            raise NotImplementedError(request)
 
         # Add request lora ID
         if request.lora_request:
@@ -614,10 +624,15 @@ class InputBatch:
                        self.presence_penalties, num_reqs)
             copy_slice(self.repetition_penalties_cpu_tensor,
                        self.repetition_penalties, num_reqs)
-
-        needs_prompt_token_ids = (not self.no_penalties or
-                                  (self.num_reqs > 0
-                                   and self.logits_processing_needs_token_ids))
+        if vllm_version_is("0.9.2"):
+            needs_prompt_token_ids = (
+                not self.no_penalties
+                or (self.num_reqs > 0
+                    and self.logits_processing_needs_token_ids_bool))
+        else:
+            needs_prompt_token_ids = (
+                not self.no_penalties
+                or self.logits_processing_needs_token_ids[:num_reqs].any())
         if needs_prompt_token_ids:
             # The prompt tokens are used only for applying penalties or
             # step pooling during the sampling/pooling process.
