@@ -38,15 +38,10 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 
-import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import (check_kv_cache_bytes_cache_exist,
-                               check_torchair_cache_exist,
-                               delete_torchair_cache_file,
-                               read_kv_cache_bytes_from_file,
-                               sleep_mode_enabled, try_register_lib)
+from vllm_ascend.utils import sleep_mode_enabled, try_register_lib
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -180,27 +175,6 @@ class NPUWorker(WorkerBase):
         logger.info(
             f"Available memory: {available_kv_cache_memory}, total memory: {total_npu_memory}"
         )
-        if get_ascend_config().torchair_graph_config.enabled:
-            if check_torchair_cache_exist(
-            ) and check_kv_cache_bytes_cache_exist():
-                old_kv_cache_bytes = read_kv_cache_bytes_from_file(
-                    torch.distributed.get_rank())
-                if 0 < old_kv_cache_bytes <= available_kv_cache_memory:
-                    logger.info(
-                        f"Use cached torchair kv_cache_bytes: {old_kv_cache_bytes}"
-                    )
-                    self.model_runner.new_kv_cache_bytes = old_kv_cache_bytes
-                    return old_kv_cache_bytes
-                else:
-                    logger.info(
-                        "Cached torchair kv_cache_bytes is too big, invalidate old torchair_cache"
-                    )
-                    delete_torchair_cache_file()
-            bytes_floating_tolerance = 1024 * 1024 * envs_ascend.VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE
-            available_kv_cache_memory -= bytes_floating_tolerance
-            logger.info(f"Use new kv_cache_bytes: {available_kv_cache_memory}")
-            self.model_runner.new_kv_cache_bytes = available_kv_cache_memory
-
         return available_kv_cache_memory
 
     def execute_model(
@@ -291,19 +265,20 @@ class NPUWorker(WorkerBase):
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_runner.pin_lora(lora_id)
 
-    def execute_dummy_batch(self) -> None:
-        runner = self.model_runner
+    def _get_max_num_tokens_and_with_prefill(self):
         max_num_tokens = 1
         with_prefill = False
-        if runner.dp_size > 1:
-            max_num_tokens, with_prefill = runner._get_forward_metadata_across_dp(
+        if self.model_runner.dp_size > 1:
+            max_num_tokens, with_prefill = self.model_runner._get_forward_metadata_across_dp(
                 max_num_tokens, with_prefill)
-        if runner.torchair_graph_enabled and not with_prefill:
-            max_num_tokens = runner.select_torchair_padded_batch_size(
-                max_num_tokens)
-        runner._dummy_run(max_num_tokens,
-                          is_compile=False,
-                          with_prefill=with_prefill)
+        return max_num_tokens, with_prefill
+
+    def execute_dummy_batch(self) -> None:
+        max_num_tokens, with_prefill = self._get_max_num_tokens_and_with_prefill(
+        )
+        self.model_runner._dummy_run(max_num_tokens,
+                                     is_compile=False,
+                                     with_prefill=with_prefill)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
