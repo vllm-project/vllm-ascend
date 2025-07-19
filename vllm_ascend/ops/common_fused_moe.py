@@ -40,23 +40,26 @@ def unquantized_fused_moe_init_func(self, *args, **kwargs):
 
 
 def forward_oot(
-    self,
-    layer: torch.nn.Module,
-    x: torch.Tensor,
-    use_grouped_topk: bool,
-    top_k: int,
-    router_logits: torch.Tensor,
-    renormalize: bool,
-    topk_group: Optional[int] = None,
-    num_expert_group: Optional[int] = None,
-    custom_routing_function: Optional[Callable] = None,
-    scoring_func: str = "softmax",
-    e_score_correction_bias: Optional[torch.Tensor] = None,
-    global_num_experts: Optional[int] = None,
-    expert_map: Optional[torch.Tensor] = None,
-    apply_router_weight_on_input: bool = False,
-    activation: str = "silu",
-) -> torch.Tensor:
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        use_grouped_topk: bool,
+        top_k: int,
+        router_logits: torch.Tensor,
+        renormalize: bool,
+        topk_group: Optional[int] = None,
+        num_expert_group: Optional[int] = None,
+        custom_routing_function: Optional[Callable] = None,
+        scoring_func: str = "softmax",
+        e_score_correction_bias: Optional[torch.Tensor] = None,
+        global_num_experts: Optional[int] = None,
+        expert_map: Optional[torch.Tensor] = None,
+        apply_router_weight_on_input: bool = False,
+        activation: str = "silu",
+        enable_eplb: bool = False,
+        expert_load_view: Optional[torch.Tensor] = None,
+        logical_to_physical_map: Optional[torch.Tensor] = None,
+        logical_replica_count: Optional[torch.Tensor] = None) -> torch.Tensor:
 
     if SELECT_GATING_TOPK_SOTFMAX_EXPERTS:
         topk_weights, topk_ids = select_gating_top_k_softmax_experts(
