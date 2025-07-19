@@ -633,7 +633,8 @@ class InputBatch:
                 or self.logits_processing_needs_token_ids[:num_reqs].any())
         else:
             # TPDO: remove this once we drop support for v0.9.2
-            needs_prompt_token_ids = (not self.no_penalties or
+            needs_prompt_token_ids = (not self.no_penalties
+                                      or self.num_reqs > 0 and
                                       self.logits_processing_needs_token_ids)
 
         if needs_prompt_token_ids:
