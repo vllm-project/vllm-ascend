@@ -22,8 +22,7 @@ from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, npu_prefetch,
-                               npu_stream_switch, npu_wait_tensor)
+from vllm_ascend.utils import npu_prefetch, npu_stream_switch, npu_wait_tensor
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -711,12 +710,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.W_UV = W_UV.transpose(0, 1).contiguous()
         # Convert from (L, N, P) to (N, P, L)
         self.W_UK_T = W_UK.permute(1, 2, 0).contiguous()
-        if get_ascend_config().enable_weight_nz_layout:
-            # cast quantized weight tensors in NZ layout for higher inference speed
-            self.W_UV.data = torch_npu.npu_format_cast(self.W_UV.data,
-                                                       ACL_FORMAT_FRACTAL_NZ)
-            self.W_UK_T.data = torch_npu.npu_format_cast(
-                self.W_UK_T.data, ACL_FORMAT_FRACTAL_NZ)
 
     def _compute_prefill_context(
         self,
