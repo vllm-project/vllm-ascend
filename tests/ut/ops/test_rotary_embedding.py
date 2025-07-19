@@ -1,3 +1,5 @@
+import vllm_ascend.patch.worker.patch_common.patch_utils  # type: ignore[import]  # isort: skip  # noqa
+
 import math
 import unittest
 from unittest.mock import MagicMock, patch
@@ -71,10 +73,10 @@ class TestRopeForwardOot(unittest.TestCase):
 
     def setUp(self):
         # Common setup for tests
-        self.positions = torch.tensor([1, 2, 3])
+        self.positions = torch.tensor([0, 1, 2])
         self.query = torch.randn(3, 4, dtype=torch.float16)
         self.key = torch.randn(3, 4, dtype=torch.float16)
-        self.head_size = 32
+        self.head_size = 4
         self.cos_sin_cache = torch.randn(3, 4)
 
         # Mock self object for rope_forward_oot
@@ -85,18 +87,18 @@ class TestRopeForwardOot(unittest.TestCase):
         self.mock_self.forward_native.return_value = (self.query, self.key)
 
     @patch('vllm_ascend.ops.rotary_embedding.get_ascend_config')
-    def test_rope_forward_oot_torchair_enabled_base(self,
+    @patch('torch_npu.npu_apply_rotary_pos_emb')
+    def test_rope_forward_oot_torchair_enabled_base(self, mock_rotary_emb,
                                                     mock_get_ascend_config):
         # Setup mock for torchair enabled
         mock_config = MagicMock()
         mock_config.torchair_graph_config.enabled = True
         mock_get_ascend_config.return_value = mock_config
 
+        mock_rotary_emb.return_value = self.query, self.key
         result_q, result_k = rope_forward_oot(self.mock_self, self.positions,
                                               self.query, self.key)
 
-        self.mock_self.forward_native.assert_called_once_with(
-            self.positions, self.query, self.key, None)
         self.assertTrue(torch.equal(result_q, self.query))
         self.assertTrue(torch.equal(result_k, self.key))
 

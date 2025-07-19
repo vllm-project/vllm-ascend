@@ -39,16 +39,27 @@ def rope_forward_oot(
     offsets: Optional[torch.Tensor] = None,
     is_neox_style_override: Optional[bool] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    if get_ascend_config().torchair_graph_config.enabled:
-        return self.forward_native(
-            positions,
-            query,
-            key,
-            offsets,
-        )
-
     import torch_npu
     query_shape, key_shape = query.shape, key.shape
+    if get_ascend_config().torchair_graph_config.enabled:
+        positions = positions.flatten()
+        cos_cache, sin_cache = self.cos_sin_cache.chunk(2, dim=-1)
+
+        cos_part = torch.index_select(cos_cache, 0, positions)
+        sin_part = torch.index_select(sin_cache, 0, positions)
+
+        cos_sin = torch.cat([cos_part, cos_part, sin_part, sin_part],
+                            dim=-1).unsqueeze(0).unsqueeze(2)
+        cos, sin = cos_sin.chunk(2, dim=-1)
+        # must BSND ?
+        query = query.reshape(positions.size(0), -1,
+                              self.head_size).unsqueeze(0)
+        key = key.reshape(positions.size(0), -1, self.head_size).unsqueeze(0)
+
+        query, key = torch_npu.npu_apply_rotary_pos_emb(
+            query, key, cos.contiguous(), sin.contiguous())
+
+        return query.view(query_shape), key.view(key_shape)
     if self.cos_sin_cache.device != query.device:
         self.cos_sin_cache = self.cos_sin_cache.to(query.device)
     if self.cos_sin_cache.dtype != query.dtype:
