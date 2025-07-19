@@ -1299,7 +1299,7 @@ class AscendFusedMoE(FusedMoE):
             else:
                 # TODO: Determine if we can remove the padding
                 padding_size = tp_size
-            if not self.enable_prefill_optimizations and num_tokens < forward_context.padded_num_tokens:
+            if not self.enable_prefill_optimizations and num_tokens < padding_size:
                 hidden_states = nn.functional.pad(
                     hidden_states, (0, 0, 0, padding_size - num_tokens))
                 router_logits = nn.functional.pad(
