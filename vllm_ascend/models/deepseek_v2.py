@@ -979,7 +979,3 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                                    attn_metadata, intermediate_tensors,
                                    inputs_embeds)
         return hidden_states
-
-
-class CustomDeepseekV3ForCausalLM(CustomDeepseekV2ForCausalLM):
-    pass
