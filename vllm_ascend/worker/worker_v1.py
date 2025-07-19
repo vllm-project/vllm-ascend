@@ -47,8 +47,12 @@ from vllm_ascend.utils import (check_kv_cache_bytes_cache_exist,
                                check_torchair_cache_exist,
                                delete_torchair_cache_file,
                                read_kv_cache_bytes_from_file,
-                               sleep_mode_enabled, try_register_lib)
+                               sleep_mode_enabled, try_register_lib,
+                               vllm_version_is)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+if not vllm_version_is("0.9.2"):
+    from vllm.pooling_params import PoolingTask
 
 
 class NPUWorker(WorkerBase):
@@ -254,6 +258,9 @@ class NPUWorker(WorkerBase):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         NPUPlatform.seed_everything(self.model_config.seed)
+
+    def get_supported_pooling_tasks(self) -> "list[PoolingTask]":
+        return self.model_runner.get_supported_pooling_tasks()
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
