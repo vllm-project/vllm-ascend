@@ -294,16 +294,30 @@ class NPUWorker(WorkerBase):
 
     def execute_dummy_batch(self) -> None:
         runner = self.model_runner
-        max_num_tokens = 1
-        with_prefill = False
-        if runner.dp_size > 1:
-            max_num_tokens, with_prefill = runner._get_forward_metadata_across_dp(
-                max_num_tokens, with_prefill)
+        if runner.dp_size <= 1:
+            raise ValueError(
+                "Dummy batch execution should only be "
+                "performed with data parallelism enabled, but got "
+                f"dp_size={runner.dp_size}.")
+
+        # If torchair graph is enabled, notify the other DP ranks that this is a
+        # dummy run by using '-1' as a flag for num_tokens. This will be
+        # replaced with the final determined graph size before the forward pass.
+        num_tokens_across_dp, with_prefill = \
+            runner._get_forward_metadata_across_dp(-1, False)
+
         if runner.torchair_graph_enabled and not with_prefill:
-            max_num_tokens = runner.select_torchair_padded_batch_size(
+            max_num_tokens = int(num_tokens_across_dp.max().item())
+            num_tokens = runner.select_torchair_padded_batch_size(
                 max_num_tokens)
-        runner._dummy_run(max_num_tokens,
+        else:
+            num_tokens = 1
+
+        num_tokens_across_dp.masked_fill_(num_tokens_across_dp == -1,
+                                          num_tokens)
+        runner._dummy_run(num_tokens,
                           is_compile=False,
+                          num_tokens_across_dp=num_tokens_across_dp,
                           with_prefill=with_prefill)
 
     def _init_worker_distributed_environment(self) -> None:
