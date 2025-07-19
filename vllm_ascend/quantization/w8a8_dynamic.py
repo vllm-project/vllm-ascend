@@ -634,7 +634,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         self.ep_group = get_ep_group()
 
         ascend_config = get_ascend_config()
-        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+        self.fused_moe_max_chunk_size = ascend_config.fused_moe_max_chunk_size
 
         try:
             device_group = self.ep_group.device_group
@@ -783,15 +783,31 @@ class AscendW8A8DynamicFusedMoEMethod:
         elif fused_moe_state in [
                 FusedMoEState.AllGather, FusedMoEState.NaiveMulticast
         ]:
-            return fused_experts(hidden_states=x,
-                                 w1=layer.w13_weight,
-                                 w1_scale=layer.w13_weight_scale,
-                                 w2=layer.w2_weight,
-                                 w2_scale=layer.w2_weight_scale,
-                                 topk_weights=topk_weights,
-                                 topk_ids=topk_ids,
-                                 top_k=top_k,
-                                 expert_map=expert_map)
+            max_chunk_size = self.fused_moe_max_chunk_size
+            x_list = x.split(max_chunk_size)
+            topk_weights_list = topk_weights.split(max_chunk_size)
+            topk_ids_list = topk_ids.split(max_chunk_size)
+            num_chunks = len(x_list)
+            assert num_chunks == len(topk_weights_list) == len(topk_ids_list)
+            for i in range(num_chunks):
+                hidden_states_chunk = fused_experts(
+                    hidden_states=x_list[i],
+                    w1=layer.w13_weight,
+                    w1_scale=layer.w13_weight_scale,
+                    w2=layer.w2_weight,
+                    w2_scale=layer.w2_weight_scale,
+                    topk_weights=topk_weights_list[i],
+                    topk_ids=topk_ids_list[i],
+                    top_k=top_k,
+                    expert_map=expert_map)
+                if num_chunks > 1:
+                    # use inplace copy to save memory
+                    x_list[i].copy_(hidden_states_chunk)
+                    del hidden_states_chunk
+                else:
+                    # num_chunks == 1, return the result directly
+                    return hidden_states_chunk
+            return x
         else:
             # The current implementation of deepseek moe splits hidden_states
             # according to tp_size before they are feed into fused_moe module.
