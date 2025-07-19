@@ -27,12 +27,13 @@ def test_bgmv_shrink() -> None:
     w = torch.randn([64, 16, 128], dtype=torch.float16)
     indices = torch.zeros([B], dtype=torch.int64)
     y = torch.zeros([B, 16])
-    y = bgmv_shrink_cpu_impl(x, w, indices, y, 0.5)
 
     x_npu = x.npu()
     w_npu = w.npu()
     indices_npu = indices.npu()
     y_npu = y.npu()
+
+    y = bgmv_shrink_cpu_impl(x, w, indices, y, 0.5)
     torch.ops._C.bgmv_shrink(x_npu, w_npu, indices_npu, y_npu, 0.5)
 
     # Compare the results.
