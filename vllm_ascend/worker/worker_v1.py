@@ -355,3 +355,6 @@ class NPUWorker(WorkerBase):
                     torch_profiler_trace_dir))
         else:
             return None
+
+    def get_supported_pooling_tasks(self):
+        return self.model_runner.get_supported_pooling_tasks()
