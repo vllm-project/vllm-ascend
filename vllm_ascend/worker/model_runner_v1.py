@@ -45,7 +45,6 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.models.interfaces import has_step_pooler
 from vllm.model_executor.models.interfaces_base import is_pooling_model
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
@@ -1778,8 +1777,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                    QKVParallelLinear, RowParallelLinear)):
                         module.weight.data = torch_npu.npu_format_cast(
                             module.weight.data, ACL_FORMAT_FRACTAL_NZ)
-            if has_step_pooler(self.model):
-                self.input_batch.logits_processing_needs_token_ids = True
+            # TODO: Remove this once vLLM supports v0.9.2
+            if vllm_version_is("0.9.2"):
+                from vllm.model_executor.models.interfaces import \
+                    has_step_pooler
+                if has_step_pooler(self.model):
+                    self.input_batch.logits_processing_needs_token_ids = True
             if self.drafter:
                 logger.info("Loading drafter model...")
                 if isinstance(self.drafter, EagleProposer):

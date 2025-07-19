@@ -35,6 +35,8 @@ from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 
+from vllm_ascend.utils import vllm_version_is
+
 _SAMPLING_EPS = 1e-5
 
 
@@ -93,8 +95,13 @@ class InputBatch:
         self.device = device
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
-        self.logits_processing_needs_token_ids = (
-            logits_processing_needs_token_ids)
+        # TODO: Remove this once we drop support for v0.9.2
+        if vllm_version_is("0.9.2"):
+            self.logits_processing_needs_token_ids = (
+                logits_processing_needs_token_ids)
+        else:
+            self.logits_processing_needs_token_ids = np.zeros(max_num_reqs,
+                                                              dtype=bool)
 
         self._req_ids: list[Optional[str]] = []
         self.req_id_to_index: dict[str, int] = {}
@@ -383,9 +390,14 @@ class InputBatch:
             if sampling_params.bad_words_token_ids:
                 self.bad_words_token_ids[
                     req_index] = sampling_params.bad_words_token_ids
+
+        elif pooling_params := request.pooling_params:
+            self.pooling_params[req_id] = pooling_params
+            if isinstance(self.logits_processing_needs_token_ids, np.ndarray):
+                self.logits_processing_needs_token_ids[req_index] = (
+                    pooling_params.requires_token_ids)
         else:
-            assert request.pooling_params is not None
-            self.pooling_params[req_id] = request.pooling_params
+            raise NotImplementedError(request)
 
         # Add request lora ID
         if request.lora_request:
