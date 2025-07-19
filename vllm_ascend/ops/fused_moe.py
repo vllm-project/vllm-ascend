@@ -1311,20 +1311,25 @@ class AscendFusedMoE(FusedMoE):
             if num_tokens < tp_size:
                 hidden_states = nn.functional.pad(
                     hidden_states, (0, 0, 0, tp_size - num_tokens))
-                router_logits = nn.functional.pad(
-                    router_logits, (0, 0, 0, tp_size - num_tokens))
             chunk_hidden_states = torch.tensor_split(hidden_states,
-                                                     tp_size,
-                                                     dim=0)
-            chunk_router_logits = torch.tensor_split(router_logits,
                                                      tp_size,
                                                      dim=0)
             tp_rank = get_tensor_model_parallel_rank()
             hidden_states = chunk_hidden_states[tp_rank]
-            router_logits = chunk_router_logits[tp_rank]
+            if not self.rm_router_logits:
+                if num_tokens < tp_size:
+                    router_logits = nn.functional.pad(
+                        router_logits, (0, 0, 0, tp_size - num_tokens))
+                chunk_router_logits = torch.tensor_split(router_logits,
+                                                         tp_size,
+                                                         dim=0)
+                router_logits = chunk_router_logits[tp_rank]
+            else:
+                router_logits, _ = gate(hidden_states)
 
         if self.dp_size > 1:
-            if fused_moe_state == FusedMoEState.AllGather:
+            if (fused_moe_state == FusedMoEState.AllGather
+                    or fused_moe_state == FusedMoEState.AllGatherEP):
                 # NOTE: When in torchair graph, it has been padded in model_runner_v1
                 if not self.torchair_graph_enabled:
                     attn_metadata = get_forward_context().attn_metadata
