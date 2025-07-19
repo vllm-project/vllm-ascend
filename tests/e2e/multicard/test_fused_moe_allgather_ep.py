@@ -50,7 +50,6 @@ def test_generate_with_allgather():
                             "enabled": True,
                             "chunked_prefill_enabled": False,
                         },
-                        "expert_tensor_parallel_size": 1
                     }) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
 
@@ -74,6 +73,5 @@ def test_generate_with_alltoall():
                             "enabled": True,
                             "chunked_prefill_enabled": False,
                         },
-                        "expert_tensor_parallel_size": 1
                     }) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
