@@ -56,3 +56,6 @@ def register_model():
     ModelRegistry.register_model(
         "PanguProMoEForCausalLM",
         "vllm_ascend.models.pangu_moe:PanguProMoEForCausalLM")
+
+    ModelRegistry.register_model(
+        "SophonForCausalLM", "vllm_ascend.models.pangu_moe:SophonForCausalLM")
