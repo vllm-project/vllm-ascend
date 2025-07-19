@@ -57,7 +57,6 @@ llm = LLM(
     model=MODEL_PATH,
     max_model_len=16384,
     limit_mm_per_prompt={"image": 10},
-    enforce_eager=True,
 )
 
 sampling_params = SamplingParams(
@@ -146,8 +145,7 @@ docker run --rm \
 vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
 --dtype bfloat16 \
 --max_model_len 16384 \
---max-num-batched-tokens 16384 \
---enforce-eager
+--max-num-batched-tokens 16384 
 ```
 
 :::{note}
