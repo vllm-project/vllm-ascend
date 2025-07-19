@@ -62,6 +62,8 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.models.deepseek_v2 import (CustomDeepseekV2MLP,
+                                            CustomDeepseekV2MoE)
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.deepseek_v2 import (CustomDeepseekV2MLP,
@@ -97,7 +99,7 @@ class CustomDeepseekDBOMLP(CustomDeepseekV2MLP):
         return x
 
 
-class CustomDeepseekDBOMoE(nn.Module):
+class CustomDeepseekDBOMoE(CustomDeepseekV2MoE):
 
     top_k: int
 
@@ -107,68 +109,9 @@ class CustomDeepseekDBOMoE(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ):
-        super().__init__()
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.routed_scaling_factor = config.routed_scaling_factor
-        self.n_shared_experts = config.n_shared_experts
-        self.routed_scaling_factor = config.routed_scaling_factor
-        if self.tp_size > config.n_routed_experts:
-            raise ValueError(
-                f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {config.n_routed_experts}.")
-
-        if config.hidden_act != "silu":
-            raise ValueError(f"Unsupported activation: {config.hidden_act}. "
-                             "Only silu is supported for now.")
-
-        self.gate = ReplicatedLinear(config.hidden_size,
-                                     config.n_routed_experts,
-                                     bias=False,
-                                     quant_config=None,
-                                     prefix=f"{prefix}.gate")
-        if config.topk_method == "noaux_tc":
-            self.gate.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.n_routed_experts))
-        else:
-            self.gate.e_score_correction_bias = None
-
-        self.experts = AscendFusedMoE(
-            num_experts=config.n_routed_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
-            renormalize=config.norm_topk_prob,
-            quant_config=quant_config,
-            use_grouped_topk=True,
-            num_expert_group=config.n_group,
-            topk_group=config.topk_group,
-            prefix=f"{prefix}.experts",
-            scoring_func=config.scoring_func,
-            e_score_correction_bias=self.gate.e_score_correction_bias)
-
-        if config.n_shared_experts is not None:
-            intermediate_size = (config.moe_intermediate_size *
-                                 config.n_shared_experts)
-            self.shared_experts = CustomDeepseekDBOMLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                reduce_results=True,
-                prefix=f"{prefix}.shared_experts",
-            )
-        CustomDeepseekDBOMoE.top_k = config.num_experts_per_tok
-
-        self.dp_size = get_dp_group().world_size
-
-        self.tp_group = get_tp_group().device_group
-        self.tp_rank = get_tp_group().rank_in_group
-
-        self.params_dtype = torch.get_default_dtype()
-
-        ascend_config = get_ascend_config()
-        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+        super().__init__(config=config,
+                        quant_config=quant_config,
+                        prefix=prefix)
 
     def forward(
             self,
