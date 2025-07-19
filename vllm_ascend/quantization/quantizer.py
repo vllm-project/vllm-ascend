@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from vllm.logger import logger
 
+from .faquant import AscendFAQuantAttentionMethod
 from .func_wrapper import (wrapper_load_model, wrapper_rmsnorm_forward_oot,
                            wrapper_rmsnorm_init)
 from .w8a8 import (AscendC8KVCacheMethod, AscendW8A8FusedMoEMethod,
@@ -30,40 +31,6 @@ from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
                            AscendW8A8DynamicLinearMethod)
 
 CUSTOMIZED_QUANTIZER_TYPE: List[str] = []
-
-
-class AscendQuantizer:
-    """An interface to different quantization implementations for ascend hardwares."""
-
-    @classmethod
-    def get_quantizer(cls,
-                      quant_config: Dict[str, Any],
-                      prefix: str,
-                      packed_modules_mapping: Optional[Dict[str,
-                                                            Any]] = dict()):
-        # TODO: Need a param to choose quantization algorithms.
-        quantization_algorithm = ''
-
-        if quantization_algorithm in CUSTOMIZED_QUANTIZER_TYPE:
-            return
-
-        try:
-            module = importlib.import_module("mindie_turbo")
-            MindIETurboQuantizer = module.MindIETurboQuantizer
-            return MindIETurboQuantizer.get_quantizer(quant_config, prefix,
-                                                      packed_modules_mapping)
-        except ImportError:
-            return VLLMAscendQuantizer.get_quantizer(quant_config, prefix,
-                                                     packed_modules_mapping)
-
-    def build_linear_method(self):
-        raise NotImplementedError
-
-    def build_moe_method(self):
-        raise NotImplementedError
-
-    def build_attention_method(self):
-        raise NotImplementedError
 
 
 class VLLMAscendQuantizer:
@@ -293,8 +260,16 @@ class W8A8DYNAMICQuantizer(VLLMAscendQuantizer):
         return AscendW8A8DynamicFusedMoEMethod()
 
 
+class FAQuantizer(VLLMAscendQuantizer):
+
+    @staticmethod
+    def build_attention_method():
+        return AscendFAQuantAttentionMethod()
+
+
 SUPPORT_ASCEND_QUANTIZER_TYPE = {
     "W8A8": W8A8Quantizer,
     "W8A8_DYNAMIC": W8A8DYNAMICQuantizer,
     "C8": W8A8Quantizer,
+    "FAQuant": FAQuantizer
 }
