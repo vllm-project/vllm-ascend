@@ -27,4 +27,4 @@ vllm serve /data/weights/Qwen2.5-0.5B-Instruct \
     --max-model-len 2000 \
     --max-num-batched-tokens 2000 \
     --trust-remote-code \
-    --gpu-memory-utilization 0.9 \
+    --gpu-memory-utilization 0.9

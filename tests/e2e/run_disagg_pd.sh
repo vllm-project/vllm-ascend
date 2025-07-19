@@ -19,8 +19,8 @@
 
 set -eo errexit
 
-. $(dirname "$0")/common.sh
-. $(dirname "$0")/pd_disaggreate/setup_pd.sh
+. "$(dirname "$0")/common.sh"
+. "$(dirname "$0")/pd_disaggreate/setup_pd.sh"
 
 export VLLM_USE_MODELSCOPE="True"
 
@@ -30,9 +30,11 @@ TP_SIZE=1
 
 # TODO: support multi-card
 prefill_ip=$(/usr/local/Ascend/driver/tools/hccn_tool -i 0 -ip -g | grep "ipaddr" | awk -F: '{print $2}' | xargs)
+# shellcheck disable=SC2089,SC2090
 PREFILL_DEVICE_IPS="[\"$prefill_ip\"]"
 
 decode_ip=$(/usr/local/Ascend/driver/tools/hccn_tool -i 1 -ip -g | grep "ipaddr" | awk -F: '{print $2}' | xargs)
+# shellcheck disable=SC2089,SC2090
 DECODE_DEVICE_IPS="[\"$decode_ip\"]"
 
 _info "====> Start pd disaggregated test"
@@ -44,14 +46,14 @@ _info "Started pd disaggregated proxy server"
 PREFILL_PROC_NAME="Prefill-instance"
 PREFILL_PORT=8001
 _info "Starting prefill instance"
-run_prefill_instance $MODEL_NAME $TP_SIZE $PREFILL_PORT $REGISTER_PORT $PREFILL_DEVICE_IPS $DECODE_DEVICE_IPS &
+run_prefill_instance $MODEL_NAME $TP_SIZE $PREFILL_PORT $REGISTER_PORT "$PREFILL_DEVICE_IPS" "$DECODE_DEVICE_IPS" &
 _info "Waiting for prefill instance ready"
 wait_url_ready $PREFILL_PROC_NAME "http://localhost:${PREFILL_PORT}/v1/completions"
 
 DECODE_PROC_NAME="Decode-instance"
 DECODE_PORT=8002
 _info "Starting decode instance"
-run_decode_instance  $MODEL_NAME $TP_SIZE $DECODE_PORT $REGISTER_PORT $PREFILL_DEVICE_IPS $DECODE_DEVICE_IPS &
+run_decode_instance  $MODEL_NAME $TP_SIZE $DECODE_PORT $REGISTER_PORT "$PREFILL_DEVICE_IPS" "$DECODE_DEVICE_IPS" &
 _info "Waiting for decode instance ready"
 wait_url_ready $DECODE_PROC_NAME "http://localhost:${DECODE_PORT}/v1/completions"
 
