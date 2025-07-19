@@ -353,8 +353,11 @@ extern void bgmv_expand_impl(AscendType type, void* stream, void* x, void* weigh
         bgmv_expand_half<<<blockDim, nullptr, stream>>>(x, weight, indices, y, batchSize, numTokensPerCore, maxLoRARank,
                                                         outputHiddenDim, sliceOffset, outputFullDim);
     } else if (type == AscendType::BF16) {
-        bgmv_expand_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, indices, y, batchSize, numTokensPerCore,
-                                                              maxLoRARank, outputHiddenDim, sliceOffset, outputFullDim);
+        #if (__CCE_AICORE__ >= 220)
+            bgmv_expand_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, indices, y, batchSize, numTokensPerCore,
+                                                                  maxLoRARank, outputHiddenDim, sliceOffset,
+                                                                  outputFullDim);
+        #endif
     } else {
         return;
     }

@@ -240,8 +240,10 @@ extern void bgmv_shrink_impl(AscendType type, void* stream, void* x, void* weigh
         bgmv_shrink_half<<<blockDim, nullptr, stream>>>(x, weight, indices, y, batchSize, numTokensPerCore, 
                                                         inputHiddenDim, maxLoRARank, scale);
     } else if (type == AscendType::BF16) {
-        bgmv_shrink_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, indices, y, batchSize, numTokensPerCore, 
-                                                              inputHiddenDim, maxLoRARank, scale);
+        #if (__CCE_AICORE__ >= 220)
+            bgmv_shrink_bfloat16_t<<<blockDim, nullptr, stream>>>(x, weight, indices, y, batchSize, numTokensPerCore, 
+                                                                  inputHiddenDim, maxLoRARank, scale);
+        #endif
     } else {
         return;
     }
