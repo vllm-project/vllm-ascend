@@ -28,6 +28,12 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.worker.gpu_input_batch import InputBatch
 
+try:
+    from torch_npu.atb import npu_mla_prefill  # noqa: F401
+    ATB_MLA_PREFILL_ENABLED = True
+except ImportError:
+    ATB_MLA_PREFILL_ENABLED = False
+
 
 class AscendMLABackend(AttentionBackend):
 
@@ -626,6 +632,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
+        self.enable_prefill_optimizations = ascend_config.enable_prefill_optimizations
 
         # Adapt torch air graph mode with spec decoding.
         speculative_config = get_current_vllm_config().speculative_config
@@ -883,17 +890,41 @@ class AscendMLAImpl(MLAAttentionImpl):
                 query, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse)
 
         elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-            key = torch.cat((k_nope, k_pe), dim=-1)
-            torch_npu._npu_flash_attention(
-                query=query,
-                key=key,
-                value=value,
-                mask=attn_metadata.attn_mask,
-                seq_len=attn_metadata.prefill.context_lens,
-                scale_value=self.scale,
-                num_heads=self.num_heads,
-                num_kv_heads=self.num_heads,
-                out=attn_output)
+            if not self.enable_prefill_optimizations or not ATB_MLA_PREFILL_ENABLED:
+                key = torch.cat((k_nope, k_pe), dim=-1)
+                torch_npu._npu_flash_attention(
+                    query=query,
+                    key=key,
+                    value=value,
+                    mask=attn_metadata.attn_mask,
+                    seq_len=attn_metadata.prefill.context_lens,
+                    scale_value=self.scale,
+                    num_heads=self.num_heads,
+                    num_kv_heads=self.num_heads,
+                    out=attn_output)
+            else:
+                q_pe = query[..., self.qk_nope_head_dim:]
+                q_nope = query[..., :self.qk_nope_head_dim]
+                mask = torch.triu(
+                    torch.ones(512,
+                               512,
+                               device=query.device,
+                               dtype=query.dtype),
+                    1)  # 512: mask only support 512
+                torch_npu.atb.npu_mla_prefill(
+                    q=q_nope,
+                    q_rope=q_pe,
+                    k=k_nope,
+                    k_rope=k_pe,
+                    v=value,
+                    q_seqlen=attn_metadata.prefill.context_lens,
+                    kv_seqlen=attn_metadata.prefill.context_lens,
+                    q_headnum=self.num_heads,
+                    qk_scale=self.scale,
+                    kv_headnum=self.num_heads,
+                    mask=mask,
+                    mask_type="mask_type_free",
+                    output=attn_output)
             attn_output = attn_output.view(-1, self.num_heads, self.v_head_dim)
         attn_output = attn_output.reshape(
             [num_tokens, self.num_heads * self.v_head_dim])
@@ -1133,7 +1164,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             # Inputs and outputs may be padded for CUDA graphs
             output_padded = output
             output = output[:num_actual_toks, ...]
-            if not self.torchair_graph_enabled:
+            if not self.torchair_graph_enabled or self.enable_prefill_optimizations:
                 kv_c_normed = kv_c_normed[:num_actual_toks, ...]
                 prefill_k_c_normed = kv_c_normed[num_decode_tokens:]
         if not self.running_in_graph:
@@ -1180,7 +1211,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 .view(-1, self.num_heads, self.qk_head_dim)
             prefill_q_pe = prefill_q[..., self.qk_nope_head_dim:]
             prefill_q_nope = prefill_q[..., :self.qk_nope_head_dim]
-            if self.torchair_graph_enabled:
+            if self.torchair_graph_enabled and not self.enable_prefill_optimizations:
                 num_tokens = prefill_hs_or_q_c.shape[0]
                 cos = attn_metadata.prefill.cos
                 sin = attn_metadata.prefill.sin
@@ -1196,6 +1227,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                                                  -1)
                 prefill_q = torch.cat([prefill_q_nope, prefill_q_pe], dim=-1)
             else:
+                num_tokens = prefill_hs_or_q_c.shape[0]
                 prefill_q_pe[...], prefill_k_pe[...] = self.rotary_emb(
                     attn_metadata.prefill.input_positions,
                     prefill_q_pe.contiguous(), prefill_k_pe)
