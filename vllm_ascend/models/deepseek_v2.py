@@ -68,6 +68,7 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.sequence import IntermediateTensors
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
@@ -407,8 +408,12 @@ class CustomDeepseekV2MoE(nn.Module):
             experts_hidden_states[0] * self.routed_scaling_factor +
             experts_hidden_states[1])
         if self.all_reduce_merge:
-            # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
-            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+            if envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and not is_prefill:
+                # Prefill uses the AllGatherEP solution (using the VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP switch), and Decode uses the MC2 solution.
+                ...
+            else:
+                # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
+                hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
         return hidden_states
 
