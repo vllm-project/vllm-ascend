@@ -31,6 +31,7 @@ from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
+from vllm.pooling_params import PoolingTask
 from vllm.sequence import IntermediateTensors
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -254,6 +255,9 @@ class NPUWorker(WorkerBase):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         NPUPlatform.seed_everything(self.model_config.seed)
+
+    def get_supported_pooling_tasks(self) -> list[PoolingTask]:
+        return self.model_runner.get_supported_pooling_tasks()
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
