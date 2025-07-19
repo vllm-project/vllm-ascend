@@ -31,7 +31,6 @@ from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
-from vllm.pooling_params import PoolingTask
 from vllm.sequence import IntermediateTensors
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -48,8 +47,12 @@ from vllm_ascend.utils import (check_kv_cache_bytes_cache_exist,
                                check_torchair_cache_exist,
                                delete_torchair_cache_file,
                                read_kv_cache_bytes_from_file,
-                               sleep_mode_enabled, try_register_lib)
+                               sleep_mode_enabled, try_register_lib,
+                               vllm_version_is)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+if not vllm_version_is("0.9.2"):
+    from vllm.pooling_params import PoolingTask
 
 
 class NPUWorker(WorkerBase):
