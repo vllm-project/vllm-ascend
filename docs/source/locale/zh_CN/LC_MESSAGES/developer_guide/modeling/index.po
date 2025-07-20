@@ -23,7 +23,7 @@ msgstr ""
 #: ../../developer_guide/modeling/index.md:1
 #: ../../developer_guide/modeling/index.md:5
 msgid "Modeling"
-msgstr "建模"
+msgstr "新模型"
 
 #: ../../developer_guide/modeling/index.md:3
 msgid ""

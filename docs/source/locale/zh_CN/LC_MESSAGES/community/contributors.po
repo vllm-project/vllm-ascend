@@ -42,7 +42,7 @@ msgstr "日期"
 
 #: ../../community/contributors.md
 msgid "Xiyuan Wang"
-msgstr "王锡元"
+msgstr "Xiyuan Wang"
 
 #: ../../community/contributors.md
 msgid "[@wangxiyuan](https://github.com/wangxiyuan)"
@@ -54,7 +54,7 @@ msgstr "2025/01"
 
 #: ../../community/contributors.md
 msgid "Yikun Jiang"
-msgstr "蒋一堃"
+msgstr "Yikun Jiang"
 
 #: ../../community/contributors.md
 msgid "[@Yikun](https://github.com/Yikun)"
@@ -66,7 +66,7 @@ msgstr "2025/02"
 
 #: ../../community/contributors.md
 msgid "Yi Gan"
-msgstr "伊甘"
+msgstr "Yi Gan"
 
 #: ../../community/contributors.md
 msgid "[@ganyi1996ppo](https://github.com/ganyi1996ppo)"
@@ -74,7 +74,7 @@ msgstr "[@ganyi1996ppo](https://github.com/ganyi1996ppo)"
 
 #: ../../community/contributors.md
 msgid "Shoujian Zheng"
-msgstr "郑守建"
+msgstr "Shoujian Zheng"
 
 #: ../../community/contributors.md
 msgid "[@jianzs](https://github.com/jianzs)"
@@ -156,7 +156,7 @@ msgstr "[@Agonixiaoxiao](https://github.com/)"
 
 #: ../../community/contributors.md
 msgid "2025/7/2"
-msgstr "2025年7月2日"
+msgstr "2025/7/2"
 
 #: ../../community/contributors.md
 msgid ""
@@ -192,7 +192,7 @@ msgstr "[@GDzhu01](https://github.com/GDzhu01)"
 
 #: ../../community/contributors.md
 msgid "2025/6/28"
-msgstr "2025年6月28日"
+msgstr "2025/6/28"
 
 #: ../../community/contributors.md
 msgid ""
@@ -436,7 +436,7 @@ msgstr "[@Yuxiao-Xu](https://github.com/Yuxiao-Xu)"
 
 #: ../../community/contributors.md
 msgid "2025/6/9"
-msgstr "2025年6月9日"
+msgstr "2025/6/9"
 
 #: ../../community/contributors.md
 msgid ""
@@ -456,7 +456,7 @@ msgstr "[@ChenTaoyu-SJTU](https://github.com/ChenTaoyu-SJTU)"
 
 #: ../../community/contributors.md
 msgid "2025/6/7"
-msgstr "2025年6月7日"
+msgstr "2025/6/7"
 
 #: ../../community/contributors.md
 msgid ""
@@ -1312,7 +1312,7 @@ msgstr "[@dependabot](https://github.com/dependabot)"
 
 #: ../../community/contributors.md
 msgid "2025/2/27"
-msgstr "2025年2月27日"
+msgstr "2025/2/27"
 
 #: ../../community/contributors.md
 msgid ""
@@ -1616,7 +1616,7 @@ msgstr "2"
 
 #: ../../community/contributors.md
 msgid "2025/2/5"
-msgstr "2025年2月5日"
+msgstr "2025/2/5"
 
 #: ../../community/contributors.md
 msgid ""
@@ -1636,7 +1636,7 @@ msgstr "[@simon-mo](https://github.com/simon-mo)"
 
 #: ../../community/contributors.md
 msgid "2025/1/29"
-msgstr "2025年1月29日"
+msgstr "2025/1/29"
 
 #: ../../community/contributors.md
 msgid ""

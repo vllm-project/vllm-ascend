@@ -11,20 +11,14 @@ pip install -r requirements-docs.txt
 # Build the docs.
 make clean
 make html
-```
 
-## Open the docs with your browser
+# Build the docs with translation
+make intl
 
-```bash
+# Open the docs with your browser
 python -m http.server -d _build/html/
 ```
 
-Launch your browser and open http://localhost:8000/.
-
-## Build the docs with translation
-
-```bash
-cd docs/source
-sphinx-intl build
-sphinx-build -b html -D language=zh_CN . _build/html
-```
+Launch your browser and open:
+- English version: http://localhost:8000
+- Chinese version: http://localhost:8000/zh_CN

@@ -65,7 +65,7 @@ msgid ""
 "Atlas A2 Training series (Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 "
 "Box16, Atlas 300T A2)"
 msgstr ""
-"Atlas A2 培训系列（Atlas 800T A2，Atlas 900 A2 PoD，Atlas 200T A2 Box16，Atlas 300T "
+"Atlas A2 训练系列（Atlas 800T A2，Atlas 900 A2 PoD，Atlas 200T A2 Box16，Atlas 300T "
 "A2）"
 
 #: ../../faqs.md:15
