@@ -1233,21 +1233,20 @@ class AscendMLAImpl(MLAAttentionImpl):
 
 class AscendMLAImpl092(AscendMLAImpl):
 
-    def __init__(
-        self,
-        num_heads: int,
-        head_size: int,
-        scale: float,
-        num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
-        sliding_window: Optional[int],
-        kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
-        logits_soft_cap: Optional[float] = None,
-        attn_type: str = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[str] = None,
-        use_irope: bool = False,
-    ) -> None:
+    def __init__(self,
+                 num_heads: int,
+                 head_size: int,
+                 scale: float,
+                 num_kv_heads: int,
+                 alibi_slopes: Optional[List[float]],
+                 sliding_window: Optional[int],
+                 kv_cache_dtype: str,
+                 blocksparse_params: Optional[Dict[str, Any]] = None,
+                 logits_soft_cap: Optional[float] = None,
+                 attn_type: str = AttentionType.DECODER,
+                 kv_sharing_target_layer_name: Optional[str] = None,
+                 use_irope: bool = False,
+                 **kwargs) -> None:
         super().__init__(
             num_heads=num_heads,
             head_size=head_size,
@@ -1260,4 +1259,4 @@ class AscendMLAImpl092(AscendMLAImpl):
             attn_type=attn_type,
             kv_sharing_target_layer_name=kv_sharing_target_layer_name,
             use_irope=use_irope,
-        )
+            **kwargs)
