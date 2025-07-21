@@ -1,21 +1,20 @@
-import unittest
-
+from tests.ut.base import TestBase
 from vllm_ascend.multistream.base import (MSAttentionMetadataSplitConfig,
                                           MSEventKey)
 
 
-class TestBase(unittest.TestCase):
+class Testbase(TestBase):
 
     def test_ms_event_key(self):
-        self.assertEqual(MSEventKey.ATTN_COM_FINISH, 0)
-        self.assertEqual(MSEventKey.ATTN_AR_FINISH, 1)
-        self.assertEqual(MSEventKey.FFN_COM_FINISH, 2)
-        self.assertEqual(MSEventKey.FFN_AR_FINISH, 3)
-        self.assertEqual(MSEventKey.MOE_BEFORE_COMM, 4)
-        self.assertEqual(MSEventKey.MOE_AFTER_COMM, 5)
-        self.assertEqual(MSEventKey.MOE_SE_COMM_FINISH, 6)
-        self.assertEqual(MSEventKey.MOE_SE_COMP_FINISH, 7)
-        self.assertEqual(MSEventKey.MOE_GATE_FINISH, 8)
+        self.assertEqual(MSEventKey.ATTN_COM_FINISH.value, 0)
+        self.assertEqual(MSEventKey.ATTN_AR_FINISH.value, 1)
+        self.assertEqual(MSEventKey.FFN_COM_FINISH.value, 2)
+        self.assertEqual(MSEventKey.FFN_AR_FINISH.value, 3)
+        self.assertEqual(MSEventKey.MOE_BEFORE_COMM.value, 4)
+        self.assertEqual(MSEventKey.MOE_AFTER_COMM.value, 5)
+        self.assertEqual(MSEventKey.MOE_SE_COMM_FINISH.value, 6)
+        self.assertEqual(MSEventKey.MOE_SE_COMP_FINISH.value, 7)
+        self.assertEqual(MSEventKey.MOE_GATE_FINISH.value, 8)
 
     def test_ms_attention_metadata_split_config_default(self):
         config = MSAttentionMetadataSplitConfig()
