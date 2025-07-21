@@ -171,4 +171,3 @@ class TestHCLLLibrary(TestBase):
         lib.hcclCommDestroy(comm)
         lib._funcs["HcclCommDestroy"].assert_called_once_with(comm)
         mock_hccl_check.assert_called_once_with(0)
-
