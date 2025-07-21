@@ -43,10 +43,10 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.communication_op import \
     data_parallel_reduce_scatter
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
+from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
                                get_all_reduce_merge_state, get_fused_moe_state,
-                               get_rm_router_logits_state, is_310p,
-                               npu_stream_switch, npu_wait_tensor)
+                               get_rm_router_logits_state, is_310p)
 
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
 SELECT_GATING_TOPK_SOTFMAX_EXPERTS: bool = envs_ascend.SELECT_GATING_TOPK_SOTFMAX_EXPERTS
