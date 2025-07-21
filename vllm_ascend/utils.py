@@ -313,8 +313,6 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     parallel_factor = 1 + sum(size > 1 for size in [
         parallel_config.data_parallel_size_local,
         parallel_config.tensor_parallel_size,
-        parallel_config.expert_parallel_size,
-        parallel_config.expert_tensor_parallel_size,
     ])
 
     # Calculate maximum supported batch sizes considering model architecture

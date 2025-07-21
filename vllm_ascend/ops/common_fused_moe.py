@@ -88,6 +88,7 @@ def forward_oot(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
+            moe_parallel_config=self.moe.moe_parallel_config,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             top_k=top_k,
