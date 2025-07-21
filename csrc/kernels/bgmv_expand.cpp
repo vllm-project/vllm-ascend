@@ -46,7 +46,7 @@ public:
     // So need to read them all and apply PairReduceSum
     static constexpr int32_t PAIR_REDUCE_NUM_REPEATS_16 = 
         (BLOCK_REDUCE_NUM_REPEATS * NUM_BLOCKS_PER_REPEAT + NUM_ELEMENTS_PER_REPEAT - 1) / NUM_ELEMENTS_PER_REPEAT;
-    // The second PairReduceSum for rank=32, needs half of the repeatition that happened for rank=16.
+    // The second PairReduceSum for rank=32, needs half of the repetition that happened for rank=16.
     // Same for rank=64, we do not support ranks greater than 64.
     static constexpr int32_t PAIR_REDUCE_NUM_REPEATS_32 = (PAIR_REDUCE_NUM_REPEATS_16 + 1) / 2;
 
