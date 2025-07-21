@@ -221,7 +221,10 @@ class TestNativeRopeDeepseekForward(TestBase):
         mock_rope_forward_oot.return_value = (query, key)
 
         with self.assertRaises(ValueError):
-            native_rope_deepseek_forward(module, positions, query, key,
+            native_rope_deepseek_forward(module,
+                                         positions,
+                                         query,
+                                         key,
                                          max_seq_len=2048)
 
     @patch('vllm_ascend.ops.rotary_embedding.rope_forward_oot')
