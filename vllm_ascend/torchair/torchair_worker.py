@@ -17,10 +17,10 @@ import torch
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
-from vllm_ascend.utils import (check_kv_cache_bytes_cache_exist,
-                               check_torchair_cache_exist,
-                               delete_torchair_cache_file,
-                               read_kv_cache_bytes_from_file)
+from vllm_ascend.torchair.utils import (check_kv_cache_bytes_cache_exist,
+                                        check_torchair_cache_exist,
+                                        delete_torchair_cache_file,
+                                        read_kv_cache_bytes_from_file)
 from vllm_ascend.worker.worker_v1 import NPUWorker
 
 
