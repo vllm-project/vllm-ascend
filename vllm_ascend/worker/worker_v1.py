@@ -290,7 +290,7 @@ class NPUWorker(WorkerBase):
         return self.model_runner.pin_lora(lora_id)
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1)
+        self.model_runner._dummy_run(1, dummy_batch=True)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
@@ -302,7 +302,8 @@ class NPUWorker(WorkerBase):
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
-        init_ascend_model_parallel(self.parallel_config.expert_parallel_size)
+        init_ascend_model_parallel(self.parallel_config.expert_parallel_size,
+                                   self.parallel_config.pipeline_parallel_size)
         ensure_kv_transfer_initialized(self.vllm_config)
 
     def _init_profiler(self):
