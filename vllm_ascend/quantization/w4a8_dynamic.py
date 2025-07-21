@@ -391,4 +391,3 @@ class AscendW4A8DynamicFusedMoEMethod:
         layer.w2_weight.data = torch_npu.npu_quantize(
             layer.w2_weight.data.to(torch.float32),
             torch.tensor([1.]).npu(), None, torch.quint4x2, -1, False)
-	
