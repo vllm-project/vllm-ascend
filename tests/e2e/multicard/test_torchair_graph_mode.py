@@ -123,6 +123,7 @@ def _pangu_torchair_test_fixture(
             distributed_executor_backend="mp",
             enforce_eager=False,
             additional_config=additional_config,
+            enable_expert_parallel=True,
     ) as vllm_model:
         # use greedy sampler to make sure the generated results are fix
         vllm_output = vllm_model.generate_greedy(example_prompts, 5)

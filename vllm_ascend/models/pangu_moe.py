@@ -30,8 +30,8 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (divide, get_pp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.distributed.parallel_state import (get_dp_group, get_tp_group,
-                                             get_world_group)
+from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
+                                             get_tp_group, get_world_group)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -58,7 +58,6 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p
 
 logger = init_logger(__name__)
@@ -93,7 +92,7 @@ class CustomMergedColumnParallelLinear(LinearBase):
         # Divide the weight matrix along the last dimension.
         output_size = sum(output_sizes)
         self.output_sizes = output_sizes
-        self.tp_size = get_world_group().world_size
+        self.tp_size = get_tp_group().world_size
         self.input_size_per_partition = input_size
         self.output_size_per_partition = divide(output_size, self.tp_size)
         self.output_partition_sizes = [self.output_size_per_partition]
@@ -144,8 +143,8 @@ class CustomMergedColumnParallelLinear(LinearBase):
 
         assert loaded_shard_id < len(self.output_sizes)
 
-        tp_rank = get_world_group().rank_in_group
-        tp_size = get_world_group().world_size
+        tp_rank = get_tp_group().rank_in_group
+        tp_size = get_tp_group().world_size
         if output_dim is not None:
             shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
             shard_size = self.output_sizes[loaded_shard_id] // tp_size
@@ -204,7 +203,7 @@ class CustomRowParallelLinear(LinearBase):
         group=None,
     ):
         # Divide the weight matrix along the first dimension.
-        self.group = group if group is not None else get_world_group()
+        self.group = group if group is not None else get_tp_group()
         self.tp_rank = self.group.rank_in_group
         self.tp_size = self.group.world_size
         self.input_size_per_partition = divide(input_size, self.tp_size)
@@ -357,7 +356,7 @@ def topk_wrapper(num_voted_experts):
         num_tokens = scores.shape[0]
         router_scale = _ROUTER_SCALE.squeeze(  # type: ignore
         )
-
+        # TODO: support disable expert parallel
         ep_size = get_ep_group().world_size
         local_num_experts = global_num_experts // ep_size
         local_num_group = topk // ep_size
@@ -464,6 +463,7 @@ class PanguProMoESparseMoeBlock(nn.Module):
             custom_routing_function=topk_wrapper(num_voted_experts),
             prefix=f"{prefix}.experts",
         )
+        self.use_ep = self.experts.use_ep
 
         self.gate = ReplicatedLinear(
             config.hidden_size,

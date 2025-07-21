@@ -42,7 +42,6 @@ class TestAscendConfig(TestBase):
         test_vllm_config = VllmConfig()
         # No additional config given, check the default value here.
         ascend_config = init_ascend_config(test_vllm_config)
-        self.assertEqual(ascend_config.expert_tensor_parallel_size, 0)
         self.assertIsNone(ascend_config.expert_map_path)
 
         torchair_graph_config = ascend_config.torchair_graph_config
@@ -75,12 +74,10 @@ class TestAscendConfig(TestBase):
             "ascend_scheduler_config": {
                 "enabled": True
             },
-            "expert_tensor_parallel_size": 1,
             "expert_map_path": "test_expert_map_path",
             "refresh": True
         }
         ascend_config = init_ascend_config(test_vllm_config)
-        self.assertEqual(ascend_config.expert_tensor_parallel_size, 1)
         self.assertEqual(ascend_config.expert_map_path, "test_expert_map_path")
 
         torchair_graph_config = ascend_config.torchair_graph_config
