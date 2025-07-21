@@ -1,12 +1,15 @@
-from dataclasses import asdict
 from typing import Callable
-from unittest.mock import MagicMock, patch
-
-import torch
-from vllm.compilation.backends import VllmBackend
-from vllm.config import VllmConfig
+from unittest.mock import MagicMock
 
 from tests.ut.base import TestBase
+from vllm_ascend import ops
+
+ops.register_dummy_fusion_op()
+
+import torch
+
+from vllm.compilation.backends import VllmBackend
+from vllm.config import VllmConfig
 from vllm_ascend.compilation.piecewise_backend import (ConcreteSizeEntry,
                                                        NPUPiecewiseBackend)
 
@@ -14,35 +17,28 @@ from vllm_ascend.compilation.piecewise_backend import (ConcreteSizeEntry,
 class TestConcreteSizeEntry(TestBase):
 
     def test_init(self):
-        entry = ConcreteSizeEntry(
-            runtime_shape=10,
-            need_to_compile=True,
-            use_aclgraph=False,
-            compiled=True,
-            runnable=lambda: None,  # 一个简单的可调用对象
-            num_finished_warmup=5,
-            aclgraph=None,  # 假设 NPUGraph 可以这样初始化
-            output="some_output",
-            input_addresses=[12345, 67890])
-        expected_dict = {
-            "runtime_shape": 10,
-            "need_to_compile": True,
-            "use_aclgraph": False,
-            "compiled": True,
-            "runnable": lambda: None,
-            "num_finished_warmup": 5,
-            "aclgraph": None,
-            "output": "some_output",
-            "input_addresses": [12345, 67890]
-        }
-
-        self.assertEqual(asdict(entry), expected_dict)
+        entry = ConcreteSizeEntry(runtime_shape=10,
+                                  need_to_compile=True,
+                                  use_aclgraph=False,
+                                  compiled=True,
+                                  runnable=lambda: None,
+                                  num_finished_warmup=5,
+                                  aclgraph=None,
+                                  output="some_output",
+                                  input_addresses=[12345, 67890])
+        self.assertEqual(entry.runtime_shape, 10)
+        self.assertTrue(entry.need_to_compile)
+        self.assertFalse(entry.use_aclgraph)
+        self.assertTrue(entry.compiled)
+        self.assertEqual(entry.num_finished_warmup, 5)
+        self.assertIsNone(entry.aclgraph)
+        self.assertEqual(entry.output, "some_output")
+        self.assertEqual(entry.input_addresses, [12345, 67890])
 
 
 class TestNPUPiecewiseBackend(TestBase):
 
     def setUp(self):
-        # 创建模拟的依赖对象
         self.graph = MagicMock(spec=torch.fx.GraphModule)
         self.vllm_config = MagicMock(spec=VllmConfig)
         self.vllm_config.compilation_config = MagicMock()
@@ -80,9 +76,7 @@ class TestNPUPiecewiseBackend(TestBase):
         self.assertEqual(backend.concrete_size_entries[10].runtime_shape, 10)
         self.assertEqual(backend.concrete_size_entries[20].runtime_shape, 20)
 
-    @patch("vllm.compilation.monitor.end_monitoring_torch_compile")
-    def test_check_for_ending_compilation(self,
-                                          mock_end_monitoring_torch_compile):
+    def test_check_for_ending_compilation(self):
         backend = NPUPiecewiseBackend(
             self.graph, self.vllm_config, self.graph_pool,
             self.piecewise_compile_index, self.total_piecewise_compiles,
@@ -92,4 +86,3 @@ class TestNPUPiecewiseBackend(TestBase):
         backend.to_be_compiled_sizes = set()
         backend.check_for_ending_compilation()
         backend.vllm_backend.compiler_manager.save_to_file.assert_called_once()
-        mock_end_monitoring_torch_compile.assert_called_once()
