@@ -11,8 +11,7 @@ from vllm_ascend.attention.mla_v1 import (AscendMLABackend,
                                           AscendMLADecodeMetadata,
                                           AscendMLAImpl, AscendMLAMetadata,
                                           AscendMLAMetadataBuilder,
-                                          AscendMLAPrefillMetadata,
-                                          CommonAttentionMetadata)
+                                          AscendMLAPrefillMetadata)
 
 
 class TestAscendMLABackend(TestBase):
