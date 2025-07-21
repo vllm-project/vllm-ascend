@@ -29,6 +29,7 @@ from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.ops.fused_moe import select_experts
 from vllm_ascend.quantization.w8a8_dynamic import (fused_experts_with_all2all,
                                                    fused_experts_with_mc2)
+from vllm_ascend.utils import npu_stream_switch, npu_wait_tensor
 
 
 class AscendW4A8DynamicLinearMethod:
@@ -232,6 +233,8 @@ class AscendW4A8DynamicFusedMoEMethod:
         log2phy: torch.Tensor = None,
         global_redundant_expert_num: int = 0,
         shared_experts: Optional[Any] = None,
+        quantized_x_for_share: Optional[Any] = None,
+        dynamic_scale_for_share: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
         assert router_logits.shape[
@@ -266,6 +269,16 @@ class AscendW4A8DynamicFusedMoEMethod:
                 e_score_correction_bias=e_score_correction_bias,
             )
 
+        fused_moe_state = get_forward_context().fused_moe_state
+        shared_gate_up, shared_dequant_scale = None, None
+        if shared_experts is not None and fused_moe_state == FusedMoEState.MC2:
+            with npu_stream_switch("moe_secondary", 0):
+                npu_wait_tensor(quantized_x_for_share, router_logits)
+                share_up_out, _ = shared_experts.gate_up_proj(
+                    (quantized_x_for_share, dynamic_scale_for_share))
+                shared_gate_up, shared_dequant_scale = share_up_out[
+                    0], share_up_out[1]
+
         # this is a naive implementation for experts load balance so as
         # to avoid accumulating too much tokens on a single rank.
         # currently it is only activated when doing profile runs.
@@ -292,7 +305,10 @@ class AscendW4A8DynamicFusedMoEMethod:
                 log2phy=log2phy,
                 global_redundant_expert_num=global_redundant_expert_num,
                 shared_experts=shared_experts,
-                is_torchair=self.torchair_graph_enabled)
+                is_torchair=self.torchair_graph_enabled,
+                quantized_x_for_share=shared_gate_up,
+                dynamic_scale_for_share=shared_dequant_scale,
+                mc2_mask=kwargs.get("mc2_mask", None))
         else:
             # The current implementation of deepseek moe splits hidden_states
             # according to tp_size before they are feed into fused_moe module.
@@ -375,3 +391,4 @@ class AscendW4A8DynamicFusedMoEMethod:
         layer.w2_weight.data = torch_npu.npu_quantize(
             layer.w2_weight.data.to(torch.float32),
             torch.tensor([1.]).npu(), None, torch.quint4x2, -1, False)
+	
