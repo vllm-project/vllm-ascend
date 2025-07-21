@@ -77,7 +77,7 @@ def test_basic_lifecycle():
     for block in blocks:
         assert block.ref_cnt == 1
 
-    scheduler.schedule()
+    scheduler_output = scheduler.schedule()
     assert len(scheduler.running) == 0
     assert len(scheduler_output.finished_req_ids) == 1
     assert request_id in scheduler_output.finished_req_ids
@@ -143,8 +143,8 @@ def test_prefix_cache_lifecycle():
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
     request_remote = create_request(request_id=1,
-                                      num_tokens=NUM_TOKENS,
-                                      do_remote_decode=True)
+                                    num_tokens=NUM_TOKENS,
+                                    do_remote_decode=True)
 
     scheduler.add_request(request_remote)
     scheduler_output = scheduler.schedule()
