@@ -28,5 +28,5 @@ class TestCache(TestBase):
                              dim=-1).squeeze(1)
         for i in range(self.num_tokens):
             idx = self.slot_mapping[i].item()
-            self.assertTrue(torch.allclose(kv_cache_reshaped[idx], 
+            self.assertTrue(torch.allclose(kv_cache_reshaped[idx],
                                            expected[i]))
