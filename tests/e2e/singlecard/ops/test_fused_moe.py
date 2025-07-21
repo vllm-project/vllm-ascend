@@ -98,3 +98,71 @@ def test_fused_experts(
     # TODO: The native params are: atol=2e-2, rtol=0, maybe related to the nan problem
     torch.testing.assert_close(output, torch_output, atol=4e-2, rtol=1)
     torch.npu.empty_cache()
+
+
+@pytest.mark.parametrize("chunk_size", [256, 4096])
+@pytest.mark.parametrize("m", [1, 33, 64, 222, 1024 * 128])
+@pytest.mark.parametrize("n", [128, 1024, 2048])
+@pytest.mark.parametrize("k", [128, 511, 1024])
+@pytest.mark.parametrize("e", NUM_EXPERTS)
+@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("ep_size", EP_SIZE)
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("device", DEVICE)
+def test_split_fused_experts(
+    chunk_size: int,
+    m: int,
+    n: int,
+    k: int,
+    e: int,
+    topk: int,
+    ep_size: int,
+    dtype: torch.dtype,
+    device: str,
+):
+    a = torch.randn((m, k), device=device, dtype=dtype) / 10
+    w1 = torch.randn((e, 2 * n, k), device=device, dtype=dtype) / 10
+    w2 = torch.randn((e, k, n), device=device, dtype=dtype) / 10
+
+    score = torch.randn((m, e), device=device, dtype=dtype)
+
+    if ep_size > 1:
+        local_e = e // ep_size
+        e_ids = torch.randint(0,
+                              e, (local_e, ),
+                              device=device,
+                              dtype=torch.int32)
+        e_map = torch.full((e, ), -1, device=device, dtype=torch.int32)
+        e_map[e_ids] = torch.arange(local_e, device=device, dtype=torch.int32)
+        w1 = w1[e_ids]
+        w2 = w2[e_ids]
+    else:
+        e_map = None
+
+    score = torch.softmax(score, dim=-1, dtype=dtype)
+    topk_weights, topk_ids = torch.topk(score, topk)
+    topk_ids = topk_ids.to(torch.int32)
+
+    a_clone = a.clone()
+    a_list = a_clone.split(chunk_size)
+    topk_weights_list = topk_weights.split(chunk_size)
+    topk_ids_list = topk_ids.split(chunk_size)
+    num_chunks = len(a_list)
+    assert num_chunks == len(topk_weights_list) == len(topk_ids_list)
+    output = a_clone
+    for i in range(len(a_list)):
+        h_chunk = fused_experts(a_list[i], w1, w2, topk_weights_list[i],
+                                topk_ids_list[i], topk, e_map)
+        if num_chunks > 1:
+            # use inplace copy to save memory
+            a_list[i].copy_(h_chunk)
+            del h_chunk
+        else:
+            # num_chunks == 1, return the result directly
+            output = h_chunk
+            break
+
+    torch_output = torch_moe(a, w1, w2, topk_weights, topk_ids, topk, e_map)
+    # TODO: The native params are: atol=2e-2, rtol=0, maybe related to the nan problem
+    torch.testing.assert_close(output, torch_output, atol=4e-2, rtol=1)
+    torch.npu.empty_cache()
