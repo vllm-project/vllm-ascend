@@ -363,6 +363,16 @@ class TestNPUPlatform(TestBase):
             "vllm_ascend.worker.worker_v1.NPUWorker",
         )
 
+        test_ascend_config = self.mock_ascend_config
+        test_ascend_config.torchair_graph_config.enabled = True
+        mock_init_ascend.return_value = test_ascend_config
+        self.mock_vllm_config.parallel_config.worker_cls = "auto"
+        self.platform.check_and_update_config(self.mock_vllm_config)
+        self.assertEqual(
+            self.mock_vllm_config.parallel_config.worker_cls,
+            "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker",
+        )
+
     @patch("vllm_ascend.ascend_config.check_ascend_config")
     @patch("vllm_ascend.ascend_config.init_ascend_config")
     @patch("vllm_ascend.utils.is_310p", return_value=True)
