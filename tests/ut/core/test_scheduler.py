@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -114,10 +114,11 @@ class TestAscendScheduler(TestBase):
         model_config.pooler_config = MagicMock()
         model_config.multimodal_config = MagicMock()
         # Cache config, optionally force APC
-        kwargs_cache: Dict[str, 
+        kwargs_cache: Dict[str,
                            Any] = ({} if ENABLE_PREFIX_CACHING is None else {
-            'enable_prefix_caching': ENABLE_PREFIX_CACHING
-        })
+                               'enable_prefix_caching':
+                               ENABLE_PREFIX_CACHING
+                           })
         cache_config = CacheConfig(
             block_size=block_size,
             gpu_memory_utilization=0.9,
