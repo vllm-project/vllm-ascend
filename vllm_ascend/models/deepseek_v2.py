@@ -217,6 +217,7 @@ class CustomDeepseekV2MoE(nn.Module):
         config: PretrainedConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        is_mtp: bool = False,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -236,7 +237,7 @@ class CustomDeepseekV2MoE(nn.Module):
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_multistream_moe = \
             ascend_config.torchair_graph_config.enable_multistream_moe and \
-            self.torchair_graph_enabled
+            self.torchair_graph_enabled and not is_mtp
 
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.n_routed_experts,
@@ -262,7 +263,8 @@ class CustomDeepseekV2MoE(nn.Module):
             topk_group=config.topk_group,
             prefix=f"{prefix}.experts",
             scoring_func=config.scoring_func,
-            e_score_correction_bias=self.gate.e_score_correction_bias)
+            e_score_correction_bias=self.gate.e_score_correction_bias,
+            is_mtp=is_mtp)
 
         if config.n_shared_experts is not None:
             intermediate_size = (config.moe_intermediate_size *
@@ -521,6 +523,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         model_config: ModelConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        is_mtp: bool = False,
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = config.hidden_size
@@ -562,6 +565,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 config=config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                is_mtp=is_mtp,
             )
         else:
             self.mlp = CustomDeepseekV2MLP(

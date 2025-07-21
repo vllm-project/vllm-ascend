@@ -1116,6 +1116,7 @@ class AscendFusedMoE(FusedMoE):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
+        is_mtp: bool = False,
     ):
         # TODO: This could not initialize FusedMoE baseclass,
         # fixme and make __init__() of AscendFusedMoE more clear
@@ -1178,7 +1179,7 @@ class AscendFusedMoE(FusedMoE):
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_multistream_moe = (
             ascend_config.torchair_graph_config.enable_multistream_moe
-            and self.torchair_graph_enabled)
+            and self.torchair_graph_enabled and not is_mtp)
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
