@@ -237,15 +237,24 @@ class CustomDeepseekV2MoE(nn.Module):
         self.enable_multistream_moe = \
             ascend_config.torchair_graph_config.enable_multistream_moe and \
             self.torchair_graph_enabled
+        self.enable_super_kernel = \
+            ascend_config.torchair_graph_config.enable_super_kernel and \
+            self.enable_multistream_moe
+        self.params_dtype = torch.get_default_dtype()
 
-        self.gate = ReplicatedLinear(config.hidden_size,
-                                     config.n_routed_experts,
-                                     bias=False,
-                                     quant_config=None,
-                                     prefix=f"{prefix}.gate")
+        self.gate = ReplicatedLinear(
+            config.hidden_size,
+            config.n_routed_experts,
+            bias=False,
+            quant_config=None,
+            params_dtype=torch.float32
+            if self.enable_super_kernel else self.params_dtype,
+            prefix=f"{prefix}.gate")
         if config.topk_method == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.n_routed_experts))
+                torch.empty(config.n_routed_experts,
+                            dtype=torch.float if self.enable_super_kernel else
+                            self.params_dtype))
         else:
             self.gate.e_score_correction_bias = None
 
@@ -288,8 +297,6 @@ class CustomDeepseekV2MoE(nn.Module):
         transfer_config = get_current_vllm_config().kv_transfer_config
         if transfer_config is not None:
             self.kv_consumer = transfer_config.kv_role == "kv_consumer"
-
-        self.params_dtype = torch.get_default_dtype()
 
     def forward(
             self,

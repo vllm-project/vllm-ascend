@@ -30,6 +30,7 @@ import torch_npu
 import torchair  # type: ignore[import]  # noqa: F401
 from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
+from torchair.scope import super_kernel as _super_kernel
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs
@@ -294,6 +295,10 @@ class ProfileExecuteDuration:
 
 def npu_stream_switch(tag: str, priority: int, *, enabled: bool = True):
     return _npu_stream_switch(tag, priority) if enabled else nullcontext()
+
+
+def super_kernel(prefix: str, stream: str, enabled: bool = True):
+    return _super_kernel(prefix, stream) if enabled else nullcontext()
 
 
 def npu_wait_tensor(self: torch.Tensor,
