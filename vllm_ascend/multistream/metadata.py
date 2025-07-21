@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Tuple, Union
 import torch
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
+from vllm_ascend.attention.mla import AscendMLAMetadata
 
 from .base import MSAttentionMetadataSplitConfig, MSEventKey
 

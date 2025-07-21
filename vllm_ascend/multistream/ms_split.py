@@ -4,7 +4,7 @@ from typing import Any, List, Optional
 import numpy as np
 import torch
 
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention import AscendAttentionState
 
 from .base import MSAttentionMetadataSplitConfig
 
@@ -127,8 +127,8 @@ def model_input_split_v1_mla_attn(
             attn_state_post = AscendAttentionState.ChunkedPrefill
             attn_mask_post = attn_metadata.attn_mask[
                 token_index:, :max(seq_lens_post)].contiguous()
-    from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,
-                                              AscendMLAPrefillMetadata)
+    from vllm_ascend.attention.mla import (AscendMLADecodeMetadata,
+                                           AscendMLAPrefillMetadata)
     if num_prefills_pre > 0:
         # split metadata.prefill
         [input_positions_pre, input_positions_post] = split_attn_tensor_type(
@@ -207,7 +207,7 @@ def model_input_split_v1_mla_attn(
         prefill_pre = None
         prefill_post = attn_metadata.prefill
     # construct metadata
-    from vllm_ascend.attention.mla_v1 import AscendMLAPrefillMetadata
+    from vllm_ascend.attention.mla import AscendMLAPrefillMetadata
     attention_metadata_pre = _metadata_cls(
         num_actual_tokens=token_index,
         num_input_tokens=token_index,

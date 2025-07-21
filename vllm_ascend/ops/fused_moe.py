@@ -1326,7 +1326,7 @@ class AscendFusedMoE(FusedMoE):
 
         if self.dp_size > 1:
             if fused_moe_state == FusedMoEState.AllGather:
-                # NOTE: When in torchair graph, it has been padded in model_runner_v1
+                # NOTE: When in torchair graph, it has been padded in model_runner
                 if not self.torchair_graph_enabled:
                     attn_metadata = get_forward_context().attn_metadata
                     if attn_metadata is not None:
