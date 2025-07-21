@@ -262,7 +262,7 @@ at::Tensor bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, a
     TORCH_CHECK((slice_size + slice_offset) <= y.size(1),
                 "slice_size + slice_offset should be smaller than the second dimension of y")
 
-    at::Tensor y_out = at::empty_like(y);
+    at::Tensor y_out = y;
     void* x_ptr = x.data_ptr();
     void* weight_ptr = weight.data_ptr();
     void* indices_ptr = indices.data_ptr();
