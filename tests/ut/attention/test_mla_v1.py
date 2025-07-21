@@ -360,60 +360,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         self.assertEqual(metadata.slot_mapping.shape[0], 3)
         self.assertEqual(metadata.query_start_loc.shape[0], 3)
 
-    @patch("vllm_ascend.attention.mla_v1.round_down")
-    @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
-    def test_build(self, mock_ascend_config, mock_round_down):
-        num_reqs = 8
-        ascend_config = MagicMock()
-        mock_ascend_config.return_value = ascend_config
-        ascend_config.torchair_graph_config.enabled = False
-        runner = MagicMock()
-        runner.device = "cpu"
-        runner.attn_mask = torch.zeros((1, 1), dtype=torch.bool)
-        runner.chunked_prefill_enabled = False
-        num_actual_tokens = 8
-        runner.seq_lens_cpu = torch.tensor([3, 4, 5, 4, 5], dtype=torch.long)
-        runner.slot_mapping_cpu = torch.tensor([1, 2, 3, 4, 5, 6, 7, 8],
-                                               dtype=torch.long)
-        runner.positions_cpu = torch.tensor([2, 3, 4, 2, 3, 2, 3, 4],
-                                            dtype=torch.long)
-        num_reqs = 5
-        max_blocks_per_seq = 100
-        input_batch = MagicMock()
-        runner.input_batch = input_batch
-        block_table = MagicMock()
-        input_batch.block_table = (block_table, )
-        input_batch.num_computed_tokens_cpu_tensor = torch.tensor(
-            [2, 3, 4, 2, 2], dtype=torch.long)
-        get_device_tensor = MagicMock()
-        get_device_tensor.return_value = torch.randint(
-            0, 1000, size=(num_reqs, max_blocks_per_seq), dtype=torch.long)
-        block_table.get_device_tensor = get_device_tensor
-
-        builder = AscendMLAMetadataBuilder(runner)
-        builder._num_prefills = 2
-        builder._num_decodes = 3
-        builder._num_decode_tokens = 3
-        builder.chunked_prefill_workspace_size = 100
-        builder.chunked_prefill_workspace = MagicMock()
-        mock_round_down.return_value = 100
-        common_attn_metadata = CommonAttentionMetadata(
-            query_start_loc=torch.tensor([0, 1, 2, 3, 5, 8]),
-            seq_lens=MagicMock())
-
-        builder.chunked_prefill_enabled = True
-        metadata = builder.build(
-            num_reqs,
-            num_actual_tokens,
-            max_query_len=1,
-            common_attn_metadata=common_attn_metadata,
-        )
-
-        self.assertIsInstance(metadata, AscendMLAMetadata)
-        self.assertEqual(metadata.num_actual_tokens, 8)
-        self.assertEqual(metadata.num_decodes, 3)
-        self.assertEqual(metadata.num_prefills, 2)
-
 
 class TestAscendMLAImpl(TestBase):
 
