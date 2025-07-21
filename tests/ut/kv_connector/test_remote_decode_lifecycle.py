@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/blob/main/tests/conftest.py
 #
 import copy
+
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
 from vllm.v1.request import FinishReason, RequestStatus
 
@@ -141,13 +142,13 @@ def test_prefix_cache_lifecycle():
     NUM_EXTERNAL_FULL_BLOCKS -= 1
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
-    request_remote_b = create_request(request_id=1,
+    request_remote = create_request(request_id=1,
                                       num_tokens=NUM_TOKENS,
                                       do_remote_decode=True)
 
-    scheduler.add_request(request_remote_b)
+    scheduler.add_request(request_remote)
     scheduler_output = scheduler.schedule()
-    model_runner_output = create_model_runner_output(reqs=[request_remote_b])
+    model_runner_output = create_model_runner_output(reqs=[request_remote])
     eco = scheduler.update_from_output(scheduler_output, model_runner_output)
     kv_transfer_params = eco[0].outputs[0].kv_transfer_params
     # Ensure we send all block ids, even if there is a cache hit.
