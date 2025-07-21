@@ -3,9 +3,10 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 import torch
 
-from tests.ut.base import TestBase
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase
+
+from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import (AscendMLABackend,
                                           AscendMLADecodeMetadata,
