@@ -639,9 +639,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                 self.dp_size,
                                                 device="cpu",
                                                 dtype=torch.int32)
-
+        cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_across_dp, dim=0)
+        
         return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, not bool(
-            forward_metadata[-1])
+            forward_metadata[-1]), cu_tokens_across_dp_cpu
 
     def _check_dbo_is_valid(self, query_lens: torch.Tensor,
                             attn_state: AscendAttentionState,
@@ -1006,7 +1007,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
                 total_num_scheduled_tokens)
         (padded_num_tokens_across_dp, num_tokens_across_dp, with_prefill,
-         enable_dbo) = self._get_forward_metadata_across_dp(
+         enable_dbo, cu_tokens_across_dp_cpu) = self._get_forward_metadata_across_dp(
              maybe_padded_num_tokens, total_num_scheduled_tokens, with_prefill,
              enable_dbo)
         extra_builder_kwargs['enable_dbo_across_dp'] = enable_dbo
@@ -1158,7 +1159,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
                 total_num_scheduled_tokens, sample_indices, finished_sending,
-                finished_recving)
+                finished_recving, cu_tokens_across_dp_cpu)
 
     def _calc_spec_decode_metadata(
         self,
@@ -1338,11 +1339,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 return self.kv_connector_no_forward(scheduler_output)
             (attn_metadata, hidden_states, spec_decode_metadata, positions,
              num_scheduled_tokens, sample_indices, finished_sending,
-             finished_recving) = (self._process_reqs(scheduler_output,
+             finished_recving, cu_tokens_across_dp_cpu) = (self._process_reqs(scheduler_output,
                                                      intermediate_tensors))
 
         with ProfileExecuteDuration().capture_async("post process"):
-            logits = self.model.compute_logits(hidden_states[sample_indices],
+            # print("############cu_tokens_across_dp_cpu",cu_tokens_across_dp_cpu)
+            logits = self.model.compute_logits(hidden_states[sample_indices], cu_tokens_across_dp_cpu,
                                                None)
 
             # Apply structured output bitmasks if present
@@ -1602,7 +1604,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             with_prefill = True
         # Padding for DP
         (num_tokens, num_tokens_across_dp, with_prefill,
-         enable_dbo) = self._get_forward_metadata_across_dp(
+         enable_dbo, cu_tokens_across_dp_cpu) = self._get_forward_metadata_across_dp(
              maybe_padded_num_tokens, num_tokens, with_prefill, False)
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
@@ -1725,7 +1727,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
                 assert isinstance(self.drafter, MtpProposer)
                 self.drafter.dummy_run(num_reqs, with_prefill=with_prefill)
-            return hidden_states
+            return hidden_states, cu_tokens_across_dp_cpu
 
     @contextmanager
     def set_in_profile_run(self):
@@ -1762,12 +1764,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # Trigger compilation for general shape.
         with self.set_in_profile_run():
-            hidden_states = self._dummy_run(self.max_num_tokens,
+            hidden_states, cu_tokens_across_dp_cpu = self._dummy_run(self.max_num_tokens,
                                             with_prefill=True)
 
         if get_pp_group().is_last_rank:
             hidden_states = hidden_states[logit_indices]
-            logits = self.model.compute_logits(hidden_states, None)
+            logits = self.model.compute_logits(hidden_states, cu_tokens_across_dp_cpu, None)
         else:
             logits = None
 
