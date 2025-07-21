@@ -122,10 +122,7 @@ def test_prefix_cache_lifecycle():
     NUM_EXTERNAL_FULL_BLOCKS = 3
     NUM_TOKENS = int(BLOCK_SIZE * (NUM_EXTERNAL_FULL_BLOCKS + 0.5))
 
-    request_remote_a = create_request(request_id=1,
-                                      max_tokens=1,
-                                      num_tokens=NUM_TOKENS,
-                                      do_remote_decode=True)
+    request_remote_a = create_request(request_id=1, do_remote_decode=True)
 
     scheduler.add_request(request_remote_a)
     scheduler_output = scheduler.schedule()
