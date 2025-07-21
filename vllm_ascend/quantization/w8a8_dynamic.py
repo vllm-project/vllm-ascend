@@ -26,9 +26,9 @@ from vllm.distributed.parallel_state import get_ep_group
 import vllm_ascend.envs as envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe import select_experts
+from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, FusedMoEState,
-                               dispose_tensor, get_fused_moe_state,
-                               npu_stream_switch, npu_wait_tensor)
+                               dispose_tensor, get_fused_moe_state)
 
 
 def apply_mlp(hidden_states: torch.Tensor,
