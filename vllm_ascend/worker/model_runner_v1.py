@@ -1768,7 +1768,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             dummy_pooling_params = PoolingParams(task=dummy_task)
 
             to_update = model.pooler.get_pooling_updates(dummy_task)
-            assert to_update is not None
             to_update.apply(dummy_pooling_params)
 
             dummy_metadata = PoolingMetadata(
