@@ -84,11 +84,6 @@ class VllmEplbAdaptor(EplbAdaptor):
                         for name in self.expert_weight_names]
                 )
 
-    # def collect_topk_ids(self, dummy_run=False):
-    #     if dummy_run:
-    #         return
-        # self.all_topk_ids.append(self.model.get_all_topk_ids(self.num_moe_layers))
-
     def get_rank_expert_workload(self) -> torch.Tensor:
         self.moe_load = self.model.get_all_moe_loads()
         return self.moe_load
