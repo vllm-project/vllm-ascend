@@ -15,9 +15,10 @@
 # limitations under the License.
 # Adapted from vllm/model_executor/models/qwen3_moe.py
 # This file is a part of the vllm-ascend project.
-
+import torch
 import vllm.model_executor.models.qwen3_moe as qwen3
 from torch import nn
+from typing import Any, Optional, Union
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
@@ -27,7 +28,10 @@ from vllm.model_executor.models.qwen3_moe import (Qwen3MoeForCausalLM,
 from vllm.model_executor.models.utils import maybe_prefix
 
 from vllm_ascend.ops.fused_moe import AscendSparseMoeBlock
+from vllm.model_executor.sampling_metadata import SamplingMetadata
 
+from vllm_ascend.ops.vocab_parallel_embedding import (CustomParallelLMHead)
+from vllm_ascend.ops.logits_processor import CustomLogitsProcessor
 
 class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
     packed_modules_mapping = {
@@ -54,12 +58,23 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
         self.quant_config = quant_config
         self.model = Qwen3MoeModel(vllm_config=vllm_config,
                                    prefix=maybe_prefix(prefix, "model"))
-        self.lm_head = ParallelLMHead(config.vocab_size,
+        self.lm_head = CustomParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config,
                                       prefix=maybe_prefix(prefix, "lm_head"))
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
-        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.logits_processor2 = CustomLogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+    
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+        cu_tokens_across_dp_cpu: torch.Tensor,
+        num_tokens_across_dp: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Optional[torch.Tensor]:
+        logits = self.logits_processor2(self.lm_head, hidden_states, cu_tokens_across_dp_cpu, num_tokens_across_dp,
+                                       sampling_metadata)
+        return logits
