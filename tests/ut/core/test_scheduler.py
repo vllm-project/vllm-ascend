@@ -555,7 +555,7 @@ class TestAscendScheduler(TestBase):
         expected_list: List[Tuple[int, int,
                                   int, List[int]]] = [(1, 3, 3, [1, 1, 1]),
                                                       (1, 3, 1, [1, 0, 0]),
-                                                      (2, 3, 3, [2, 1]), 
+                                                      (2, 3, 3, [2, 1]),
                                                       (1, 1, 1, [1]),
                                                       (0, 0, 0, [0]),
                                                       (2, 6, 3, [2, 1, 0])]
