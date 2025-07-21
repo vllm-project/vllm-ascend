@@ -1621,11 +1621,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     k: v[:num_tokens]
                     for k, v in self.intermediate_tensors.items()
                 })
-
-            with set_forward_context(None,
-                                     self.vllm_config,
-                                     num_tokens=num_tokens):
-                if self.torchair_graph_enabled and not with_prefill:
+            
+            if self.torchair_graph_enabled and not with_prefill:
+                with set_forward_context(None,
+                                        self.vllm_config,
+                                        num_tokens=num_tokens):
+                
                     attn_metadata = self.attn_metadata_builder.build_dummy(
                         num_reqs=num_tokens, num_actual_tokens=1)
                     # Only mark static while compiling
@@ -1656,22 +1657,40 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         kv_caches=self.kv_caches,
                         attn_metadata=attn_metadata,
                     )
-                else:
-                    maybe_converting_weight_acl_format(self.model,
-                                                       ACL_FORMAT_FRACTAL_ND)
+            else:
+                maybe_converting_weight_acl_format(self.model,
+                                                    ACL_FORMAT_FRACTAL_ND)
+                additional_config = self.vllm_config.additional_config
+                if additional_config is not None and "oproj_tensor_parallel_size" in additional_config and len(self.kv_caches) != 0:
+                    dummy_tokens = 1
+                    dummy_input_ids = torch.tensor([1], device=input_ids.device)
+                    dummy_positions = torch.tensor([0], device=positions.device)
+                    attn_metadata = self.attn_metadata_builder.build_dummy(
+                        1, dummy_tokens)
 
-                    hidden_states = model(
-                        input_ids=input_ids,
-                        positions=positions,
-                        intermediate_tensors=intermediate_tensors,
-                        inputs_embeds=inputs_embeds)
-                    if self.use_aux_hidden_state_outputs:
-                        hidden_states, _ = hidden_states
-                    else:
-                        hidden_states = hidden_states
-                    if self.use_spec_decode and isinstance(
-                            self.drafter, EagleProposer):
-                        self.drafter.dummy_run(num_tokens)
+                    with set_forward_context(attn_metadata, self.vllm_config,
+                                    num_tokens=dummy_tokens):
+                        hidden_states = model(
+                            input_ids=dummy_input_ids,
+                            positions=dummy_positions,
+                            intermediate_tensors=intermediate_tensors,
+                            inputs_embeds=inputs_embeds
+                            )
+                else:
+                    with set_forward_context(None, self.vllm_config,
+                                num_tokens=num_tokens):
+                        hidden_states = model(
+                            input_ids=input_ids,
+                            positions=positions,
+                            intermediate_tensors=intermediate_tensors,
+                            inputs_embeds=inputs_embeds)
+                        if self.use_aux_hidden_state_outputs:
+                            hidden_states, _ = hidden_states
+                        else:
+                            hidden_states = hidden_states
+                        if self.use_spec_decode and isinstance(
+                                self.drafter, EagleProposer):
+                            self.drafter.dummy_run(num_tokens)
             return hidden_states
 
     def profile_run(self) -> None:

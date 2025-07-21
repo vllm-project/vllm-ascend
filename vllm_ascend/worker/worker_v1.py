@@ -308,6 +308,7 @@ class NPUWorker(WorkerBase):
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
+        additional_config = self.vllm_config.additional_config
         parallel_config = self.vllm_config.parallel_config
         init_distributed_environment(self.parallel_config.world_size,
                                      self.rank, self.distributed_init_method,
@@ -315,9 +316,16 @@ class NPUWorker(WorkerBase):
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
+        
+        oproj_tensor_parallel_size = 1
+        if additional_config is not None and "oproj_tensor_parallel_size" in additional_config:
+            oproj_tensor_parallel_size = additional_config.get(
+                "oproj_tensor_parallel_size", 1)
+
         init_ascend_model_parallel(
             parallel_config.expert_parallel_size,
             parallel_config.expert_tensor_parallel_size,
+            oproj_tensor_parallel_size,
             parallel_config.world_size_across_dp,
         )
         ensure_kv_transfer_initialized(self.vllm_config)

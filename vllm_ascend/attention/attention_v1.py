@@ -153,6 +153,8 @@ class AscendMetadata:
 
     with_prefill_across_dp: bool = False
 
+    is_dummy: bool = False
+
 
 class AscendAttentionMetadataBuilder:
 
@@ -162,6 +164,23 @@ class AscendAttentionMetadataBuilder:
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
+
+    def build_dummy(self, num_reqs: int,
+                    num_actual_tokens: int) -> AscendMetadata:
+        device = self.runner.device
+        fake_tensor = torch.zeros((num_reqs, num_actual_tokens),
+                                  dtype=torch.int32,
+                                  device=device)
+                
+        return AscendMetadata(
+            num_actual_tokens=num_actual_tokens,
+            block_tables=fake_tensor,
+            query_start_loc=fake_tensor,
+            query_lens=fake_tensor,
+            seq_lens=fake_tensor,
+            with_prefill_across_dp=True,
+            is_dummy=True,
+        )
 
     def build(self,
               num_reqs,
