@@ -658,9 +658,6 @@ class DynamicEplbV2(EplbPolicy):
 
             max_heat_per_layer_after[layer] = max(result, key=lambda x: x['total_load'])['total_load']
 
-            # for box in result:
-            #     print("before: ",
-            #           f"Box {box['device_id']}: Items = {box['assigned_experts']}, weight = {box['expert_weights']}, Total Weight = {box['total_load']}, Item Count = {box['expert_count']}")
         layer_changed_ratio = []
         for layer_idx in range(layer_num):
             layer_changed_ratio.append(self.safe_divide(max_heat_per_layer_after[layer_idx], max_heat_per_layer_before[layer_idx]))
