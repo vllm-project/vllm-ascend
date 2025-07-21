@@ -1,8 +1,8 @@
-import unittest
 from unittest.mock import MagicMock
 
 import torch
 
+from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.ms_split import (compute_split_seq_index,
@@ -11,7 +11,7 @@ from vllm_ascend.multistream.ms_split import (compute_split_seq_index,
                                               split_attn_tensor_type)
 
 
-class TestMsSplit(unittest.TestCase):
+class TestMsSplit(TestBase):
 
     def test_decode_only(self):
         result = compute_split_seq_index(
@@ -145,5 +145,3 @@ class TestMsSplit(unittest.TestCase):
                                                ascendMLAPrefillMetadata,
                                                ms_split_config)
         self.assertEqual(result, [None])
-
-    # 这个的测试用例后续还需要继续补齐
