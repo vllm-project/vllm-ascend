@@ -308,7 +308,6 @@ def fused_experts_with_mc2(
                                   w1_scale_bias=w1_scale_bias,
                                   w2_scale_bias=w2_scale_bias)
 
-
     # moeCombine
     kwargs_mc2 = {
         "expand_x": down_out_list,
