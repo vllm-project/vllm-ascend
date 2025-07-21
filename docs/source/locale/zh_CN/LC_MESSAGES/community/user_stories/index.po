@@ -1,0 +1,103 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../community/user_stories/index.md:15
+msgid "More details"
+msgstr "更多细节"
+
+#: ../../community/user_stories/index.md:1
+msgid "User Stories"
+msgstr "用户故事"
+
+#: ../../community/user_stories/index.md:3
+msgid ""
+"Read case studies on how users and developers solves real, everyday problems"
+" with vLLM Ascend"
+msgstr "阅读案例研究，了解用户和开发者如何使用 vLLM Ascend 解决实际日常问题。"
+
+#: ../../community/user_stories/index.md:5
+msgid ""
+"[LLaMA-Factory](./llamafactory.md) is an easy-to-use and efficient platform "
+"for training and fine-tuning large language models, it supports vLLM Ascend "
+"to speed up inference since [LLaMA-"
+"Factory#7739](https://github.com/hiyouga/LLaMA-Factory/pull/7739), gain 2x "
+"performance enhancement of inference."
+msgstr ""
+"[LLaMA-Factory](./llamafactory.md) 是一个易于使用且高效的大语言模型训练与微调平台，自 [LLaMA-"
+"Factory#7739](https://github.com/hiyouga/LLaMA-Factory/pull/7739) 起支持 vLLM "
+"Ascend 加速推理，推理性能提升 2 倍。"
+
+#: ../../community/user_stories/index.md:7
+msgid ""
+"[Huggingface/trl](https://github.com/huggingface/trl) is a cutting-edge "
+"library designed for post-training foundation models using advanced "
+"techniques like SFT, PPO and DPO, it uses vLLM Ascend since "
+"[v0.17.0](https://github.com/huggingface/trl/releases/tag/v0.17.0) to "
+"support RLHF on Ascend NPU."
+msgstr ""
+"[Huggingface/trl](https://github.com/huggingface/trl) 是一个前沿的库，专为使用 SFT、PPO 和"
+" DPO 等先进技术对基础模型进行后训练而设计。从 "
+"[v0.17.0](https://github.com/huggingface/trl/releases/tag/v0.17.0) 版本开始，该库利用"
+" vLLM Ascend 来支持在 Ascend NPU 上进行 RLHF。"
+
+#: ../../community/user_stories/index.md:9
+msgid ""
+"[MindIE Turbo](https://pypi.org/project/mindie-turbo) is an LLM inference "
+"engine acceleration plug-in library developed by Huawei on Ascend hardware, "
+"which includes self-developed large language model optimization algorithms "
+"and optimizations related to the inference engine framework. It supports "
+"vLLM Ascend since "
+"[2.0rc1](https://www.hiascend.com/document/detail/zh/mindie/20RC1/AcceleratePlugin/turbodev/mindie-"
+"turbo-0001.html)."
+msgstr ""
+"[MindIE Turbo](https://pypi.org/project/mindie-turbo) "
+"是华为在昇腾硬件上开发的一款用于加速LLM推理引擎的插件库，包含自主研发的大语言模型优化算法及与推理引擎框架相关的优化。从 "
+"[2.0rc1](https://www.hiascend.com/document/detail/zh/mindie/20RC1/AcceleratePlugin/turbodev/mindie-"
+"turbo-0001.html) 起，支持 vLLM Ascend。"
+
+#: ../../community/user_stories/index.md:11
+msgid ""
+"[GPUStack](https://github.com/gpustack/gpustack) is an open-source GPU "
+"cluster manager for running AI models. It supports vLLM Ascend since "
+"[v0.6.2](https://github.com/gpustack/gpustack/releases/tag/v0.6.2), see more"
+" GPUStack performance evaluation info on "
+"[link](https://mp.weixin.qq.com/s/pkytJVjcH9_OnffnsFGaew)."
+msgstr ""
+"[GPUStack](https://github.com/gpustack/gpustack) 是一个开源的 GPU 集群管理器，用于运行 AI "
+"模型。从 [v0.6.2](https://github.com/gpustack/gpustack/releases/tag/v0.6.2) "
+"版本开始支持 vLLM Ascend，更多 GPUStack 性能评测信息见 "
+"[链接](https://mp.weixin.qq.com/s/pkytJVjcH9_OnffnsFGaew)。"
+
+#: ../../community/user_stories/index.md:13
+msgid ""
+"[verl](https://github.com/volcengine/verl) is a flexible, efficient and "
+"production-ready RL training library for large language models (LLMs), uses "
+"vLLM Ascend since "
+"[v0.4.0](https://github.com/volcengine/verl/releases/tag/v0.4.0), see more "
+"info on [verl x Ascend "
+"Quickstart](https://verl.readthedocs.io/en/latest/ascend_tutorial/ascend_quick_start.html)."
+msgstr ""
+"[verl](https://github.com/volcengine/verl) "
+"是一个灵活、高效且可用于生产环境的大型语言模型（LLM）强化学习训练库，自 "
+"[v0.4.0](https://github.com/volcengine/verl/releases/tag/v0.4.0) 起支持 vLLM "
+"Ascend，更多信息请参见 [verl x Ascend "
+"快速上手](https://verl.readthedocs.io/en/latest/ascend_tutorial/ascend_quick_start.html)。"

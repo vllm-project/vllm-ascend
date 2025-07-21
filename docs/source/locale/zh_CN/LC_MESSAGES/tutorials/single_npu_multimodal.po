@@ -1,0 +1,99 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../tutorials/single_npu_multimodal.md:1
+msgid "Single NPU (Qwen2.5-VL 7B)"
+msgstr "单个NPU（Qwen2.5-VL 7B）"
+
+#: ../../tutorials/single_npu_multimodal.md:3
+msgid "Run vllm-ascend on Single NPU"
+msgstr "在单个 NPU 上运行 vllm-ascend"
+
+#: ../../tutorials/single_npu_multimodal.md:5
+msgid "Offline Inference on Single NPU"
+msgstr "在单个NPU上进行离线推理"
+
+#: ../../tutorials/single_npu_multimodal.md:7
+msgid "Run docker container:"
+msgstr "运行 docker 容器："
+
+#: ../../tutorials/single_npu_multimodal.md:29
+msgid "Setup environment variables:"
+msgstr "设置环境变量："
+
+#: ../../tutorials/single_npu_multimodal.md:40
+msgid ""
+"`max_split_size_mb` prevents the native allocator from splitting blocks "
+"larger than this size (in MB). This can reduce fragmentation and may allow "
+"some borderline workloads to complete without running out of memory. You can"
+" find more details "
+"[<u>here</u>](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha003/apiref/envref/envref_07_0061.html)."
+msgstr ""
+"`max_split_size_mb` 防止本地分配器拆分超过此大小（以 MB "
+"为单位）的内存块。这可以减少内存碎片，并且可能让一些边缘情况下的工作负载顺利完成而不会耗尽内存。你可以在[<u>这里</u>](https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/800alpha003/apiref/envref/envref_07_0061.html)找到更多详细信息。"
+
+#: ../../tutorials/single_npu_multimodal.md:43
+msgid "Run the following script to execute offline inference on a single NPU:"
+msgstr "运行以下脚本以在单个 NPU 上执行离线推理："
+
+#: ../../tutorials/single_npu_multimodal.md:109
+msgid "If you run this script successfully, you can see the info shown below:"
+msgstr "如果你成功运行此脚本，你可以看到如下所示的信息："
+
+#: ../../tutorials/single_npu_multimodal.md:121
+msgid "Online Serving on Single NPU"
+msgstr "单个 NPU 上的在线服务"
+
+#: ../../tutorials/single_npu_multimodal.md:123
+msgid "Run docker container to start the vLLM server on a single NPU:"
+msgstr "运行 docker 容器，在单个 NPU 上启动 vLLM 服务器："
+
+#: ../../tutorials/single_npu_multimodal.md:154
+msgid ""
+"Add `--max_model_len` option to avoid ValueError that the "
+"Qwen2.5-VL-7B-Instruct model's max seq len (128000) is larger than the "
+"maximum number of tokens that can be stored in KV cache. This will differ "
+"with different NPU series base on the HBM size. Please modify the value "
+"according to a suitable value for your NPU series."
+msgstr ""
+"新增 `--max_model_len` 选项，以避免出现 ValueError，即 Qwen2.5-VL-7B-Instruct "
+"模型的最大序列长度（128000）大于 KV 缓存可存储的最大 token 数。该数值会根据不同 NPU 系列的 HBM 大小而不同。请根据你的 NPU"
+" 系列，将该值设置为合适的数值。"
+
+#: ../../tutorials/single_npu_multimodal.md:157
+msgid "If your service start successfully, you can see the info shown below:"
+msgstr "如果你的服务启动成功，你会看到如下所示的信息："
+
+#: ../../tutorials/single_npu_multimodal.md:165
+msgid ""
+"Once your server is started, you can query the model with input prompts:"
+msgstr "一旦你的服务器启动，你可以通过输入提示词来查询模型："
+
+#: ../../tutorials/single_npu_multimodal.md:182
+msgid ""
+"If you query the server successfully, you can see the info shown below "
+"(client):"
+msgstr "如果你成功查询了服务器，你可以看到如下所示的信息（客户端）："
+
+#: ../../tutorials/single_npu_multimodal.md:188
+msgid "Logs of the vllm server:"
+msgstr "vllm 服务器的日志："
