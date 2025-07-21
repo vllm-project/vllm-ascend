@@ -289,13 +289,13 @@ def fused_experts_with_mc2(
 
     # `expand_x` will be disposed in the `apply_mlp` function
     if w1_scale_bias is None:
-    	down_out_list = apply_mlp_decode([expand_x],
-                                     	w1,
-                                     	w1_scale,
-                                     	w2,
-                                     	w2_scale,
-                                     	expert_token_nums,
-                                     	dynamic_scale=dynamic_scale)
+        down_out_list = apply_mlp_decode([expand_x],
+                                     	  w1,
+                                     	  w1_scale,
+                                     	  w2,
+                                     	  w2_scale,
+                                     	  expert_token_nums,
+                                     	  dynamic_scale=dynamic_scale)
     else:
         # w4a8 scene, cannot use apply_mlp_decode because the operator is not supported
         down_out_list = apply_mlp(expand_x,
