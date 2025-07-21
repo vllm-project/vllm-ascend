@@ -82,7 +82,7 @@ class TestNPUCommunicator:
 
         output = comm.all_to_all(input_,
                                  scatter_sizes=scatter_sizes,
-                                gather_sizes=gather_sizes)
+                                 gather_sizes=gather_sizes)
 
         dist.barrier()
 
@@ -100,7 +100,7 @@ class TestNPUCommunicator:
         # rank 0: [[1, 2], [101, 102]]
         # rank 1: [[11, 12], [111, 112]]
         input_data = [[rank * 10 + r * 100 + 1, rank * 10 + r * 100 + 2]
-                       for r in range(world_size)]
+                      for r in range(world_size)]
         input_ = torch.tensor(input_data, device=device)
 
         comm = NPUCommunicator(cpu_group=dist.group.WORLD,
