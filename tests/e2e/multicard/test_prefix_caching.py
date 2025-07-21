@@ -60,7 +60,7 @@ INPUT_PROMPTS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [50])
-def test_prefix_cache_with_v1_scheduler(model: str, max_tokens: int) -> None:
+def test_prefix_cache_with_scheduler(model: str, max_tokens: int) -> None:
     with VllmRunner(model,
                     enforce_eager=True,
                     max_model_len=2048,

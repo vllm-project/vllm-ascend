@@ -163,7 +163,7 @@ class NPUPlatform(Platform):
             update_aclgraph_sizes(vllm_config)
 
         if parallel_config and parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
+            parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
 
         if cache_config:
             if cache_config.block_size is None:
@@ -198,11 +198,11 @@ class NPUPlatform(Platform):
 
         use_torchair = get_ascend_config().torchair_graph_config.enabled
         if use_mla:
-            return "vllm_ascend.attention.mla_v1.AscendMLABackend"
+            return "vllm_ascend.attention.mla.AscendMLABackend"
         elif use_torchair:
-            return "vllm_ascend.attention.attention_v1_torchair.AscendAttentionTorchairBackend"
+            return "vllm_ascend.attention.attention_torchair.AscendAttentionTorchairBackend"
         else:
-            return "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
+            return "vllm_ascend.attention.attention.AscendAttentionBackend"
 
     @classmethod
     def get_punica_wrapper(cls) -> str:

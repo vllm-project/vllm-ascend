@@ -360,7 +360,7 @@ class TestNPUPlatform(TestBase):
 
         self.assertEqual(
             self.mock_vllm_config.parallel_config.worker_cls,
-            "vllm_ascend.worker.worker_v1.NPUWorker",
+            "vllm_ascend.worker.worker.NPUWorker",
         )
 
     @patch("vllm_ascend.ascend_config.check_ascend_config")
@@ -411,8 +411,7 @@ class TestNPUPlatform(TestBase):
             use_v1=True,
             use_mla=True,
         )
-        self.assertEqual(result,
-                         "vllm_ascend.attention.mla_v1.AscendMLABackend")
+        self.assertEqual(result, "vllm_ascend.attention.mla.AscendMLABackend")
 
     @patch('vllm_ascend.platform.get_ascend_config')
     def test_get_attn_backend_cls_use_v1_and_torchair(self,
@@ -433,7 +432,7 @@ class TestNPUPlatform(TestBase):
         )
         self.assertEqual(
             result,
-            "vllm_ascend.attention.attention_v1_torchair.AscendAttentionTorchairBackend"
+            "vllm_ascend.attention.attention_torchair.AscendAttentionTorchairBackend"
         )
 
     @patch('vllm_ascend.platform.get_ascend_config')
@@ -453,8 +452,7 @@ class TestNPUPlatform(TestBase):
             use_mla=False,
         )
         self.assertEqual(
-            result,
-            "vllm_ascend.attention.attention_v1.AscendAttentionBackend")
+            result, "vllm_ascend.attention.attention.AscendAttentionBackend")
 
     def test_get_punica_wrapper(self):
         result = self.platform.get_punica_wrapper()

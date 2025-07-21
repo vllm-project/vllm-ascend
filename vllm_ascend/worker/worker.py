@@ -47,7 +47,7 @@ from vllm_ascend.utils import (check_kv_cache_bytes_cache_exist,
                                delete_torchair_cache_file,
                                read_kv_cache_bytes_from_file,
                                sleep_mode_enabled, try_register_lib)
-from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+from vllm_ascend.worker.model_runner import NPUModelRunner
 
 
 class NPUWorker(WorkerBase):
