@@ -3,12 +3,15 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from tests.ut.base import TestBase
+from vllm_ascend.attention.attention_v1 import \
+    AscendAttentionBackendImpl092  # isort: skip
 from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
                                                 AscendAttentionBackendImpl,
                                                 AscendAttentionMetadataBuilder,
                                                 AscendAttentionState,
                                                 AscendMetadata,
                                                 CommonAttentionState)
+from vllm_ascend.utils import vllm_version_is
 
 
 class TestAscendAttentionBackend(TestBase):
@@ -17,8 +20,12 @@ class TestAscendAttentionBackend(TestBase):
         self.assertEqual(AscendAttentionBackend.get_name(), "ASCEND")
 
     def test_get_impl_cls(self):
-        self.assertEqual(AscendAttentionBackend.get_impl_cls(),
-                         AscendAttentionBackendImpl)
+        if vllm_version_is("0.9.2"):
+            self.assertEqual(AscendAttentionBackend.get_impl_cls(),
+                             AscendAttentionBackendImpl092)
+        else:
+            self.assertEqual(AscendAttentionBackend.get_impl_cls(),
+                             AscendAttentionBackendImpl)
 
     def test_get_metadata_cls(self):
         self.assertEqual(AscendAttentionBackend.get_metadata_cls(),
