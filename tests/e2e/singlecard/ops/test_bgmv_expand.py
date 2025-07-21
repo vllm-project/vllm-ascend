@@ -7,14 +7,15 @@ enable_custom_op()
 DEFAULT_ATOL = 1e-3
 DEFAULT_RTOL = 1e-3
 
+
 def bgmv_expand_cpu_impl(x: torch.Tensor, w: torch.Tensor,
                          indices: torch.Tensor, y: torch.tensor,
-                         slice_offset: int, slice_size: int
-) -> torch.Tensor:
+                         slice_offset: int, slice_size: int) -> torch.Tensor:
     W = w[indices, :, :].transpose(-1, -2).to(torch.float32)
     z = torch.bmm(x.unsqueeze(1).to(torch.float32), W).squeeze()
     y[:, slice_offset:slice_offset + slice_size] += z
     return y
+
 
 @torch.inference_mode()
 def test_bgmv_expand() -> None:
@@ -38,4 +39,3 @@ def test_bgmv_expand() -> None:
                                y_out,
                                atol=DEFAULT_ATOL,
                                rtol=DEFAULT_RTOL)
-    

@@ -7,10 +7,10 @@ enable_custom_op()
 DEFAULT_ATOL = 1e-3
 DEFAULT_RTOL = 1e-3
 
+
 def bgmv_shrink_cpu_impl(x: torch.Tensor, w: torch.Tensor,
                          indices: torch.Tensor, y: torch.tensor,
-                         scaling: float
-) -> torch.Tensor:
+                         scaling: float) -> torch.Tensor:
     W = w[indices, :, :].transpose(-1, -2).to(torch.float32)
     z = torch.bmm(x.unsqueeze(1).to(torch.float32), W).squeeze()
     y[:, :] += z * scaling
