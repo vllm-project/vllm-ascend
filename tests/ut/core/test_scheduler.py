@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -114,7 +114,8 @@ class TestAscendScheduler(TestBase):
         model_config.pooler_config = MagicMock()
         model_config.multimodal_config = MagicMock()
         # Cache config, optionally force APC
-        kwargs_cache: Dict[str, bool] = ({} if ENABLE_PREFIX_CACHING is None else {
+        kwargs_cache: Dict[str, 
+                           Any] = ({} if ENABLE_PREFIX_CACHING is None else {
             'enable_prefix_caching': ENABLE_PREFIX_CACHING
         })
         cache_config = CacheConfig(
@@ -543,13 +544,20 @@ class TestAscendScheduler(TestBase):
         1. Speculated tokens get scheduled correctly
         2. Spec decoding stats properly count number of draft and accepted tokens
         """
-        spec_tokens_list: List[List[List[int]]] = [[[1, 2, 3]], [[1, 2, 3]], [[1, 2], [3]], [[1]],
-                            [[]], [[1, 2, 3], [4, 5, 6]]]
-        output_tokens_list: List[List[List[int]]] = [[[1, 2, 3, 4]], [[1, 5]], [[1, 2, 5], [3, 4]],
-                              [[1, 2]], [[5]], [[1, 2, 7], [4, 8]]]
-        expected_list: List[Tuple[int, int, int, List[int]]] = [(1, 3, 3, [1, 1, 1]), (1, 3, 1, [1, 0, 0]),
-                         (2, 3, 3, [2, 1]), (1, 1, 1, [1]), (0, 0, 0, [0]),
-                         (2, 6, 3, [2, 1, 0])]
+        spec_tokens_list: List[List[List[int]]] = [[[1, 2, 3]], [[1, 2, 3]],
+                                                   [[1, 2], [3]], [[1]], [[]],
+                                                   [[1, 2, 3], [4, 5, 6]]]
+        output_tokens_list: List[List[List[int]]] = [[[1, 2, 3, 4]], [[1, 5]],
+                                                     [[1, 2, 5], [3, 4]],
+                                                     [[1, 2]], [[5]],
+                                                     [[1, 2, 7], [4, 8]]]
+        expected_list: List[Tuple[int, int,
+                                  int, List[int]]] = [(1, 3, 3, [1, 1, 1]),
+                                                      (1, 3, 1, [1, 0, 0]),
+                                                      (2, 3, 3, [2, 1]), 
+                                                      (1, 1, 1, [1]),
+                                                      (0, 0, 0, [0]),
+                                                      (2, 6, 3, [2, 1, 0])]
 
         global NUM_SPECULATIVE_TOKENS
         for idx in range(len(spec_tokens_list)):
