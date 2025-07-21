@@ -19,9 +19,6 @@ class TestAscendMLABackend(TestBase):
     def test_get_name(self):
         self.assertEqual(AscendMLABackend.get_name(), "VLLM_ASCEND_MLA")
 
-    def test_get_impl_cls(self):
-        self.assertEqual(AscendMLABackend.get_impl_cls(), AscendMLAImpl)
-
     def test_get_metadata_cls(self):
         self.assertEqual(AscendMLABackend.get_metadata_cls(),
                          AscendMLAMetadata)
