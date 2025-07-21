@@ -41,7 +41,6 @@ from vllm.v1.worker.worker_base import WorkerBase
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config, init_ascend_config
 from vllm_ascend.device_allocator.camem import CaMemAllocator
-from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (check_kv_cache_bytes_cache_exist,
                                check_torchair_cache_exist,
@@ -308,18 +307,12 @@ class NPUWorker(WorkerBase):
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
-        parallel_config = self.vllm_config.parallel_config
         init_distributed_environment(self.parallel_config.world_size,
                                      self.rank, self.distributed_init_method,
                                      self.local_rank, "hccl")
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
-        init_ascend_model_parallel(
-            parallel_config.expert_parallel_size,
-            parallel_config.expert_tensor_parallel_size,
-            parallel_config.world_size_across_dp,
-        )
         ensure_kv_transfer_initialized(self.vllm_config)
 
     def _init_profiler(self):
