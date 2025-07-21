@@ -569,7 +569,7 @@ class TestAscendMLAImpl(TestBase):
     @patch("torch_npu.atb.npu_ring_mla")
     def test_compute_prefill_context(self, mock_ring, mock_load):
         S, N, D, VD = 2, self.impl.num_heads, self.impl.qk_head_dim, self.impl.v_head_dim
-        RD, AND = self.impl.qk_rope_head_dim, self.impl.qk_nope_head_dim
+        _, AND = self.impl.qk_rope_head_dim, self.impl.qk_nope_head_dim
         num_blocks, block_size = 100, 20
         query = torch.randn(S, N, D)
         kv_cache = torch.randn(num_blocks, block_size, N, D)
