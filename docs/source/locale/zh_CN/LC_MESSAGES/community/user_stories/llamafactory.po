@@ -1,0 +1,87 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../community/user_stories/llamafactory.md:1
+msgid "LLaMA-Factory"
+msgstr "LLaMA-Factory"
+
+#: ../../community/user_stories/llamafactory.md:3
+msgid "**About / Introduction**"
+msgstr "**关于 / 介绍**"
+
+#: ../../community/user_stories/llamafactory.md:5
+msgid ""
+"[LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory) is an easy-to-use "
+"and efficient platform for training and fine-tuning large language models. "
+"With LLaMA-Factory, you can fine-tune hundreds of pre-trained models locally"
+" without writing any code."
+msgstr ""
+"[LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory) "
+"是一个易于使用且高效的平台，用于训练和微调大型语言模型。有了 LLaMA-Factory，你可以在本地对数百个预训练模型进行微调，无需编写任何代码。"
+
+#: ../../community/user_stories/llamafactory.md:7
+msgid ""
+"LLaMA-Facotory users need to evaluate and inference the model after fine-"
+"tuning the model."
+msgstr "LLaMA-Facotory 用户需要在对模型进行微调后对模型进行评估和推理。"
+
+#: ../../community/user_stories/llamafactory.md:9
+msgid "**The Business Challenge**"
+msgstr "**业务挑战**"
+
+#: ../../community/user_stories/llamafactory.md:11
+msgid ""
+"LLaMA-Factory used transformers to perform inference on Ascend NPU, but the "
+"speed was slow."
+msgstr "LLaMA-Factory 使用 transformers 在 Ascend NPU 上进行推理，但速度较慢。"
+
+#: ../../community/user_stories/llamafactory.md:13
+msgid "**Solving Challenges and Benefits with vLLM Ascend**"
+msgstr "**通过 vLLM Ascend 解决挑战与收益**"
+
+#: ../../community/user_stories/llamafactory.md:15
+msgid ""
+"With the joint efforts of LLaMA-Factory and vLLM Ascend ([LLaMA-"
+"Factory#7739](https://github.com/hiyouga/LLaMA-Factory/pull/7739)), the "
+"performance of LLaMA-Factory in the model inference stage has been "
+"significantly improved. According to the test results, the inference speed "
+"of LLaMA-Factory has been increased to 2x compared to the transformers "
+"version."
+msgstr ""
+"在 LLaMA-Factory 和 vLLM Ascend 的共同努力下（参见 [LLaMA-"
+"Factory#7739](https://github.com/hiyouga/LLaMA-Factory/pull/7739)），LLaMA-"
+"Factory 在模型推理阶段的性能得到了显著提升。根据测试结果，LLaMA-Factory 的推理速度相比 transformers 版本提升到了 2"
+" 倍。"
+
+#: ../../community/user_stories/llamafactory.md:17
+msgid "**Learn more**"
+msgstr "**了解更多**"
+
+#: ../../community/user_stories/llamafactory.md:19
+msgid ""
+"See more about LLaMA-Factory and how it uses vLLM Ascend for inference on "
+"the Ascend NPU in the following documentation: [LLaMA-Factory Ascend NPU "
+"Inference](https://llamafactory.readthedocs.io/en/latest/advanced/npu_inference.html)."
+msgstr ""
+"在以下文档中查看更多关于 LLaMA-Factory 以及其如何在 Ascend NPU 上使用 vLLM Ascend 进行推理的信息：[LLaMA-"
+"Factory Ascend NPU "
+"推理](https://llamafactory.readthedocs.io/en/latest/advanced/npu_inference.html)。"
