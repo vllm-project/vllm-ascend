@@ -20,7 +20,7 @@ from typing import Optional, Tuple
 
 import torch
 from vllm.model_executor.layers.rotary_embedding import (
-    DeepseekScalingRotaryEmbedding, RotaryEmbedding)
+    DeepseekScalingRotaryEmbedding, RotaryEmbedding, MRotaryEmbedding)
 
 from vllm_ascend.utils import enable_custom_op
 
@@ -279,6 +279,29 @@ def deepseek_rope_init_func(
     _set_cos_sin_cache(self, self.max_seq_len, dtype=dtype, device="npu")
 
 
+def mrope_forward(
+    self,
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+)-> Tuple[torch.Tensor, torch.Tensor]:
+    import torch_npu
+    mrope_section = [0, 0, 0] if positions.ndim == 1 else self.mrope_section
+
+    query, key = torch_npu.npu_mrope(
+        positions,
+        query.contiguous(),
+        key.contiguous(),
+        self.cos_sin_cache.contiguous(),
+        self.head_size,
+        mrope_section=mrope_section,
+        rotary_mode='half'
+    )
+
+    return query, key
+
+
+MRotaryEmbedding.forward = mrope_forward
 RotaryEmbedding.forward_oot = rope_forward_oot
 
 # Note: we adopt the native huggingface deepseek rope initialization code from

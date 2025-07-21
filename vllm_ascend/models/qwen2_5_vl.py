@@ -20,10 +20,12 @@
 from functools import partial
 from typing import Callable, Iterable, Optional, Set, Tuple
 
+import math
 import torch
+import torch_npu
 import torch.nn as nn
 import torch.nn.functional as F
-import torch_npu
+import torch.distributed as dist
 from einops import rearrange
 from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
     Qwen2_5_VLConfig, Qwen2_5_VLVisionConfig)
@@ -34,17 +36,58 @@ from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.models.qwen2_5_vl import (
     Qwen2_5_VisionAttention, Qwen2_5_VisionBlock, Qwen2_5_VisionPatchEmbed,
     Qwen2_5_VisionRotaryEmbedding, Qwen2_5_VisionTransformer,
     Qwen2_5_VLDummyInputsBuilder, Qwen2_5_VLForConditionalGeneration,
-    Qwen2_5_VLMultiModalProcessor, Qwen2_5_VLProcessingInfo)
+    Qwen2_5_VLMultiModalProcessor, Qwen2_5_VLProcessingInfo, Qwen2_5_VisionMLP, Qwen2_5_VisionPatchMerger)
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm_ascend.distributed.seq_parallel_utils import all_to_all_3d, all_to_all_4d, all_gather_2d
 
 MIN_PAD_SIZE = 64  # min_size to pad weight
 MAX_PAD_SIZE = 128  # max_size to pad weight
 
+
+def get_rank_world():
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    return rank, world_size
+
+class AscendQwen2_5_VisionMLP(Qwen2_5_VisionMLP):
+    def __init__(
+        self,
+        in_features: int,
+        hidden_features: int,
+        bias: bool =False,
+        act_fn: Callable[[torch.Tensor], torch.Tensor] = F.silu,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str =""
+    ):
+        super().__init__(in_features, hidden_features, bias, act_fn, quant_config, prefix)
+        self.gate_proj = ReplicatedLinear(
+            in_features,
+            hidden_features,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_proj"
+        )
+        self.up_proj = ReplicatedLinear(
+            in_features,
+            hidden_features,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.up_proj"
+        )
+        self.down_proj = ReplicatedLinear(
+            hidden_features,
+            in_features,
+            bias=bias,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj"
+        )
+        self.act_fn = act_fn
 
 class AscendQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
 
@@ -64,11 +107,22 @@ class AscendQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
             prefix,
         )
         self.embed_dim = embed_dim
+        self.rank, self.world_size = get_rank_world()
         self.hidden_size_per_attention_head = dist_utils.divide(
             projection_size, num_heads)
+        self.num_attention_heads_per_partition = dist_utils.divide(
+            num_heads, self.world_size)
         self.origin_hidden_size_per_attention_head = self.hidden_size_per_attention_head
         if self.hidden_size_per_attention_head > MIN_PAD_SIZE and self.hidden_size_per_attention_head < MAX_PAD_SIZE:
             self.hidden_size_per_attention_head = MAX_PAD_SIZE
+        self.qkv = ReplicatedLinear(input_size=embed_dim,
+                                    output_size=3 * projection_size,
+                                    quant_config=quant_config,
+                                    prefix=f"{prefix}.qkv")
+        self.proj = ReplicatedLinear(input_size=projection_size,
+                                    output_size=embed_dim,
+                                    quant_config=quant_config,
+                                    prefix=f"{prefix}.proj")
 
     def split_qkv(self, qkv: torch.Tensor) -> tuple[torch.Tensor, ...]:
         # [s, b, 3 * head * head_dim]
@@ -89,9 +143,20 @@ class AscendQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
         cu_seqlens: torch.Tensor,
         cos: torch.Tensor,
         sin: torch.Tensor,
+        true_seq: int,
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
+
+        x = rearrange(x, 's b (t h d) -> (b t) s h d',
+            b=1, t=3, h=self.num_attention_heads_per_partition * self.world_size
+        )
+        x = all_to_all_4d(x, is_seq_to_head=True)
+        cur_seq = x.shape[1]
+        x = x[:, :true_seq, :, :]
+        x = rearrange(x, '(b t) s h d -> s b (t h d)',
+            b=1, t=3, h=self.num_attention_heads_per_partition,
+        )
 
         # [s, b, 3 * head * head_dim] -> 3 * [s, b, head, head_dim]
         q, k, v = self.split_qkv(x)
@@ -119,7 +184,10 @@ class AscendQwen2_5_VisionAttention(Qwen2_5_VisionAttention):
             num_heads=self.num_attention_heads_per_partition,
             num_kv_heads=self.num_attention_heads_per_partition,
             out=context_layer)
-
+        padding = (0, 0, 0, 0, 0, cur_seq-true_seq)
+        context_layer = F.pad(context_layer, padding)
+        context_layer = all_to_all_3d(context_layer, is_seq_to_head=False)
+        
         context_layer = rearrange(context_layer,
                                   "(b s) h d -> s b (h d)",
                                   b=batch_size).contiguous()
@@ -147,11 +215,17 @@ class AscendQwen2_5_VisionBlock(Qwen2_5_VisionBlock):
                                                   projection_size=dim,
                                                   quant_config=quant_config,
                                                   prefix=f"{prefix}.attn")
+        self.mlp = AscendQwen2_5_VisionMLP(dim,
+                                           mlp_hidden_dim,
+                                           act_fn=act_fn,
+                                           bias=True,
+                                           quant_config=quant_config,
+                                           prefix=f"{prefix}.mlp")
 
     def forward(self, x: torch.Tensor, cu_seqlens: torch.Tensor,
-                cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+                cos: torch.Tensor, sin: torch.Tensor, true_seq: int) -> torch.Tensor:
         x = x + self.attn(
-            self.norm1(x), cu_seqlens=cu_seqlens, cos=cos, sin=sin)
+            self.norm1(x), cu_seqlens=cu_seqlens, cos=cos, sin=sin, true_seq=true_seq)
 
         x = x + self.mlp(self.norm2(x))
         return x
@@ -172,6 +246,31 @@ class AscendQwen2_5_VisionRotaryEmbedding(Qwen2_5_VisionRotaryEmbedding):
         inv_freq = 1.0 / (theta
                           **(torch.arange(0, dim, 2, dtype=torch.float) / dim))
         self.inv_freq = inv_freq
+
+class AscendQwen2_5_VisionPatchMerger(Qwen2_5_VisionPatchMerger):
+    def __init__(
+        self,
+        d_model: int,
+        context_dim: int,
+        norm_layer: Optional[Callable[[int], nn.Module]] =None,
+        spatial_merge_size: int = 2,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(d_model, context_dim, norm_layer, spatial_merge_size, quant_config, prefix)
+        self.mlp = nn.ModuleList([
+            ReplicatedLinear(self.hidden_size,
+                            self.hidden_size,
+                            bias=True,
+                            quant_config=quant_config,
+                            prefix=f"{prefix}.mlp.0"),
+            nn.GELU(),
+            ReplicatedLinear(self.hidden_size,
+                            d_model,
+                            bias=True,
+                            quant_config=quant_config,
+                            prefix=f"{prefix}.mlp.2"),
+        ])
 
 
 class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
@@ -208,6 +307,14 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
                 prefix=f"{prefix}.blocks.{layer_idx}")
             for layer_idx in range(vision_config.depth)
         ])
+        self.merger = AscendQwen2_5_VisionPatchMerger(
+            d_model=vision_config.out_hidden_size,
+            context_dim=self.hidden_size,
+            norm_layer=norm_layer,
+            spatial_merge_size=self.spatial_merge_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.merger",
+        )
         self.tp_size = parallel_state.get_tensor_model_parallel_world_size()
         self.tp_rank = parallel_state.get_tensor_model_parallel_rank()
         self.hidden_size_per_attention_head = dist_utils.divide(
@@ -417,19 +524,34 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
         rotary_pos_emb = rotary_pos_emb[window_index, :, :]
         rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
 
+        #pad for sp:
+        rank, world_size = get_rank_world()
+        merge_size = self.spatial_merge_size ** 2
+        padding_size = math.ceil(math.ceil(seq_len / world_size) / merge_size) * merge_size * world_size -seq_len
+        if padding_size > 0:
+            padding = torch.zeros(
+                padding_size, *x.size()[1:],
+                dtype=x.dtype, device=x.device
+            )
+            x = torch.cat([x, padding], dim=0)
+
         cos, sin = self.cal_cos_sin(rotary_pos_emb)
 
         # transformers
+        x = x.chunk(world_size, dim=0)[rank]
         x = x.unsqueeze(1)
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
                 cu_seqlens_now = cu_seqlens
             else:
                 cu_seqlens_now = cu_window_seqlens
-            x = blk(x, cu_seqlens=cu_seqlens_now, cos=cos, sin=sin)
+            x = blk(x, cu_seqlens=cu_seqlens_now, cos=cos, sin=sin, true_seq=seq_len)
 
         # adapter
         x = self.merger(x)
+        x = all_gather_2d(x, world_size=world_size, group = None)
+        if padding_size:
+            x = x[:-padding_size // merge_size]
         reverse_indices = torch.argsort(window_index)
         x = x[reverse_indices, :]
         return x
