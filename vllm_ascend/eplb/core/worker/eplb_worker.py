@@ -71,8 +71,7 @@ class EplbWorker:
         self.update_expert_map(new_expert_maps)
         logger.debug(f"[EPLB Process  new_map differs, performing D2D")
 
-        update_info = self.compose_expert_update_info_bipartite(new_expert_maps, self.old_expert_maps)\
-            if self.policy_type <= 2 else self.compose_expert_update_info_greedy(new_expert_maps, self.old_expert_maps)
+        update_info = self.compose_expert_update_info_greedy(new_expert_maps, self.old_expert_maps)
         self.old_expert_maps = new_expert_maps
         logger.info("EPLB Process compute complete")
 
