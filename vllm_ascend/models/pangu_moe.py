@@ -1142,7 +1142,7 @@ class SophonForCausalLM(PanguProMoEForCausalLM):
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
 
-        expert_params_mapping = []
+        expert_params_mapping: list[Any] = []
 
         params_dict = dict(self.named_parameters())  # from model
         loaded_params: Set[str] = set()
