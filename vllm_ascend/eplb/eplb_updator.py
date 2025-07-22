@@ -17,7 +17,6 @@
 
 import torch
 import numpy
-from typing import Dict, List
 import torch.distributed as dist
 import vllm.envs as envs
 from multiprocessing import Queue, Manager
