@@ -470,12 +470,12 @@ def register_ascend_customop():
         return
     from vllm.model_executor.custom_op import CustomOp
 
-    from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
+    from vllm_ascend.ops import (AscendDeepseekScalingRotaryEmbedding,
+                                 AscendQuickGELU, AscendRotaryEmbedding,
+                                 AscendSiluAndMul)
     CustomOp.register_oot(_decorated_op_cls=AscendQuickGELU, name="QuickGELU")
     CustomOp.register_oot(_decorated_op_cls=AscendSiluAndMul,
                           name="SiluAndMul")
-    from vllm_ascend.ops.rotary_embedding import (
-        AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
     CustomOp.register_oot(_decorated_op_cls=AscendRotaryEmbedding,
                           name="RotaryEmbedding")
     CustomOp.register_oot(
