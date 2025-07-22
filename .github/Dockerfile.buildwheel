@@ -15,17 +15,16 @@
 # This file is a part of the vllm-ascend project.
 #
 ARG PY_VERSION=3.10
-FROM quay.io/ascend/cann:8.0.0-910b-ubuntu22.04-py${PY_VERSION}
+FROM quay.io/ascend/manylinux:8.0.0-910b-manylinux_2_28-py${PY_VERSION}
 
 ARG COMPILE_CUSTOM_KERNELS=1
 
 # Define environments
 ENV DEBIAN_FRONTEND=noninteractive
 ENV COMPILE_CUSTOM_KERNELS=${COMPILE_CUSTOM_KERNELS}
-RUN apt-get update -y && \
-    apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev && \
-    rm -rf /var/cache/apt/* && \
-    rm -rf /var/lib/apt/lists/*
+RUN yum update -y && \
+    yum install -y python3-pip git vim wget net-tools gcc gcc-c++ make cmake numactl-devel && \
+    rm -rf /var/cache/yum
 
 WORKDIR /workspace
 
@@ -41,8 +40,6 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/`uname -i`-linux/devlib && \
     cd vllm-ascend && \
     python3 setup.py bdist_wheel && \
-    ls -l dist && \
-    for f in dist/*.whl; do mv "$f" "$(echo "$f" | sed -e 's/-linux_x86_64\.whl$/-manylinux1_x86_64.whl/' -e 's/-linux_aarch64\.whl$/-manylinux2014_aarch64.whl/')"; done && \
     ls -l dist
 
 CMD ["/bin/bash"]
