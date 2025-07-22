@@ -1,12 +1,12 @@
-import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
 
+from tests.ut.base import TestBase
 from vllm_ascend.distributed.kv_transfer.simple_pipe import SimplePipe
 
 
-class TestSimplePipe(unittest.TestCase):
+class TestSimplePipe(TestBase):
 
     @classmethod
     def _create_mock_config(self):
