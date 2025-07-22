@@ -37,7 +37,8 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding import (RotaryEmbedding,
+                                                         get_rope)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.models.interfaces import SupportsPP
@@ -219,7 +220,9 @@ class CustomQwen3MoeAttention(Qwen3MoeAttention):
             positions: torch.Tensor,
             hidden_states: torch.Tensor,
             kv_cache: Optional[torch.Tensor] = None,
-            attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
+            attn_metadata: Optional[AttentionMetadata] = None,
+            cos: Optional[torch.Tensor] = None,
+            sin: Optional[torch.Tensor] = None) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Add qk-norm
@@ -234,9 +237,10 @@ class CustomQwen3MoeAttention(Qwen3MoeAttention):
 
         k_by_head = self.k_norm(k_by_head)
         k = k_by_head.view(k.shape)
-        q, k = self.rotary_emb(positions, q, k)
 
         if self.torchair_graph_enabled and attn_metadata is not None and attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            q, k = self.rotary_emb(
+                positions, q, k, cos=cos, sin=sin, is_cos_sin_cached=True)
             forward_kwargs = {}
             if envs.VLLM_USE_V1:
                 output_shape = q.shape
@@ -256,6 +260,7 @@ class CustomQwen3MoeAttention(Qwen3MoeAttention):
             output, _ = self.o_proj(attn_output)
             return output
         else:
+            q, k = self.rotary_emb(positions, q, k)
             attn_output = self.attn(q, k, v)
             output, _ = self.o_proj(attn_output)
             return output
@@ -319,6 +324,8 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
         residual: Optional[torch.Tensor] = None,
         kv_cache: Optional[torch.Tensor] = None,
         attn_metadata: Optional[AttentionMetadata] = None,
+        cos: Optional[torch.Tensor] = None,
+        sin: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
@@ -332,6 +339,8 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
+            cos=cos,
+            sin=sin
         )
 
         # Fully Connected
@@ -371,6 +380,7 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
+        self.cos_sin_cache = self.layers[0].self_attn.rotary_emb.cos_sin_cache
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -395,13 +405,22 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
+        # Generate cos and sin outside layers to avoid repeated calculation.
+        cos, sin = None, None
+        if type(self.layers[0].self_attn.rotary_emb) is RotaryEmbedding:
+            cos_sin = self.cos_sin_cache.index_select(0, positions)
+            last_dim = cos_sin.size()[-1]
+            cos, sin = cos_sin.reshape(-1, 2, last_dim // 2) \
+                .repeat(1, 1, 2).chunk(2, dim=-2)
+            cos, sin = cos.view(1, -1, 1, last_dim).contiguous(), sin.view(
+                1, -1, 1, last_dim).contiguous()
+
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions, hidden_states, residual,
-                kv_caches[i -
-                          self.start_layer] if kv_caches is not None else None,
-                attn_metadata)
+                kv_caches[i - self.start_layer] if kv_caches is not None else None,
+                attn_metadata, cos=cos, sin=sin)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
