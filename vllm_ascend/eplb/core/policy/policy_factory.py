@@ -1,6 +1,6 @@
 # Copyright Huawei Technologies Co., Ltd. 2023-2024. All rights reserved.
 from .eplb_policy import EplbPolicy, DynamicConfig
-from .mock_load_balance import MockLoadBalance
+from .policy_random import RandomLoadBalance
 from .dynamic_ep import DynamicEplb
 from .dynamic_ep_v2 import DynamicEplbV2
 
@@ -15,8 +15,8 @@ class PolicyFactory:
             # only one redundant expert can be placed in one NPU and its physical expert index must be 0
 
             # Applying greedy d2d expert weight update composing
-            0:MockLoadBalance,     # MockLoadBalance: shuffle last physical expert on NPU 1 and 3
+            0:RandomLoadBalance,     # RandomLoadBalance: shuffle last physical expert on NPU 1 and 3
             1:DynamicEplb,         # Dynamic EPLB policy: overall expert replacement based on current moe load
             2:DynamicEplbV2,       # Dynamic EPLB policy V2:  expert replacement with constrained number of expert shuffle
         }
-        return policy.get(policy_type, MockLoadBalance)(config)
+        return policy.get(policy_type, RandomLoadBalance)(config)

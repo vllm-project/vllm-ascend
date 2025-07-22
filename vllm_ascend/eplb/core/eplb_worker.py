@@ -27,7 +27,7 @@ from abc import ABC, abstractmethod
 from vllm.logger import logger
 
 from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory, DynamicConfig
-from vllm_ascend.eplb.tool.eplb_utils import ExpertMapUtils
+from vllm_ascend.eplb.tool.eplb_utils import generate_log2phy_map
 
 
 class EplbWorker:
@@ -60,7 +60,7 @@ class EplbWorker:
         if load_info is None:
             return
 
-        #根据负载信息，获取更新后的专家表
+        # Get the updated expert table based on the workload information
         old_placement = self.global2local(self.old_expert_maps, self.num_local_experts)
         changed, priority, new_placement = self.calculate_rebalance_experts(load_info, old_placement)
 
@@ -249,7 +249,7 @@ class EplbWorker:
 
     def calculate_rebalance_experts(self, load_info, old_placement):
         """
-        通过 policy 实例的 rebalance_experts 方法计算 new_map。
+        Compute `new_map` by calling the `rebalance_experts` method of the policy instance.
         """
         if self.old_expert_maps is None:
             return False, None, None
@@ -343,7 +343,7 @@ class EplbWorker:
             maps.append(new_expert_map[self.rank_id].numpy().tolist())
 
             if self.redundant_enable:
-                log2phy_map = ExpertMapUtils.generate_log2phy_map(new_expert_map)
+                log2phy_map = generate_log2phy_map(new_expert_map)
                 log2phy_all.append(log2phy_map[self.rank_id].numpy().tolist())
             else:
                 log2phy_all.append([])

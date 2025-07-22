@@ -5,11 +5,9 @@ from abc import abstractmethod
 class DynamicConfig:
     placement_policy = None
 
-    max_transferred_expert_per_layer = 100
-    # 一台机器上，一层最多搬运多少专家
-
-    ep_worldsize = 64  # 整个集群上所有的专家分布在多少个die上
-    num_die_per_host = 8  # 每台机器上有几个die
+    max_transferred_expert_per_layer = 100 # Maximum number of experts that can be migrated per layer on a single host
+    ep_worldsize = 64  # Total number of dies across the entire cluster where experts are distributed
+    num_die_per_host = 8  # Number of dies on each host machine
 
 
 class EplbPolicy:
@@ -19,7 +17,7 @@ class EplbPolicy:
     @abstractmethod
     def rebalance_experts(self, current_expert_table, expert_workload):
         """
-        传入weight并返回相关限制条件下的专家复制和放置
+        Pass in the weights and return expert replication and placement under relevant constraints.
         INPUT:
         current_expert_table: [layerId, rankId, expert_num_i]
         expert_workload = expert_table[layer0][rankId][expert_num_i]

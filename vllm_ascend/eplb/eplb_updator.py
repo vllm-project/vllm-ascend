@@ -23,9 +23,8 @@ import vllm.envs as envs
 from multiprocessing import Queue, Manager
 
 from vllm.logger import logger
-from vllm_ascend.eplb.core.worker.eplb_worker import EplbProcess
-from vllm_ascend.eplb.core.loader.device_transfer_loader import D2DExpertWeightLoader
-from vllm_ascend.eplb.tool.eplb_utils import ExpertMapUtils
+from vllm_ascend.eplb.core.eplb_worker import EplbProcess
+from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 
 class EplbUpdator:
 
@@ -81,7 +80,7 @@ class EplbUpdator:
             planner_q = self.planner_block_queue,
             block_update_q = self.block_update_queue,
             redundant_enable = self.redundant_enable,
-            policy_type = 4,
+            policy_type = 1,
             enable_d2d = True
         )
 
