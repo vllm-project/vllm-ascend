@@ -23,12 +23,14 @@ import vllm.envs as envs
 from multiprocessing import Queue, Manager
 
 from vllm.logger import logger
-from vllm_ascend.eplb.core.eplb_worker import EplbProcess
-from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
+from vllm_ascend.eplb.core.worker.eplb_worker import EplbProcess
+from vllm_ascend.eplb.core.loader.device_transfer_loader import D2DExpertWeightLoader
+from vllm_ascend.ascend_config import get_ascend_config
 
 class EplbUpdator:
 
     def __init__(self, expert_map_path):
+        self.ascend_config = get_ascend_config()
         self.init_eplb(expert_map_path)
 
     def set_adaptor(self, adaptor):
@@ -38,10 +40,11 @@ class EplbUpdator:
         self.global_expert_num = self.adaptor.global_expert_num
 
     def init_eplb(self, expert_map_path):
+        self.rank_id = dist.get_rank()
         self.num_expert_load_gather = 10
         self.periodic_load_gather = True
         self.redundant_enable = (expert_map_path is not None)
-        self.num_iterations_eplb_update: torch.int64 = 130
+        self.num_iterations_eplb_update: torch.int64 = self.ascend_config.num_iterations_eplb_update
         self.expert_map_path = expert_map_path
 
         try:
@@ -53,14 +56,14 @@ class EplbUpdator:
                 self.periodic_load_gather = False
 
         self.expert_map_initialized = False
-        self.gate_eplb = True
+        self.gate_eplb = self.ascend_config.gate_eplb
 
         self.reqs = []
         self.update_info_all = []
 
         self.cur_iterations: torch.int64 = 0
 
-        self.num_wait_worker_iterations: torch.int64 = 30
+        self.num_wait_worker_iterations: torch.int64 = self.ascend_config.num_wait_worker_iterations
 
         self.planner_block_queue = Queue()
         self.block_update_queue = Queue(maxsize=1)
@@ -201,46 +204,6 @@ class EplbUpdator:
 
         for req in reqs:
             req.wait()
-
-    def unpack_update_batch(self, packed_update_info):
-        """
-        Unpack the IPC batch back into original update_info_list.
-        """
-        send_all, recv_all, stacked_maps, stacked_log2phy, layer_id_tensor = packed_update_info
-
-        maps     = stacked_maps.unbind(0)
-        layer_ids = layer_id_tensor.tolist()
-
-        if self.redundant_enable:
-            log2phy_list = stacked_log2phy.unbind(0)
-        else:
-            log2phy_list = [None] * len(maps)
-
-        _zip = zip
-        _send = send_all
-        _recv = recv_all
-        _maps = maps
-        _l2p  = log2phy_list
-        _lids = layer_ids
-
-        recovered = [
-            (_s, _r, _m, _lp, _lid)
-            for _s, _r, _m, _lp, _lid
-            in _zip(_send, _recv, _maps, _l2p, _lids)
-        ]
-        return recovered
-
-    def get_expert_load(self) -> tuple:
-        expert_maps = self.shared_dict["expert_maps"]
-        moe_load = self.shared_dict["moe_load"]  # Tensor [L, W, global_experts_num]
-        num_local_experts = expert_maps.max() + 1
-        return  moe_load, expert_maps, num_local_experts
-
-    def update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
-        logger.info(f" start update {self.num_expert_load_gather=}, {self.num_iterations_eplb_update}...")
-        self.num_expert_load_gather = num_expert_load_gather
-        self.num_iterations_eplb_update = num_iterations
-        logger.info(f" update {self.num_expert_load_gather=}, {self.num_iterations_eplb_update} success...")
 
     def shutdown(self):
         """
