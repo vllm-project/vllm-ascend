@@ -204,46 +204,6 @@ class EplbUpdator:
         for req in reqs:
             req.wait()
 
-#     def unpack_update_batch(self, packed_update_info):
-#         """
-#         Unpack the IPC batch back into original update_info_list.
-#         """
-#         send_all, recv_all, stacked_maps, stacked_log2phy, layer_id_tensor = packed_update_info
-#
-#         maps     = stacked_maps.unbind(0)
-#         layer_ids = layer_id_tensor.tolist()
-#
-#         if self.redundant_enable:
-#             log2phy_list = stacked_log2phy.unbind(0)
-#         else:
-#             log2phy_list = [None] * len(maps)
-#
-#         _zip = zip
-#         _send = send_all
-#         _recv = recv_all
-#         _maps = maps
-#         _l2p  = log2phy_list
-#         _lids = layer_ids
-#
-#         recovered = [
-#             (_s, _r, _m, _lp, _lid)
-#             for _s, _r, _m, _lp, _lid
-#             in _zip(_send, _recv, _maps, _l2p, _lids)
-#         ]
-#         return recovered
-#
-#     def get_expert_load(self) -> tuple:
-#         expert_maps = self.shared_dict["expert_maps"]
-#         moe_load = self.shared_dict["moe_load"]  # Tensor [L, W, global_experts_num]
-#         num_local_experts = expert_maps.max() + 1
-#         return  moe_load, expert_maps, num_local_experts
-#
-#     def update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
-#         logger.info(f" start update {self.num_expert_load_gather=}, {self.num_iterations_eplb_update}...")
-#         self.num_expert_load_gather = num_expert_load_gather
-#         self.num_iterations_eplb_update = num_iterations
-#         logger.info(f" update {self.num_expert_load_gather=}, {self.num_iterations_eplb_update} success...")
-
     def shutdown(self):
         """
         Clean up the EPLB process.
