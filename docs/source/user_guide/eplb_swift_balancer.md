@@ -1,9 +1,11 @@
-# Overview
+# Swift Balancer
+
+## Overview
 Experts rebalancing of MoE models for LLM serving is a mandatory option.Changing experts dynamically would have a negative impact on TTFT and TPOT while stop-the-world. 
 Asynchronously expert load balacing would be a better choice.
 We have launched SwiftBalancer to support dynamic experts load balancing with Zero-overhead experts movement.
 
-# Design 
+## Design 
 
 ![alt text](../assets/eplb_swift_balancer.png)
 
@@ -19,7 +21,7 @@ The overall workflow involves:
 In our profiling shows experts transforming is hidden in the bubble between forward iterations. Cpu time cost of eplb algo. and other python operator such as log2phy
 would be hidden by eplb worker process too.
 
-# Examples
+## Examples
 
 Currently swift balancer optimize 5ms TPOT with ep size 64 while cost less than 2ms for every layer expert movement.
 
