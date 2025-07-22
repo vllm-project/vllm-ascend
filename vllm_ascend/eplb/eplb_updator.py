@@ -29,8 +29,8 @@ from vllm_ascend.ascend_config import get_ascend_config
 class EplbUpdator:
 
     def __init__(self, expert_map_path):
-        self.init_eplb(expert_map_path)
         self.ascend_config = get_ascend_config()
+        self.init_eplb(expert_map_path)
 
     def set_adaptor(self, adaptor):
         self.adaptor = adaptor
