@@ -22,9 +22,12 @@ import vllm.envs as envs
 from multiprocessing import Queue, Manager
 
 from vllm.logger import logger
-from vllm_ascend.eplb.core.worker.eplb_worker import EplbProcess
-from vllm_ascend.eplb.core.loader.device_transfer_loader import D2DExpertWeightLoader
+from vllm_ascend.eplb.core.eplb_worker import EplbProcess
+from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 from vllm_ascend.ascend_config import get_ascend_config
+from queue import Queue
+from typing import Any
+
 
 class EplbUpdator:
 

@@ -53,7 +53,10 @@ class EplbWorker:
         # Get initial expert_map
         if self.old_expert_maps is None:
             self.old_expert_maps = self.get_init_expert_maps()
-            self.num_local_experts = self.old_expert_maps.max() + 1
+            if self.old_expert_maps is not None:
+                self.num_local_experts = self.old_expert_maps.max() + 1
+            else:
+                raise ValueError("Failed to get expert_maps from shared_dict.")
 
         # Get MOE load information
         load_info = self.fetch_and_sum_load_info()
@@ -123,8 +126,10 @@ class EplbWorker:
             current_expert_maps_this_layer = current_expert_maps[layer_id]
             updated_expert_maps_this_layer_org = updated_expert_maps_org[layer_id]
 
-            expert_send_info_this_layer = dict()
-            expert_recv_info_this_layer = dict()
+            from typing import Any
+
+            expert_send_info_this_layer: dict[Any, Any] = {}
+            expert_recv_info_this_layer: dict[Any, Any] = {}
 
             # Guard Clause: if there is no expert weight update, avoid subsequent processing
             if (np.equal(updated_expert_maps_this_layer,
@@ -209,8 +214,8 @@ class EplbWorker:
             updated_expert_maps_this_layer = updated_expert_maps[layer_id]
             current_expert_maps_this_layer = current_expert_maps[layer_id]
 
-            expert_send_info_this_layer = dict()
-            expert_recv_info_this_layer = dict()
+            expert_send_info_this_layer: dict[Any, Any] = {}
+            expert_recv_info_this_layer: dict[Any, Any] = {}
 
             # Guard Clause: if there is no expert weight update, avoid subsequent processing
             if torch.equal(updated_expert_maps_this_layer, current_expert_maps_this_layer):
