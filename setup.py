@@ -298,6 +298,7 @@ class custom_install(install):
 
     def run(self):
         self.run_command("build_ext")
+        self.run_command("build_py")
         install.run(self)
 
 
@@ -354,7 +355,8 @@ def get_requirements() -> List[str]:
 cmdclass = {
     "build_py": custom_build_info,
     "build_ext": cmake_build_ext,
-    "install": custom_install
+    "install": custom_install,
+    "develop": custom_install
 }
 
 setup(
