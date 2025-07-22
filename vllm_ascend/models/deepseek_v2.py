@@ -32,6 +32,7 @@ import torch_npu
 import vllm.envs as envs
 import itertools
 from torch import nn
+import torch.distributed as dist
 from torch.nn.parameter import Parameter, UninitializedParameter 
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
@@ -234,6 +235,24 @@ def mlp_tensor_model_parallel_all_gather(input_: torch.Tensor,
 def mlp_tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
     """All-reduce the input tensor across model parallel group."""
     return get_mlptp_group().all_reduce(input_)
+
+def mlp_tensor_model_parallel_reduce_scatter(input_: torch.Tensor) -> torch.Tensor:
+    """reduce scatter the input tensor across model parallel group."""
+    return get_mlptp_group().reduce_scatter(input_)
+
+# 临时定义is_prefill方法，验证是否是预填充阶段
+def is_prefill(attn_metadata: Optional[AttentionMetadata] = None) -> bool:
+        if attn_metadata is None:
+            attn_metadata = get_forward_context().attn_metadata
+        # TODO: need a better flag to indicate whether in profile run or not.
+        if attn_metadata is None:
+            # for profile run
+            is_prefill = True
+        else:
+            is_prefill = attn_metadata.num_prefills > 0
+            if hasattr(attn_metadata, 'with_prefill_across_dp'):
+                is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
+        return is_prefill
     
 class CustomDeepseekV2MLPColumnParallelLinear(LinearBase):
     """Linear layer with column parallelism.
@@ -917,10 +936,32 @@ class CustomDeepseekV2MLP(nn.Module):
             raise NotImplementedError(
                 f"Quantization with [{type(quant_method)}] is NOT supported")
 
-    def forward(self, x):
+    def forward(self, x, is_prefill: bool = False):
+        if is_prefill:
+            pad_size = 0
+            # pd mix use
+            # 临时设置dp_size为4，后续需要根据实际情况修改
+            dp_size = 4
+            # if model_extra_config.parall_config.dp_size > 1:
+            if dp_size > 1:
+                local_length = x.shape[0]
+                # reduce_length = torch.tensor(x.shape[0], dtype=torch.int64, device=current_platform.device_type)
+                reduce_length = torch.tensor(x.shape[0], dtype=torch.int64, device="npu")
+                dist.all_reduce(reduce_length, op=dist.ReduceOp.MAX, async_op=False)
+                global_max_length = reduce_length.item()
+                pad_size = global_max_length - x.shape[0]
+
+                x = torch.nn.functional.pad(
+                    x, (0, 0, 0, pad_size)
+                )
+        x = mlp_tensor_model_parallel_all_gather(x, dim=0)
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
+        x = mlp_tensor_model_parallel_reduce_scatter(x)
+        if is_prefill and pad_size > 0:
+            # remove padding
+            x = x[:local_length, :]
         return x
 
 
@@ -1375,7 +1416,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                                      attn_metadata,
                                      replace_allreduce=mla_moe_communication)
         else:
-            hidden_states = self.mlp(hidden_states)
+            hidden_states = self.mlp(hidden_states, is_prefill=is_prefill(attn_metadata))
 
         if isinstance(
                 self.mlp,
