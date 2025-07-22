@@ -32,7 +32,7 @@ def generate_index_dicts(cls, tensor_2d):
 
     return dict_list
 
-def generate_log2phy_map(cls, expert_map):
+def generate_log2phy_map(expert_map):
     num_local_experts = expert_map.max() + 1
     log2phy_map = expert_map.clone()
     num_ranks, num_global_expert = log2phy_map.shape
