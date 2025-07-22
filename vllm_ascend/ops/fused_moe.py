@@ -1143,6 +1143,7 @@ class AscendFusedMoE(FusedMoE):
 
         ascend_config = get_ascend_config()
         expert_map_path = ascend_config.expert_map_path
+        self.dynamic_eplb = ascend_config.dynamic_eplb
         if expert_map_path and os.path.exists(expert_map_path):
             # moe expert load balance
             expert_load_balancer = ExpertLoadBalancer(expert_map_path,
@@ -1158,6 +1159,10 @@ class AscendFusedMoE(FusedMoE):
             # Create a tensor of size num_experts filled with -1
             self.local_num_experts, self.expert_map = determine_expert_map(
                 self.ep_size, self.ep_rank, self.global_num_experts)
+            if self.dynamic_eplb:
+                from vllm_ascend.eplb.core.eplb_utils import determine_default_log2phy_map
+                self.log2phy = determine_default_log2phy_map(self.global_num_experts,
+                    self.ep_size, self.ep_rank)
 
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_multistream_moe = (
@@ -1188,7 +1193,6 @@ class AscendFusedMoE(FusedMoE):
         local_num_experts = (torch.sum(self.expert_map != -1)
                              if self.expert_map is not None else num_experts)
 
-        self.dynamic_eplb = ascend_config.dynamic_eplb
         self.moe_load = None
         if self.dynamic_eplb:
             self.moe_load = torch.zeros(local_num_experts, dtype=torch.int64)
