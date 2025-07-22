@@ -49,6 +49,7 @@ user_guide/env_vars
 user_guide/additional_config
 user_guide/graph_mode.md
 user_guide/release_notes
+user_guide/eplb_swift_balancer
 :::
 
 % How to contribute to the vLLM Ascend project
