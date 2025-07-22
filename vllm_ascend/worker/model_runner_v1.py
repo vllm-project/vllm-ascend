@@ -88,7 +88,7 @@ from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
-from vllm_ascend.eplb.core.device_transfer_loader import D2DExpertWeightLoader
+from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]

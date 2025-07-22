@@ -18,7 +18,7 @@
 import torch
 import random
 
-def generate_index_dicts(cls, tensor_2d):
+def generate_index_dicts(tensor_2d):
     dict_list = []
     current_idx = 0
 
@@ -32,7 +32,7 @@ def generate_index_dicts(cls, tensor_2d):
 
     return dict_list
 
-def generate_log2phy_map(cls, expert_map):
+def generate_log2phy_map(expert_map):
     num_local_experts = expert_map.max() + 1
     log2phy_map = expert_map.clone()
     num_ranks, num_global_expert = log2phy_map.shape
@@ -58,8 +58,7 @@ def generate_log2phy_map(cls, expert_map):
 
     return log2phy_map
 
-def global2local(cls,
-    placement: torch.Tensor,
+def global2local(placement: torch.Tensor,
     E_local: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
 
