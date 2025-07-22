@@ -18,19 +18,6 @@
 import torch
 import random
 
-def generate_index_dicts(tensor_2d):
-    dict_list = []
-    current_idx = 0
-
-    for row in tensor_2d:
-        value_to_index = {}
-        for i in range(row.size(0)):
-            value = row[i].item()
-            value_to_index[value] = current_idx + i
-        dict_list.append(value_to_index)
-        current_idx += row.size(0)
-
-    return dict_list
 
 def generate_log2phy_map(expert_map):
     num_local_experts = expert_map.max() + 1
@@ -58,50 +45,28 @@ def generate_log2phy_map(expert_map):
 
     return log2phy_map
 
-def global2local(placement: torch.Tensor,
-    E_local: int
-) -> tuple[torch.Tensor, torch.Tensor]:
 
-    G, _ = placement.shape
-    device = placement.device
+def determine_default_log2phy_map(global_expert_num, world_size, rank_id):
 
-    pt_local = torch.full(( G, E_local),
-                            fill_value=-1,
-                            dtype=torch.long,
-                            device=device)
+    local_num_experts  = self.global_expert_num // self.world_size
 
-    valid = placement >= 0
-    g_idx, k_idx = valid.nonzero(as_tuple=True)
-    slot_idx = placement[g_idx, k_idx]
+    expert_map_all = torch.full(
+        (self.world_size, self.global_expert_num), -1, dtype=torch.int32
+    )
 
-    pt_local[g_idx, slot_idx] = k_idx
+    for r in range(self.world_size):
+        if r < self.world_size - 1:
+            start = r * local_num_experts
+            end   = (r + 1) * local_num_experts
+            local_count = local_num_experts
+        else:
+            start = r * local_num_experts
+            end   = self.global_expert_num
+            local_count = self.global_expert_num - r * local_num_experts
 
-    return pt_local
+        local_ids = torch.arange(local_count, dtype=torch.int32)
+        expert_map_all[r, start:end] = local_ids
 
-def global2local_load(self,
-    workload: torch.Tensor,
-    placement: torch.Tensor,
-    E_local: int
-) -> tuple[torch.Tensor, torch.Tensor]:
-    L, G, _ = placement.shape
-    device = placement.device
+    log2phy_map_all = generate_log2phy_map(expert_map_all)
 
-    wt_local = torch.full((L, G, E_local),
-                            fill_value=-1,
-                            dtype=workload.dtype,
-                            device=device)
-    pt_local = torch.full((L, G, E_local),
-                            fill_value=-1,
-                            dtype=torch.long,
-                            device=device)
-
-    valid = placement >= 0
-    l_idx, g_idx, k_idx = valid.nonzero(as_tuple=True)
-
-    slot_idx = placement[l_idx, g_idx, k_idx]
-    values = workload[l_idx, g_idx, k_idx]
-
-    wt_local[l_idx, g_idx, slot_idx] = values
-    pt_local[l_idx, g_idx, slot_idx] = k_idx
-
-    return wt_local, pt_local
+    return log2phy_map_all[rank_id]
