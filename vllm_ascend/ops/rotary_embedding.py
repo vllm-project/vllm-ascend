@@ -21,9 +21,9 @@ from typing import Optional, Tuple
 import torch
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, RotaryEmbedding)
-from vllm.platforms import current_platform
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import enable_custom_op, is_310p
 
 
@@ -140,7 +140,7 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         self.max_seq_len = max_position_embeddings
         self._set_cos_sin_cache(max_position_embeddings,
                                 dtype=dtype,
-                                device=current_platform.device_type)
+                                device=NPUPlatform.device_type)
 
     def _yarn_get_mscale(self, scale: float = 1, mscale: float = 1) -> float:
         if scale <= 1:
