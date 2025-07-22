@@ -1,8 +1,8 @@
-import unittest
 from unittest.mock import patch
 
 import torch
 
+from tests.ut.base import TestBase
 from vllm_ascend.quantization.func_wrapper import (wrapper_rmsnorm_forward_oot,
                                                    wrapper_rmsnorm_init)
 
@@ -20,7 +20,7 @@ class MockRMSNorm:
         self.ignore_anti = extra_args.get('ignore_anti', True)
 
 
-class TestFuncWrapper(unittest.TestCase):
+class TestFuncWrapper(TestBase):
 
     def test_wrapper_rmsnorm_init(self):
 

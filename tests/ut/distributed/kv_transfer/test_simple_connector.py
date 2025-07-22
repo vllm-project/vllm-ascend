@@ -1,17 +1,17 @@
-import unittest
 from unittest.mock import MagicMock, patch
 
 import torch
 from vllm.config import VllmConfig
 from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
+from tests.ut.base import TestBase
 from vllm_ascend.distributed.kv_transfer.simple_buffer import SimpleBuffer
 from vllm_ascend.distributed.kv_transfer.simple_connector import \
     SimpleConnector
 from vllm_ascend.distributed.kv_transfer.simple_pipe import SimplePipe
 
 
-class TestSimpleConnector(unittest.TestCase):
+class TestSimpleConnector(TestBase):
 
     def setUp(self):
         self.mock_pipe = MagicMock(spec=SimplePipe)
