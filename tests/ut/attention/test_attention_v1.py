@@ -96,7 +96,6 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         num_reqs = 2
         num_actual_tokens = 10
         max_query_len = 5
-        common_prefix_len = 1
 
         self.mock_runner.input_batch.block_table = [MagicMock()]
         self.mock_runner.input_batch.block_table[
@@ -114,8 +113,11 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         mock_nd_to_nz_2d.return_value = mock_nz_tensor
         mock_npu_format_cast.return_value = mock_nz_tensor
 
-        self.builder.build(num_reqs, num_actual_tokens, max_query_len,
-                           common_prefix_len)
+        self.builder.build(
+            num_reqs,
+            num_actual_tokens,
+            max_query_len,
+        )
 
     @patch('vllm_ascend.attention.attention_v1.AscendMetadata')
     @patch('torch_npu.npu_format_cast')
@@ -148,7 +150,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         mock_nd_to_nz_spec.return_value = mock_nz_tensor
         mock_npu_format_cast.return_value = mock_nz_tensor
 
-        self.builder.build(num_reqs, num_actual_tokens, max_query_len, 0)
+        self.builder.build(num_reqs, num_actual_tokens, max_query_len)
 
     @patch('vllm_ascend.attention.attention_v1.AscendMetadata')
     @patch('vllm_ascend.attention.attention_v1.is_310p', return_value=False)
@@ -169,7 +171,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.mock_runner.attn_state = AscendAttentionState.ChunkedPrefill
         self.mock_runner.query_start_loc_cpu = torch.tensor([0, 2, 5, 9])
 
-        self.builder.build(num_reqs, num_actual_tokens, max_query_len, 0)
+        self.builder.build(num_reqs, num_actual_tokens, max_query_len)
 
 
 class TestAscendAttentionBackendImpl(TestBase):
@@ -201,7 +203,9 @@ class TestAscendAttentionBackendImpl(TestBase):
             alibi_slopes=None,
             sliding_window=None,
             kv_cache_dtype="float16",
-            attn_type=self.attention_type.DECODER)
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
+            kv_sharing_target_layer_name=None)
 
         self.impl_192 = AscendAttentionBackendImpl(
             num_heads=8,
@@ -211,16 +215,21 @@ class TestAscendAttentionBackendImpl(TestBase):
             alibi_slopes=None,
             sliding_window=None,
             kv_cache_dtype="float16",
-            attn_type=self.attention_type.DECODER)
+            logits_soft_cap=None,
+            attn_type=self.attention_type.DECODER,
+            kv_sharing_target_layer_name=None)
 
-        self.impl_error = AscendAttentionBackendImpl(num_heads=8,
-                                                     head_size=192,
-                                                     scale=1.0,
-                                                     num_kv_heads=8,
-                                                     alibi_slopes=None,
-                                                     sliding_window=None,
-                                                     kv_cache_dtype="float16",
-                                                     attn_type=None)
+        self.impl_error = AscendAttentionBackendImpl(
+            num_heads=8,
+            head_size=192,
+            scale=1.0,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="float16",
+            logits_soft_cap=None,
+            attn_type=None,
+            kv_sharing_target_layer_name=None)
 
     @patch('torch.ops.vllm.unified_ascend_attention_with_output')
     def test_forward_trace_flag_true(self, mock_unified_attention):

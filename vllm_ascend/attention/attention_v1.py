@@ -130,10 +130,8 @@ class AscendMetadata:
     query_start_loc: torch.Tensor
     query_lens: torch.Tensor
     seq_lens: torch.Tensor
-
     # max value of number of tokens across dp group
     max_num_tokens_across_dp: int = 0
-
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int] = None
     # (num_tokens,). The indices of the token slots that input tokens will be
@@ -141,18 +139,9 @@ class AscendMetadata:
     # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor = None
-    # TODO: Indicates whether there are only prefill requests.
-    # FlashAttention can be used when there are only prefill requests.
-    # FlashAttention has better performance than PageAtttention,
-    # but it does not support decode requests.
-    is_only_prefill: bool = False
     # Current state of this attention run.
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
     attn_mask: Optional[torch.Tensor] = None
-
-    # For logging.
-    num_input_tokens: int = 0  # Number of tokens including padding.
-
     with_prefill_across_dp: bool = False
 
 
@@ -169,7 +158,6 @@ class AscendAttentionMetadataBuilder:
               num_reqs,
               num_actual_tokens,
               max_query_len,
-              common_prefix_len,
               max_num_tokens_across_dp: int = 0,
               with_prefill_across_dp: bool = False):
 
@@ -224,10 +212,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         alibi_slopes: Optional[List[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        logits_soft_cap: Optional[float] = None,
-        attn_type: str = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[str] = None,
-        use_irope: bool = False,
+        logits_soft_cap: Optional[float],
+        attn_type: str,
+        kv_sharing_target_layer_name: Optional[str],
+        **kwargs,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
