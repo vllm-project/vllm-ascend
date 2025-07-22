@@ -4,7 +4,7 @@ import random
 import torch
 import torch
 
-from .eplb_policy import EplbPolicy, DynamicConfig
+from .policy_abstract import EplbPolicy, DynamicConfig
 
 random.seed(42)
 

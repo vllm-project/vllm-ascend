@@ -2,7 +2,7 @@
 from collections import defaultdict
 import numpy as np
 
-from .eplb_policy import EplbPolicy, DynamicConfig
+from .policy_abstract import EplbPolicy, DynamicConfig
 
 
 class DynamicTable:

@@ -1,8 +1,8 @@
 # Copyright Huawei Technologies Co., Ltd. 2023-2024. All rights reserved.
-from .eplb_policy import EplbPolicy, DynamicConfig
+from .policy_abstract import EplbPolicy, DynamicConfig
 from .policy_random import RandomLoadBalance
-from .dynamic_ep import DynamicEplb
-from .dynamic_ep_v2 import DynamicEplbV2
+from .policy_dynamic_ep import DynamicEplb
+from .policy_dynamic_ep_v2 import DynamicEplbV2
 
 
 

@@ -27,7 +27,7 @@ from abc import ABC, abstractmethod
 from vllm.logger import logger
 
 from vllm_ascend.eplb.core.policy.policy_factory import PolicyFactory, DynamicConfig
-from vllm_ascend.eplb.tool.eplb_utils import generate_log2phy_map
+from vllm_ascend.eplb.core.eplb_utils import generate_log2phy_map
 
 
 class EplbWorker:
