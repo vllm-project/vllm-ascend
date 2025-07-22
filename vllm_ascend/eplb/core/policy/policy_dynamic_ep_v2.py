@@ -6,11 +6,9 @@ from abc import abstractmethod
 class DynamicConfig:
     placement_policy = None
 
-    max_transferred_expert_per_layer = 100
-    # 一台机器上，一层最多搬运多少专家
-
-    ep_worldsize = 64  # 整个集群上所有的专家分布在多少个die上
-    num_die_per_host = 8  # 每台机器上有几个die
+    max_transferred_expert_per_layer = 100 # Maximum number of experts that can be migrated per layer on a single host
+    ep_worldsize = 64  # Total number of dies across the entire cluster where experts are distributed
+    num_die_per_host = 8  # Number of dies on each host machine
 
 
 class EplbPolicy:
@@ -20,7 +18,7 @@ class EplbPolicy:
     @abstractmethod
     def rebalance_experts(self, current_expert_table, expert_workload):
         """
-        传入weight并返回相关限制条件下的专家复制和放置
+        Pass in the weights and return expert replication and placement under relevant constraints.
         INPUT:
         current_expert_table: [layerId, rankId, expert_num_i]
         expert_workload = expert_table[layer0][rankId][expert_num_i]
@@ -44,17 +42,17 @@ class EplbPolicy:
 
 class DynamicTable:
     # workload_table:
-    # 三维矩阵，[layer, gpus, experts_per_gpu_per_layer] -> value: 所在位置的热度
-    # 大小为 层数 * 卡数 * 每层每卡的专家数量
-    # 里面i, j, k的元素代表 第 i 层 第 j 张卡第 k 个专家的热度
-    # 对于收集不到的专家，填为 -1
+    # 3D matrix: [layer, gpus, experts_per_gpu_per_layer] -> value: workload (heat) at the corresponding position
+    # Size: number of layers * number of GPUs * number of experts per GPU per layer
+    # The element at (i, j, k) represents the workload (heat) of the k-th expert on the j-th GPU in the i-th layer
+    # For experts that are not available or collected, the value is set to -1
     workload_table = None
 
     # placement_table:
-    # 三维矩阵，[layer, gpus, experts_per_gpu_per_layer] -> value: 所在位置的物理专家id
-    # 大小为 层数 * 卡数 * 每层每卡的专家数量
-    # 里面i, j, k的元素代表 第 i 层 第 j 张卡第 k 个专家的物理id
-    # 对于收集不到的专家，填为 -1
+    # 3D matrix: [layer, gpus, experts_per_gpu_per_layer] -> value: physical expert ID at the corresponding position
+    # Size: number of layers * number of GPUs * number of experts per GPU per layer
+    # The element at (i, j, k) represents the physical expert ID of the k-th expert on the j-th GPU in the i-th layer
+    # For experts that are not available or collected, the value is set to -1
     placement_table = None
 
 class DynamicEplbV2(EplbPolicy):

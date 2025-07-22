@@ -2,22 +2,22 @@
 from collections import defaultdict
 import numpy as np
 
-from .eplb_policy import EplbPolicy, DynamicConfig
+from .policy_abstract import EplbPolicy, DynamicConfig
 
 
 class DynamicTable:
     # workload_table:
-    # 三维矩阵，[layer, gpus, experts_per_gpu_per_layer] -> value: 所在位置的热度
-    # 大小为 层数 * 卡数 * 每层每卡的专家数量
-    # 里面i, j, k的元素代表 第 i 层 第 j 张卡第 k 个专家的热度
-    # 对于收集不到的专家，填为 -1
+    # 3D matrix: [layer, gpus, experts_per_gpu_per_layer] -> value: workload (heat) at the corresponding position
+    # Size: number of layers * number of GPUs * number of experts per GPU per layer
+    # The element at (i, j, k) represents the workload (heat) of the k-th expert on the j-th GPU in the i-th layer
+    # For experts that are not available or collected, the value is set to -1
     workload_table = None
 
     # placement_table:
-    # 三维矩阵，[layer, gpus, experts_per_gpu_per_layer] -> value: 所在位置的物理专家id
-    # 大小为 层数 * 卡数 * 每层每卡的专家数量
-    # 里面i, j, k的元素代表 第 i 层 第 j 张卡第 k 个专家的物理id
-    # 对于收集不到的专家，填为 -1
+    # 3D matrix: [layer, gpus, experts_per_gpu_per_layer] -> value: physical expert ID at the corresponding position
+    # Size: number of layers * number of GPUs * number of experts per GPU per layer
+    # The element at (i, j, k) represents the physical expert ID of the k-th expert on the j-th GPU in the i-th layer
+    # For experts that are not available or collected, the value is set to -1
     placement_table = None
 
 
@@ -42,7 +42,7 @@ class DynamicEplb(EplbPolicy):
         return workload_new
 
     @staticmethod
-    # 热点专家拆分为冗余专家
+    # Split hot (high-load) experts into redundant experts
     def original_compute_balanced_pack_redundancy(origin_weights, card_num, num_redundancy_expert):
         # Step 1: Sort the items by weight in descending order (we are sorting by weight now)
         # Sort based on the second element (the second value of each tuple)
@@ -119,7 +119,7 @@ class DynamicEplb(EplbPolicy):
 
         return result, boxes
 
-    # 热点专家拆分为冗余专家
+    # Split hot (high-load) experts into redundant experts
     @staticmethod
     def compute_balanced_pack_redundancy(origin_weights, card_num, num_redundancy_expert):
         route_expert_num = len(origin_weights)
@@ -186,7 +186,7 @@ class DynamicEplb(EplbPolicy):
 
         return result, boxes
 
-    # 无冗余专家方案
+    # Scheme without redundant experts
     @staticmethod
     def compute_balanced_pack(origin_weights, card_num):
         sorted_indices = np.argsort([t[1] for t in origin_weights])[::-1]
@@ -289,30 +289,31 @@ class DynamicEplb(EplbPolicy):
         max_heat_per_layer_before = self.calculate_max_heat_per_layer(info.workload_table, layer_num)
         npu_heat_all_origin = sum(max_heat_per_layer_before)
 
-        # 计算负载均衡，部署冗余专家
+        # Perform load balancing and deploy redundant experts
         layer_num = layer_workloads.shape[0]
         expert_num = layer_workloads.shape[1]
-        # 校验专家数量、卡数量、冗余专家数量不能超过卡数量
+        # Validate that the number of experts, number of cards, and number of redundant experts do not exceed the number of cards
         if num_original_expert != expert_num:
-            raise ValueError(f"原始专家数量 {num_original_expert} 必须等于 expert_num {expert_num}")
+            raise ValueError(f"the number of original experts {num_original_expert} must be equal to expert_num {expert_num}")
 
         if num_npus <= 0:
-            raise ValueError("NPUs 数量必须大于 0")
+            raise ValueError("the number of NPUs must be greater than 0")
 
         if num_npus < num_redundancy_expert:
-            raise ValueError(f"NPUs 数量 {num_npus} 必须大于或等于冗余专家数量 {num_redundancy_expert}")
+            raise ValueError(f"the number of NPUs {num_npus} must be greater than or equal to the number of redundant experts {num_redundancy_expert}")
 
-        # 每个卡部署的专家数量 一个冗余专家
+        # Number of experts deployed on each card includes one redundant expert
         global_deployment = [[[] for _ in range(num_npus)] for _ in range(layer_num)]
-        # 遍历获得每一层的放置策略，考虑计算均衡
+        # Iterate to obtain the placement strategy for each layer, taking computational balance into account
         max_heat_per_layer_after = np.zeros([layer_num])
         for layer in range(layer_num):
-            # 获取当前层专家ID和对应负载，负载需要进行正则化处理, 每个卡加一个冗余专家
+            # Get the expert IDs and their corresponding workloads for the current layer;
+            # workloads need to be normalized, and one redundant expert is added per card
             weights = np.zeros((expert_num,), dtype='object')
             for expert_id, workload_weight in enumerate(layer_workloads[layer]):
                 weights[expert_id] = (expert_id, workload_weight)
 
-            # 获取每一层全局计算均衡的放置策略
+            # Obtain the globally balanced placement strategy for each layer
             result, layer_deployment = self.original_compute_balanced_pack_redundancy(
                 weights, num_npus, num_redundancy_expert
             )
@@ -321,7 +322,7 @@ class DynamicEplb(EplbPolicy):
             max_heat_per_layer_after[layer] = max(result, key=lambda x: x['total_weight'])['total_weight']
 
         new_global_deployment = self.constraint_expert_local_exchange(current_expert_table, global_deployment)
-        # 获取层优先级
+        # Obtain the priority of each layer
         layer_changed_ratio = []
         for layer_idx in range(layer_num):
             layer_changed_ratio.append(max_heat_per_layer_after[layer_idx] / max_heat_per_layer_before[layer_idx])

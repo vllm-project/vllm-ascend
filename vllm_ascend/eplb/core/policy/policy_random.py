@@ -4,11 +4,11 @@ import random
 import torch
 import torch
 
-from .eplb_policy import EplbPolicy, DynamicConfig
+from .policy_abstract import EplbPolicy, DynamicConfig
 
 random.seed(42)
 
-class MockLoadBalance(EplbPolicy):
+class RandomLoadBalance(EplbPolicy):
     def __init__(self, config: DynamicConfig):
         super().__init__(config)
 
@@ -18,11 +18,11 @@ class MockLoadBalance(EplbPolicy):
         num_card = len(current_expert_table[0])
 
         for i in range(num_layers):
-            # 随机选两个卡
+            # randomly choose two card
             # indices = random.sample(range(num_card), 2)
             indices = [3,1]
 
-            # 交换冗余专家
+            # swap redundant experts
             expert_id_to_exchange = new_table[i][indices[0]][-1].clone()
             new_table[i][indices[0]][-1] = new_table[i][indices[1]][-1]
             new_table[i][indices[1]][-1] = expert_id_to_exchange

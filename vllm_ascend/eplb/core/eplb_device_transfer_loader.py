@@ -19,14 +19,13 @@ import torch.distributed as dist
 from enum import Enum
 
 from vllm.logger import logger
-from vllm_ascend.eplb.core.loader.abstract_loader import ExpertWeightLoader
 
 class ExpertWeightUpdateState(Enum):
     WAITING = 0      # waiting for updated expert_map by EplbWorker
     READY = 1        # ready for d2d expert weights updating
     TRANSFERING = 2  # d2d finished and waiting for updating expert_map into model
 
-class D2DExpertWeightLoader(ExpertWeightLoader):
+class D2DExpertWeightLoader:
 
     def __init__(self, eplb_adaptor):
         self.comm_op_list = None
