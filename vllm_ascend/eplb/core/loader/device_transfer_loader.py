@@ -118,37 +118,37 @@ class D2DExpertWeightLoader(ExpertWeightLoader):
         self.layer_id = -1
         self.state = ExpertWeightUpdateState.WAITING
 
-    def generate_mock_update_info(self, rank_id):
-        if rank_id == 0:
-            expert_send_info = [(1, 0)]
-            expert_recv_info = [(1, 64)]
-            updated_expert_map_list = [-1] + [i for i in range(1, 64)] + [0] + [j for j in [-1] * 191]
-            updated_expert_map = torch.tensor(updated_expert_map_list)
-            layer_id = 3
-
-        if rank_id == 1:
-            expert_send_info = [(0, 64)]
-            expert_recv_info = [(0, 0)]
-            updated_expert_map_list = [0] + [k for k in [-1] * 63] + [i for i in range(1, 64)] + [j for j in [-1] * 129]
-            updated_expert_map = torch.tensor(updated_expert_map_list)
-            layer_id = 3
-
-        if rank_id == 2:
-            expert_send_info = [(3, 128)]
-            expert_recv_info = [(3, 192)]
-            updated_expert_map_list = [k for k in [-1] * 129] + [i for i in range(1, 64)] + [0] + [j for j in [-1] * 63]
-            updated_expert_map = torch.tensor(updated_expert_map_list)
-            layer_id = 3
-
-        if rank_id == 3:
-            expert_send_info = [(2, 192)]
-            expert_recv_info = [(2, 128)]
-            updated_expert_map_list = [k for k in [-1] * 128] + [0] + [k for k in [-1] * 64] + [i for i in range(1, 64)]
-            updated_expert_map = torch.tensor(updated_expert_map_list)
-            layer_id = 3
-
-        self.mock_flag = False
-        return (expert_send_info, expert_recv_info, updated_expert_map, layer_id)
+#     def generate_mock_update_info(self, rank_id):
+#         if rank_id == 0:
+#             expert_send_info = [(1, 0)]
+#             expert_recv_info = [(1, 64)]
+#             updated_expert_map_list = [-1] + [i for i in range(1, 64)] + [0] + [j for j in [-1] * 191]
+#             updated_expert_map = torch.tensor(updated_expert_map_list)
+#             layer_id = 3
+#
+#         if rank_id == 1:
+#             expert_send_info = [(0, 64)]
+#             expert_recv_info = [(0, 0)]
+#             updated_expert_map_list = [0] + [k for k in [-1] * 63] + [i for i in range(1, 64)] + [j for j in [-1] * 129]
+#             updated_expert_map = torch.tensor(updated_expert_map_list)
+#             layer_id = 3
+#
+#         if rank_id == 2:
+#             expert_send_info = [(3, 128)]
+#             expert_recv_info = [(3, 192)]
+#             updated_expert_map_list = [k for k in [-1] * 129] + [i for i in range(1, 64)] + [0] + [j for j in [-1] * 63]
+#             updated_expert_map = torch.tensor(updated_expert_map_list)
+#             layer_id = 3
+#
+#         if rank_id == 3:
+#             expert_send_info = [(2, 192)]
+#             expert_recv_info = [(2, 128)]
+#             updated_expert_map_list = [k for k in [-1] * 128] + [0] + [k for k in [-1] * 64] + [i for i in range(1, 64)]
+#             updated_expert_map = torch.tensor(updated_expert_map_list)
+#             layer_id = 3
+#
+#         self.mock_flag = False
+#         return (expert_send_info, expert_recv_info, updated_expert_map, layer_id)
 
     def load_impl(self, old_expert_table, new_expert_table):
         raise NotImplementedError

@@ -212,11 +212,11 @@ class NPUWorker(WorkerBase):
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
-    def get_expert_load(self) -> tuple:
-        return self.model_runner.do_get_expert_load()
-
-    def update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
-        self.model_runner.do_update_expert_load_statistical_period(num_expert_load_gather, num_iterations)
+#     def get_expert_load(self) -> tuple:
+#         return self.model_runner.do_get_expert_load()
+#
+#     def update_expert_load_statistical_period(self, num_expert_load_gather: int, num_iterations: int):
+#         self.model_runner.do_update_expert_load_statistical_period(num_expert_load_gather, num_iterations)
 
     def get_model(self) -> nn.Module:
         return self.model_runner.get_model()
