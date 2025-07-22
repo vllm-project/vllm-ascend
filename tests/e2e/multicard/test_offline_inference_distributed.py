@@ -167,3 +167,20 @@ def test_models_distributed_topk() -> None:
             distributed_executor_backend="mp",
     ) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
+
+
+def test_models_distributed_Qwen3_W8A8():
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+
+    with VllmRunner(
+            snapshot_download("vllm-ascend/Qwen3-8B-W8A8"),
+            max_model_len=8192,
+            enforce_eager=True,
+            dtype="auto",
+            tensor_parallel_size=4,
+            quantization="ascend",
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)

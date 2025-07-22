@@ -25,7 +25,7 @@ from vllm.utils import GiB_bytes
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-if __name__ == "__main__":
+def main():
     prompt = "How are you?"
 
     free, total = torch.npu.mem_get_info()
@@ -51,3 +51,7 @@ if __name__ == "__main__":
     output2 = llm.generate(prompt, sampling_params)
     # cmp output
     assert output[0].outputs[0].text == output2[0].outputs[0].text
+
+
+if __name__ == "__main__":
+    main()

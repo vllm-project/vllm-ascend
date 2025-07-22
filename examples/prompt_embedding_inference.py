@@ -1,7 +1,12 @@
+import os
+
 import torch
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizer)
 from vllm import LLM
+
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 def init_tokenizer_and_llm(model_name: str):
