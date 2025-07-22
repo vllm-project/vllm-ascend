@@ -44,12 +44,8 @@ def create_requests(
                                      prompt_logprobs=prompt_logprobs)
     requests = []
     for i in range(num_requests):
-        if mm_positions is not None:
-            mm_position = mm_positions[i]
-            mm_inputs = [MultiModalKwargs({})] * len(mm_position)
-        else:
-            mm_position = None
-            mm_inputs = None
+        mm_position = None
+        mm_inputs = None
         request = Request(
             request_id=f"{i}",
             prompt_token_ids=[i] * num_tokens,
