@@ -20,20 +20,20 @@ import random
 
 class ExpertMapUtils():
 
-    @classmethod
-    def generate_index_dicts(cls, tensor_2d):
-        dict_list = []
-        current_idx = 0
-
-        for row in tensor_2d:
-            value_to_index = {}
-            for i in range(row.size(0)):
-                value = row[i].item()
-                value_to_index[value] = current_idx + i
-            dict_list.append(value_to_index)
-            current_idx += row.size(0)
-
-        return dict_list
+#     @classmethod
+#     def generate_index_dicts(cls, tensor_2d):
+#         dict_list = []
+#         current_idx = 0
+#
+#         for row in tensor_2d:
+#             value_to_index = {}
+#             for i in range(row.size(0)):
+#                 value = row[i].item()
+#                 value_to_index[value] = current_idx + i
+#             dict_list.append(value_to_index)
+#             current_idx += row.size(0)
+#
+#         return dict_list
 
     @classmethod
     def generate_log2phy_map(cls, expert_map):
@@ -84,31 +84,31 @@ class ExpertMapUtils():
 
         return pt_local
 
-    @classmethod
-    def global2local_load(self,
-        workload: torch.Tensor,
-        placement: torch.Tensor,
-        E_local: int
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        L, G, _ = placement.shape
-        device = placement.device
-
-        wt_local = torch.full((L, G, E_local),
-                              fill_value=-1,
-                              dtype=workload.dtype,
-                              device=device)
-        pt_local = torch.full((L, G, E_local),
-                              fill_value=-1,
-                              dtype=torch.long,
-                              device=device)
-
-        valid = placement >= 0
-        l_idx, g_idx, k_idx = valid.nonzero(as_tuple=True)
-
-        slot_idx = placement[l_idx, g_idx, k_idx]
-        values = workload[l_idx, g_idx, k_idx]
-
-        wt_local[l_idx, g_idx, slot_idx] = values
-        pt_local[l_idx, g_idx, slot_idx] = k_idx
-
-        return wt_local, pt_local
+#     @classmethod
+#     def global2local_load(self,
+#         workload: torch.Tensor,
+#         placement: torch.Tensor,
+#         E_local: int
+#     ) -> tuple[torch.Tensor, torch.Tensor]:
+#         L, G, _ = placement.shape
+#         device = placement.device
+#
+#         wt_local = torch.full((L, G, E_local),
+#                               fill_value=-1,
+#                               dtype=workload.dtype,
+#                               device=device)
+#         pt_local = torch.full((L, G, E_local),
+#                               fill_value=-1,
+#                               dtype=torch.long,
+#                               device=device)
+#
+#         valid = placement >= 0
+#         l_idx, g_idx, k_idx = valid.nonzero(as_tuple=True)
+#
+#         slot_idx = placement[l_idx, g_idx, k_idx]
+#         values = workload[l_idx, g_idx, k_idx]
+#
+#         wt_local[l_idx, g_idx, slot_idx] = values
+#         pt_local[l_idx, g_idx, slot_idx] = k_idx
+#
+#         return wt_local, pt_local

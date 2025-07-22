@@ -62,7 +62,7 @@ class EplbWorker:
 
         #根据负载信息，获取更新后的专家表
         old_placement = self.global2local(self.old_expert_maps, self.num_local_experts)
-        changed, priority, new_placement = self.calculate_rebalance_experts(load_info, old_placement)
+        _, _, new_placement = self.calculate_rebalance_experts(load_info, old_placement)
 
         if not torch.is_tensor(new_placement):
             new_placement = torch.tensor(new_placement)
