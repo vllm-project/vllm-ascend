@@ -5,12 +5,13 @@ from abc import abstractmethod
 class DynamicConfig:
     placement_policy = None
 
-    max_transferred_expert_per_layer = 100 # Maximum number of experts that can be migrated per layer on a single host
+    max_transferred_expert_per_layer = 100  # Maximum number of experts that can be migrated per layer on a single host
     ep_worldsize = 64  # Total number of dies across the entire cluster where experts are distributed
     num_die_per_host = 8  # Number of dies on each host machine
 
 
 class EplbPolicy:
+
     def __init__(self, config: DynamicConfig):
         self.config = config
 

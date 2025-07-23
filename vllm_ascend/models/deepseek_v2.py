@@ -783,7 +783,8 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
     def get_all_expert_map(self, num_moe_layers):
         all_loads = []
         for layer_id in range(num_moe_layers):
-            load_tensor = self.get_expert_map(layer_id + self.num_dense_layers)  # (num_experts_per_layer,)
+            load_tensor = self.get_expert_map(
+                layer_id + self.num_dense_layers)  # (num_experts_per_layer,)
             all_loads.append(load_tensor)
 
         return torch.stack(all_loads, dim=0)
@@ -798,7 +799,8 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 
     def clear_all_moe_loads(self):
         for layer_id in range(self.num_moe_layers):
-            self.model.layers[layer_id + self.num_dense_layers].mlp.experts.clear_moe_load()
+            self.model.layers[
+                layer_id + self.num_dense_layers].mlp.experts.clear_moe_load()
 
 
 class CustomDeepseekV3ForCausalLM(CustomDeepseekV2ForCausalLM):

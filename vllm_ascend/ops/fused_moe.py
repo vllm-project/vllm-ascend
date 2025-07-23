@@ -1193,9 +1193,10 @@ class AscendFusedMoE(FusedMoE):
             self.local_num_experts, self.expert_map = determine_expert_map(
                 self.ep_size, self.ep_rank, self.global_num_experts)
             if self.dynamic_eplb:
-                from vllm_ascend.eplb.core.eplb_utils import determine_default_log2phy_map
-                self.log2phy = determine_default_log2phy_map(self.global_num_experts,
-                    self.ep_size, self.ep_rank)
+                from vllm_ascend.eplb.core.eplb_utils import \
+                    determine_default_log2phy_map
+                self.log2phy = determine_default_log2phy_map(
+                    self.global_num_experts, self.ep_size, self.ep_rank)
 
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_multistream_moe = (
@@ -1421,7 +1422,7 @@ class AscendFusedMoE(FusedMoE):
         else:
             return final_hidden_states
 
-    def update_map(self,new_expert_map):
+    def update_map(self, new_expert_map):
         self.expert_map = new_expert_map
 
     def get_map(self):
@@ -1431,7 +1432,8 @@ class AscendFusedMoE(FusedMoE):
         return self.log2phy
 
     def clear_moe_load(self):
-        self.moe_load.zero_()
+        if self.moe_load is not None:
+            self.moe_load.zero_()
 
     # ----------------------------------------- TBO-related --------------------------------------------
 

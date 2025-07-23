@@ -15,7 +15,9 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
+from typing import Any
+
 
 class EplbAdaptor():
 
@@ -27,7 +29,7 @@ class EplbAdaptor():
         raise NotImplementedError
 
     @abstractmethod
-    def get_init_expert_map(self, num_moe_layers=None):
+    def get_init_expert_map(self, num_moe_layers: Any) -> Any:
         raise NotImplementedError
 
     @abstractmethod

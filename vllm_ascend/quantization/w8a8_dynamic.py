@@ -219,7 +219,8 @@ def fused_experts_with_mc2(
     quantized_x_for_share: Optional[Any] = None,
     dynamic_scale_for_share: Optional[Any] = None,
     mc2_mask: Optional[torch.Tensor] = None,
-) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+) -> Union[Tuple[torch.Tensor, torch.Tensor, int], Tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor, int]]:
     assert mc2_mask is not None
     if log2phy is not None:
         topk_ids = log2phy[topk_ids]
@@ -447,7 +448,7 @@ def fused_prefill_experts_with_mc2(
             shared_outputs[start_indx:end_indx,
                            ...] = prefill_expert_outputs[1]
             expert_token_nums = prefill_expert_outputs[2]
-            group_list_type = prefill_expert_outputs[3]
+            #group_list_type = prefill_expert_outputs[3]
         start_indx = end_indx
 
     if shared_experts is None:

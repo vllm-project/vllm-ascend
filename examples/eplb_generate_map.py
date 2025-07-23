@@ -1,24 +1,7 @@
-#
-# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-# This file is a part of the vllm-ascend project.
-# Adapted from vllm-project/vllm/examples/offline_inference/basic.py
-# Copyright 2025 The vLLM team.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-#
-import numpy as np
-import json
 import argparse
+import json
+
+import numpy as np
 
 
 def split_and_insert(n, k, m):
@@ -40,19 +23,26 @@ def split_and_insert(n, k, m):
     return np.concatenate(groups)
 
 
-def random_generation(n_layer=58, n_expert=256, start_layer_idx=0, device_count=128, n_redundant=128, output_name=""):
+def random_generation(n_layer=58,
+                      n_expert=256,
+                      start_layer_idx=0,
+                      device_count=128,
+                      n_redundant=128,
+                      output_name=""):
     expert_data = {}
     expert_data["moe_layer_count"] = n_layer
     layer_list = []
     for i in range(n_layer):
         layer = {"layer_id": start_layer_idx + i, "device_count": device_count}
-        random_placement = split_and_insert(n_expert, device_count, n_redundant)
+        random_placement = split_and_insert(n_expert, device_count,
+                                            n_redundant)
         device_list = []
         step = random_placement.shape[0] // device_count
         for j in range(device_count):
             device = {}
             device["device_id"] = j
-            device["device_expert"] = random_placement[j * step: (j + 1) * step].tolist()
+            device["device_expert"] = random_placement[j * step:(j + 1) *
+                                                       step].tolist()
             device_list.append(device)
         layer["device_list"] = device_list
         layer_list.append(layer)
@@ -65,8 +55,12 @@ def random_generation(n_layer=58, n_expert=256, start_layer_idx=0, device_count=
 
     print(f"JSON file generated: {json_file_path}")
 
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="python generate_map.py --n_layers 2 --n_experts 256 --card_num 8 --n_redundant 8 --output expert_map.json")
+    parser = argparse.ArgumentParser(
+        description=
+        "python generate_map.py --n_layers 2 --n_experts 256 --card_num 8 --n_redundant 8 --output expert_map.json"
+    )
     parser.add_argument("--n_layers", type=int, required=True)
     parser.add_argument("--n_experts", type=int, required=True)
     parser.add_argument("--card_num", type=int, required=True)

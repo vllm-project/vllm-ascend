@@ -38,9 +38,11 @@ class AscendConfig:
 
         self.expert_map_path = additional_config.get("expert_map_path", None)
         self.dynamic_eplb = additional_config.get("dynamic_eplb", False)
-        self.num_iterations_eplb_update = additional_config.get("num_iterations_eplb_update", 400)
+        self.num_iterations_eplb_update = additional_config.get(
+            "num_iterations_eplb_update", 400)
         self.gate_eplb = additional_config.get("gate_eplb", False)
-        self.num_wait_worker_iterations = additional_config.get("num_wait_worker_iterations", 30)
+        self.num_wait_worker_iterations = additional_config.get(
+            "num_wait_worker_iterations", 30)
         self.chunked_prefill_for_mla = additional_config.get(
             "chunked_prefill_for_mla", False)
         self.enable_weight_nz_layout = additional_config.get(
