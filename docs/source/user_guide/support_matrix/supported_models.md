@@ -1,5 +1,7 @@
 # Model Support
 
+Get the newest info here: https://github.com/vllm-project/vllm-ascend/issues/1608
+
 ## Text-only Language Models
 
 ### Generative Models
