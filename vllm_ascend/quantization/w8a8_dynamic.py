@@ -326,13 +326,25 @@ def fused_experts_with_mc2(
             shared_act, swiglu_out_scale = shared_act_out[0], shared_act_out[1]
 
     # `expand_x` will be disposed in the `apply_mlp` function
-    down_out_list = apply_mlp_decode([expand_x],
-                                     w1,
-                                     w1_scale,
-                                     w2,
-                                     w2_scale,
-                                     expert_token_nums,
-                                     dynamic_scale=dynamic_scale)
+    if w1_scale_bias is None:
+        down_out_list = apply_mlp_decode([expand_x],
+                                         w1,
+                                         w1_scale,
+                                         w2,
+                                         w2_scale,
+                                         expert_token_nums,
+                                         dynamic_scale=dynamic_scale)
+    else:
+        # w4a8 scene, cannot use apply_mlp_decode because the operator is not supported
+        down_out_list = apply_mlp(expand_x,
+                                  w1,
+                                  w1_scale,
+                                  w2,
+                                  w2_scale,
+                                  expert_token_nums,
+                                  dynamic_scale=dynamic_scale,
+                                  w1_scale_bias=w1_scale_bias,
+                                  w2_scale_bias=w2_scale_bias)
 
     # moeCombine
     kwargs_mc2 = {

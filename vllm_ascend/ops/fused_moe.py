@@ -877,8 +877,23 @@ def select_experts(
         ValueError: If an unsupported scoring function is provided.
     """
 
+    def _renormalize_topk_weights(
+        topk_weights: torch.Tensor,
+        renormalize: bool,
+    ):
+        if renormalize:
+            topk_weights = topk_weights / topk_weights.sum(dim=-1,
+                                                           keepdim=True)
+        return topk_weights
+
     if scoring_func == "softmax":
         # NOTE: vLLM use dtype=torch.float here
+        if not use_grouped_topk and custom_routing_function is None:
+            topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k_softmax(
+                x=router_logits, finished=None, k=top_k)
+            topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+            return topk_weights, topk_ids
+
         topk_weights = router_logits.softmax(dim=-1)
     elif scoring_func == "sigmoid":
         topk_weights = router_logits.sigmoid()
@@ -912,10 +927,11 @@ def select_experts(
                                                 k=top_k,
                                                 dim=-1,
                                                 sorted=False)
-    elif custom_routing_function is None:
-        topk_weights, topk_ids = topk_weights.topk(top_k, dim=-1)
-        topk_weights = topk_weights.to(hidden_states.dtype)
-    else:
+        topk_ids = topk_ids.to(torch.int32)
+        topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+        return topk_weights, topk_ids
+
+    if custom_routing_function is not None:
         topk_weights, topk_ids = custom_routing_function(
             hidden_states=hidden_states,
             gating_output=router_logits,
@@ -926,11 +942,12 @@ def select_experts(
         topk_ids = topk_ids.to(torch.int32)
         return topk_weights, topk_ids
 
+    topk_weights, topk_ids = topk_weights.topk(top_k, dim=-1)
+    topk_weights = topk_weights.to(hidden_states.dtype)
+
     # Required by npu_moe_init_routing
     topk_ids = topk_ids.to(torch.int32)
-
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
     return topk_weights, topk_ids
 
@@ -1283,9 +1300,6 @@ class AscendFusedMoE(FusedMoE):
         if shared_experts:
             if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
                 shared_hidden_states = shared_experts(hidden_states)
-                if not shared_experts.down_proj.reduce_results and shared_experts.down_proj.tp_size > 1:
-                    shared_hidden_states = tensor_model_parallel_all_reduce(
-                        shared_hidden_states)
 
         mc2_mask = forward_context.mc2_mask
         tp_size = get_tensor_model_parallel_world_size()
