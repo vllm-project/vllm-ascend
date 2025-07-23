@@ -864,16 +864,23 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 mm_embeds.append(mm_embeds_item)
         return mm_embeds
 
-    def _generate_hidden_states(self, input_ids, positions,
-                                intermediate_tensors, inputs_embeds,
-                                attn_metadata, with_prefill, padded_batch_size,
-                                **model_kwargs):
+    def _generate_hidden_states(
+        self,
+        input_ids,
+        positions,
+        intermediate_tensors,
+        inputs_embeds,
+        attn_metadata,
+        with_prefill,
+        padded_batch_size,
+    ):
         assert self.model is not None
-        hidden_states = self.model(input_ids=input_ids,
-                                   positions=positions,
-                                   intermediate_tensors=intermediate_tensors,
-                                   inputs_embeds=inputs_embeds,
-                                   **model_kwargs)
+        hidden_states = self.model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+        )
         return hidden_states
 
     def _generate_extra_builder_kwargs(self, total_num_scheduled_tokens,
@@ -1111,11 +1118,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                  self.vllm_config,
                                  num_tokens=num_input_tokens):
             with ProfileExecuteDuration().capture_async("forward"):
-                model_kwargs = {}
                 hidden_states = self._generate_hidden_states(
                     input_ids, positions, intermediate_tensors, inputs_embeds,
-                    attn_metadata, with_prefill, padded_batch_size,
-                    **model_kwargs)
+                    attn_metadata, with_prefill, padded_batch_size)
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0

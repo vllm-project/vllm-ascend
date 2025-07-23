@@ -90,13 +90,18 @@ class NPUTorchairModelRunner(NPUModelRunner):
             extra_builder_kwargs['graph_pad_size'] = graph_pad_size
         return extra_builder_kwargs, padded_batch_size
 
-    def _generate_hidden_states(self, input_ids, positions,
-                                intermediate_tensors, inputs_embeds,
-                                attn_metadata, with_prefill, padded_batch_size,
-                                **model_kwargs):
+    def _generate_hidden_states(
+        self,
+        input_ids,
+        positions,
+        intermediate_tensors,
+        inputs_embeds,
+        attn_metadata,
+        with_prefill,
+        padded_batch_size,
+    ):
         """Generate hidden_states with compiled model."""
-        model_kwargs["kv_caches"] = self.kv_caches
-        model_kwargs["attn_metadata"] = attn_metadata
+        kwargs = {"kv_caches": self.kv_caches, "attn_metadata": attn_metadata}
         if not with_prefill:
             if is_310p():
                 converting_weight_acl_format_310p(self.model,
@@ -110,12 +115,16 @@ class NPUTorchairModelRunner(NPUModelRunner):
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds,
-                **model_kwargs,
+                **kwargs,
             )
         else:
-            hidden_states = super()._generate_hidden_states(
-                input_ids, positions, intermediate_tensors, inputs_embeds,
-                attn_metadata, with_prefill, padded_batch_size, **model_kwargs)
+            assert self.model is not None
+            hidden_states = self.model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                **kwargs)
         return hidden_states
 
     def _generate_dummy_run_hidden_states(self, input_ids, positions,
