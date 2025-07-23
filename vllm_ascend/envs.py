@@ -150,7 +150,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_ASCEND_FUSED_MOE_MC2_CHUNK_SIZE", "128")),
     # FlashComm optimization: Enable v1 and v2 by setting this flag to 1 or 2 respectively
     "VLLM_ASCEND_ENABLE_FLASHCOMM":
-    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))
+    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0')),
 }
 
 # end-env-vars-definition
