@@ -39,6 +39,7 @@ class ServerState:
         self.active_tokens = 0
         self.active_kv_cache = 0  # Only for prefiller
         self.active_requests = 0  # Number of active requests
+        self.aborted_requests = set()  # Track aborted requests
         self.lock = asyncio.Lock()  # Per-server lock for state updates
 
 
@@ -54,6 +55,24 @@ class ProxyState:
         self.req_to_prefiller = {}
         self.req_id_lock = asyncio.Lock()
         self.req_id_counter = 0
+
+    async def abort_prefiller_request(self, server_idx: int, request_id):
+        """
+        Mark a request as aborted. This will helps to release kv cache in
+        prefiller node.
+        """
+        async with self.prefillers[server_idx].lock:
+            self.prefillers[server_idx].aborted_requests.add(request_id)
+
+    async def aquire_aborted_prefiller_requests(self, server_idx: int):
+        """
+        Get the set of aborted requests and clear it.
+        This is used to release kv cache in prefiller node.
+        """
+        async with self.req_id_lock:
+            aborted_requests = self.prefillers[server_idx].aborted_requests.copy()
+            self.prefillers[server_idx].aborted_requests.clear()
+            return aborted_requests
 
     async def next_req_id(self):
         async with self.req_id_lock:
@@ -176,11 +195,13 @@ app = FastAPI(lifespan=lifespan)
 
 
 async def send_request_to_service(client: httpx.AsyncClient,
+                                  prefiller_id: int,
                                   endpoint: str,
                                   req_data: dict,
                                   request_id: str,
                                   max_retries: int = 3,
                                   base_delay: float = 0.2):
+    aborted_requests = await proxy_state.aquire_aborted_prefiller_requests(prefiller_id)
     req_data = req_data.copy()
     req_data['kv_transfer_params'] = {
         "do_remote_decode": True,
@@ -188,7 +209,8 @@ async def send_request_to_service(client: httpx.AsyncClient,
         "remote_engine_id": None,
         "remote_block_ids": None,
         "remote_host": None,
-        "remote_port": None
+        "remote_port": None,
+        "aborted_request": aborted_requests,
     }
     req_data["stream"] = False
     req_data["max_tokens"] = 1
@@ -287,6 +309,7 @@ async def _handle_completions(api: str, request: Request):
         # Send request to prefiller
         response = await send_request_to_service(
             prefiller.client,
+            prefiller_idx,
             api,
             req_data,
             request_id,
@@ -310,18 +333,26 @@ async def _handle_completions(api: str, request: Request):
         async def generate_stream():
             nonlocal released_kv
             # Only one await per chunk, minimal logic in loop
-            async for chunk in stream_service_response_with_retry(
-                decoder.client,
-                api,
-                req_data,
-                request_id=request_id,
-                max_retries=global_args.max_retries,
-                base_delay=global_args.retry_delay):
-                if not released_kv and chunk:
-                    await proxy_state.release_prefiller_kv(
-                        prefiller_idx, prefiller_score)
-                    released_kv = True
-                yield chunk
+            try:
+                async for chunk in stream_service_response_with_retry(
+                    decoder.client,
+                    api,
+                    req_data,
+                    request_id=request_id,
+                    max_retries=global_args.max_retries,
+                    base_delay=global_args.retry_delay):
+                    if not released_kv and chunk:
+                        await proxy_state.release_prefiller_kv(
+                            prefiller_idx, prefiller_score)
+                        released_kv = True
+                    yield chunk
+            except Exception as e:
+                logger.error(
+                    f"Error during streaming from decoder {decoder.url}: {str(e)} the aborted request {request_id} will be routing to the target prefiller when new request is ready to dispatch to it"
+                )
+                proxy_state.abort_prefiller_request(prefiller_idx, request_id)
+                proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
+
             # After streaming done, release tokens
             await proxy_state.release_decoder(decoder_idx, decoder_score)
 
