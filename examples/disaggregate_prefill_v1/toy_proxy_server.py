@@ -8,6 +8,7 @@ import os
 import random
 import sys
 from contextlib import asynccontextmanager
+from typing import List
 
 import httpx
 from fastapi import FastAPI, Request
@@ -37,14 +38,19 @@ class ServerState:
                                             max_keepalive_connections=100000))
         self.active_tokens = 0
         self.active_kv_cache = 0  # Only for prefiller
+        self.active_requests = 0  # Number of active requests
         self.lock = asyncio.Lock()  # Per-server lock for state updates
 
 
 class ProxyState:
 
     def __init__(self, prefiller_instances, decoder_instances):
-        self.prefillers = [ServerState(h, p) for h, p in prefiller_instances]
-        self.decoders = [ServerState(h, p) for h, p in decoder_instances]
+        self.prefillers: List[ServerState] = [
+            ServerState(h, p) for h, p in prefiller_instances
+        ]
+        self.decoders: List[ServerState] = [
+            ServerState(h, p) for h, p in decoder_instances
+        ]
         self.req_to_prefiller = {}
         self.req_id_lock = asyncio.Lock()
         self.req_id_counter = 0
@@ -55,7 +61,7 @@ class ProxyState:
             return str(self.req_id_counter)
 
     async def select_prefiller(self, token_count):
-        # Find the best prefiller (no lock needed for read)
+        # Find the best prefiller
         min_tokens = min(p.active_tokens for p in self.prefillers)
         candidates = [
             i for i, p in enumerate(self.prefillers)
@@ -99,6 +105,16 @@ class ProxyState:
         async with self.decoders[idx].lock:
             self.decoders[idx].active_tokens -= token_count
 
+    # Omni_infer's calculate_input_scores function
+    def calculate_prefill_scores(request_length: int) -> float:
+        req_len = len(request_length)
+        length_score = req_len / 4.0
+        input_score = length_score * 0.0345 + 120.0745
+        return input_score
+
+    def calculate_decode_scores(request_length: int) -> float:
+        return request_length
+
 
 proxy_state = None
 
@@ -127,7 +143,7 @@ def parse_args():
     parser.add_argument(
         "--retry-delay",
         type=float,
-        default=0.2,
+        default=0.001,
         help="Base delay (seconds) for exponential backoff retries")
     args = parser.parse_args()
     if len(args.prefiller_hosts) != len(args.prefiller_ports):
@@ -259,10 +275,11 @@ async def stream_service_response_with_retry(client: httpx.AsyncClient,
 async def _handle_completions(api: str, request: Request):
     try:
         req_data = await request.json()
-        input_tokens = int(req_data.get('input_tokens', 1))
+        request_length = len(request.body())
+        prefiller_score = proxy_state.calculate_prefill_scores(request_length)
         request_id = await proxy_state.next_req_id()
         # Select prefiller
-        prefiller_idx = await proxy_state.select_prefiller(input_tokens)
+        prefiller_idx = await proxy_state.select_prefiller(prefiller_score)
         prefiller = proxy_state.prefillers[prefiller_idx]
         # Send request to prefiller
         response = await send_request_to_service(
@@ -272,13 +289,15 @@ async def _handle_completions(api: str, request: Request):
             request_id,
             max_retries=global_args.max_retries,
             base_delay=global_args.retry_delay)
-        await proxy_state.release_prefiller(prefiller_idx, input_tokens)
+        await proxy_state.release_prefiller(prefiller_idx, prefiller_score)
         response_json = response.json()
         kv_transfer_params = response_json.get('kv_transfer_params', {})
         if kv_transfer_params:
             req_data["kv_transfer_params"] = kv_transfer_params
         # Select decoder
-        decoder_idx = await proxy_state.select_decoder(input_tokens)
+        decoder_score = proxy_state.calculate_decode_scores(request_length)
+        # Use the prefiller's kv_transfer_params to select decoder
+        decoder_idx = await proxy_state.select_decoder(decoder_score)
         decoder = proxy_state.decoders[decoder_idx]
         logger.debug("Using %s %s", prefiller.url, decoder.url)
         # Stream response from decoder
@@ -296,11 +315,11 @@ async def _handle_completions(api: str, request: Request):
                 base_delay=global_args.retry_delay):
                 if not released_kv and chunk:
                     await proxy_state.release_prefiller_kv(
-                        prefiller_idx, input_tokens)
+                        prefiller_idx, prefiller_score)
                     released_kv = True
                 yield chunk
             # After streaming done, release tokens
-            await proxy_state.release_decoder(decoder_idx, input_tokens)
+            await proxy_state.release_decoder(decoder_idx, decoder_score)
 
         return StreamingResponse(generate_stream(),
                                  media_type="application/json")
