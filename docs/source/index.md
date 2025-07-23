@@ -43,16 +43,10 @@ faqs
 :::{toctree}
 :caption: User Guide
 :maxdepth: 1
-user_guide/suppoted_features
-user_guide/supported_models
-user_guide/env_vars
-user_guide/additional_config
-user_guide/sleep_mode
-user_guide/graph_mode.md
-user_guide/lora.md
-user_guide/quantization.md
+user_guide/support_matrix/index
+user_guide/configuration/index
+user_guide/feature_guide/index
 user_guide/release_notes
-user_guide/structured_output
 :::
 
 % How to contribute to the vLLM Ascend project

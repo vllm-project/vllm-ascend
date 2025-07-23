@@ -199,8 +199,11 @@ class SimpleConnector(KVConnectorBase):
         model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
         kv_caches: List[torch.Tensor],
-    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
-               "ModelInputForGPUWithSamplingMetadata", ]:
+    ) -> Tuple[
+            Union[torch.Tensor, IntermediateTensors],
+            bool,
+            "ModelInputForGPUWithSamplingMetadata",
+    ]:
         bypass_model_exec = True
 
         model_config = self.model_config

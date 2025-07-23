@@ -30,7 +30,7 @@ from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 
 import vllm_ascend  # noqa: F401
-from tests.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner
 
 MODELS = [
     "Qwen/Qwen2.5-0.5B-Instruct",
@@ -108,7 +108,7 @@ def test_multimodal(model, prompt_template, vllm_runner):
                                    max_tokens=64)
 
 
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE": "1"})
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION": "1"})
 def test_models_topk() -> None:
     example_prompts = [
         "Hello, my name is",

@@ -1,6 +1,6 @@
 # Multi-NPU (QwQ 32B W8A8)
 
-## Run docker container:
+## Run docker container
 :::{note}
 w8a8 quantization feature is supported by v0.8.4rc2 or higher
 :::

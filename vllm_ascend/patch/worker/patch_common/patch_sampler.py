@@ -21,33 +21,11 @@ from typing import Optional
 import torch
 import torch_npu
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler, random_sample
-from vllm.v1.sample.sampler import Sampler
 
 from vllm_ascend import envs
 
 
-def apply_min_p(
-    self,
-    logits: torch.Tensor,
-    min_p: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Filters logits using adaptive probability thresholding.
-    """
-    # Convert logits to probability distribution
-    probability_values = torch.nn.functional.softmax(logits, dim=-1)
-    # Calculate maximum probabilities per sequence
-    max_probabilities = torch.amax(probability_values, dim=-1, keepdim=True)
-    # Reshape min_p for broadcasting
-    adjusted_min_p = min_p.unsqueeze(1) * max_probabilities
-    # Identify valid tokens using threshold comparison
-    # Apply mask using boolean indexing
-    logits = logits.masked_fill(probability_values < adjusted_min_p,
-                                -float('inf'))
-    return logits
-
-
-def _apply_top_k_top_p(
+def apply_top_k_top_p(
     logits: torch.Tensor,
     k: torch.Tensor,
     p: torch.Tensor,
@@ -96,11 +74,10 @@ def topk_topp_forward_native(
 
     The logits tensor may be updated in-place.
     """
-    logits = _apply_top_k_top_p(logits, k, p)
+    logits = apply_top_k_top_p(logits, k, p)
     probs = logits.softmax(dim=-1, dtype=torch.float32)
     return random_sample(probs, generators)
 
 
-Sampler.apply_min_p = apply_min_p
-if envs.VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE:
+if envs.VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION:
     TopKTopPSampler.forward_native = topk_topp_forward_native

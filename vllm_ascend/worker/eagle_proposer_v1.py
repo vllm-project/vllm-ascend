@@ -14,7 +14,7 @@ from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.sample.metadata import SamplingMetadata
 
-from vllm_ascend.attention.attention import AttentionMaskBuilder
+from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
 logger = init_logger(__name__)
@@ -74,8 +74,8 @@ class EagleProposer:
         mask_len = os.getenv("PAGED_ATTENTION_MASK_LEN", 10000)
         self.attn_mask_len = min(self.model_config.max_model_len,
                                  int(mask_len))
-        self.attn_mask_builder = AttentionMaskBuilder.initialize_from_len(
-            self.attn_mask_len, self.dtype)
+        self.attn_mask_builder = AttentionMaskBuilder(self.attn_mask_len,
+                                                      self.dtype)
 
     def _make_attention_mask(
         self,
@@ -384,46 +384,3 @@ def prepare_eagle_input_sequential(out_tensor: torch.Tensor,
                    (target_indices < end_pos) & \
                    (offset_tensor < num_tokens)
             out_tensor[target_indices[mask]] = values_to_store[mask]
-
-
-# NOTE(woosuk): Currently, the below code is not used and we always use argmax
-# to sample the draft tokens. We will use this after we find a way to manage
-# the draft prob tensor.
-# Refer to https://github.com/vllm-project/vllm/pull/16899 for the details.
-# FIXME(woosuk): The logic here is duplicated with the main sampling code.
-# We should refactor this to reuse the same sampling implementation.
-def compute_probs_and_sample_next_token(
-    logits: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if sampling_metadata.all_greedy:
-        # For greedy requests, draft_probs is not used in rejection sampling.
-        # Therefore, we can just return the logits.
-        probs = logits
-        next_token_ids = logits.argmax(dim=-1)
-        return next_token_ids, probs
-
-    is_greedy = sampling_metadata.temperature == -1
-    temperature = torch.where(is_greedy, 1.0, sampling_metadata.temperature)
-    logits.div_(temperature.view(-1, 1))
-    probs = logits.softmax(dim=-1, dtype=torch.float32)
-
-    # NOTE(woosuk): Currently, we ignore most of the sampling parameters in
-    # generating the draft tokens. We only use the temperature. While this
-    # could degrade the acceptance rate, it does not affect the distribution
-    # of the generated tokens after rejection sampling.
-
-    # TODO(woosuk): Consider seeds.
-    q = torch.empty_like(probs)
-    q.exponential_()
-    # NOTE(woosuk): We shouldn't use `probs.div_(q)` because the draft_probs
-    # will be used later for rejection sampling.
-    next_token_ids = probs.div(q).argmax(dim=-1).view(-1)
-    if not sampling_metadata.all_random:
-        greedy_token_ids = probs.argmax(dim=-1)
-        next_token_ids = torch.where(
-            is_greedy,
-            greedy_token_ids,
-            next_token_ids,
-        )
-    return next_token_ids, probs

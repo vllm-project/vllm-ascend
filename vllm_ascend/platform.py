@@ -16,7 +16,6 @@
 #
 
 import gc
-import os
 from datetime import timedelta
 from typing import TYPE_CHECKING, Optional, Tuple
 
@@ -27,9 +26,10 @@ from torch.distributed.distributed_c10d import PrefixStore
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
-from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
+from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
+                                       init_ascend_config)
 from vllm_ascend.utils import (ASCEND_QUATIZATION_METHOD, is_310p,
-                               update_aclgraph_sizes)
+                               register_ascend_customop, update_aclgraph_sizes)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -116,6 +116,8 @@ class NPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        if not envs.VLLM_USE_V1:
+            raise ValueError("vLLM Ascend does not support V0 engine.")
         # initialize ascend config from vllm additional_config
         ascend_config = init_ascend_config(vllm_config)
 
@@ -129,38 +131,12 @@ class NPUPlatform(Platform):
         if kv_cache_dtype is not None:
             vllm_config.cache_config.cache_dtype = kv_cache_dtype
 
-        if parallel_config:
-            # Default value for expert tensor parallel size
-            parallel_config.expert_tensor_parallel_size = parallel_config.tensor_parallel_size
-
-            # NOTE: When enable_expert_parallel is True, we follow vLLM convention:
-            # ep_size = world_size, which means expert_tensor_parallel_size must be 1
-            if parallel_config.enable_expert_parallel:
-                parallel_config.expert_tensor_parallel_size = 1
-            # NOTE: When enable_expert_parallel is False and param `asceend_config.expert_tensor_parallel_size`
-            # is configured, use ascend_config
-            elif ascend_config.expert_tensor_parallel_size > 0:
-                parallel_config.expert_tensor_parallel_size = ascend_config.expert_tensor_parallel_size
-
-            # Calculate expert parallel size based on world size
-            parallel_config.expert_parallel_size = (
-                parallel_config.world_size_across_dp //
-                parallel_config.expert_tensor_parallel_size)
-
         if model_config is None:
             logger.warning("Model config is missing. This may indicate "
                            "that we are running a test case")
             enforce_eager = False
         else:
             enforce_eager = getattr(model_config, "enforce_eager", False)
-
-        if ascend_config.torchair_graph_config.enabled and envs.VLLM_MLA_DISABLE:
-            # torchair_graph is not supported for V1 without mla currently.
-            logger.warning(
-                "Torchair graph mode is still experimental and not supported for V1 without mla currently, "
-                "Fallback to eager mode.")
-            ascend_config.torchair_graph_config.enabled = False
-            enforce_eager = True
 
         check_ascend_config(vllm_config, enforce_eager)
 
@@ -187,18 +163,10 @@ class NPUPlatform(Platform):
             update_aclgraph_sizes(vllm_config)
 
         if parallel_config and parallel_config.worker_cls == "auto":
-            if envs.VLLM_USE_V1:
-                parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
-            elif vllm_config.speculative_config:
-                # NOTE: We set this var to `1` in vllm-ascend to avoid segment
-                # fault when using spec decode with V0 engine.
-                os.environ["ACL_OP_INIT_MODE"] = "1"
-                parallel_config.worker_cls = "vllm.spec_decode.spec_decode_worker.create_spec_worker"
-                parallel_config.sd_worker_cls = "vllm_ascend.worker.worker.NPUWorker"
-            elif vllm_config.scheduler_config.is_multi_step:
-                parallel_config.worker_cls = "vllm_ascend.worker.multi_step_worker.MultiStepWorker"
+            if ascend_config.torchair_graph_config.enabled:
+                parallel_config.worker_cls = "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker"
             else:
-                parallel_config.worker_cls = "vllm_ascend.worker.worker.NPUWorker"
+                parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
 
         if cache_config:
             if cache_config.block_size is None:
@@ -209,31 +177,35 @@ class NPUPlatform(Platform):
                 )
                 cache_config.block_size = 128
 
-        if envs.VLLM_USE_V1:
-            # Activate custom ops for v1, except on 310P
-            if not is_310p():
-                compilation_config.custom_ops = ["all"]
+        # Activate custom ops for v1, except on 310P
+        if not is_310p():
+            compilation_config.custom_ops = ["all"]
 
-            # If ascend_scheduler_config is enabled,
-            # extents original scheduler_config to use AscendScheduler.
-            if ascend_config.ascend_scheduler_config.enabled:
-                from vllm_ascend.core.schedule_config import \
-                    AscendSchedulerConfig
-                ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
-                    vllm_config.scheduler_config,
-                    ascend_config.ascend_scheduler_config)
-                vllm_config.scheduler_config = ascend_scheduler_config
+        # If ascend_scheduler_config is enabled,
+        # extents original scheduler_config to use AscendScheduler.
+        if ascend_config.ascend_scheduler_config.enabled:
+            from vllm_ascend.core.schedule_config import AscendSchedulerConfig
+            ascend_scheduler_config = AscendSchedulerConfig.initialize_from_config(
+                vllm_config.scheduler_config,
+                ascend_config.ascend_scheduler_config)
+            vllm_config.scheduler_config = ascend_scheduler_config
+
+        # register Ascend CustomOp
+        register_ascend_customop()
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla):
-        if use_v1 and use_mla:
-            return "vllm_ascend.attention.mla_v1.AscendMLABackend"
-        if use_v1:
-            return "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
+        if not use_v1:
+            raise ValueError("vLLM Ascend does not support V0 engine.")
+
+        use_torchair = get_ascend_config().torchair_graph_config.enabled
         if use_mla:
-            return "vllm_ascend.attention.attention.AscendMLAAttentionBackend"
-        return "vllm_ascend.attention.attention.AscendAttentionBackend"
+            return "vllm_ascend.attention.mla_v1.AscendMLABackend"
+        elif use_torchair:
+            return "vllm_ascend.attention.attention_v1_torchair.AscendAttentionTorchairBackend"
+        else:
+            return "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
 
     @classmethod
     def get_punica_wrapper(cls) -> str:

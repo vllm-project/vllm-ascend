@@ -26,12 +26,16 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
+from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.pool.metadata import PoolingMetadata
+from vllm.v1.sample.logits_processor import init_builtin_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 
-from vllm_ascend.pool.metadata import PoolingMetadata
+from vllm_ascend.utils import vllm_version_is
 
 _SAMPLING_EPS = 1e-5
 
@@ -81,16 +85,15 @@ class InputBatch:
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
-        logits_processing_needs_token_ids: bool = False,
+        is_spec_decode: bool = False,
     ):
+        self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
         self.max_num_batched_tokens = max_num_batched_tokens
         self.device = device
         self.pin_memory = pin_memory
         self.vocab_size = vocab_size
-        self.logits_processing_needs_token_ids = (
-            logits_processing_needs_token_ids)
 
         self._req_ids: list[Optional[str]] = []
         self.req_id_to_index: dict[str, int] = {}
@@ -159,6 +162,9 @@ class InputBatch:
                                             pin_memory=pin_memory)
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: set[str] = set()
+
+        # IDs of requests which do not support spec decoding
+        self.spec_decode_unsupported_reqs: set[str] = set()
 
         self.min_p = torch.empty((max_num_reqs, ),
                                  dtype=torch.float32,
@@ -240,8 +246,21 @@ class InputBatch:
 
         # req_index -> bad_words_token_ids
         self.bad_words_token_ids: dict[int, list[list[int]]] = {}
+        if vllm_version_is("0.9.2"):
+            self.logits_processing_needs_token_ids_bool = False
+        else:
+            self.logits_processing_needs_token_ids = np.zeros(max_num_reqs,
+                                                              dtype=bool)
 
         self.req_output_token_ids: list[Optional[list[int]]] = []
+
+        # Define logits processors.
+        # TODO(andy): logits processor list should be extensible via engine
+        # constructor argument; for now the list is fixed.
+        self.logitsprocs = init_builtin_logitsprocs(
+            pin_memory_available=pin_memory,
+            max_num_reqs=max_num_reqs + 1,
+            device=device)
 
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
@@ -292,6 +311,9 @@ class InputBatch:
         self.block_table.add_row(request.block_ids, req_index)
 
         if sampling_params := request.sampling_params:
+            if self.is_spec_decode and is_spec_decode_unsupported(
+                    sampling_params):
+                self.spec_decode_unsupported_reqs.add(req_id)
             if sampling_params.sampling_type == SamplingType.GREEDY:
                 # Avoid later division by zero.
                 self.temperature_cpu[req_index] = -1.0
@@ -365,9 +387,15 @@ class InputBatch:
             if sampling_params.bad_words_token_ids:
                 self.bad_words_token_ids[
                     req_index] = sampling_params.bad_words_token_ids
-        else:
+        elif vllm_version_is("0.9.2"):
             assert request.pooling_params is not None
             self.pooling_params[req_id] = request.pooling_params
+        elif pooling_params := request.pooling_params:
+            self.pooling_params[req_id] = pooling_params
+            self.logits_processing_needs_token_ids[req_index] = (
+                pooling_params.requires_token_ids)
+        else:
+            raise NotImplementedError(request)
 
         # Add request lora ID
         if request.lora_request:
@@ -400,6 +428,7 @@ class InputBatch:
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
+        self.spec_decode_unsupported_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.num_prompt_logprobs.pop(req_id, None)
@@ -422,6 +451,64 @@ class InputBatch:
         self.bad_words_token_ids.pop(req_index, None)
         self.pooling_params.pop(req_id, None)
         return req_index
+
+    def swap_states(self, i1: int, i2: int) -> None:
+        old_id_i1 = self._req_ids[i1]
+        old_id_i2 = self._req_ids[i2]
+        self._req_ids[i1], self._req_ids[i2] =\
+            self._req_ids[i2], self._req_ids[i1] # noqa
+        self.req_output_token_ids[i1], self.req_output_token_ids[i2] =\
+            self.req_output_token_ids[i2], self.req_output_token_ids[i1]
+        assert old_id_i1 is not None and old_id_i2 is not None
+        self.req_id_to_index[old_id_i1], self.req_id_to_index[old_id_i2] =\
+            self.req_id_to_index[old_id_i2], self.req_id_to_index[old_id_i1]
+        self.num_tokens[i1], self.num_tokens[i2] =\
+            self.num_tokens[i2], self.num_tokens[i1]
+        self.num_tokens_no_spec[i1], self.num_tokens_no_spec[i2] =\
+            self.num_tokens_no_spec[i2], self.num_tokens_no_spec[i1]
+        self.num_prompt_tokens[i1], self.num_prompt_tokens[i2] =\
+            self.num_prompt_tokens[i2], self.num_prompt_tokens[i1]
+        self.num_computed_tokens_cpu[i1], self.num_computed_tokens_cpu[i2] =\
+            self.num_computed_tokens_cpu[i2], self.num_computed_tokens_cpu[i1]
+        self.temperature_cpu[i1], self.temperature_cpu[i2] =\
+            self.temperature_cpu[i2], self.temperature_cpu[i1]
+        self.top_p_cpu[i1], self.top_p_cpu[i2] =\
+            self.top_p_cpu[i2], self.top_p_cpu[i1]
+        self.top_k_cpu[i1], self.top_k_cpu[i2] =\
+            self.top_k_cpu[i2], self.top_k_cpu[i1]
+        self.frequency_penalties_cpu[i1], self.frequency_penalties_cpu[i2] =\
+            self.frequency_penalties_cpu[i2], self.frequency_penalties_cpu[i1]
+        self.presence_penalties_cpu[i1], self.presence_penalties_cpu[i2] =\
+            self.presence_penalties_cpu[i2], self.presence_penalties_cpu[i1]
+        self.repetition_penalties_cpu[i1], self.repetition_penalties_cpu[i2] =\
+            self.repetition_penalties_cpu[i2], self.repetition_penalties_cpu[i1]
+        self.min_p_cpu[i1], self.min_p_cpu[i2] =\
+            self.min_p_cpu[i2], self.min_p_cpu[i1]
+
+        # NOTE: the following is unsafe
+        # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
+        #     self.token_ids_cpu[i2, ...], self.token_ids_cpu[i1, ...]
+        # instead, we need to temporiarily copy the data for one of the indices
+        # TODO(lucas): optimize this by only copying valid indices
+        tmp = self.token_ids_cpu[i1, ...].copy()
+        self.token_ids_cpu[i1, ...] = self.token_ids_cpu[i2, ...]
+        self.token_ids_cpu[i2, ...] = tmp
+
+        swap_dict_values(self.generators, i1, i2)
+        swap_dict_values(self.min_tokens, i1, i2)
+        swap_dict_values(self.bad_words_token_ids, i1, i2)
+
+        self.request_lora_mapping[i1], self.request_lora_mapping[i2] =\
+            self.request_lora_mapping[i2], self.request_lora_mapping[i1]
+        self.logit_bias[i1], self.logit_bias[i2] =\
+            self.logit_bias[i2], self.logit_bias[i1]
+
+        if self.allowed_token_ids_mask_cpu_tensor is not None:
+            self.allowed_token_ids_mask_cpu_tensor[i1], \
+                self.allowed_token_ids_mask_cpu_tensor[i2] =\
+                self.allowed_token_ids_mask_cpu_tensor[i2], \
+                    self.allowed_token_ids_mask_cpu_tensor[i1]
+        self.block_table.swap_row(i1, i2)
 
     def condense(self, empty_req_indices: list[int]) -> None:
         """Move non-empty requests down into lower, empty indices.
@@ -537,10 +624,15 @@ class InputBatch:
                        self.presence_penalties, num_reqs)
             copy_slice(self.repetition_penalties_cpu_tensor,
                        self.repetition_penalties, num_reqs)
-
-        needs_prompt_token_ids = (not self.no_penalties or
-                                  (self.num_reqs > 0
-                                   and self.logits_processing_needs_token_ids))
+        if vllm_version_is("0.9.2"):
+            needs_prompt_token_ids = (
+                not self.no_penalties
+                or (self.num_reqs > 0
+                    and self.logits_processing_needs_token_ids_bool))
+        else:
+            needs_prompt_token_ids = (
+                not self.no_penalties
+                or self.logits_processing_needs_token_ids[:num_reqs].any())
         if needs_prompt_token_ids:
             # The prompt tokens are used only for applying penalties or
             # step pooling during the sampling/pooling process.
@@ -563,7 +655,6 @@ class InputBatch:
             all_random=self.all_random,
             top_p=None if self.no_top_p else self.top_p[:num_reqs],
             top_k=None if self.no_top_k else self.top_k[:num_reqs],
-            min_p=None if self.no_min_p else self.min_p[:num_reqs],
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
             prompt_token_ids=prompt_token_ids,
@@ -571,11 +662,10 @@ class InputBatch:
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=cast(list[list[int]], self.req_output_token_ids),
-            min_tokens=self.min_tokens,
             no_penalties=self.no_penalties,
-            logit_bias=self.logit_bias[:num_reqs],
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
+            logitsprocs=self.logitsprocs,
         )
 
     @property

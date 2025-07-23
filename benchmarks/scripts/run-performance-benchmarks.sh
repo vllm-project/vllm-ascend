@@ -281,7 +281,6 @@ cleanup_on_error() {
 main() {
   START_TIME=$(date +%s)
   check_npus
-  python3 benchmarks/scripts/patch_benchmark_dataset.py
   
   # dependencies
   (which wget && which curl) || (apt-get update && apt-get install -y wget curl)
@@ -295,7 +294,7 @@ main() {
   export VLLM_LOG_LEVEL="WARNING"
   
   # set env
-  export HF_ENDPOINT="https://hf-mirror.com"
+  export VLLM_USE_MODELSCOPE=True
 
   # prepare for benchmarking
   cd benchmarks || exit 1

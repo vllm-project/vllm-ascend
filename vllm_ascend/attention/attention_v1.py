@@ -31,7 +31,7 @@ from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
-                               nd_to_nz_2d, nd_to_nz_spec)
+                               nd_to_nz_2d, nd_to_nz_spec, vllm_version_is)
 
 
 class AscendAttentionBackend(AttentionBackend):
@@ -43,6 +43,8 @@ class AscendAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> Type["AscendAttentionBackendImpl"]:
+        if vllm_version_is("0.9.2"):
+            return AscendAttentionBackendImpl092
         return AscendAttentionBackendImpl
 
     @staticmethod
@@ -222,7 +224,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
         alibi_slopes: Optional[List[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: Optional[str] = None,
@@ -274,6 +275,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             shape = [batch_size * seq_len, num_heads, head_size]
         """
         num_tokens = query.shape[0]
+        use_kv_cache_int8 = kv_cache.numel(
+        ) > 0 and kv_cache[0].dtype == torch.int8
         if output is None:
             output = torch.empty(num_tokens,
                                  self.num_heads,
@@ -289,7 +292,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 output=output,
                 layer_name=layer.layer_name)
 
-        elif hasattr(layer, 'quant_method'):
+        elif hasattr(layer, 'quant_method') and use_kv_cache_int8:
             output = layer.quant_method.apply(layer, query, key, value,
                                               kv_cache, attn_metadata,
                                               self.attn_type, self.scale,
@@ -393,8 +396,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 if self.head_size == 192:
                     cu_seqlen_q = [0] + attn_metadata.query_lens.tolist()
                     cu_seqlen_k = [0] + attn_metadata.seq_lens.tolist()
-                    cu_seqlen_q = torch.tensor(cu_seqlen_q, device="npu")
-                    cu_seqlen_k = torch.tensor(cu_seqlen_k, device="npu")
+                    cu_seqlen_q = torch.tensor(cu_seqlen_q,
+                                               device=query.device)
+                    cu_seqlen_k = torch.tensor(cu_seqlen_k,
+                                               device=query.device)
                     cu_seqlen_q = torch.cumsum(cu_seqlen_q, dim=0)
                     cu_seqlen_k = torch.cumsum(cu_seqlen_k, dim=0)
                     max_seqlen_q = torch.max(attn_metadata.query_lens)
@@ -429,10 +434,42 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         out=output)
 
         # to make in-place change to the output tensor
-        if hasattr(layer, 'quant_method'):
+        if hasattr(layer, 'quant_method') and use_kv_cache_int8:
             output = output.view(num_tokens, self.num_heads, self.head_size)
         ori_output[:, :, :] = output[:num_tokens, :, :]
         return output.view(num_tokens, self.hidden_size)
+
+
+class AscendAttentionBackendImpl092(AscendAttentionBackendImpl):
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: Optional[List[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
+        logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
+        use_irope: bool = False,
+    ) -> None:
+        super().__init__(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            alibi_slopes=alibi_slopes,
+            sliding_window=sliding_window,
+            kv_cache_dtype=kv_cache_dtype,
+            logits_soft_cap=logits_soft_cap,
+            attn_type=attn_type,
+            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+            use_irope=use_irope,
+        )
 
 
 def unified_ascend_attention_with_output(

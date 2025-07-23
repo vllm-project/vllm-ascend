@@ -1,5 +1,7 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+# Adapted from vllm-project/vllm/examples/offline_inference/basic.py
 # Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,27 +15,37 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# This file is a part of the vllm-ascend project.
-# Adapted from vllm-project/vllm/examples/offline_inference/basic.py
 #
+
+# isort: skip_file
+import os
+
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 from vllm import LLM, SamplingParams
 
-prompts = [
-    "Hello, my name is",
-    "The president of the United States is",
-    "The capital of France is",
-    "The future of AI is",
-]
 
-# Create a sampling params object.
-sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
-# Create an LLM.
-llm = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
+def main():
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
 
-# Generate texts from the prompts.
-outputs = llm.generate(prompts, sampling_params)
-for output in outputs:
-    prompt = output.prompt
-    generated_text = output.outputs[0].text
-    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    # Create a sampling params object.
+    sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
+    # Create an LLM.
+    llm = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
+
+    # Generate texts from the prompts.
+    outputs = llm.generate(prompts, sampling_params)
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+
+if __name__ == "__main__":
+    main()

@@ -50,13 +50,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value is None, which means the system default C compiler will be used.
     "C_COMPILER":
     lambda: os.getenv("C_COMPILER", None),
-    # Whether to enable the topk optimization. It's disabled by default for experimental support
-    # We'll make it enabled by default in the future.
-    "VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_OPTIMIZE", '0'))),
     # The version of the Ascend chip. If not set, the default value is
-    # ASCEND910B1. It's used for package building. Please make sure that the
-    # version is correct.
+    # ASCEND910B1(Available for A2 and A3 series). It's used for package building.
+    # Please make sure that the version is correct.
     "SOC_VERSION":
     lambda: os.getenv("SOC_VERSION", "ASCEND910B1"),
     # If set, vllm-ascend will print verbose logs during compilation
@@ -121,6 +117,22 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value to False to disable the optimized model.
     "USE_OPTIMIZED_MODEL":
     lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
+    # SELECT_GATING_TOPK_SOTFMAX_EXPERTS is the equivalent of select_experts in non-quantized scenarios.
+    # In theory, it should have better performance than select_experts.
+    # Subsequent versions will remove the SELECT_GATING_TOPK_SOTFMAX_EXPERTS tag and use it as the default mode.
+    "SELECT_GATING_TOPK_SOTFMAX_EXPERTS":
+    lambda: bool(int(os.getenv("SELECT_GATING_TOPK_SOTFMAX_EXPERTS", '0'))),
+    # The tolerance of the kv cache size, if the difference between the
+    # actual kv cache size and the cached kv cache size is less than this value,
+    # then the cached kv cache size will be used.
+    "VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE":
+    lambda: int(
+        os.getenv("VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE", 64)),
+    # Whether to enable the topk optimization. It's disabled by default for experimental support
+    # We'll make it enabled by default in the future.
+    "VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION":
+    lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION", '0'))),
 }
 
 # end-env-vars-definition

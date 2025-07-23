@@ -18,31 +18,10 @@
 # This file is a part of the vllm-ascend project.
 
 import torch
-import vllm
-import vllm.distributed
 import vllm.envs as envs
 from vllm.config import ParallelConfig
 
 from vllm_ascend.utils import is_310p
-
-
-def ascend_destroy_model_parallel():
-    """Set the groups to none and destroy them."""
-    from vllm.distributed.parallel_state import _DP, _PP, _TP
-    if _TP:
-        _TP.destroy()
-    _TP = None
-
-    if _PP:
-        _PP.destroy()
-    _PP = None
-
-    if _DP:
-        _DP.destroy()
-    _DP = None
-    from vllm_ascend.distributed.parallel_state import \
-        destory_ascend_model_parallel
-    destory_ascend_model_parallel()
 
 
 def parallel_config_get_dp_port(self) -> int:
@@ -62,7 +41,6 @@ def parallel_config_get_dp_port(self) -> int:
     return port
 
 
-vllm.distributed.parallel_state.destroy_model_parallel = ascend_destroy_model_parallel
 ParallelConfig.get_next_dp_init_port = parallel_config_get_dp_port
 
 
@@ -131,19 +109,6 @@ def communication_adaptation_310p():
         torch.distributed.all_reduce)
     torch.distributed.distributed_c10d.all_reduce = all_reduce_wrapper_310p(
         torch.distributed.distributed_c10d.all_reduce)
-
-    def reduce_scatter_310p(output_tensor, input_tensor, group=None):
-        rank = torch.distributed.get_rank(group)
-        world_size = torch.distributed.get_world_size(group)
-        torch.distributed.all_reduce(input_tensor,
-                                     torch.distributed.ReduceOp.SUM,
-                                     group,
-                                     async_op=False)
-        interval = input_tensor.shape[0] // world_size
-        output_tensor[:] = input_tensor[rank * interval:(rank + 1) * interval]
-
-    torch.distributed._reduce_scatter_base = reduce_scatter_310p
-    torch.distributed.distributed_c10d._reduce_scatter_base = reduce_scatter_310p
 
 
 if is_310p():

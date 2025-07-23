@@ -19,33 +19,10 @@
 from typing import Optional
 
 import torch
-from vllm.v1.sample.sampler import Sampler  # noqa: F401
 
 # Set tolerance to 1 for quant ops
 DEFAULT_ATOL = 1e-3
 DEFAULT_RTOL = 1e-3
-
-
-def apply_min_p_new(
-    logits: torch.Tensor,
-    min_p: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Filters logits using adaptive probability thresholding.
-    """
-    if min_p == 0:
-        return logits
-    # Convert logits to probability distribution
-    probability_values = torch.nn.functional.softmax(logits, dim=-1)
-    # Calculate maximum probabilities per sequence
-    max_probabilities = torch.amax(probability_values, dim=-1, keepdim=True)
-    # Reshape min_p for broadcasting
-    adjusted_min_p = min_p.unsqueeze(1) * max_probabilities
-    # Identify valid tokens using threshold comparison
-    # Apply mask using boolean indexing
-    logits = logits.masked_fill(probability_values < adjusted_min_p,
-                                -float('inf'))
-    return logits
 
 
 def apply_top_k_top_p(
@@ -115,21 +92,6 @@ def apply_top_k_top_p_new(
         logits = torch.empty_like(logits_flatten).fill_(-float("inf"))
         logits[valid_idx] = valid_logits
     return logits.reshape(batch_size, vocab_size)
-
-
-# test with leading dimension and merge seqlen and batch_size as num_tokens
-@torch.inference_mode()
-def test_apply_min_p() -> None:
-    logits = torch.randn((128, 7168)).npu()
-    min_p = torch.Tensor([0.01]).npu()
-    logits_new = apply_min_p_new(logits, min_p)
-    sampler = Sampler()
-    logits_old = sampler.apply_min_p(logits, min_p)
-    # Compare the results.
-    torch.testing.assert_close(logits_new,
-                               logits_old,
-                               atol=DEFAULT_ATOL,
-                               rtol=DEFAULT_RTOL)
 
 
 # test with leading dimension and merge seqlen and batch_size as num_tokens

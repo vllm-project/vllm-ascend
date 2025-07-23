@@ -20,6 +20,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+import torch_npu
 from torch import nn
 from torch.nn import Parameter
 from transformers import PretrainedConfig
@@ -29,8 +30,8 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (divide, get_pp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
-from vllm.distributed.parallel_state import (get_dp_group, get_tp_group,
-                                             get_world_group)
+from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
+                                             get_tp_group, get_world_group)
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -56,8 +57,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.distributed.parallel_state import get_ep_group
-from vllm_ascend.utils import is_310p
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p
 
 logger = init_logger(__name__)
 
@@ -91,7 +92,7 @@ class CustomMergedColumnParallelLinear(LinearBase):
         # Divide the weight matrix along the last dimension.
         output_size = sum(output_sizes)
         self.output_sizes = output_sizes
-        self.tp_size = get_world_group().world_size
+        self.tp_size = get_tp_group().world_size
         self.input_size_per_partition = input_size
         self.output_size_per_partition = divide(output_size, self.tp_size)
         self.output_partition_sizes = [self.output_size_per_partition]
@@ -142,8 +143,8 @@ class CustomMergedColumnParallelLinear(LinearBase):
 
         assert loaded_shard_id < len(self.output_sizes)
 
-        tp_rank = get_world_group().rank_in_group
-        tp_size = get_world_group().world_size
+        tp_rank = get_tp_group().rank_in_group
+        tp_size = get_tp_group().world_size
         if output_dim is not None:
             shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
             shard_size = self.output_sizes[loaded_shard_id] // tp_size
@@ -202,7 +203,7 @@ class CustomRowParallelLinear(LinearBase):
         group=None,
     ):
         # Divide the weight matrix along the first dimension.
-        self.group = group if group is not None else get_world_group()
+        self.group = group if group is not None else get_tp_group()
         self.tp_rank = self.group.rank_in_group
         self.tp_size = self.group.world_size
         self.input_size_per_partition = divide(input_size, self.tp_size)
@@ -355,7 +356,7 @@ def topk_wrapper(num_voted_experts):
         num_tokens = scores.shape[0]
         router_scale = _ROUTER_SCALE.squeeze(  # type: ignore
         )
-
+        # TODO: support disable expert parallel
         ep_size = get_ep_group().world_size
         local_num_experts = global_num_experts // ep_size
         local_num_group = topk // ep_size
@@ -462,6 +463,7 @@ class PanguProMoESparseMoeBlock(nn.Module):
             custom_routing_function=topk_wrapper(num_voted_experts),
             prefix=f"{prefix}.experts",
         )
+        self.use_ep = self.experts.use_ep
 
         self.gate = ReplicatedLinear(
             config.hidden_size,
@@ -498,8 +500,8 @@ class PanguProMoESparseMoeBlock(nn.Module):
         global _ROUTER_SCALE
         _ROUTER_SCALE = self.router_scale
         if not use_h2p():
-            final_hidden_states = self.experts(hidden_states=hidden_states,
-                                               router_logits=router_logits)
+            final_hidden_states = self.experts.forward_impl(
+                hidden_states=hidden_states, router_logits=router_logits)
         else:
             # TODO: when using h2p, we have to skip communication in vLLM
             # native FusedMoE. here we need to design a better FusedMoE
@@ -608,6 +610,9 @@ class PanguProMoEAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
+        ascend_config = get_ascend_config()
+        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -618,7 +623,19 @@ class PanguProMoEAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
+        if self.torchair_graph_enabled:
+            forward_kwargs = {'trace_flag': False}
+            output_shape = q.shape
+            attn_output = torch.empty(output_shape,
+                                      dtype=q.dtype,
+                                      device=q.device)
+            forward_kwargs['output'] = attn_output
+            attn_output = self.attn.impl.forward(self.attn, q, k, v, kv_cache,
+                                                 attn_metadata,
+                                                 **forward_kwargs)
+        else:
+            attn_output = self.attn(q, k, v)
+
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -1097,4 +1114,10 @@ class PanguProMoEForCausalLM(nn.Module, SupportsPP):
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
+            if is_310p() and "head" in name:
+                # on 300I Duo platform, ACL_FORMAT_FRACTAL_NZ is much more preferred than
+                # ACL_FORMAT_FRACTAL_ND by matmul operation. Since lmhead is also implemented
+                # by linear, we manually cast the format here.
+                param.data = torch_npu.npu_format_cast(param.data,
+                                                       ACL_FORMAT_FRACTAL_NZ)
         return loaded_params

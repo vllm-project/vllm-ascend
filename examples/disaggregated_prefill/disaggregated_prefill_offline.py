@@ -12,6 +12,9 @@ import os
 import time
 from multiprocessing import Event, Process
 
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
 kv_connector_extra_config = {
     "prefill_device_ips": ["1.2.3.1", "1.2.3.2"],
     "decode_device_ips": ["1.2.3.9", "1.2.3.10"],

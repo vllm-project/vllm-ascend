@@ -29,7 +29,6 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 import torch_npu
-import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
@@ -40,7 +39,7 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter)
-from vllm.distributed.parallel_state import get_dp_group
+from vllm.distributed.parallel_state import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -70,12 +69,10 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_ep_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
-from vllm_ascend.utils import (dispose_tensor, npu_stream_switch,
-                               npu_wait_tensor, vllm_version_is)
+from vllm_ascend.utils import dispose_tensor, npu_prefetch
 
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
@@ -303,7 +300,6 @@ class CustomDeepseekV2MoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.routed_scaling_factor = config.routed_scaling_factor
         self.n_shared_experts = config.n_shared_experts
-        self.routed_scaling_factor = config.routed_scaling_factor
         if self.tp_size > config.n_routed_experts:
             raise ValueError(
                 f"Tensor parallel size {self.tp_size} is greater than "
@@ -345,6 +341,8 @@ class CustomDeepseekV2MoE(nn.Module):
             e_score_correction_bias=self.gate.e_score_correction_bias)
 
         if config.n_shared_experts is not None:
+            self.all_reduce_merge = self.experts.all_reduce_merge
+            reduce_results = not self.all_reduce_merge
             intermediate_size = (config.moe_intermediate_size *
                                  config.n_shared_experts)
             self.shared_experts = CustomDeepseekV2MLP(
@@ -352,7 +350,7 @@ class CustomDeepseekV2MoE(nn.Module):
                 intermediate_size=intermediate_size,
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
-                reduce_results=True,
+                reduce_results=reduce_results,
                 force_replicate=self.enable_multistream_moe,
                 prefix=f"{prefix}.shared_experts",
             )
@@ -367,6 +365,7 @@ class CustomDeepseekV2MoE(nn.Module):
         self.ep_group = get_ep_group()
 
         self.params_dtype = torch.get_default_dtype()
+        self.rm_router_logits = self.experts.rm_router_logits
 
     def forward(self,
                 hidden_states: torch.Tensor,
@@ -389,7 +388,9 @@ class CustomDeepseekV2MoE(nn.Module):
                 is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
 
         # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
+        router_logits = None
+        if not self.rm_router_logits:
+            router_logits, _ = self.gate(hidden_states)
 
         experts_hidden_states = self.experts(
             hidden_states=hidden_states,
@@ -398,11 +399,15 @@ class CustomDeepseekV2MoE(nn.Module):
             top_k=CustomDeepseekV2MoE.top_k,
             enable_force_load_balance=enable_force_load_balance,
             shared_experts=self.shared_experts,
+            gate=self.gate,
             replace_allreduce=replace_allreduce)
 
         hidden_states = (
             experts_hidden_states[0] * self.routed_scaling_factor +
             experts_hidden_states[1])
+        if self.all_reduce_merge:
+            # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
+            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
         return hidden_states
 
@@ -563,29 +568,26 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                                   and attn_metadata.num_decodes > 0)
         forward_kwargs = {"enable_multistream_mla": enable_multistream_mla}
         if self.q_lora_rank is not None:
+            npu_prefetch(self.q_a_proj.weight,
+                         hidden_states,
+                         enabled=enable_multistream_mla)
             ckq = self.q_a_proj(hidden_states)[0]
-            npu_wait_tensor(hidden_states, ckq, enabled=enable_multistream_mla)
-            with npu_stream_switch("mla_secondary",
-                                   0,
-                                   enabled=enable_multistream_mla):
-                hidden_states_or_q_c = self.q_a_layernorm(ckq)
+            hidden_states_or_q_c = self.q_a_layernorm(ckq)
+            forward_kwargs['ckq'] = ckq
         else:
             hidden_states_or_q_c = hidden_states
         if self.torchair_graph_enabled:
-            if envs.VLLM_USE_V1:
-                output_shape = hidden_states.shape
-                output = torch.empty(output_shape,
-                                     dtype=hidden_states_or_q_c.dtype,
-                                     device=hidden_states_or_q_c.device)
-                forward_kwargs['output'] = output
-
+            output_shape = hidden_states.shape
+            output = torch.empty(output_shape,
+                                 dtype=hidden_states_or_q_c.dtype,
+                                 device=hidden_states_or_q_c.device)
+            forward_kwargs['output'] = output
             output = self.mla_attn.impl.forward(self.mla_attn,
                                                 hidden_states_or_q_c,
                                                 hidden_states, None, kv_cache,
                                                 attn_metadata,
                                                 **forward_kwargs)
-            if envs.VLLM_USE_V1:
-                output = output.view(-1, output_shape[-1])
+            output = output.view(-1, output_shape[-1])
             return output
         else:
             kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
@@ -653,7 +655,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 prefix=f"{prefix}.mlp",
             )
             self.mla_moe_communication = ascend_config.torchair_graph_config.enable_multistream_moe \
-                and model_config.use_mla and envs.VLLM_USE_V1 and self.tp_size > 1
+                and model_config.use_mla and self.tp_size > 1
         else:
             self.mlp = CustomDeepseekV2MLP(
                 hidden_size=config.hidden_size,
@@ -938,19 +940,12 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
 
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    if vllm_version_is("0.9.1"):
-                        weight_loader(param,
-                                      loaded_weight,
-                                      name,
-                                      shard_id=shard_id,
-                                      expert_id=expert_id)
-                    else:
-                        weight_loader(param,
-                                      loaded_weight,
-                                      name,
-                                      shard_id=shard_id,
-                                      expert_id=expert_id,
-                                      return_success=False)
+                    weight_loader(param,
+                                  loaded_weight,
+                                  name,
+                                  shard_id=shard_id,
+                                  expert_id=expert_id,
+                                  return_success=False)
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.
@@ -985,7 +980,3 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                                    attn_metadata, intermediate_tensors,
                                    inputs_embeds)
         return hidden_states
-
-
-class CustomDeepseekV3ForCausalLM(CustomDeepseekV2ForCausalLM):
-    pass
