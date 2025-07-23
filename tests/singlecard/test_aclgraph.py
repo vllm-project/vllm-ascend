@@ -29,6 +29,8 @@ from vllm import LLM, SamplingParams
 from tests.conftest import VllmRunner
 from tests.model_utils import check_outputs_equal
 
+os.environ['VLLM_USE_MODELSCOPE'] = 'True'
+
 MODELS = ["Qwen/Qwen2.5-0.5B-Instruct"]
 
 
