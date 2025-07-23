@@ -20,6 +20,7 @@
 from typing import Any, List
 
 import torch
+from vllm.config import get_current_vllm_config
 from vllm.utils import is_pin_memory_available
 from vllm.worker.cache_engine import CacheEngine
 
@@ -45,25 +46,32 @@ def allocate_kv_cache(
         alloc_shape = kv_cache_shape
 
         for _ in range(self.num_attention_layers):
-            # null block in CpuGpuBlockAllocator requires at least that
-            # block to be zeroed-out.
-            # We zero-out everything for simplicity.
-            layer_kv_cache_nope = torch.zeros(
-                alloc_shape[:-1] +
-                (self.model_config.hf_text_config.kv_lora_rank, ),
-                dtype=self.dtype,
-                pin_memory=pin_memory,
-                device=device)
-            layer_kv_cache_pe = torch.zeros(
-                alloc_shape[:-1] +
-                (self.model_config.hf_text_config.qk_rope_head_dim, ),
-                dtype=self.dtype,
-                pin_memory=pin_memory,
-                device=device)
+            if get_current_vllm_config().model_config.use_mla:
+                # null block in CpuGpuBlockAllocator requires at least that
+                # block to be zeroed-out.
+                # We zero-out everything for simplicity.
+                layer_kv_cache_nope = torch.zeros(
+                    alloc_shape[:-1] +
+                    (self.model_config.hf_text_config.kv_lora_rank, ),
+                    dtype=self.dtype,
+                    pin_memory=pin_memory,
+                    device=device)
+                layer_kv_cache_pe = torch.zeros(
+                    alloc_shape[:-1] +
+                    (self.model_config.hf_text_config.qk_rope_head_dim, ),
+                    dtype=self.dtype,
+                    pin_memory=pin_memory,
+                    device=device)
+                kv_cache.append((layer_kv_cache_nope, layer_kv_cache_pe))
+            else:
+                layer_kv_cache = torch.zeros(alloc_shape,
+                                             dtype=self.dtype,
+                                             pin_memory=pin_memory,
+                                             device=device)
 
-            # view back to (TOTAL_PAGES, PAGE_SIZE, entry_shape...) for cases
-            # when entry_shape is higher than 1D
-            kv_cache.append((layer_kv_cache_nope, layer_kv_cache_pe))
+                # view back to (TOTAL_PAGES, PAGE_SIZE, entry_shape...) for cases
+                # when entry_shape is higher than 1D
+                kv_cache.append(layer_kv_cache.view(kv_cache_shape))
     else:
         for _ in range(self.num_attention_layers):
             # null block in CpuGpuBlockAllocator requires at least that

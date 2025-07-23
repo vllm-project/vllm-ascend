@@ -19,9 +19,12 @@ import math
 from typing import Optional, Tuple
 
 import torch
+import torch.nn.functional as F
+import torch_npu
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding)
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import enable_custom_op
 
 
