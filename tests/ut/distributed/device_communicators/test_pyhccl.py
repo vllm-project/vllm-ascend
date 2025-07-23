@@ -9,26 +9,11 @@ from vllm_ascend.distributed.device_communicators.pyhccl import \
 
 
 class MockHcclLib:
-
-    def __init__(self, path):
-        pass
-
-    def hcclGetUniqueId(self):
-        uid = MagicMock()
-        uid.internal = list(range(128))  # 128 字节随意填充
-        return uid
-
-    def hcclCommInitRank(self, rank):
-        return f"fake_comm_{rank}"
-
-    def hcclAllReduce(self, *args, **kw):
-        pass
+    pass
 
 
 class MockUniqueId:
-
-    def __init__(self):
-        self.internal = [0] * 128
+    pass
 
 
 class TestPyHcclCommunicator(TestBase):
