@@ -95,6 +95,10 @@ from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 if not vllm_version_is("0.10.0"):
     from vllm.tasks import GenerationTask, SupportedTask
 
+from vllm_ascend.eplb.eplb_updator import EplbUpdator
+from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
+
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -353,6 +357,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.is_kv_producer = False
         if vllm_config.kv_transfer_config is not None:
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
+
+        #EPLB
+        self.dynamic_eplb = ascend_config.dynamic_eplb
+        if self.dynamic_eplb == True:
+            self.eplb_adaptor = None
+            self.is_eplb_warmuped = False
+            self.eplb_updator = EplbUpdator(ascend_config.expert_map_path)
+
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -1528,11 +1540,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     # Return empty ModelRunnerOuptut if there's no work to do.
                     return EMPTY_MODEL_RUNNER_OUTPUT
                 return self.kv_connector_no_forward(scheduler_output)
+
+            if self.dynamic_eplb:
+                self.eplb_updator.forward_before()
+
             (attn_metadata, hidden_states, spec_decode_metadata, positions,
              num_scheduled_tokens, logits_indices, aux_hidden_states,
              num_scheduled_tokens_np, finished_sending,
              finished_recving) = (self._process_reqs(scheduler_output,
                                                      intermediate_tensors))
+
+            if self.dynamic_eplb:
+                self.eplb_updator.take_update_info_from_eplb_process()
 
         with ProfileExecuteDuration().capture_async("post process"):
             # Broadcast PP output for external_launcher (torchrun)
@@ -1713,6 +1732,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             logger.info("Profile execute duration [%s]:%s", captured_name,
                         " ".join(dr_str))
 
+        if self.dynamic_eplb:
+            self.eplb_updator.forward_end()
+
         return model_runner_output
 
     def kv_connector_no_forward(
@@ -1804,6 +1826,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # TODO(zzzzwwjj): when aclgraph and full graph mode, we need build attn_metadata
             attn_metadata = None
 
+        if not is_torchair_compile and not self.in_profile_run and self.dynamic_eplb:
+            self.eplb_updator.forward_before()
+
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
             model = self.model
@@ -1894,6 +1919,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     if self.use_spec_decode and isinstance(
                             self.drafter, EagleProposer):
                         self.drafter.dummy_run(num_tokens)
+
+            if self.in_profile_run and self.dynamic_eplb:
+                self.model.clear_all_moe_loads()
+            if not is_torchair_compile and not self.in_profile_run and self.dynamic_eplb:
+                self.eplb_updator.take_update_info_from_eplb_process()
+                self.eplb_updator.forward_end()
+
             return hidden_states
 
     @contextmanager
@@ -1980,6 +2012,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 raise e
 
         return pooler_output
+
+    def eplb_warmup(self):
+        #EPLB
+        if self.dynamic_eplb and not self.is_eplb_warmuped:
+            self.is_eplb_warmuped = True
+            self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
+            self.eplb_updator.set_adaptor(self.eplb_adaptor)
+            self.eplb_updator.warm_up_eplb()
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
