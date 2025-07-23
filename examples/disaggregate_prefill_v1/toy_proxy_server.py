@@ -3,9 +3,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-import itertools
+import asyncio
 import os
-import uuid
+import random
+import sys
 from contextlib import asynccontextmanager
 
 import httpx
@@ -15,148 +16,156 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """
-    Lifespan context manager to handle startup and shutdown events.
-    """
-    # Startup: Initialize client pools for prefiller and decoder services
-    app.state.prefill_clients = []
-    app.state.decode_clients = []
-    limit = httpx.Limits(max_connections=100000,
-                         max_keepalive_connections=100000)
-
-    # Create prefill clients
-    for i, (host, port) in enumerate(global_args.prefiller_instances):
-        prefiller_base_url = f'http://{host}:{port}/v1'
-        app.state.prefill_clients.append({
-            'client':
-            httpx.AsyncClient(timeout=None,
-                              base_url=prefiller_base_url,
-                              limits=limit),
-            'host':
-            host,
-            'port':
-            port,
-            'id':
-            i
-        })
-
-    # Create decode clients
-    for i, (host, port) in enumerate(global_args.decoder_instances):
-        decoder_base_url = f'http://{host}:{port}/v1'
-        app.state.decode_clients.append({
-            'client':
-            httpx.AsyncClient(timeout=None,
-                              base_url=decoder_base_url,
-                              limits=limit),
-            'host':
-            host,
-            'port':
-            port,
-            'id':
-            i
-        })
-
-    # Initialize round-robin iterators
-    app.state.prefill_iterator = itertools.cycle(
-        range(len(app.state.prefill_clients)))
-    app.state.decode_iterator = itertools.cycle(
-        range(len(app.state.decode_clients)))
-
-    print(f"Initialized {len(app.state.prefill_clients)} prefill clients "
-          f"and {len(app.state.decode_clients)} decode clients.")
-
-    yield
-
-    # Shutdown: Close all clients
-    for client_info in app.state.prefill_clients:
-        await client_info['client'].aclose()
-
-    for client_info in app.state.decode_clients:
-        await client_info['client'].aclose()
+# Add uvloop for faster event loop if available
+try:
+    import uvloop
+    asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
+except ImportError:
+    pass
 
 
-# Update FastAPI app initialization to use lifespan
-app = FastAPI(lifespan=lifespan)
+class ServerState:
+
+    def __init__(self, host, port):
+        self.host = host
+        self.port = port
+        self.url = f'http://{host}:{port}/v1'
+        self.client = httpx.AsyncClient(timeout=None,
+                                        base_url=self.url,
+                                        limits=httpx.Limits(
+                                            max_connections=100000,
+                                            max_keepalive_connections=100000))
+        self.active_tokens = 0
+        self.active_kv_cache = 0  # Only for prefiller
+        self.lock = asyncio.Lock()  # Per-server lock for state updates
+
+
+class ProxyState:
+
+    def __init__(self, prefiller_instances, decoder_instances):
+        self.prefillers = [ServerState(h, p) for h, p in prefiller_instances]
+        self.decoders = [ServerState(h, p) for h, p in decoder_instances]
+        self.req_to_prefiller = {}
+        self.req_id_lock = asyncio.Lock()
+        self.req_id_counter = 0
+
+    async def next_req_id(self):
+        async with self.req_id_lock:
+            self.req_id_counter += 1
+            return str(self.req_id_counter)
+
+    async def select_prefiller(self, token_count):
+        # Find the best prefiller (no lock needed for read)
+        min_tokens = min(p.active_tokens for p in self.prefillers)
+        candidates = [
+            i for i, p in enumerate(self.prefillers)
+            if p.active_tokens == min_tokens
+        ]
+        min_kv = min(self.prefillers[i].active_kv_cache for i in candidates)
+        final_candidates = [
+            i for i in candidates
+            if self.prefillers[i].active_kv_cache == min_kv
+        ]
+        chosen = final_candidates[0] if len(
+            final_candidates) == 1 else random.choice(final_candidates)
+        # Only lock the chosen server for update
+        async with self.prefillers[chosen].lock:
+            self.prefillers[chosen].active_tokens += token_count
+            self.prefillers[chosen].active_kv_cache += token_count
+        return chosen
+
+    async def release_prefiller(self, idx, token_count):
+        async with self.prefillers[idx].lock:
+            self.prefillers[idx].active_tokens -= token_count
+
+    async def release_prefiller_kv(self, idx, token_count):
+        async with self.prefillers[idx].lock:
+            if self.prefillers[idx].active_kv_cache > 0:
+                self.prefillers[idx].active_kv_cache -= token_count
+
+    async def select_decoder(self, token_count):
+        min_tokens = min(d.active_tokens for d in self.decoders)
+        candidates = [
+            i for i, d in enumerate(self.decoders)
+            if d.active_tokens == min_tokens
+        ]
+        chosen = candidates[0] if len(candidates) == 1 else random.choice(
+            candidates)
+        async with self.decoders[chosen].lock:
+            self.decoders[chosen].active_tokens += token_count
+        return chosen
+
+    async def release_decoder(self, idx, token_count):
+        async with self.decoders[idx].lock:
+            self.decoders[idx].active_tokens -= token_count
+
+
+proxy_state = None
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--host", type=str, default="localhost")
-
-    # For prefiller instances
     parser.add_argument("--prefiller-hosts",
-                        "--prefiller-host",
                         type=str,
                         nargs="+",
                         default=["localhost"])
     parser.add_argument("--prefiller-ports",
-                        "--prefiller-port",
                         type=int,
                         nargs="+",
                         default=[8100])
-
-    # For decoder instances
     parser.add_argument("--decoder-hosts",
-                        "--decoder-host",
                         type=str,
                         nargs="+",
                         default=["localhost"])
-    parser.add_argument("--decoder-ports",
-                        "--decoder-port",
+    parser.add_argument("--decoder-ports", type=int, nargs="+", default=[8200])
+    parser.add_argument("--max-retries",
                         type=int,
-                        nargs="+",
-                        default=[8200])
-
+                        default=3,
+                        help="Maximum number of retries for HTTP requests")
+    parser.add_argument(
+        "--retry-delay",
+        type=float,
+        default=0.2,
+        help="Base delay (seconds) for exponential backoff retries")
     args = parser.parse_args()
-
-    # Validate and pair hosts with ports
     if len(args.prefiller_hosts) != len(args.prefiller_ports):
         raise ValueError(
             "Number of prefiller hosts must match number of prefiller ports")
-
     if len(args.decoder_hosts) != len(args.decoder_ports):
         raise ValueError(
             "Number of decoder hosts must match number of decoder ports")
-
-    # Create tuples of (host, port) for each service type
     args.prefiller_instances = list(
         zip(args.prefiller_hosts, args.prefiller_ports))
     args.decoder_instances = list(zip(args.decoder_hosts, args.decoder_ports))
-
     return args
 
 
-def get_next_client(app, service_type: str):
-    """
-    Get the next client in round-robin fashion.
-
-    Args:
-        app: The FastAPI app instance
-        service_type: Either 'prefill' or 'decode'
-
-    Returns:
-        The next client to use
-    """
-    if service_type == 'prefill':
-        client_idx = next(app.state.prefill_iterator)
-        return app.state.prefill_clients[client_idx]
-    elif service_type == 'decode':
-        client_idx = next(app.state.decode_iterator)
-        return app.state.decode_clients[client_idx]
-    else:
-        raise ValueError(f"Unknown service type: {service_type}")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global proxy_state
+    proxy_state = ProxyState(global_args.prefiller_instances,
+                             global_args.decoder_instances)
+    print(
+        f"Initialized {len(proxy_state.prefillers)} prefill clients and {len(proxy_state.decoders)} decode clients."
+    )
+    yield
+    for p in proxy_state.prefillers:
+        await p.client.aclose()
+    for d in proxy_state.decoders:
+        await d.client.aclose()
 
 
-async def send_request_to_service(client_info: dict, endpoint: str,
-                                  req_data: dict, request_id: str):
-    """
-    Send a request to a service using a client from the pool.
-    """
+app = FastAPI(lifespan=lifespan)
+
+
+async def send_request_to_service(client: httpx.AsyncClient,
+                                  endpoint: str,
+                                  req_data: dict,
+                                  request_id: str,
+                                  max_retries: int = 3,
+                                  base_delay: float = 0.2):
     req_data = req_data.copy()
     req_data['kv_transfer_params'] = {
         "do_remote_decode": True,
@@ -174,70 +183,128 @@ async def send_request_to_service(client_info: dict, endpoint: str,
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         "X-Request-Id": request_id
     }
+    last_exc = None
+    for attempt in range(1, max_retries + 1):
+        try:
+            response = await client.post(endpoint,
+                                         json=req_data,
+                                         headers=headers)
+            response.raise_for_status()
+            return response
+        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            logger.warning(
+                f"Attempt {attempt} failed for {endpoint}: {str(e)}")
+            last_exc = e
+            if attempt < max_retries:
+                await asyncio.sleep(base_delay * (2**(attempt - 1)))
+            else:
+                logger.error(
+                    f"All {max_retries} attempts failed for {endpoint}.")
+                raise last_exc
 
-    response = await client_info['client'].post(endpoint,
-                                                json=req_data,
-                                                headers=headers)
-    response.raise_for_status()
 
-    return response
-
-
-async def stream_service_response(client_info: dict, endpoint: str,
-                                  req_data: dict, request_id: str):
-    """
-    Asynchronously stream response from a service using a client from the pool.
-    """
+async def stream_service_response_with_retry(client: httpx.AsyncClient,
+                                             endpoint: str,
+                                             req_data: dict,
+                                             request_id: str,
+                                             max_retries: int = 3,
+                                             base_delay: float = 0.2):
     headers = {
         "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
         "X-Request-Id": request_id
     }
-
-    async with client_info['client'].stream("POST",
-                                            endpoint,
-                                            json=req_data,
-                                            headers=headers) as response:
-        response.raise_for_status()
-        async for chunk in response.aiter_bytes():
-            yield chunk
+    for attempt in range(1, max_retries + 1):
+        try:
+            async with client.stream("POST",
+                                     endpoint,
+                                     json=req_data,
+                                     headers=headers) as response:
+                response.raise_for_status()
+                first_chunk_sent = False
+                async for chunk in response.aiter_bytes():
+                    first_chunk_sent = True
+                    yield chunk
+                return  # Success, exit after streaming
+        except (httpx.RequestError, httpx.HTTPStatusError) as e:
+            if attempt < max_retries:
+                logger.warning(
+                    f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}"
+                )
+                await asyncio.sleep(base_delay * (2**(attempt - 1)))
+            else:
+                logger.error(
+                    f"All {max_retries} attempts failed for streaming {endpoint}."
+                )
+                raise e
+        except Exception as e:
+            # If any chunk has been sent, do not retry, just log and drop
+            if 'first_chunk_sent' in locals() and first_chunk_sent:
+                logger.error(
+                    f"Streaming to client interrupted after response started: {str(e)}"
+                )
+                return
+            else:
+                if attempt < max_retries:
+                    logger.warning(
+                        f"Attempt {attempt} failed for streaming {endpoint}: {str(e)}"
+                    )
+                    await asyncio.sleep(base_delay * (2**(attempt - 1)))
+                else:
+                    logger.error(
+                        f"All {max_retries} attempts failed for streaming {endpoint}."
+                    )
+                    raise e
 
 
 async def _handle_completions(api: str, request: Request):
     try:
         req_data = await request.json()
-        request_id = str(uuid.uuid4())
-
-        # Get the next prefill client in round-robin fashion
-        prefill_client_info = get_next_client(request.app, 'prefill')
-
-        # Send request to prefill service
-        response = await send_request_to_service(prefill_client_info, api,
-                                                 req_data, request_id)
-
-        # Extract the needed fields
+        input_tokens = int(req_data.get('input_tokens', 1))
+        request_id = await proxy_state.next_req_id()
+        # Select prefiller
+        prefiller_idx = await proxy_state.select_prefiller(input_tokens)
+        prefiller = proxy_state.prefillers[prefiller_idx]
+        # Send request to prefiller
+        response = await send_request_to_service(
+            prefiller.client,
+            api,
+            req_data,
+            request_id,
+            max_retries=global_args.max_retries,
+            base_delay=global_args.retry_delay)
+        await proxy_state.release_prefiller(prefiller_idx, input_tokens)
         response_json = response.json()
         kv_transfer_params = response_json.get('kv_transfer_params', {})
         if kv_transfer_params:
             req_data["kv_transfer_params"] = kv_transfer_params
+        # Select decoder
+        decoder_idx = await proxy_state.select_decoder(input_tokens)
+        decoder = proxy_state.decoders[decoder_idx]
+        logger.debug("Using %s %s", prefiller.url, decoder.url)
+        # Stream response from decoder
+        released_kv = False
 
-        # Get the next decode client in round-robin fashion
-        decode_client_info = get_next_client(request.app, 'decode')
-
-        logger.debug("Using %s %s", prefill_client_info, decode_client_info)
-
-        # Stream response from decode service
         async def generate_stream():
-            async for chunk in stream_service_response(decode_client_info,
-                                                       api,
-                                                       req_data,
-                                                       request_id=request_id):
+            nonlocal released_kv
+            # Only one await per chunk, minimal logic in loop
+            async for chunk in stream_service_response_with_retry(
+                decoder.client,
+                api,
+                req_data,
+                request_id=request_id,
+                max_retries=global_args.max_retries,
+                base_delay=global_args.retry_delay):
+                if not released_kv and chunk:
+                    await proxy_state.release_prefiller_kv(
+                        prefiller_idx, input_tokens)
+                    released_kv = True
                 yield chunk
+            # After streaming done, release tokens
+            await proxy_state.release_decoder(decoder_idx, input_tokens)
 
         return StreamingResponse(generate_stream(),
                                  media_type="application/json")
-
     except Exception as e:
-        import sys
         import traceback
         exc_info = sys.exc_info()
         print("Error occurred in disagg prefill proxy server"
@@ -259,17 +326,15 @@ async def handle_chat_completions(request: Request):
 
 @app.get("/healthcheck")
 async def healthcheck():
-    """Simple endpoint to check if the server is running."""
     return {
         "status": "ok",
-        "prefill_instances": len(app.state.prefill_clients),
-        "decode_instances": len(app.state.decode_clients)
+        "prefill_instances": len(proxy_state.prefillers),
+        "decode_instances": len(proxy_state.decoders)
     }
 
 
 if __name__ == '__main__':
     global global_args
     global_args = parse_args()
-
     import uvicorn
     uvicorn.run(app, host=global_args.host, port=global_args.port)
