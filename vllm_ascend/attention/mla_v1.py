@@ -152,6 +152,7 @@ class AscendMLAMetadata:
     # chunked prefill by default if no attn_states passed
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
 
+    enable_dbo_across_dp: bool = False
     decode: Optional[AscendMLADecodeMetadata] = None
     prefill: Optional[AscendMLAPrefillMetadata] = None
 

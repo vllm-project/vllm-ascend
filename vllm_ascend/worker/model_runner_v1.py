@@ -559,7 +559,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if batch_changed:
             self.input_batch.refresh_sampling_metadata()
 
-    def _get_forward_metadata_across_dp(
+    def get_forward_metadata_across_dp(
             self, total_num_scheduled_tokens: int, with_prefill: bool,
             enable_dbo: bool) -> tuple[int, bool, bool]:
         forward_metadata = torch.tensor(
@@ -1057,7 +1057,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                               total_num_scheduled_tokens)
 
         if self.dp_size > 1:
-            max_num_tokens, with_prefill, enable_dbo = self._get_forward_metadata_across_dp(
+            max_num_tokens, with_prefill, enable_dbo = self.get_forward_metadata_across_dp(
                 total_num_scheduled_tokens, with_prefill, enable_dbo)
             extra_builder_kwargs['max_num_tokens_across_dp'] = max_num_tokens
             extra_builder_kwargs['with_prefill_across_dp'] = with_prefill
