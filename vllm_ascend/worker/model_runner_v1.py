@@ -86,6 +86,10 @@ from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.utils import ProfileExecuteDuration
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 
+from vllm_ascend.eplb.eplb_updator import EplbUpdator
+from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
+from vllm_ascend.eplb.core.eplb_device_transfer_loader import D2DExpertWeightLoader
+
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -386,6 +390,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+
+        #EPLB
+        self.dynamic_eplb = ascend_config.dynamic_eplb
+        if self.dynamic_eplb == True:
+            self.eplb_adaptor = None
+            self.is_eplb_warmuped = False
+            self.eplb_updator = EplbUpdator(ascend_config.expert_map_path)
 
         # NOTE: we need to use `in_profile_run` to determine whether `enable_force_load_balance` is True
         self.in_profile_run = False
@@ -1355,10 +1366,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     # Return empty ModelRunnerOuptut if there's no work to do.
                     return EMPTY_MODEL_RUNNER_OUTPUT
                 return self.kv_connector_no_forward(scheduler_output)
+
+            if self.dynamic_eplb:
+                self.eplb_updator.forward_before()
+
             (attn_metadata, hidden_states, spec_decode_metadata, positions,
              num_scheduled_tokens, sample_indices, finished_sending,
              finished_recving) = (self._process_reqs(scheduler_output,
                                                      intermediate_tensors))
+
+            if self.dynamic_eplb:
+                self.eplb_updator.take_update_info_from_eplb_process()
 
         with ProfileExecuteDuration().capture_async("post process"):
             logits = self.model.compute_logits(hidden_states[sample_indices],
@@ -1472,6 +1490,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             captured_name = "Decode" if self.attn_state == AscendAttentionState.DecodeOnly else "Prefill"
             logger.info("Profile execute duration [%s]:%s", captured_name,
                         " ".join(dr_str))
+
+        if self.dynamic_eplb:
+            self.eplb_updator.forward_end()
 
         return model_runner_output
 
@@ -1658,6 +1679,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 attn_state=attn_state,
             )
 
+        if not is_torchair_compile and not self.in_profile_run and self.dynamic_eplb:
+            self.eplb_updator.forward_before()
+
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
             model = self.model
@@ -1749,6 +1773,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     skip_attn=skip_attn,
                     num_reqs=num_reqs,
                     num_tokens_across_dp=num_tokens_across_dp)
+
+            if self.in_profile_run and self.dynamic_eplb:
+                self.model.clear_all_moe_loads()
+            if not is_torchair_compile and not self.in_profile_run and self.dynamic_eplb:
+                self.eplb_updator.take_update_info_from_eplb_process()
+                self.eplb_updator.forward_end()
+
             return hidden_states
 
     @contextmanager
@@ -1799,6 +1830,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         del hidden_states, logits
         self.encoder_cache.clear()
         gc.collect()
+
+    def eplb_warmup(self):
+        #EPLB
+        if self.dynamic_eplb and not self.is_eplb_warmuped:
+            self.is_eplb_warmuped = True
+            self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
+            self.eplb_updator.set_adaptor(self.eplb_adaptor)
+            self.eplb_updator.warm_up_eplb()
 
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
