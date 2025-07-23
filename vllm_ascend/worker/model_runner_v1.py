@@ -1036,7 +1036,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
              maybe_padded_num_tokens, total_num_scheduled_tokens, with_prefill,
              enable_dbo)
         extra_builder_kwargs['enable_dbo_across_dp'] = enable_dbo
-        extra_builder_kwargs['with_prefill_across_dp'] = with_prefill
 
         # TODO(zzzzwwjj): this code need to refactor afterwards.
         self.with_prefill = with_prefill

@@ -142,7 +142,6 @@ class AscendMetadata:
     num_input_tokens: int = 0  # Number of tokens including padding.
 
     enable_dbo_across_dp: bool = False
-    with_prefill_across_dp: bool = False
     use_torchair_graph: bool = False
 
     def split_metadata_for_multistream(
@@ -223,37 +222,34 @@ class AscendAttentionMetadataBuilder:
                                                  non_blocking=True)
 
         graph_pad_size = kwargs.get("graph_pad_size", -1)
-        with_prefill_across_dp = kwargs["with_prefill_across_dp"]
         use_torchair_graph = graph_pad_size != -1
-        if not with_prefill_across_dp:
-            if use_torchair_graph and self.runner.attn_state in [
-                    AscendAttentionState.DecodeOnly,
-                    AscendAttentionState.SpecDecoding
-            ]:
-                num_seqs = len(seq_lens)  # type: ignore
-                if graph_pad_size != 0:
-                    pad_value = 1
-                    padded_seq_lens = seq_lens.tolist() + [  # type: ignore
-                        pad_value  # type: ignore
-                    ] * graph_pad_size
-                else:
-                    padded_seq_lens = seq_lens.tolist()  # type: ignore
+        if use_torchair_graph and self.runner.attn_state in [
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding
+        ]:
+            num_seqs = len(seq_lens)  # type: ignore
+            if graph_pad_size != 0:
+                pad_value = 1
+                padded_seq_lens = seq_lens.tolist() + [  # type: ignore
+                    pad_value  # type: ignore
+                ] * graph_pad_size
+            else:
+                padded_seq_lens = seq_lens.tolist()  # type: ignore
 
-                seq_lens = torch.from_numpy(
-                    np.array(padded_seq_lens).astype(np.int32))
-                padding = torch.full((graph_pad_size, ),
-                                     PAD_SLOT_ID,
-                                     dtype=slot_mapping.dtype,
-                                     device=slot_mapping.device)
-                slot_mapping = torch.cat([slot_mapping, padding])
-                block_table_padding = torch.zeros(
-                    (graph_pad_size, ) + block_table.shape[1:],
-                    dtype=block_table.dtype,
-                    device=block_table.device)
-                block_table = torch.cat([block_table, block_table_padding],
-                                        dim=0)
-                block_table = self._get_graph_runner_block_tables(
-                    num_seqs + graph_pad_size, block_table)
+            seq_lens = torch.from_numpy(
+                np.array(padded_seq_lens).astype(np.int32))
+            padding = torch.full((graph_pad_size, ),
+                                 PAD_SLOT_ID,
+                                 dtype=slot_mapping.dtype,
+                                 device=slot_mapping.device)
+            slot_mapping = torch.cat([slot_mapping, padding])
+            block_table_padding = torch.zeros(
+                (graph_pad_size, ) + block_table.shape[1:],
+                dtype=block_table.dtype,
+                device=block_table.device)
+            block_table = torch.cat([block_table, block_table_padding], dim=0)
+            block_table = self._get_graph_runner_block_tables(
+                num_seqs + graph_pad_size, block_table)
 
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -267,7 +263,6 @@ class AscendAttentionMetadataBuilder:
             attn_mask=attn_mask,
             attn_state=attn_state,
             enable_dbo_across_dp=enable_dbo_across_dp,
-            with_prefill_across_dp=with_prefill_across_dp,
             use_torchair_graph=use_torchair_graph)
         return attn_metadata
 
@@ -438,7 +433,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 if self.key_cache is None:
                     self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
                 slots = attn_metadata.slot_mapping
-                if not attn_metadata.with_prefill_across_dp and self.torchair_graph_enabled:
+                if attn_metadata.attn_state == AscendAttentionState.DecodeOnly and self.torchair_graph_enabled:
                     self.update_kv_cache(key=key,
                                          value=value,
                                          key_cache=self.key_cache,

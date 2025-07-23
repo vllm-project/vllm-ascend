@@ -115,14 +115,12 @@ class AscendQwen3MoeSparseMoeBlock(nn.Module):
         # to avoid high memory consumption on a single rank.
         # TODO: need a better flag to indicate whether in profile run or not.
         if attn_metadata is None:
-            # for profile run
+            # legacy reason: no attn_metadata when profile run
             is_prefill = True
             enable_force_load_balance = True
         else:
-            enable_force_load_balance = True
-            if hasattr(attn_metadata, 'with_prefill_across_dp'):
-                is_prefill = attn_metadata.with_prefill_across_dp
-                enable_force_load_balance = is_prefill
+            is_prefill = attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            enable_force_load_balance = is_prefill
 
         router_logits, _ = self.gate(hidden_states)
 
