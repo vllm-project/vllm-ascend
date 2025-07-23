@@ -30,11 +30,6 @@ from vllm_ascend.models.deepseek_v2 import (
     CustomDeepseekV2SiluAndMul)
 
 
-def mock_npu_swiglu(x):
-    a, b = x.chunk(2, dim=-1)
-    return a * torch.sigmoid(b)
-
-
 @pytest.fixture
 def base_config():
     config = PretrainedConfig(
@@ -130,9 +125,8 @@ def test_custom_deepseek_v2_silu_and_mul():
     assert silu.weight_scale is None
 
     x = torch.randn(2, 4)
-    with patch("torch_npu.npu_swiglu", side_effect=mock_npu_swiglu):
-        output = silu.forward_oot(x)
-        assert output.shape == (2, 2)
+    output = silu.forward_oot(x)
+    assert output.shape == (2, 2)
 
     weight_scale = Mock(return_value=torch.tensor(0.1))
     silu = CustomDeepseekV2SiluAndMul(weight_scale=weight_scale)
@@ -192,9 +186,8 @@ def test_custom_deepseek_v2_mlp(mock_distributed, base_config):
     assert isinstance(mlp.act_fn, CustomDeepseekV2SiluAndMul)
 
     x = torch.randn(2, 4, 128)
-    with patch("torch_npu.npu_swiglu", side_effect=mock_npu_swiglu):
-        output = mlp(x)
-        assert output.shape == (2, 4, 128)
+    output = mlp(x)
+    assert output.shape == (2, 4, 128)
 
     with patch("vllm_ascend.models.deepseek_v2.QuantizationConfig"
                ) as mock_quant_config:
