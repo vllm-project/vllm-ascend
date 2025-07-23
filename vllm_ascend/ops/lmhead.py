@@ -19,6 +19,8 @@ from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
+from vllm_ascend.distributed.parallel_state import get_lmhead_group
+
 DEFAULT_VOCAB_PADDING_SIZE = 64
 
 
@@ -43,7 +45,10 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        return dispatch_unquantized_gemm()(x, layer.weight, bias)
+        x = get_lmhead_group().all_gather(x, 0)
+        output = dispatch_unquantized_gemm()(x, layer.weight, bias)
+        output = get_lmhead_group().all_to_all(output)
+        return output
 
     def embedding(self, layer: torch.nn.Module,
                   input_: torch.Tensor) -> torch.Tensor:
@@ -209,8 +214,8 @@ class VocabParallelEmbedding(torch.nn.Module):
         super().__init__()
 
         # Keep the input dimensions.
-        tp_rank = get_tensor_model_parallel_rank()
-        self.tp_size = get_tensor_model_parallel_world_size()
+        tp_rank = get_lmhead_group().rank_in_group
+        self.tp_size = get_lmhead_group().world_size
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
         self.org_vocab_size = org_num_embeddings or num_embeddings
