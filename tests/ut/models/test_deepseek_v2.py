@@ -18,6 +18,9 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 from transformers import PretrainedConfig
+from vllm.config import CacheConfig
+from vllm.distributed.parallel_state import GroupCoordinator
+
 from vllm_ascend.models.deepseek_v2 import (
     CustomDeepseekV2DecoderLayer, CustomDeepseekV2ForCausalLM,
     CustomDeepseekV2MergedReplicatedLinear, CustomDeepseekV2MLAAttention,
@@ -25,9 +28,6 @@ from vllm_ascend.models.deepseek_v2 import (
     CustomDeepseekV2RowParallelLinear,
     CustomDeepseekV2RowParallelLinearReplaceAllreduce,
     CustomDeepseekV2SiluAndMul)
-
-from vllm.config import CacheConfig
-from vllm.distributed.parallel_state import GroupCoordinator
 
 
 def mock_npu_swiglu(x):
