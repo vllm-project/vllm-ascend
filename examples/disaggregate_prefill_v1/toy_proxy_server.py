@@ -106,13 +106,12 @@ class ProxyState:
             self.decoders[idx].active_tokens -= token_count
 
     # Omni_infer's calculate_input_scores function
-    def calculate_prefill_scores(request_length: int) -> float:
-        req_len = len(request_length)
-        length_score = req_len / 4.0
+    def calculate_prefill_scores(self, request_length: int) -> float:
+        length_score = request_length / 4.0
         input_score = length_score * 0.0345 + 120.0745
         return input_score
 
-    def calculate_decode_scores(request_length: int) -> float:
+    def calculate_decode_scores(self, request_length: int) -> float:
         return request_length
 
 
@@ -130,12 +129,12 @@ def parse_args():
     parser.add_argument("--prefiller-ports",
                         type=int,
                         nargs="+",
-                        default=[8100])
+                        default=[8001])
     parser.add_argument("--decoder-hosts",
                         type=str,
                         nargs="+",
                         default=["localhost"])
-    parser.add_argument("--decoder-ports", type=int, nargs="+", default=[8200])
+    parser.add_argument("--decoder-ports", type=int, nargs="+", default=[8002])
     parser.add_argument("--max-retries",
                         type=int,
                         default=3,
@@ -275,8 +274,12 @@ async def stream_service_response_with_retry(client: httpx.AsyncClient,
 async def _handle_completions(api: str, request: Request):
     try:
         req_data = await request.json()
-        request_length = len(request.body())
+        req_body = await request.body()
+        request_length = len(req_body)
         prefiller_score = proxy_state.calculate_prefill_scores(request_length)
+        logger.debug(
+            f"Request length: {request_length}, Prefiller score: {prefiller_score}"
+        )
         request_id = await proxy_state.next_req_id()
         # Select prefiller
         prefiller_idx = await proxy_state.select_prefiller(prefiller_score)
@@ -296,6 +299,7 @@ async def _handle_completions(api: str, request: Request):
             req_data["kv_transfer_params"] = kv_transfer_params
         # Select decoder
         decoder_score = proxy_state.calculate_decode_scores(request_length)
+        logger.debug("Decoder score: %f", decoder_score)
         # Use the prefiller's kv_transfer_params to select decoder
         decoder_idx = await proxy_state.select_decoder(decoder_score)
         decoder = proxy_state.decoders[decoder_idx]
