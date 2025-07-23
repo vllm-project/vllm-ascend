@@ -53,6 +53,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
         ascend_config = get_ascend_config()
         self.new_kv_cache_bytes = -1
+        self.padded_batch_size = -1
         self.torchair_compiled_model = None  # type: ignore
         self.torchair_compiled_models = {}  # type: ignore
         self.use_cached_npu_graph = ascend_config.torchair_graph_config.use_cached_graph
@@ -72,7 +73,6 @@ class NPUTorchairModelRunner(NPUModelRunner):
                                        with_prefill):
         """Generate graph_pad_size for torchair case."""
         extra_builder_kwargs = {}
-        padded_batch_size = -1
 
         if self.dp_size > 1:
             max_num_tokens, with_prefill = self._get_forward_metadata_across_dp(
@@ -81,14 +81,14 @@ class NPUTorchairModelRunner(NPUModelRunner):
             extra_builder_kwargs['with_prefill_across_dp'] = with_prefill
         if not with_prefill:
             if self.dp_size > 1:
-                padded_batch_size = self._select_torchair_padded_batch_size(
+                self.padded_batch_size = self._select_torchair_padded_batch_size(
                     max_num_tokens)
             else:
-                padded_batch_size = self._select_torchair_padded_batch_size(
+                self.padded_batch_size = self._select_torchair_padded_batch_size(
                     total_num_scheduled_tokens)
-            graph_pad_size = padded_batch_size - total_num_scheduled_tokens
+            graph_pad_size = self.padded_batch_size - total_num_scheduled_tokens
             extra_builder_kwargs['graph_pad_size'] = graph_pad_size
-        return extra_builder_kwargs, padded_batch_size
+        return extra_builder_kwargs
 
     def _generate_hidden_states(
         self,
@@ -98,7 +98,6 @@ class NPUTorchairModelRunner(NPUModelRunner):
         inputs_embeds,
         attn_metadata,
         with_prefill,
-        padded_batch_size,
     ):
         """Generate hidden_states with compiled model."""
         kwargs = {"kv_caches": self.kv_caches, "attn_metadata": attn_metadata}
@@ -106,10 +105,10 @@ class NPUTorchairModelRunner(NPUModelRunner):
             if is_310p():
                 converting_weight_acl_format_310p(self.model,
                                                   ACL_FORMAT_FRACTAL_NZ)
-            input_ids = self.input_ids[:padded_batch_size]
-            positions = self.positions[:padded_batch_size]
+            input_ids = self.input_ids[:self.padded_batch_size]
+            positions = self.positions[:self.padded_batch_size]
             compiled_model = self._get_torchair_lazy_compiled_model(
-                padded_batch_size)
+                self.padded_batch_size)
             hidden_states = compiled_model(
                 input_ids=input_ids,
                 positions=positions,

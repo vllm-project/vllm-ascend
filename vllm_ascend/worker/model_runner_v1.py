@@ -872,7 +872,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         inputs_embeds,
         attn_metadata,
         with_prefill,
-        padded_batch_size,
     ):
         assert self.model is not None
         hidden_states = self.model(
@@ -891,7 +890,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 total_num_scheduled_tokens, with_prefill)
             extra_builder_kwargs['max_num_tokens_across_dp'] = max_num_tokens
             extra_builder_kwargs['with_prefill_across_dp'] = with_prefill
-        return extra_builder_kwargs, -1
+        return extra_builder_kwargs
 
     def _process_reqs(
         self,
@@ -1030,7 +1029,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         with_prefill = attn_state not in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
-        extra_builder_kwargs, padded_batch_size = self._generate_extra_builder_kwargs(
+        extra_builder_kwargs = self._generate_extra_builder_kwargs(
             total_num_scheduled_tokens, with_prefill)
         if self.vllm_config.model_config.use_mla:
             query_start_loc = self.query_start_loc[:num_reqs + 1]
@@ -1120,7 +1119,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             with ProfileExecuteDuration().capture_async("forward"):
                 hidden_states = self._generate_hidden_states(
                     input_ids, positions, intermediate_tensors, inputs_embeds,
-                    attn_metadata, with_prefill, padded_batch_size)
+                    attn_metadata, with_prefill)
 
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
