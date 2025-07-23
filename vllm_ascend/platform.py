@@ -29,6 +29,7 @@ from vllm.platforms import Platform, PlatformEnum
 
 from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
 from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD, update_aclgraph_sizes
+import vllm_ascend.envs as ascend_envs
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -208,6 +209,9 @@ class NPUPlatform(Platform):
                     vllm_config.scheduler_config,
                     ascend_config.ascend_scheduler_config)
                 vllm_config.scheduler_config = ascend_scheduler_config
+
+        if ascend_envs.VLLM_ASCEND_ENABLE_FLASHCOMM == 1 and parallel_config.enable_expert_parallel:
+            assert parallel_config.expert_parallel_size > 1, "For better performance in MoE, SP works exclusively with MC2, AllToAll, and AllToAllV."
 
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
