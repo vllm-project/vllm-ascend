@@ -396,8 +396,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 if self.head_size == 192:
                     cu_seqlen_q = [0] + attn_metadata.query_lens.tolist()
                     cu_seqlen_k = [0] + attn_metadata.seq_lens.tolist()
-                    cu_seqlen_q = torch.tensor(cu_seqlen_q, device="npu")
-                    cu_seqlen_k = torch.tensor(cu_seqlen_k, device="npu")
+                    cu_seqlen_q = torch.tensor(cu_seqlen_q,
+                                               device=query.device)
+                    cu_seqlen_k = torch.tensor(cu_seqlen_k,
+                                               device=query.device)
                     cu_seqlen_q = torch.cumsum(cu_seqlen_q, dim=0)
                     cu_seqlen_k = torch.cumsum(cu_seqlen_k, dim=0)
                     max_seqlen_q = torch.max(attn_metadata.query_lens)

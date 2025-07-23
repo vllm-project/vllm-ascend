@@ -233,7 +233,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.spec_attn_mask = torch.triu(torch.ones(2048,
                                                         2048,
                                                         dtype=torch.bool),
-                                             diagonal=1).to("npu")
+                                             diagonal=1).to(self.device)
             if get_pp_group().is_last_rank:
                 if self.speculative_config.method == "ngram":
                     self.drafter = NgramProposer(self.vllm_config)
@@ -1119,6 +1119,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.torchair_graph_enabled and not with_prefill:
             input_ids = self.input_ids[:padded_batch_size]
             positions = self.positions[:padded_batch_size]
+
+        if get_pp_group().is_first_rank:
+            intermediate_tensors = None
+        else:
+            assert intermediate_tensors is not None
+            assert self.intermediate_tensors is not None
+            for k, v in intermediate_tensors.items():
+                self.intermediate_tensors[k][:num_input_tokens].copy_(
+                    v[:num_input_tokens], non_blocking=True)
+            intermediate_tensors = IntermediateTensors({
+                k: v[:num_input_tokens]
+                for k, v in self.intermediate_tensors.items()
+            })
 
         # Run forward pass
         with set_forward_context(attn_metadata,

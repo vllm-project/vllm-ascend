@@ -400,19 +400,13 @@ class TestAscendAttentionBackendImpl(TestBase):
         layer = self.layer_no_quant
         mock_vanilla_prefill.return_value = MagicMock()
 
-        def mock_tensor(data, device=None, **kwargs):
-            if device == "npu":
-                return metadata.attn_mask
-            return torch.tensor(data, **kwargs)
-
-        with patch("torch.tensor", side_effect=mock_tensor):
-            output = self.impl_192.forward(layer,
-                                           query,
-                                           key,
-                                           value,
-                                           kv_cache,
-                                           metadata,
-                                           trace_flag=False)
+        output = self.impl_192.forward(layer,
+                                       query,
+                                       key,
+                                       value,
+                                       kv_cache,
+                                       metadata,
+                                       trace_flag=False)
 
         mock_vanilla_prefill.assert_called_once()
         assert output.shape == (10, 8 * 192)
