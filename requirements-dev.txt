@@ -5,9 +5,10 @@ openai
 pytest >= 6.0
 pytest-asyncio
 lm-eval
-ray
 types-jsonschema
 xgrammar
 zmq
 types-psutil
 networkx
+ray>=2.47.1
+protobuf==4.25.6
