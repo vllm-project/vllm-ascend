@@ -260,7 +260,6 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         _metadata_for_padding = init_metadata_for_sp(input_ids)
-        # print(f"is enable sp {_metadata_for_padding.not_dummy_and_is_prefill}")
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                    inputs_embeds, _metadata_for_padding)
         return hidden_states
