@@ -141,8 +141,7 @@ jobs:
     name: singlecard e2e test
     runs-on: ${{ matrix.os }}
     container:
-      # TODO(yikun): Remove m.daocloud.io prefix when infra proxy ready
-      image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.1.rc1-910b-ubuntu22.04-py3.10
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -221,8 +220,7 @@ jobs:
     name: multicard e2e test
     runs-on: ${{ matrix.os }}
     container:
-      # TODO(yikun): Remove m.daocloud.io prefix when infra proxy ready
-      image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.1.rc1-910b-ubuntu22.04-py3.10
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True

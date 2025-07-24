@@ -50,7 +50,7 @@ jobs:
     name: vLLM Ascend test
     runs-on: linux-arm64-npu-1
     container:
-      image: m.daocloud.io/quay.io/ascend/vllm-ascend:${{ matrix.vllm_verison }}
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:${{ matrix.vllm_verison }}
     steps:
       - name: Check NPU/CANN and git info
         run: |
