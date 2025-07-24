@@ -68,7 +68,6 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
@@ -547,11 +546,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         else:
             hidden_states_or_q_c = hidden_states
         is_mtp_model = attn_metadata is not None and attn_metadata.is_mtp_model
-        with_decode = attn_metadata is not None and attn_metadata.attn_state in [
-            AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
-        ]
-        with_optimization_prefill = self.enable_prefill_optimizations and not with_decode
-        if self.torchair_graph_enabled and not is_mtp_model and not with_optimization_prefill:
+        if self.torchair_graph_enabled and not is_mtp_model:
             if self.enable_prefill_optimizations and self.debug_layer_idx > 3 and self.debug_layer_idx < 61:
                 hidden_states_or_q_c = get_tp_group().all_gather(
                     hidden_states_or_q_c, 0)
