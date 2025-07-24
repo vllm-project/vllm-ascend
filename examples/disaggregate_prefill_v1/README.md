@@ -28,7 +28,7 @@ Execution Sequence
 - Start Decode on Node 2 (D2)
 - Start proxy server on Node1
 
-* Run prefill server P1 on first node
+Run prefill server P1 on first node:
 ```shell
 export HCCL_IF_IP=172.19.32.175  # node ip
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
@@ -71,7 +71,7 @@ vllm serve /models/deepseek_r1_w8a8 \
   '{"torchair_graph_config": {"enabled":false}, "ascend_scheduler_config":{"enabled":false}, "chunked_prefill_for_mla":true}' 
 ```
 
-* Run prefill server P2 on second node
+Run prefill server P2 on second node:
 ```shell
 export HCCL_IF_IP=172.19.241.49
 export GLOO_SOCKET_IFNAME="eth0"
@@ -115,7 +115,9 @@ vllm serve /models/deepseek_r1_w8a8 \
   '{"torchair_graph_config": {"enabled":false}, "ascend_scheduler_config":{"enabled":false}, "chunked_prefill_for_mla":true}' 
 ```
 
-* Run decode server d1 on third node
+Run decode server d1 on third node:
+
+* In the D node, the `max-num-batched-tokens` does not need to be set to 36K (since the D node runs a maximum of `max-num-seqs` batches, profile_run only needs to run the number of `max-num-seqs`). So the `max-num-batched-tokens` can be set to `max-num-seqs`, which will reduce the activation memory consumption.
 ```shell
 export HCCL_IF_IP=172.19.123.51
 export GLOO_SOCKET_IFNAME="eth0"
@@ -157,7 +159,7 @@ vllm serve /models/deepseek_r1_w8a8 \
   '{"torchair_graph_config": {"enabled":true},  "ascend_scheduler_config":{"enabled":false}}' 
 ```
 
-* Run decode server d2 on last node
+Run decode server d2 on last node:
 ```shell
 export HCCL_IF_IP=172.19.190.36
 export GLOO_SOCKET_IFNAME="eth0"
@@ -200,13 +202,13 @@ vllm serve /models/deepseek_r1_w8a8 \
   '{"torchair_graph_config": {"enabled":false},  "ascend_scheduler_config":{"enabled":false}}' 
 ```
 
-* Run proxy server on the first node
+Run proxy server on the first node:
 ```shell
 cd /vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1
 python toy_proxy_server.py --host 172.19.32.175 --port 1025 --prefiller-hosts 172.19.241.49 --prefiller-port 20002 --decoder-hosts 172.19.123.51 --decoder-ports 20002
 ```
 
-* Verification
+Verification
 Check service health using the proxy server endpoint:
 ```shell
 curl http://localhost:1025/v1/completions \
@@ -219,8 +221,8 @@ curl http://localhost:1025/v1/completions \
     }'
 ```
 
-* Performance
-Test performance with vllm benchmark
+Performance
+Test performance with vllm benchmark:
 ```shell
 cd /vllm-workspace/vllm/benchmarks
 python3 benchmark_serving.py \
