@@ -36,6 +36,12 @@ on:
       - '.github/workflows/image_a3_ubuntu.yml'
       - 'Dockerfile.a3'
       - 'vllm_ascend/**'
+      - 'setup.py'
+      - 'pyproject.toml'
+      - 'requirements.txt'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'csrc/**'
 jobs:
 
   build:
