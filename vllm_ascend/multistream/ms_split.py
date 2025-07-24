@@ -223,7 +223,6 @@ def model_input_split_v1_mla_attn(
         attn_mask=attn_mask_pre,
         prefill=prefill_pre,
         decode=decode_pre,
-        with_prefill_across_dp=attn_metadata.with_prefill_across_dp,
     )
     attention_metadata_post = _metadata_cls(
         num_actual_tokens=attn_metadata.num_actual_tokens - token_index,
@@ -240,6 +239,5 @@ def model_input_split_v1_mla_attn(
         attn_state=attn_state_post,
         prefill=prefill_post,
         decode=decode_post,
-        with_prefill_across_dp=attn_metadata.with_prefill_across_dp,
     )
     return [attention_metadata_pre, attention_metadata_post]

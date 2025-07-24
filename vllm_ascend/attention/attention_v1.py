@@ -130,8 +130,6 @@ class AscendMetadata:
     query_start_loc: torch.Tensor
     query_lens: torch.Tensor
     seq_lens: torch.Tensor
-    # max value of number of tokens across dp group
-    max_num_tokens_across_dp: int = 0
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int] = None
     # (num_tokens,). The indices of the token slots that input tokens will be
@@ -142,7 +140,9 @@ class AscendMetadata:
     # Current state of this attention run.
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
     attn_mask: Optional[torch.Tensor] = None
-    with_prefill_across_dp: bool = False
+
+    # For logging.
+    num_input_tokens: int = 0  # Number of tokens including padding.
 
 
 class AscendAttentionMetadataBuilder:
@@ -154,12 +154,7 @@ class AscendAttentionMetadataBuilder:
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
 
-    def build(self,
-              num_reqs,
-              num_actual_tokens,
-              max_query_len,
-              max_num_tokens_across_dp: int = 0,
-              with_prefill_across_dp: bool = False):
+    def build(self, num_reqs, num_actual_tokens, max_query_len):
 
         block_table = self.runner.input_batch.block_table[0].get_device_tensor(
         )
@@ -186,18 +181,15 @@ class AscendAttentionMetadataBuilder:
                 attn_mask = torch_npu.npu_format_cast(mask_nz.contiguous(),
                                                       ACL_FORMAT_FRACTAL_NZ)
 
-        attn_metadata = AscendMetadata(
-            num_actual_tokens=num_actual_tokens,
-            block_tables=block_table,
-            query_start_loc=query_start_loc,
-            query_lens=query_lens,
-            seq_lens=seq_lens,
-            max_query_len=max_query_len,
-            slot_mapping=slot_mapping,
-            attn_mask=attn_mask,
-            attn_state=attn_state,
-            max_num_tokens_across_dp=max_num_tokens_across_dp,
-            with_prefill_across_dp=with_prefill_across_dp)
+        attn_metadata = AscendMetadata(num_actual_tokens=num_actual_tokens,
+                                       block_tables=block_table,
+                                       query_start_loc=query_start_loc,
+                                       query_lens=query_lens,
+                                       seq_lens=seq_lens,
+                                       max_query_len=max_query_len,
+                                       slot_mapping=slot_mapping,
+                                       attn_mask=attn_mask,
+                                       attn_state=attn_state)
         return attn_metadata
 
 
