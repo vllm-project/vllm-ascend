@@ -31,18 +31,13 @@ from vllm_ascend.eplb.core.policy.policy_factory import (DynamicConfig,
 
 class EplbWorker:
 
-    def __init__(self,
-                 shared_dict,
-                 policy_type,
-                 enable_d2d: bool = True,
-                 redundant_enable=0):
+    def __init__(self, shared_dict, policy_type, enable_d2d: bool = True):
         self.policy_type = policy_type
         self.policy = PolicyFactory.generate_policy(policy_type,
                                                     DynamicConfig())
         self.shared_dict = shared_dict
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
-        self.redundant_enable = redundant_enable
         self.rank_id = dist.get_rank()
 
     def do_update(self):
@@ -381,11 +376,8 @@ class EplbWorker:
 
             maps.append(new_expert_map[self.rank_id].numpy().tolist())
 
-            if self.redundant_enable:
-                log2phy_map = generate_log2phy_map(new_expert_map)
-                log2phy_all.append(log2phy_map[self.rank_id].numpy().tolist())
-            else:
-                log2phy_all.append([])
+            log2phy_map = generate_log2phy_map(new_expert_map)
+            log2phy_all.append(log2phy_map[self.rank_id].numpy().tolist())
 
             layer_ids.append(layer_id)
 
@@ -398,7 +390,6 @@ class EplbProcess:
                  shared_dict,
                  planner_q,
                  block_update_q,
-                 redundant_enable,
                  policy_type: int = 0,
                  enable_d2d: bool = True):
         """
@@ -412,11 +403,10 @@ class EplbProcess:
         self.enable_d2d = enable_d2d
         self.planner_q = planner_q
         self.block_update_q = block_update_q
-        self.redundant_enable = redundant_enable
 
         # Create EplbWorker instance
         self.worker = EplbWorker(self.shared_dict, self.policy_type,
-                                 self.enable_d2d, self.redundant_enable)
+                                 self.enable_d2d)
 
     def worker_process(self, planner_q, block_update_q):
         """
