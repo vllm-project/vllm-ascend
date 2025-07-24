@@ -8,7 +8,6 @@ from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading, set_default_torch_dtype)
 from vllm.v1.sample.metadata import SamplingMetadata
 
-from vllm_ascend.attention.mla_v1 import CommonAttentionMetadata
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
 
 
@@ -100,11 +99,6 @@ class MtpProposer:
         query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
         max_query_len = query_lens.max().item()
 
-        seq_lens = (target_positions[last_token_indices] + 1)
-
-        common_attn_metadata = CommonAttentionMetadata(
-            query_start_loc=cu_num_tokens, seq_lens=seq_lens)
-
         # FIXME: reorder_batch() needs to be called before build()
         # because fields of attn_metadata_builder needs to be updated.
         # However, currently reorder_batch() takes input_batch and
@@ -120,8 +114,7 @@ class MtpProposer:
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
+            query_start_loc=cu_num_tokens,
         )
 
         with set_forward_context(attn_metadata, self.vllm_config):

@@ -75,8 +75,7 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
 from vllm_ascend.attention.attention_v1_torchair import AscendTorchairMetadata
-from vllm_ascend.attention.mla_v1 import (AscendMLAMetadata,
-                                          CommonAttentionMetadata)
+from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
@@ -694,15 +693,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
-
-            # Prepare for cascade attention if enabled & beneficial.
-            common_prefix_len = 0
-
             attn_metadata_i = self.attn_metadata_builder.build(
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
-                common_prefix_len=common_prefix_len,
             )
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
@@ -1049,27 +1043,22 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             extra_builder_kwargs['graph_pad_size'] = graph_pad_size
 
         if self.vllm_config.model_config.use_mla:
-            query_start_loc = self.query_start_loc[:num_reqs + 1]
-            seq_lens = self.seq_lens[:num_reqs]
-            common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=query_start_loc, seq_lens=seq_lens)
+            extra_builder_kwargs[
+                "query_start_loc"] = self.query_start_loc[:num_reqs + 1]
             attn_metadata = self.attn_metadata_builder.build(  # type: ignore
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
-                common_attn_metadata=common_attn_metadata,
-                common_prefix_len=None,
                 **extra_builder_kwargs,
             )
+            attn_metadata.num_input_tokens = num_input_tokens
         else:
             attn_metadata = self.attn_metadata_builder.build(  # type: ignore
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
-                common_prefix_len=None,
                 **extra_builder_kwargs,
             )
-        attn_metadata.num_input_tokens = num_input_tokens
 
         # Prepare input_ids
         token_indices = (positions_np +
