@@ -6,7 +6,7 @@ This demo document provides instructions for running a disaggregated vLLM-ascend
 ## Prerequisites
 - Ascend NPU environment with vLLM 0.9.1 installed
 - Network interfaces configured for distributed communication (eg: eth0)
-- Model weights located at `/data01/deepseek_r1_w8a8_zhw`
+- Model weights located at `/models/deepseek_r1_w8a8`
 
 ## Rank table generation
 The rank table is a JSON file that specifies the mapping of Ascend NPU ranks to nodes. The following command generates a rank table for all nodes with 16 cards prefill and 16 cards decode:
@@ -15,7 +15,7 @@ Run the following command on every node to generate the rank table:
 ```shell
 cd vllm-ascend/examples/disaggregate_prefill_v1/
 bash gen_ranktable.sh --ips 172.19.32.175 172.19.241.49 172.19.123.51 172.19.190.36 \
-  --npus-per-node 8 --network-card-name enp189s0f0 --prefill-device-cnt 16 --decode-device-cnt 16
+  --npus-per-node 8 --network-card-name eth0 --prefill-device-cnt 16 --decode-device-cnt 16
 ```
 Rank table will generated at `/vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1/ranktable.json`
 
@@ -38,7 +38,7 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/example
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
-vllm serve /data01/deepseek_r1_w8a8_zhw \
+vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \
   --port 20002 \
   --data-parallel-size 2 \
@@ -79,7 +79,7 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/example
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
-vllm serve /data01/deepseek_r1_w8a8_zhw \
+vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \
   --port 20002 \
   --headless \
@@ -121,7 +121,7 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/example
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
-vllm serve /data01/deepseek_r1_w8a8_zhw \
+vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \
   --port 20002 \
   --data-parallel-size 2 \
@@ -162,7 +162,7 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/example
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
-vllm serve /data01/deepseek_r1_w8a8_zhw \
+vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \
   --port 20002 \
   --headless \
@@ -225,9 +225,9 @@ python3 benchmark_serving.py \
     --num-prompts 256 \
     --ignore-eos \
     --model deepseek \
-    --tokenizer /data01/deepseek_r1_w8a8_zhw \
+    --tokenizer /models/deepseek_r1_w8a8 \
     --host localhost \
-    --port 8000 \
+    --port 1025 \
     --endpoint /v1/completions \
     --max-concurrency 4 \
     --request-rate 4
