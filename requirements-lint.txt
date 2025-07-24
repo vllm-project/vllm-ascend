@@ -7,3 +7,4 @@ types-PyYAML
 types-regex
 types-requests
 types-setuptools
+networkx
