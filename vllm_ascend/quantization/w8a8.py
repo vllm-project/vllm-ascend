@@ -23,11 +23,7 @@ import torch_npu
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ
 
-
-def quant_per_tensor(in_tensor: torch.Tensor, input_scale: torch.Tensor,
-                     input_offset: torch.Tensor):
-    return torch_npu.npu_quantize(in_tensor, input_scale, input_offset,
-                                  torch.qint8, -1, False)
+from .quant_utils import quant_per_tensor
 
 
 class AscendW8A8LinearMethod:

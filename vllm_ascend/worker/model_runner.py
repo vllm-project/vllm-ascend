@@ -67,6 +67,8 @@ from vllm.worker.model_runner_base import (
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 
+from ..quantization.func_wrapper import wrapper_load_model
+
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
 
@@ -991,6 +993,7 @@ class NPUModelRunnerBase(ModelRunnerBase[TModelInputForNPU]):
     def get_model(self) -> nn.Module:
         return self.model
 
+    @wrapper_load_model
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:
