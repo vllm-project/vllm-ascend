@@ -640,18 +640,12 @@ class PanguProMoEAttention(nn.Module):
 def is_the_first_4_cards():
     # True [0,3]
     # False [4,7]
-    ep_group = get_ep_group()
-    device_group = ep_group.device_group
-    local_rank = torch.distributed.get_rank(group=device_group)
-    if local_rank < 4:
+    if get_world_group().rank_in_group < 4:
         return True
     return False
 
 def get_local_rank():
-    ep_group = get_ep_group()
-    device_group = ep_group.device_group
-    local_rank = torch.distributed.get_rank(group=device_group)
-    return local_rank
+    return get_world_group().rank_in_group
 
 class PanguProMoEDecoderLayer(nn.Module):
 
@@ -661,6 +655,7 @@ class PanguProMoEDecoderLayer(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
+        enable_attn_export_split: bool = False
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -668,40 +663,74 @@ class PanguProMoEDecoderLayer(nn.Module):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
-        # Attention
-        if is_the_first_4_cards():
-            self.mlp = None
-            self.self_attn = PanguProMoEAttention(
-                hidden_size=self.hidden_size,
-                num_heads=config.num_attention_heads,
-                num_kv_heads=config.num_key_value_heads,
-                rope_theta=rope_theta,
-                rope_scaling=rope_scaling,
-                max_position_embeddings=max_position_embeddings,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.self_attn",
+        self.enable_attn_export_split = enable_attn_export_split
+        # # Attention
+        # if is_the_first_4_cards():
+        #     self.mlp = None
+        #     self.self_attn = PanguProMoEAttention(
+        #         hidden_size=self.hidden_size,
+        #         num_heads=config.num_attention_heads,
+        #         num_kv_heads=config.num_key_value_heads,
+        #         rope_theta=rope_theta,
+        #         rope_scaling=rope_scaling,
+        #         max_position_embeddings=max_position_embeddings,
+        #         cache_config=cache_config,
+        #         quant_config=quant_config,
+        #         prefix=f"{prefix}.self_attn",
+        #     )
+        # # Export
+        # else:
+        #     self.self_attn = None
+        #     # `mlp_only_layers` in the config.
+        #     layer_idx = extract_layer_index(prefix)
+        #     mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
+        #                        config.mlp_only_layers)
+        #     if (layer_idx not in mlp_only_layers) and (config.num_experts > 0):
+        #         self.mlp = PanguProMoESparseMoeBlock(
+        #             config=config,
+        #             quant_config=quant_config,
+        #             prefix=f"{prefix}.mlp",
+        #         )
+        #     else:
+        #         self.mlp = PanguProMoEMLP(
+        #             hidden_size=config.hidden_size,
+        #             intermediate_size=config.intermediate_size,
+        #             hidden_act=config.hidden_act,
+        #             quant_config=quant_config,
+        #             prefix=f"{prefix}.mlp",
+        #         )
+        # ======================
+
+        self.self_attn = PanguProMoEAttention(
+            hidden_size=self.hidden_size,
+            num_heads=config.num_attention_heads,
+            num_kv_heads=config.num_key_value_heads,
+            rope_theta=rope_theta,
+            rope_scaling=rope_scaling,
+            max_position_embeddings=max_position_embeddings,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
             )
-        # Export
+
+        # `mlp_only_layers` in the config.
+        layer_idx = extract_layer_index(prefix)
+        mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
+                            config.mlp_only_layers)
+        if (layer_idx not in mlp_only_layers) and (config.num_experts > 0):
+            self.mlp = PanguProMoESparseMoeBlock(
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
+            )
         else:
-            # `mlp_only_layers` in the config.
-            layer_idx = extract_layer_index(prefix)
-            mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
-                               config.mlp_only_layers)
-            if (layer_idx not in mlp_only_layers) and (config.num_experts > 0):
-                self.mlp = PanguProMoESparseMoeBlock(
-                    config=config,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.mlp",
-                )
-            else:
-                self.mlp = PanguProMoEMLP(
-                    hidden_size=config.hidden_size,
-                    intermediate_size=config.intermediate_size,
-                    hidden_act=config.hidden_act,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.mlp",
-                )
+            self.mlp = PanguProMoEMLP(
+                hidden_size=config.hidden_size,
+                intermediate_size=config.intermediate_size,
+                hidden_act=config.hidden_act,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
+            )
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
@@ -720,8 +749,13 @@ class PanguProMoEDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         need_h2p_pad = h2p_unpad_idx is not None and h2p_pad_idx is not None \
             and h2p_unpad_idx.shape[0] < h2p_pad_idx.shape[0]
-        tp_size = get_tp_group().world_size
-
+        rank = get_world_group().rank_in_group
+        # device_group = get_tp_group().device_group
+        # local_rank = torch.distributed.get_rank(group=device_group)
+        # print(f"tp_size is ==== {tp_size}")
+        # print(f"device_group is ==== {device_group}")
+        # print(f"local_rank is ==== {local_rank}")
+        # print(f"rank_in_group is ==== {get_tp_group().rank_in_group}")
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -741,80 +775,93 @@ class PanguProMoEDecoderLayer(nn.Module):
                 if need_h2p_pad:
                     hidden_states = hidden_states.index_select(
                         dim=0, index=h2p_unpad_idx)
-        # 如果是Attn就计算一次Attn，否则就不计算
-        if self.self_attn is not None:
-            # 计算attention
+        if self.enable_attn_export_split:
+            import torch.distributed as dist
+            # 如果是Attn就计算一次Attn，否则就不计算
+            if rank < 4:
+                # print(f"rank is == {rank} , start attn")
+                # 计算attention
+                hidden_states = self.self_attn(
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    kv_cache=kv_cache,
+                    attn_metadata=attn_metadata,
+                )
+                # Fully Connected
+                hidden_states, residual = self.post_attention_layernorm(
+                    hidden_states, residual)
+                # 发送给对应的exprot
+                # AE分离场景下，attention 所在的卡（例如卡0）需要将hidden_states、attn_metadata
+                # send 给export所在的卡（例如卡4）
+                dst_rank = (rank ) % 4 + 4
+                dist.send(hidden_states, dst_rank)
+                dist.send(residual, dst_rank)
+                # recv
+                # 接收export发送的数据
+                src_rank = (rank ) % 4 + 4
+                dist.recv(hidden_states,src_rank)
+                # print(f"接收export发送的数据 recv_matedata_list is == {hidden_states.shape}")
+            # export
+            else:
+                # print(f"rank is == {rank} , start export")
+                # recv
+                # 接收attn发送的数据
+                src_rank = (rank ) % 4 
+                dist.recv(hidden_states,src_rank)
+                dist.recv(residual,src_rank)
+                # print(f"接收attn发送的数据 recv_matedata_list is == {hidden_states.shape}")
+                # 计算mlp
+                hidden_states = self.mlp(hidden_states, attn_metadata=attn_metadata)
+                # send
+                dst_rank = src_rank
+                dist.send(hidden_states, dst_rank)
+        else:
+            #=============================
             hidden_states = self.self_attn(
                 positions=positions,
                 hidden_states=hidden_states,
                 kv_cache=kv_cache,
                 attn_metadata=attn_metadata,
             )
+
+            if use_h2p():
+                if need_h2p_pad:
+                    hidden_states = hidden_states.index_select(dim=0,
+                                                               index=h2p_pad_idx)
+                if tp_size > 1:
+                    hidden_states = dist._functional_collectives.reduce_scatter_tensor(
+                        hidden_states,
+                        "sum",
+                        scatter_dim=0,
+                        group=get_tp_group().device_group)
             # Fully Connected
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual)
-            # 发送给对应的exprot
-            # AE分离场景下，attention 所在的卡（例如卡0）需要将hidden_states、attn_metadata、
-            # mla_moe_communication send 给export所在的卡（例如卡8）
-            local_rank = get_local_rank()
-            dst_rank = local_rank + 4
-            ep_group = get_ep_group()
-            matedata_list = [hidden_states, attn_metadata]
-            ep_group.send_object(matedata_list, dst_rank)
-        # export
-        else:
-            # recv
-            # 接收attn发送的数据
-            local_rank = get_local_rank()
-            src_rank = local_rank - 4
-            ep_group = get_ep_group()
-            recv_matedata_list = ep_group.recv_object(src_rank)
-            hidden_states, attn_metadata, mla_moe_communication = recv_matedata_list
-            # 计算
+            if use_h2p():
+                all_rank_group = get_world_group().device_group
+                output_size = (hidden_states.shape[0] *
+                               get_world_group().world_size,
+                               hidden_states.shape[1])
+                # Allocate output tensor.
+                output_tensor = torch.empty(output_size,
+                                            dtype=hidden_states.dtype,
+                                            device=hidden_states.device)
+                # All-gather.
+                dist.all_gather_into_tensor(output_tensor,
+                                            hidden_states,
+                                            group=all_rank_group)
+                hidden_states = output_tensor
+
             hidden_states = self.mlp(hidden_states, attn_metadata=attn_metadata)
-            # send
-            local_rank = get_local_rank()
-            dst_rank = local_rank - 4
-            ep_group = get_ep_group()
-            matedata_list = [hidden_states]
-            ep_group.send_object(matedata_list, dst_rank)
-        hidden_states = matedata_list[0]
 
-
-        if use_h2p():
-            if need_h2p_pad:
-                hidden_states = hidden_states.index_select(dim=0,
-                                                           index=h2p_pad_idx)
-            if tp_size > 1:
+            if use_h2p():
                 hidden_states = dist._functional_collectives.reduce_scatter_tensor(
                     hidden_states,
                     "sum",
                     scatter_dim=0,
-                    group=get_tp_group().device_group)
-
-        if use_h2p():
-            all_rank_group = get_world_group().device_group
-            output_size = (hidden_states.shape[0] *
-                           get_world_group().world_size,
-                           hidden_states.shape[1])
-            # Allocate output tensor.
-            output_tensor = torch.empty(output_size,
-                                        dtype=hidden_states.dtype,
-                                        device=hidden_states.device)
-            # All-gather.
-            dist.all_gather_into_tensor(output_tensor,
-                                        hidden_states,
-                                        group=all_rank_group)
-            hidden_states = output_tensor
-
-
-        if use_h2p():
-            hidden_states = dist._functional_collectives.reduce_scatter_tensor(
-                hidden_states,
-                "sum",
-                scatter_dim=0,
-                group=get_world_group().device_group)
-
+                    group=get_world_group().device_group)
+        #print(f"rank == {rank} 最后的 hidden_states is == {hidden_states}")
+        #print(f"rank == {rank} 最后的 residual is == {residual}")
         return hidden_states, residual
 
 
@@ -827,6 +874,7 @@ class PanguProMoEModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        self.enable_attn_export_split = vllm_config.parallel_config.enable_attn_export_split
 
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -842,7 +890,8 @@ class PanguProMoEModel(nn.Module):
             lambda prefix: PanguProMoEDecoderLayer(config=config,
                                                    cache_config=cache_config,
                                                    quant_config=quant_config,
-                                                   prefix=prefix),
+                                                   prefix=prefix,
+                                                   enable_attn_export_split = self.enable_attn_export_split),
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -904,6 +953,7 @@ class PanguProMoEModel(nn.Module):
             h2p_pad_idx = None
 
         for i in range(self.start_layer, self.end_layer):
+            # print(f"layer id is === {i}")
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions, hidden_states, residual,
@@ -993,8 +1043,10 @@ class PanguProMoEForCausalLM(nn.Module, SupportsPP):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+
         tp_size = get_tp_group().world_size
         tp_rank = get_tp_group().rank_in_group
+
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -1011,12 +1063,12 @@ class PanguProMoEForCausalLM(nn.Module, SupportsPP):
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
             num_experts=self.config.num_experts)
-
         # expert_params_mapping = []
 
         params_dict = dict(self.named_parameters())  # from model
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
+            # print(f"name is == {name}")
             # =======================================================
             # BF: add this to load with less layers
             if 'layers' in name:
@@ -1076,7 +1128,11 @@ class PanguProMoEForCausalLM(nn.Module, SupportsPP):
                     weight_loader(param, loaded_weight)
 
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                # if get_world_group().rank_in_group > 3:
+                #     continue
                 # Skip non-stacked layers and experts (experts handled below).
+                # print(f"param_name is =={param_name}")
+                # print(f"weight_name is =={weight_name}")
                 if weight_name not in name:
                     continue
                 # We have mlp.experts[0].gate_proj in the checkpoint.
