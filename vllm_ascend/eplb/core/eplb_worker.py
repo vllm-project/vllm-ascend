@@ -18,7 +18,7 @@
 from multiprocessing import Process
 from typing import Any
 
-import networkx as nx
+import networkx as nx  # type: ignore
 import numpy as np
 import torch
 import torch.distributed as dist
