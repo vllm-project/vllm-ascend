@@ -342,7 +342,7 @@ class AscendQwen2VisionTransformer(Qwen2VisionTransformer):
 class AscendQwen2VLForConditionalGeneration(Qwen2VLForConditionalGeneration):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config)
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.visual = AscendQwen2VisionTransformer(
             self.config.vision_config,
             norm_eps=getattr(self.config, "rms_norm_eps", 1e-6),
