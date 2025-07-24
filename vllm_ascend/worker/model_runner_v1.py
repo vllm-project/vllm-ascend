@@ -606,16 +606,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if batch_changed:
             self.input_batch.refresh_sampling_metadata()
 
-    def _get_forward_metadata_across_dp(
+        def _get_forward_metadata_across_dp(
             self, maybe_padded_num_tokens: int, num_tokens: int,
-            with_prefill: bool, enable_dbo: bool
+            with_prefill: bool, enable_dbo: bool, is_profile: bool=False, num_reqs: int=1
     ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
         if self.dp_size == 1:
             return maybe_padded_num_tokens, None, with_prefill, enable_dbo
 
+        print("##################self.dp_size",self.dp_size,"is_profile",is_profile," self.dp_rank", self.dp_rank)
         num_tokens_across_dp = [0] * self.dp_size * 2
         num_tokens_across_dp[self.dp_rank] = maybe_padded_num_tokens
         num_tokens_across_dp[self.dp_size + self.dp_rank] = num_tokens
+        print("##################maybe_padded_num_tokens",maybe_padded_num_tokens)
+        print("##################num_tokens_across_dp allreduce before",num_tokens_across_dp," self.dp_rank", self.dp_rank)
         forward_metadata = torch.tensor(num_tokens_across_dp +
                                         [with_prefill, not enable_dbo],
                                         device="cpu",
@@ -630,6 +633,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             maybe_padded_num_tokens = num_tokens
         else:
             num_tokens_across_dp = forward_metadata[:self.dp_size]
+        print("##################num_tokens_across_dp@@@@@@@@@",num_tokens_across_dp)
 
         # NOTE: when in torchair_graph_mode, we need to pad local_num_tokens to
         # `max_num_tokens_across_dp`, in other situation it is not necessary.
@@ -639,10 +643,40 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                 self.dp_size,
                                                 device="cpu",
                                                 dtype=torch.int32)
+        print("##################num_tokens_across_dp",num_tokens_across_dp," self.dp_rank", self.dp_rank)
         cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_across_dp, dim=0)
+        num_reqs_across_dp = [0] * self.dp_size * 2
+        if is_profile:
+            assert num_tokens <= self.scheduler_config.max_num_batched_tokens
+            max_num_reqs = self.scheduler_config.max_num_seqs
+            num_reqs = math.ceil(num_tokens / self.decode_token_per_req)
+            if with_prefill:
+                num_reqs = min(num_tokens, max_num_reqs)
+            else:
+                num_reqs = (num_tokens + self.decode_token_per_req -
+                            1) // self.decode_token_per_req
+            num_reqs_across_dp[self.dp_rank] = num_reqs
+            num_reqs_across_dp[self.dp_size + self.dp_rank] = num_reqs
+           
+        else:
+            num_reqs_across_dp[self.dp_rank] = num_reqs
+            num_reqs_across_dp[self.dp_size + self.dp_rank] = num_reqs
+        
+        num_reqs_forward_metadata = torch.tensor(num_reqs_across_dp +
+                                        [with_prefill, not enable_dbo],
+                                        device="cpu",
+                                        dtype=torch.int32)
+        dist.all_reduce(num_reqs_forward_metadata, group=get_dp_group().cpu_group)
+        if with_prefill:
+            num_reqs_across_dp = num_reqs_forward_metadata[self.dp_size:self.dp_size *
+                                                    2]
+        else:
+            num_reqs_across_dp = num_reqs_forward_metadata[:self.dp_size]
+        print("##################num_reqs_across_dp",num_reqs_across_dp," self.dp_rank", self.dp_rank)
+        
         
         return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, not bool(
-            forward_metadata[-1]), cu_tokens_across_dp_cpu
+            forward_metadata[-1]), cu_tokens_across_dp_cpu, num_reqs_across_dp, num_reqs
 
     def _check_dbo_is_valid(self, query_lens: torch.Tensor,
                             attn_state: AscendAttentionState,
@@ -880,6 +914,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
         num_scheduled_tokens = np.empty(num_reqs, dtype=np.int32)
+        print("#############first num_reqs",num_reqs)
+        print("#############first num_scheduled_tokens",num_scheduled_tokens)
         num_valid_tokens = np.empty(num_reqs, dtype=np.int32)
         max_num_scheduled_tokens = 0
         for i, req_id in enumerate(self.input_batch.req_ids):
@@ -903,6 +939,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         sample_indices = cu_num_tokens - 1
         sample_indices = torch.from_numpy(sample_indices).to(self.device,
                                                              non_blocking=True)
+        print("#############sample_indices",sample_indices)
         arange = self.arange_np[:total_num_scheduled_tokens] - cumsums_offsets
 
         positions_np = self.positions_np[:total_num_scheduled_tokens]
@@ -1007,9 +1044,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
                 total_num_scheduled_tokens)
         (padded_num_tokens_across_dp, num_tokens_across_dp, with_prefill,
-         enable_dbo, cu_tokens_across_dp_cpu) = self._get_forward_metadata_across_dp(
+         enable_dbo, cu_tokens_across_dp_cpu, num_reqs_across_dp, num_reqs) = self._get_forward_metadata_across_dp(
              maybe_padded_num_tokens, total_num_scheduled_tokens, with_prefill,
-             enable_dbo)
+             enable_dbo, False, num_reqs)
+        
+        print("#################num_reqs_across_dp",num_reqs_across_dp)
+        print("#################num_reqs",num_reqs)
         extra_builder_kwargs['enable_dbo_across_dp'] = enable_dbo
 
         # TODO(zzzzwwjj): this code need to refactor afterwards.
@@ -1156,10 +1196,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens)
             sample_indices = spec_decode_metadata.logits_indices
-
+        
+        print("#############sample_indices after",sample_indices)
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
                 total_num_scheduled_tokens, sample_indices, finished_sending,
-                finished_recving, cu_tokens_across_dp_cpu)
+                finished_recving, num_reqs_across_dp, num_tokens_across_dp)
 
     def _calc_spec_decode_metadata(
         self,
@@ -1339,12 +1380,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 return self.kv_connector_no_forward(scheduler_output)
             (attn_metadata, hidden_states, spec_decode_metadata, positions,
              num_scheduled_tokens, sample_indices, finished_sending,
-             finished_recving, cu_tokens_across_dp_cpu) = (self._process_reqs(scheduler_output,
+             finished_recving, num_reqs_across_dp, num_tokens_across_dp) = (self._process_reqs(scheduler_output,
                                                      intermediate_tensors))
 
         with ProfileExecuteDuration().capture_async("post process"):
-            # print("############cu_tokens_across_dp_cpu",cu_tokens_across_dp_cpu)
-            logits = self.model.compute_logits(hidden_states[sample_indices], cu_tokens_across_dp_cpu,
+            print("############sample_indices",sample_indices)
+            print("############ProfileExecuteDuration hidden_states",hidden_states)
+            # temp = len(sample_indices)
+            # num_scheduled = torch.Tensor([temp] * self.dp_size).int()
+            logits = self.model.compute_logits(hidden_states[sample_indices], num_reqs_across_dp, num_tokens_across_dp,
                                                None)
 
             # Apply structured output bitmasks if present
@@ -1604,20 +1648,22 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             with_prefill = True
         # Padding for DP
         (num_tokens, num_tokens_across_dp, with_prefill,
-         enable_dbo, cu_tokens_across_dp_cpu) = self._get_forward_metadata_across_dp(
-             maybe_padded_num_tokens, num_tokens, with_prefill, False)
-
-        # Set num_scheduled_tokens based on num_tokens and max_num_seqs
-        # for dummy run with LoRA so that the num_reqs collectively
-        # has num_tokens in total.
-        assert num_tokens <= self.scheduler_config.max_num_batched_tokens
-        max_num_reqs = self.scheduler_config.max_num_seqs
-        num_reqs = math.ceil(num_tokens / self.decode_token_per_req)
-        if with_prefill:
-            num_reqs = min(num_tokens, max_num_reqs)
-        else:
-            num_reqs = (num_tokens + self.decode_token_per_req -
-                        1) // self.decode_token_per_req
+         enable_dbo, cu_tokens_across_dp_cpu, num_reqs_across_dp, num_reqs) = self._get_forward_metadata_across_dp(
+             maybe_padded_num_tokens, num_tokens, with_prefill, False, True, 1)
+        print("#################num_reqs_across_dp",num_reqs_across_dp)
+        print("#################num_reqs",num_reqs)
+        
+        # # Set num_scheduled_tokens based on num_tokens and max_num_seqs
+        # # for dummy run with LoRA so that the num_reqs collectively
+        # # has num_tokens in total.
+        # assert num_tokens <= self.scheduler_config.max_num_batched_tokens
+        # max_num_reqs = self.scheduler_config.max_num_seqs
+        # num_reqs = math.ceil(num_tokens / self.decode_token_per_req)
+        # if with_prefill:
+        #     num_reqs = min(num_tokens, max_num_reqs)
+        # else:
+        #     num_reqs = (num_tokens + self.decode_token_per_req -
+        #                 1) // self.decode_token_per_req
         min_tokens_per_req = num_tokens // num_reqs
         num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
         num_scheduled_tokens_list[-1] += num_tokens % num_reqs
@@ -1670,17 +1716,74 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     for k, v in self.intermediate_tensors.items()
                 })
 
-            with set_ascend_forward_context(
-                    attn_metadata,
-                    self.vllm_config,
-                    num_tokens=num_tokens,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                    with_prefill=with_prefill,
-                    in_profile_run=self.in_profile_run,
-                    num_actual_tokens=0,
-            ):
-                model_kwargs = {}
-                if self.torchair_graph_enabled and not with_prefill:
+            # with set_ascend_forward_context(
+            #         attn_metadata,
+            #         self.vllm_config,
+            #         num_tokens=num_tokens,
+            #         num_tokens_across_dp=num_tokens_across_dp,
+            #         with_prefill=with_prefill,
+            #         in_profile_run=self.in_profile_run,
+            #         num_actual_tokens=0,
+            # ):
+            #     model_kwargs = {}
+            #     if self.torchair_graph_enabled and not with_prefill:
+            #         # Only mark static while compiling
+            #         if is_torchair_compile:
+            #             torch._dynamo.mark_static(input_ids)
+            #             torch._dynamo.mark_static(positions)
+            #             torch._dynamo.mark_static(
+            #                 attn_metadata.decode.block_table)
+            #             torch._dynamo.mark_static(
+            #                 attn_metadata.decode.input_positions)
+            #             torch._dynamo.mark_static(attn_metadata.decode.sin)
+            #             torch._dynamo.mark_static(attn_metadata.decode.cos)
+            #             torch._dynamo.mark_static(
+            #                 get_forward_context().mc2_mask)
+            #             torch._dynamo.mark_static(attn_metadata.slot_mapping)
+            #             if self.speculative_config:
+            #                 torch._dynamo.mark_static(
+            #                     attn_metadata.decode.attn_mask)
+            #             for kv in self.kv_caches:
+            #                 assert isinstance(
+            #                     kv, tuple), "kv_cache must be a tuple"
+            #                 torch._dynamo.mark_static(kv[0])
+            #                 torch._dynamo.mark_static(kv[1])
+            #         compiled_model = self._get_torchair_lazy_compiled_model(
+            #             num_tokens)
+            #         model_kwargs["kv_caches"] = self.kv_caches
+            #         model_kwargs["attn_metadata"] = attn_metadata
+            #         if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+            #             model_kwargs["graph_enable"] = True  # type: ignore
+            #         hidden_states = compiled_model(
+            #             input_ids=input_ids,
+            #             positions=positions,
+            #             intermediate_tensors=intermediate_tensors,
+            #             inputs_embeds=None,
+            #             **model_kwargs,
+            #         )
+            #     else:
+            #         if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+            #             model_kwargs["graph_enable"] = False  # type: ignore
+            #         print(":#################input_ids",input_ids.shape)
+            #         print(":#################positions",positions.shape)
+            #         hidden_states = model(
+            #             input_ids=input_ids,
+            #             positions=positions,
+            #             intermediate_tensors=intermediate_tensors,
+            #             inputs_embeds=inputs_embeds,
+            #             **model_kwargs)
+            #         print(":#################dummy run hidden_states",hidden_states.shape, hidden_states)
+            if self.torchair_graph_enabled and not with_prefill:
+                with set_ascend_forward_context(
+                        attn_metadata,
+                        self.vllm_config,
+                        num_tokens=num_tokens,
+                        num_tokens_across_dp=num_tokens_across_dp,
+                        with_prefill=with_prefill,
+                        in_profile_run=self.in_profile_run,
+                        num_actual_tokens=0,
+                ):
+                    model_kwargs = {}
                     # Only mark static while compiling
                     if is_torchair_compile:
                         torch._dynamo.mark_static(input_ids)
@@ -1715,19 +1818,61 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         inputs_embeds=None,
                         **model_kwargs,
                     )
+            else:
+                if len(self.kv_caches) != 0:
+                    dummy_tokens = 1
+                    dummy_input_ids = torch.tensor([1], device=input_ids.device)
+                    dummy_positions = torch.tensor([0], device=positions.device)
+                    attn_metadata = self.attn_metadata_builder.build_dummy_metadata(num_actual_tokens=dummy_tokens,
+                                                                                    num_reqs=1,
+                                                                                    num_scheduled_tokens=num_scheduled_tokens,
+                                                                                    attn_state=attn_state)
+
+                    with set_ascend_forward_context(attn_metadata,
+                                                    self.vllm_config,
+                                                    num_tokens=dummy_tokens,
+                                                    num_tokens_across_dp=num_tokens_across_dp,
+                                                    with_prefill=with_prefill,
+                                                    in_profile_run=self.in_profile_run,
+                                                    num_actual_tokens=0):
+                        model_kwargs = {}
+                        if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+                            model_kwargs["graph_enable"] = False  # type: ignore
+                        print(":################dummy_tokens#input_ids",dummy_input_ids)
+                        print(":###############dummy_tokens##positions",dummy_positions)
+                        hidden_states = model(
+                            input_ids=dummy_input_ids,
+                            positions=dummy_positions,
+                            intermediate_tensors=intermediate_tensors,
+                            inputs_embeds=inputs_embeds,
+                            **model_kwargs)
+                        print(":#################dummy_tokens hidden_states",hidden_states.shape, hidden_states)
                 else:
-                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
-                        model_kwargs["graph_enable"] = False  # type: ignore
-                    hidden_states = model(
-                        input_ids=input_ids,
-                        positions=positions,
-                        intermediate_tensors=intermediate_tensors,
-                        inputs_embeds=inputs_embeds,
-                        **model_kwargs)
+                    with set_ascend_forward_context(
+                            attn_metadata,
+                            self.vllm_config,
+                            num_tokens=num_tokens,
+                            num_tokens_across_dp=num_tokens_across_dp,
+                            with_prefill=with_prefill,
+                            in_profile_run=self.in_profile_run,
+                            num_actual_tokens=0,
+                    ):
+                        model_kwargs = {}
+                        if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+                            model_kwargs["graph_enable"] = False  # type: ignore
+                        print(":#################input_ids",input_ids.shape)
+                        print(":#################positions",positions.shape)
+                        hidden_states = model(
+                            input_ids=input_ids,
+                            positions=positions,
+                            intermediate_tensors=intermediate_tensors,
+                            inputs_embeds=inputs_embeds,
+                            **model_kwargs)
+                        print(":#################dummy run hidden_states",hidden_states.shape, hidden_states)
             if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
                 assert isinstance(self.drafter, MtpProposer)
                 self.drafter.dummy_run(num_reqs, with_prefill=with_prefill)
-            return hidden_states, cu_tokens_across_dp_cpu
+            return hidden_states, num_reqs_across_dp, num_tokens_across_dp
 
     @contextmanager
     def set_in_profile_run(self):
@@ -1754,22 +1899,26 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         num_scheduled_tokens_list[-1] += num_tokens % num_reqs
         assert sum(num_scheduled_tokens_list) == num_tokens
         assert len(num_scheduled_tokens_list) == num_reqs
-
+        
+        print("##############num_scheduled_tokens_list",num_scheduled_tokens_list)
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
+        print("##############num_scheduled_tokens",num_scheduled_tokens)
         logit_indices = np.cumsum(num_scheduled_tokens) - 1
+        print("##############logit_indices",logit_indices)
 
         # assert self.lora_manager is not None, "LoRA is not enabled"
         # TODO: call maybe_profile_with_lora()
 
         # Trigger compilation for general shape.
         with self.set_in_profile_run():
-            hidden_states, cu_tokens_across_dp_cpu = self._dummy_run(self.max_num_tokens,
+            hidden_states, num_reqs_across_dp, num_tokens_across_dp = self._dummy_run(self.max_num_tokens,
                                             with_prefill=True)
 
         if get_pp_group().is_last_rank:
             hidden_states = hidden_states[logit_indices]
-            logits = self.model.compute_logits(hidden_states, cu_tokens_across_dp_cpu, None)
+            # num_scheduled = torch.Tensor([num_reqs] * self.dp_size).int()
+            logits = self.model.compute_logits(hidden_states, num_reqs_across_dp, num_tokens_across_dp, None)
         else:
             logits = None
 
