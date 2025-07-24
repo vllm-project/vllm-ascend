@@ -38,6 +38,8 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/example
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
+VLLM_LLMDD_RPC_PORT=5559
+
 vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \
   --port 20002 \
@@ -48,11 +50,11 @@ vllm serve /models/deepseek_r1_w8a8 \
   --data-parallel-rpc-port 13356 \
   --tensor-parallel-size 8 \
   --enable-expert-parallel \
-  --no-enable-prefix-caching \
   --seed 1024 \
   --served-model-name deepseek \
-  --max-model-len 6144  \
-  --max-num-batched-tokens 6144  \
+  --max-model-len 32768  \
+  --max-num-batched-tokens 32768  \
+  --max-num-seqs 256 \
   --trust-remote-code \
   --enforce-eager \
   --gpu-memory-utilization 0.9  \
@@ -66,7 +68,7 @@ vllm serve /models/deepseek_r1_w8a8 \
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enabled":false, "enable_multistream_shared_expert":false}, "ascend_scheduler_config":{"enabled":true, "enable_chunked_prefill":false}}'
+  '{"torchair_graph_config": {"enabled":false}, "ascend_scheduler_config":{"enabled":false}, "chunked_prefill_for_mla":true}' 
 ```
 
 * Run prefill server P2 on second node
@@ -79,6 +81,8 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/example
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
+VLLM_LLMDD_RPC_PORT=5659
+
 vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \
   --port 20002 \
@@ -90,11 +94,11 @@ vllm serve /models/deepseek_r1_w8a8 \
   --data-parallel-rpc-port 13356 \
   --tensor-parallel-size 8 \
   --enable-expert-parallel \
-  --no-enable-prefix-caching \
   --seed 1024 \
   --served-model-name deepseek \
-  --max-model-len 6144  \
-  --max-num-batched-tokens 6144  \
+  --max-model-len 32768  \
+  --max-num-batched-tokens 32768  \
+  --max-num-seqs 256 \
   --trust-remote-code \
   --enforce-eager \
   --gpu-memory-utilization 0.9  \
@@ -108,7 +112,7 @@ vllm serve /models/deepseek_r1_w8a8 \
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enabled":false, "enable_multistream_shared_expert":false},  "ascend_scheduler_config":{"enabled":true, "enable_chunked_prefill":false}}' 
+  '{"torchair_graph_config": {"enabled":false}, "ascend_scheduler_config":{"enabled":false}, "chunked_prefill_for_mla":true}' 
 ```
 
 * Run decode server d1 on third node
@@ -121,6 +125,8 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/example
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
+VLLM_LLMDD_RPC_PORT=5759
+
 vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \
   --port 20002 \
@@ -131,13 +137,12 @@ vllm serve /models/deepseek_r1_w8a8 \
   --data-parallel-rpc-port 13356 \
   --tensor-parallel-size 8 \
   --enable-expert-parallel \
-  --no-enable-prefix-caching \
   --seed 1024 \
   --served-model-name deepseek \
-  --max-model-len 6144  \
-  --max-num-batched-tokens 6144  \
+  --max-model-len 32768  \
+  --max-num-batched-tokens 256  \
+  --max-num-seqs 256 \
   --trust-remote-code \
-  --enforce-eager \
   --gpu-memory-utilization 0.9  \
   --kv-transfer-config  \
   '{"kv_connector": "LLMDataDistCMgrConnector",
@@ -149,7 +154,7 @@ vllm serve /models/deepseek_r1_w8a8 \
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enabled":false, "enable_multistream_shared_expert":false},  "ascend_scheduler_config":{"enabled":true, "enable_chunked_prefill":false}}'
+  '{"torchair_graph_config": {"enabled":true},  "ascend_scheduler_config":{"enabled":false}}' 
 ```
 
 * Run decode server d2 on last node
@@ -162,6 +167,8 @@ export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/example
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
+VLLM_LLMDD_RPC_PORT=5859
+
 vllm serve /models/deepseek_r1_w8a8 \
   --host 0.0.0.0 \
   --port 20002 \
@@ -173,13 +180,12 @@ vllm serve /models/deepseek_r1_w8a8 \
   --data-parallel-rpc-port 13356 \
   --tensor-parallel-size 8 \
   --enable-expert-parallel \
-  --no-enable-prefix-caching \
   --seed 1024 \
   --served-model-name deepseek \
-  --max-model-len 6144  \
-  --max-num-batched-tokens 6144  \
+  --max-model-len 32768  \
+  --max-num-batched-tokens 256  \
+  --max-num-seqs 256 \
   --trust-remote-code \
-  --enforce-eager \
   --gpu-memory-utilization 0.9  \
   --kv-transfer-config  \
   '{"kv_connector": "LLMDataDistCMgrConnector",
@@ -191,7 +197,7 @@ vllm serve /models/deepseek_r1_w8a8 \
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
   --additional-config \
-  '{"torchair_graph_config": {"enabled":false, "enable_multistream_shared_expert":false},  "ascend_scheduler_config":{"enabled":true, "enable_chunked_prefill":false}}' 
+  '{"torchair_graph_config": {"enabled":false},  "ascend_scheduler_config":{"enabled":false}}' 
 ```
 
 * Run proxy server on the first node
