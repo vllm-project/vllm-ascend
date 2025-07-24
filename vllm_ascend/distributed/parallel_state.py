@@ -29,7 +29,7 @@ def init_ascend_model_parallel(
     if model_parallel_initialized():
         return
     assert torch.distributed.is_initialized()
-    world_size = world_size or torch.distributed.get_world_size()
+    world_size = torch.distributed.get_world_size()
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
     num_expert_parallel_groups = world_size // expert_parallel_size
