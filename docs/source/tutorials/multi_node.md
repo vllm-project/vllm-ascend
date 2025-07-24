@@ -56,9 +56,10 @@ hccn_tool -i 0 -ping -g address 10.20.0.20
 ## Run with docker
 Assume you have two Atlas 800 A2(64G*8) nodes, and want to deploy the `deepseek-v3-w8a8` quantitative model across multi-node.
 
-```shell
-# Define the image and container name
-export IMAGE=quay.io/ascend/vllm-ascend:main
+```{code-block} bash
+   :substitutions:
+# Update the vllm-ascend image
+export IMAGE=m.daocloud.io/quay.io/ascend/vllm-ascend:|vllm_ascend_version|
 export NAME=vllm-ascend
 
 # Run the container using the defined variables
@@ -108,11 +109,10 @@ export TP_SOCKET_IFNAME=$nic_name
 export HCCL_SOCKET_IFNAME=$nic_name
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
-export VLLM_USE_V1=1
 export HCCL_BUFFSIZE=1024
 
 # The w8a8 weight can obtained from https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V3-W8A8
-# If you want to the quantization manually, please refer to https://vllm-ascend.readthedocs.io/en/latest/user_guide/quantization.html
+# If you want to the quantization manually, please refer to https://vllm-ascend.readthedocs.io/en/latest/user_guide/feature_guide/quantization.html
 vllm serve /root/.cache/ds_v3 \
 --host 0.0.0.0 \
 --port 8004 \

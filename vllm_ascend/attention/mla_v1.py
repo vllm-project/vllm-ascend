@@ -1,11 +1,12 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Tuple, Type, TypeVar
+from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type,
+                    TypeVar)
 
 import numpy as np
 import torch
 import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
-                                              AttentionMetadata,
+                                              AttentionMetadata, AttentionType,
                                               MLAAttentionImpl)
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import get_current_vllm_config
@@ -15,31 +16,19 @@ from vllm.model_executor.layers.linear import (LinearBase,
 from vllm.utils import cdiv, round_down
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.attention.attention import _ALLOWED_NUM_QUERIES_PER_KV
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
-from vllm_ascend.utils import npu_prefetch, npu_stream_switch, npu_wait_tensor
+from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
+from vllm_ascend.utils import npu_prefetch, vllm_version_is
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
-
-@dataclass
-class CommonAttentionMetadata:
-    """
-    Attention metadata attributes that can be shared by layers in different KV
-    cache groups and thus having different block table.
-    """
-
-    query_start_loc: torch.Tensor
-    """(batch_size + 1,), the start location of each request in query Tensor"""
-    seq_lens: torch.Tensor
-    """(batch_size,), the length of each request including both computed tokens
-    and newly scheduled tokens"""
+_ALLOWED_NUM_QUERIES_PER_KV = [32, 64, 128]
 
 
 class AscendMLABackend(AttentionBackend):
@@ -48,7 +37,7 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "VLLM_ASCEND_MLA"
+        return "ASCEND_MLA"
 
     @staticmethod
     def get_metadata_cls() -> type["AttentionMetadata"]:
@@ -65,6 +54,8 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> Type["MLAAttentionImpl"]:
+        if vllm_version_is("0.9.2"):
+            return AscendMLAImpl092
         return AscendMLAImpl
 
 
@@ -363,11 +354,10 @@ class AscendMLAMetadataBuilder:
         num_reqs: int,
         num_actual_tokens: int,
         max_query_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-        common_prefix_len: Optional[int] = None,
         graph_pad_size: int = -1,
         max_num_tokens_across_dp: int = 0,
         with_prefill_across_dp: bool = False,
+        query_start_loc: torch.Tensor = None,
     ) -> AscendMLAMetadata:
         assert self._num_decodes + self._num_prefills == num_reqs
 
@@ -389,7 +379,6 @@ class AscendMLAMetadataBuilder:
         seq_lens = seq_lens_cpu
         max_query_len = query_lens.max().item()
         max_seq_lens = seq_lens.max().item()
-        query_start_loc = common_attn_metadata.query_start_loc
 
         prefill_metadata = None
         chunked_context_metadata = None
@@ -398,7 +387,6 @@ class AscendMLAMetadataBuilder:
             tokens_start = self._num_decode_tokens
             max_query_len = query_lens[tokens_start:].max().item()
             max_seq_lens = seq_lens[tokens_start:].max().item()
-            query_start_loc = common_attn_metadata.query_start_loc
             prefill_query_start_loc = query_start_loc[
                 reqs_start:] - query_start_loc[reqs_start]
 
@@ -532,10 +520,9 @@ class AscendMLAImpl(MLAAttentionImpl):
         alibi_slopes: Optional[list[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[dict[str, Any]],
         logits_soft_cap: Optional[float],
         attn_type: str,
-        kv_sharing_target_layer_name: Optional[str] = None,
+        kv_sharing_target_layer_name: Optional[str],
         **kwargs,
     ) -> None:
         self.num_heads = num_heads
@@ -1225,3 +1212,34 @@ class AscendMLAImpl(MLAAttentionImpl):
                 output[:num_decode_tokens] = output_decode
 
         return output_padded
+
+
+class AscendMLAImpl092(AscendMLAImpl):
+
+    def __init__(self,
+                 num_heads: int,
+                 head_size: int,
+                 scale: float,
+                 num_kv_heads: int,
+                 alibi_slopes: Optional[List[float]],
+                 sliding_window: Optional[int],
+                 kv_cache_dtype: str,
+                 blocksparse_params: Optional[Dict[str, Any]] = None,
+                 logits_soft_cap: Optional[float] = None,
+                 attn_type: str = AttentionType.DECODER,
+                 kv_sharing_target_layer_name: Optional[str] = None,
+                 use_irope: bool = False,
+                 **kwargs) -> None:
+        super().__init__(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            alibi_slopes=alibi_slopes,
+            sliding_window=sliding_window,
+            kv_cache_dtype=kv_cache_dtype,
+            logits_soft_cap=logits_soft_cap,
+            attn_type=attn_type,
+            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+            use_irope=use_irope,
+            **kwargs)

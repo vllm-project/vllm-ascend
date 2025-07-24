@@ -24,7 +24,7 @@ import types
 import weakref
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Union, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -37,14 +37,16 @@ from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.distributed.parallel_state import get_dp_group, get_pp_group
+from vllm.distributed.parallel_state import (get_dp_group, get_pp_group,
+                                             get_tp_group)
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.models.interfaces import has_step_pooler
+from vllm.model_executor.models.interfaces_base import (VllmModelForPooling,
+                                                        is_pooling_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
@@ -58,11 +60,11 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
+from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
-from vllm.v1.utils import bind_kv_cache
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (gather_mm_placeholders,
                                   sanity_check_mm_encoder_outputs,
@@ -73,19 +75,24 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
 from vllm_ascend.attention.attention_v1_torchair import AscendTorchairMetadata
-from vllm_ascend.attention.mla_v1 import (AscendMLAMetadata,
-                                          CommonAttentionMetadata)
+from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.pool.metadata import PoolingMetadata
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
+from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
+                                        write_kv_cache_bytes_to_file)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               ProfileExecuteDuration,
-                               check_torchair_cache_exist, is_310p,
+                               ProfileExecuteDuration, is_310p,
                                maybe_converting_weight_acl_format,
-                               write_kv_cache_bytes_to_file)
+                               vllm_version_is)
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
+
+if vllm_version_is("0.9.2"):
+    from vllm.model_executor.models.interfaces import has_step_pooler
+    from vllm.v1.utils import bind_kv_cache
+else:
+    from vllm.v1.worker.utils import bind_kv_cache
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -146,6 +153,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
+        self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.block_size = vllm_config.cache_config.block_size
@@ -224,7 +232,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.spec_attn_mask = torch.triu(torch.ones(2048,
                                                         2048,
                                                         dtype=torch.bool),
-                                             diagonal=1).to("npu")
+                                             diagonal=1).to(self.device)
             if get_pp_group().is_last_rank:
                 if self.speculative_config.method == "ngram":
                     self.drafter = NgramProposer(self.vllm_config)
@@ -389,12 +397,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
+            pooling_params = new_req_data.pooling_params
             if sampling_params and \
                 sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
             else:
                 generator = None
+
+            if not vllm_version_is("0.9.2") and pooling_params:
+                assert (task := pooling_params.task) is not None, (
+                    "You did not set `task` in the API")
+                model = cast(VllmModelForPooling, self.model)
+                to_update = model.pooler.get_pooling_updates(task)
+                to_update.apply(pooling_params)
 
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
@@ -565,7 +581,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table.commit(num_reqs)
+        if vllm_version_is("0.9.2"):
+            self.input_batch.block_table.commit(num_reqs)
+        else:
+            self.input_batch.block_table.commit_block_table(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         req_ids = self.input_batch.req_ids
@@ -674,15 +693,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
-
-            # Prepare for cascade attention if enabled & beneficial.
-            common_prefix_len = 0
-
             attn_metadata_i = self.attn_metadata_builder.build(
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
-                common_prefix_len=common_prefix_len,
             )
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
@@ -896,7 +910,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table.commit(num_reqs)
+        if vllm_version_is("0.9.2"):
+            self.input_batch.block_table.commit(num_reqs)
+        else:
+            self.input_batch.block_table.commit_block_table(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
@@ -921,8 +938,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         cu_num_tokens = np.cumsum(num_scheduled_tokens)
         cumsums_offsets = np.repeat(cu_num_tokens - num_scheduled_tokens,
                                     num_scheduled_tokens)
-        sample_indices = cu_num_tokens - 1
-        sample_indices = torch.from_numpy(sample_indices).to(self.device,
+        logits_indices = cu_num_tokens - 1
+        logits_indices = torch.from_numpy(logits_indices).to(self.device,
                                                              non_blocking=True)
         arange = self.arange_np[:total_num_scheduled_tokens] - cumsums_offsets
 
@@ -1026,27 +1043,22 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             extra_builder_kwargs['graph_pad_size'] = graph_pad_size
 
         if self.vllm_config.model_config.use_mla:
-            query_start_loc = self.query_start_loc[:num_reqs + 1]
-            seq_lens = self.seq_lens[:num_reqs]
-            common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=query_start_loc, seq_lens=seq_lens)
+            extra_builder_kwargs[
+                "query_start_loc"] = self.query_start_loc[:num_reqs + 1]
             attn_metadata = self.attn_metadata_builder.build(  # type: ignore
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
-                common_attn_metadata=common_attn_metadata,
-                common_prefix_len=None,
                 **extra_builder_kwargs,
             )
+            attn_metadata.num_input_tokens = num_input_tokens
         else:
             attn_metadata = self.attn_metadata_builder.build(  # type: ignore
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
-                common_prefix_len=None,
                 **extra_builder_kwargs,
             )
-        attn_metadata.num_input_tokens = num_input_tokens
 
         # Prepare input_ids
         token_indices = (positions_np +
@@ -1096,6 +1108,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.torchair_graph_enabled and not with_prefill:
             input_ids = self.input_ids[:padded_batch_size]
             positions = self.positions[:padded_batch_size]
+
+        if get_pp_group().is_first_rank:
+            intermediate_tensors = None
+        else:
+            assert intermediate_tensors is not None
+            assert self.intermediate_tensors is not None
+            for k, v in intermediate_tensors.items():
+                self.intermediate_tensors[k][:num_input_tokens].copy_(
+                    v[:num_input_tokens], non_blocking=True)
+            intermediate_tensors = IntermediateTensors({
+                k: v[:num_input_tokens]
+                for k, v in self.intermediate_tensors.items()
+            })
 
         # Run forward pass
         with set_forward_context(attn_metadata,
@@ -1153,14 +1178,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens)
-            sample_indices = spec_decode_metadata.logits_indices
+            logits_indices = spec_decode_metadata.logits_indices
 
         aux_hidden_states = None
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = hidden_states
 
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
-                total_num_scheduled_tokens, sample_indices, aux_hidden_states,
+                total_num_scheduled_tokens, logits_indices, aux_hidden_states,
                 num_scheduled_tokens)
 
     def _get_cumsum_and_arange(
@@ -1397,16 +1422,42 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # Return empty ModelRunnerOuptut if there's no work to do.
                 return EMPTY_MODEL_RUNNER_OUTPUT
             (attn_metadata, hidden_states, spec_decode_metadata, positions,
-             num_scheduled_tokens, sample_indices, aux_hidden_states,
+             num_scheduled_tokens, logits_indices, aux_hidden_states,
              num_scheduled_tokens_np) = (self._process_reqs(
                  scheduler_output, intermediate_tensors))
 
         with ProfileExecuteDuration().capture_async("post process"):
-            if self.input_batch.pooling_params:
-                return self._pool(hidden_states, num_scheduled_tokens,
-                                  num_scheduled_tokens_np)
-            logits = self.model.compute_logits(hidden_states[sample_indices],
-                                               None)
+            # Broadcast PP output for external_launcher (torchrun)
+            # to make sure we are synced across pp ranks
+            # TODO: Support overlapping mirco-batches
+            # https://github.com/vllm-project/vllm/issues/18019
+            broadcast_pp_output = \
+                self.parallel_config.distributed_executor_backend \
+                == "external_launcher" and len(get_pp_group().ranks) > 0
+            if not get_pp_group().is_last_rank:
+                # For mid-pipeline stages, return the hidden states.
+                if not broadcast_pp_output:
+                    return hidden_states
+                assert isinstance(hidden_states, IntermediateTensors)
+                get_pp_group().send_tensor_dict(
+                    hidden_states.tensors, all_gather_group=get_tp_group())
+                logits = None
+            else:
+                if self.input_batch.pooling_params:
+                    return self._pool(hidden_states, num_scheduled_tokens,
+                                      num_scheduled_tokens_np)
+                sample_hidden_states = hidden_states[logits_indices]
+                logits = self.model.compute_logits(sample_hidden_states, None)
+            if broadcast_pp_output:
+                model_output_broadcast_data = {
+                    "logits": logits.contiguous(),
+                } if logits is not None else {}
+                model_output_broadcast_data = get_pp_group(
+                ).broadcast_tensor_dict(model_output_broadcast_data,
+                                        src=len(get_pp_group().ranks) - 1)
+                assert model_output_broadcast_data is not None
+                logits = model_output_broadcast_data["logits"]
+
             # Apply structured output bitmasks if present
             if scheduler_output.grammar_bitmask is not None:
                 logits = self.apply_grammar_bitmask(scheduler_output, logits)
@@ -1423,6 +1474,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # creates a new tensor with separate storage from the original
                 # logits tensor. This means any in-place operations on bonus_logits
                 # won't affect the original logits tensor.
+                assert logits is not None
                 bonus_logits = logits[
                     spec_decode_metadata.bonus_logits_indices]
                 sampler_output = self.sampler(
@@ -1690,26 +1742,58 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         req_num_tokens = num_tokens // num_reqs
 
-        dummy_metadata = PoolingMetadata(
-            prompt_lens=torch.tensor([h.shape[0] for h in hidden_states_list],
-                                     device=self.device),
-            prompt_token_ids=torch.zeros((num_reqs, req_num_tokens),
-                                         dtype=torch.int32,
-                                         device=self.device),
-            pooling_params=[PoolingParams()] * num_reqs)
+        if vllm_version_is("0.9.2"):
+            dummy_metadata = PoolingMetadata(
+                prompt_lens=torch.tensor(
+                    [h.shape[0] for h in hidden_states_list],
+                    device=self.device),
+                prompt_token_ids=torch.zeros((num_reqs, req_num_tokens),
+                                             dtype=torch.int32,
+                                             device=self.device),
+                pooling_params=[PoolingParams()] * num_reqs)
+            try:
+                pooler_output = self.model.pooler(
+                    hidden_states=hidden_states_list,
+                    pooling_metadata=dummy_metadata)
+            except RuntimeError as e:
+                if 'out of memory' in str(e):
+                    raise RuntimeError(
+                        "NPU out of memory occurred when warming up pooler with "
+                        f"{num_reqs} dummy requests. Please try lowering "
+                        "`max_num_seqs` or `gpu_memory_utilization` when "
+                        "initializing the engine.") from e
+                else:
+                    raise e
+        else:
+            model = cast(VllmModelForPooling, self.model)
+            dummy_task = self.get_supported_pooling_tasks()[0]
+            dummy_pooling_params = PoolingParams(task=dummy_task)
 
-        try:
-            pooler_output = self.model.pooler(hidden_states=hidden_states_list,
-                                              pooling_metadata=dummy_metadata)
-        except RuntimeError as e:
-            if 'out of memory' in str(e):
-                raise RuntimeError(
-                    "NPU out of memory occurred when warming up pooler with "
-                    f"{num_reqs} dummy requests. Please try lowering "
-                    "`max_num_seqs` or `gpu_memory_utilization` when "
-                    "initializing the engine.") from e
-            else:
-                raise e
+            to_update = model.pooler.get_pooling_updates(dummy_task)
+            to_update.apply(dummy_pooling_params)
+
+            dummy_metadata = PoolingMetadata(
+                prompt_lens=torch.tensor(
+                    [h.shape[0] for h in hidden_states_list],
+                    device=self.device),
+                prompt_token_ids=torch.zeros((num_reqs, req_num_tokens),
+                                             dtype=torch.int32,
+                                             device=self.device),
+                pooling_params=[dummy_pooling_params] * num_reqs)
+
+            try:
+                pooler_output = model.pooler(hidden_states=hidden_states_list,
+                                             pooling_metadata=dummy_metadata)
+            except RuntimeError as e:
+                if 'out of memory' in str(e):
+                    raise RuntimeError(
+                        "NPU out of memory occurred when warming up pooler with "
+                        f"{num_reqs} dummy requests. Please try lowering "
+                        "`max_num_seqs` or `gpu_memory_utilization` when "
+                        "initializing the engine.") from e
+                else:
+                    raise e
+
         return pooler_output
 
     def load_model(self) -> None:
@@ -1728,8 +1812,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                    QKVParallelLinear, RowParallelLinear)):
                         module.weight.data = torch_npu.npu_format_cast(
                             module.weight.data, ACL_FORMAT_FRACTAL_NZ)
-            if has_step_pooler(self.model):
-                self.input_batch.logits_processing_needs_token_ids = True
+
+            if vllm_version_is("0.9.2") and has_step_pooler(self.model):
+                self.input_batch.logits_processing_needs_token_ids_bool = True
             if self.drafter:
                 logger.info("Loading drafter model...")
                 if isinstance(self.drafter, EagleProposer):
@@ -2340,3 +2425,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if batch_size <= padded_batch_size < selected_batch_size:
                 selected_batch_size = padded_batch_size
         return selected_batch_size
+
+    def get_supported_pooling_tasks(self):
+        model = self.get_model()
+        if not is_pooling_model(model):
+            return []
+
+        return list(model.pooler.get_supported_tasks())

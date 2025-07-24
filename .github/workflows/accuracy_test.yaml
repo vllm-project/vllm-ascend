@@ -90,7 +90,6 @@ jobs:
       }}
     strategy:
       matrix:
-        vllm_use_version: [1]
         # the accuracy test will run:
         # 1. workflow_dispatch with models input
         #   - all: Qwen/Qwen3-30B-A3B, Qwen/Qwen2.5-VL-7B-Instruct, Qwen/Qwen3-8B-Base
@@ -122,9 +121,9 @@ jobs:
          ) }}
 
       fail-fast: false
-    name: ${{ matrix.model_name }} accuracy V${{ matrix.vllm_use_version }}
+    name: ${{ matrix.model_name }} accuracy
     container:
-      image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.1.rc1-910b-ubuntu22.04-py3.10
       env:
         DATASET_SOURCE: ModelScope
         VLLM_USE_MODELSCOPE: True
@@ -147,11 +146,11 @@ jobs:
 
       - name: Config mirrors
         run: |
-          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
-          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
-          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
 
       - name: Install system dependencies
         run: |
@@ -169,6 +168,23 @@ jobs:
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
         run: VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Resolve vllm-ascend version
+        run: |
+          VERSION_INPUT="${{ github.event.inputs.vllm-ascend-version }}"
+          
+          if [[ "$VERSION_INPUT" == "main" ]]; then
+            TAGS=$(git ls-remote --tags --sort=-v:refname https://github.com/vllm-project/vllm-ascend "v*" | cut -f2 | sed 's|refs/tags/||')
+            LATEST_TAG=$(echo "$TAGS" | head -n1)
+            if [[ -z "$LATEST_TAG" ]]; then
+              RESOLVED_VERSION="main"
+            else
+              RESOLVED_VERSION="$LATEST_TAG"
+            fi
+          else
+            RESOLVED_VERSION="$VERSION_INPUT"
+          fi
+          echo "GHA_VLLM_ASCEND_VERSION=$RESOLVED_VERSION" >> $GITHUB_ENV
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
@@ -225,7 +241,6 @@ jobs:
             pip show torch | grep "Version:" | awk '{print "GHA_TORCH_VERSION="$2}'
             pip show torch_npu | grep "Version:" | awk '{print "GHA_TORCH_NPU_VERSION="$2}'
             pip show vllm | grep "Version:" | awk '{print "GHA_VLLM_VERSION="$2}' | sed 's/+.*//'
-            echo "GHA_VLLM_ASCEND_VERSION=${{ github.event.inputs.vllm-ascend-version || github.ref }}"
           } >> "$GITHUB_ENV"
       
       - name: Print versions
@@ -236,15 +251,14 @@ jobs:
           echo "vLLM: ${{ env.GHA_VLLM_VERSION }}"
           echo "vLLM Ascend: ${{ env.GHA_VLLM_ASCEND_VERSION }}"
 
-      - name: Run Accuracy Test for V${{ matrix.vllm_use_version }}
+      - name: Run Accuracy Test
         id: report
         working-directory: ./benchmarks
         env:
           PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
-          VLLM_USE_V1: ${{ matrix.vllm_use_version }}
         run: |
           model_base_name=$(basename ${{ matrix.model_name }})
-          markdown_name="${model_base_name}-V${{ matrix.vllm_use_version }}"
+          markdown_name="${model_base_name}"
           echo "markdown_name=$markdown_name"
           echo "markdown_name=$markdown_name" >> $GITHUB_OUTPUT
           mkdir -p ./accuracy
@@ -259,7 +273,6 @@ jobs:
             --vllm_version "${{ env.GHA_VLLM_VERSION }}" \
             --vllm_commit "${{ env.VLLM_COMMIT }}" \
             --vllm_ascend_commit "${{ env.VLLM_ASCEND_COMMIT }}" \
-            --vllm_use_v1 "$VLLM_USE_V1"
 
       - name: Generate step summary
         if: ${{ always() }}
@@ -282,7 +295,7 @@ jobs:
             echo "contains_fail=false" >> $GITHUB_OUTPUT
           fi
 
-      - name: Upload Report for V${{ matrix.vllm_use_version }}
+      - name: Upload Report 
         if: ${{ github.event_name == 'workflow_dispatch' && steps.check_report.outputs.contains_fail == 'false' }}
         uses: actions/upload-artifact@v4
         with:

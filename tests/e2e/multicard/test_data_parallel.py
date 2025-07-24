@@ -30,7 +30,6 @@ import pytest
 MODELS = ["Qwen/Qwen2.5-0.5B-Instruct"]
 
 
-@pytest.mark.skipif(True, reason="TODO: fix dp timeout error in ci")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
 @patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1"})

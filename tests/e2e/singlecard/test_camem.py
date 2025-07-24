@@ -21,7 +21,7 @@ import torch
 from vllm import LLM, SamplingParams
 from vllm.utils import GiB_bytes
 
-from tests.utils import fork_new_process_for_each_test
+from tests.e2e.utils import fork_new_process_for_each_test
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 
 

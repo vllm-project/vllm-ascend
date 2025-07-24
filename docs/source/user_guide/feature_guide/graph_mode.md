@@ -24,8 +24,6 @@ import os
 
 from vllm import LLM
 
-os.environ["VLLM_USE_V1"] = "1"
-
 model = LLM(model="Qwen/Qwen2-7B-Instruct")
 outputs = model.generate("Hello, how are you?")
 ```
@@ -45,8 +43,6 @@ offline example:
 ```python
 import os
 from vllm import LLM
-
-os.environ["VLLM_USE_V1"] = "1"
 
 # TorchAirGraph is only work without chunked-prefill now
 model = LLM(model="deepseek-ai/DeepSeek-R1-0528", additional_config={"torchair_graph_config": {"enabled": True},"ascend_scheduler_config": {"enabled": True,}})
@@ -70,8 +66,6 @@ offline example:
 ```python
 import os
 from vllm import LLM
-
-os.environ["VLLM_USE_V1"] = "1"
 
 model = LLM(model="someother_model_weight", enforce_eager=True)
 outputs = model.generate("Hello, how are you?")

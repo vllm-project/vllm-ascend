@@ -12,7 +12,7 @@ This document describes how to install vllm-ascend manually.
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
     | CANN          | >= 8.1.RC1                       | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | >= 2.5.1.post1.dev20250619       | Required for vllm-ascend                  |
+    | torch-npu     | >= 2.5.1.post1.dev20250619       | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
     | torch         | >= 2.5.1                         | Required for torch-npu and vllm           |
 
 You have 2 way to install:

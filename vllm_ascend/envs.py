@@ -51,8 +51,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "C_COMPILER":
     lambda: os.getenv("C_COMPILER", None),
     # The version of the Ascend chip. If not set, the default value is
-    # ASCEND910B1. It's used for package building. Please make sure that the
-    # version is correct.
+    # ASCEND910B1(Available for A2 and A3 series). It's used for package building.
+    # Please make sure that the version is correct.
     "SOC_VERSION":
     lambda: os.getenv("SOC_VERSION", "ASCEND910B1"),
     # If set, vllm-ascend will print verbose logs during compilation
@@ -128,6 +128,11 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE":
     lambda: int(
         os.getenv("VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE", 64)),
+    # Whether to enable the topk optimization. It's disabled by default for experimental support
+    # We'll make it enabled by default in the future.
+    "VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION":
+    lambda: bool(
+        int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION", '0'))),
 }
 
 # end-env-vars-definition

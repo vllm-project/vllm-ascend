@@ -14,7 +14,6 @@
 #
 
 import os
-from unittest import mock
 
 from transformers import PretrainedConfig
 from vllm.config import ModelConfig, VllmConfig
@@ -43,7 +42,6 @@ class TestAscendConfig(TestBase):
         test_vllm_config = VllmConfig()
         # No additional config given, check the default value here.
         ascend_config = init_ascend_config(test_vllm_config)
-        self.assertEqual(ascend_config.expert_tensor_parallel_size, 0)
         self.assertIsNone(ascend_config.expert_map_path)
 
         torchair_graph_config = ascend_config.torchair_graph_config
@@ -76,12 +74,10 @@ class TestAscendConfig(TestBase):
             "ascend_scheduler_config": {
                 "enabled": True
             },
-            "expert_tensor_parallel_size": 1,
             "expert_map_path": "test_expert_map_path",
             "refresh": True
         }
         ascend_config = init_ascend_config(test_vllm_config)
-        self.assertEqual(ascend_config.expert_tensor_parallel_size, 1)
         self.assertEqual(ascend_config.expert_map_path, "test_expert_map_path")
 
         torchair_graph_config = ascend_config.torchair_graph_config
@@ -170,8 +166,30 @@ class TestAscendConfig(TestBase):
         init_ascend_config(test_vllm_config)
         check_ascend_config(test_vllm_config, False)
 
-        # For V1 engine
-        with mock.patch.dict(os.environ, {"VLLM_USE_V1": "1"}):
+        test_vllm_config.additional_config = {
+            "torchair_graph_config": {
+                "enabled": True,
+            },
+            "refresh": True
+        }
+        init_ascend_config(test_vllm_config)
+        check_ascend_config(test_vllm_config, False)
+
+        test_vllm_config.additional_config = {
+            "torchair_graph_config": {
+                "enabled": False,
+            },
+            "refresh": True
+        }
+        init_ascend_config(test_vllm_config)
+        check_ascend_config(test_vllm_config, False)
+
+    @_clean_up_ascend_config
+    def test_check_ascend_config_wrong_case(self):
+        test_vllm_config = VllmConfig()
+
+        # torchair + eager mode
+        with self.assertRaises(RuntimeError):
             test_vllm_config.additional_config = {
                 "torchair_graph_config": {
                     "enabled": True,
@@ -179,85 +197,38 @@ class TestAscendConfig(TestBase):
                 "refresh": True
             }
             init_ascend_config(test_vllm_config)
+            enforce_eager = True
+            check_ascend_config(test_vllm_config, enforce_eager)
+        # torchair + non deepseek model
+        with self.assertRaises(NotImplementedError):
+            test_vllm_config.additional_config = {
+                "torchair_graph_config": {
+                    "enabled": True,
+                },
+                "refresh": True
+            }
+            model_path = os.path.join(os.path.dirname(__file__), "fake_weight")
+            fake_model_config = ModelConfig(model=model_path)
+            fake_model_config.hf_config = PretrainedConfig()
+            fake_model_config.hf_config.model_type = "llama"
+            test_vllm_config.model_config = fake_model_config
+            init_ascend_config(test_vllm_config)
             check_ascend_config(test_vllm_config, False)
-
+        # aclgraph + deepseek model
+        with self.assertRaises(NotImplementedError):
             test_vllm_config.additional_config = {
                 "torchair_graph_config": {
                     "enabled": False,
                 },
                 "refresh": True
             }
+            model_path = os.path.join(os.path.dirname(__file__), "fake_weight")
+            fake_model_config = ModelConfig(model=model_path)
+            fake_model_config.hf_config = PretrainedConfig()
+            fake_model_config.hf_config.model_type = "deepseek"
+            test_vllm_config.model_config = fake_model_config
             init_ascend_config(test_vllm_config)
             check_ascend_config(test_vllm_config, False)
-
-    @_clean_up_ascend_config
-    def test_check_ascend_config_wrong_case(self):
-        test_vllm_config = VllmConfig()
-        # For V0 engine
-        with mock.patch.dict(os.environ, {"VLLM_USE_V1": "0"}):
-            with self.assertRaises(NotImplementedError):
-                test_vllm_config.additional_config = {
-                    "torchair_graph_config": {
-                        "enabled": True,
-                    },
-                    "refresh": True
-                }
-                init_ascend_config(test_vllm_config)
-                check_ascend_config(test_vllm_config, False)
-            with self.assertRaises(NotImplementedError):
-                test_vllm_config.additional_config = {
-                    "ascend_scheduler_config": {
-                        "enabled": True,
-                    },
-                    "refresh": True
-                }
-                init_ascend_config(test_vllm_config)
-                check_ascend_config(test_vllm_config, True)
-        # For V1 engine
-        with mock.patch.dict(os.environ, {"VLLM_USE_V1": "1"}):
-            # torchair + eager mode
-            with self.assertRaises(RuntimeError):
-                test_vllm_config.additional_config = {
-                    "torchair_graph_config": {
-                        "enabled": True,
-                    },
-                    "refresh": True
-                }
-                init_ascend_config(test_vllm_config)
-                enforce_eager = True
-                check_ascend_config(test_vllm_config, enforce_eager)
-            # torchair + non deepseek model
-            with self.assertRaises(NotImplementedError):
-                test_vllm_config.additional_config = {
-                    "torchair_graph_config": {
-                        "enabled": True,
-                    },
-                    "refresh": True
-                }
-                model_path = os.path.join(os.path.dirname(__file__),
-                                          "fake_weight")
-                fake_model_config = ModelConfig(model=model_path)
-                fake_model_config.hf_config = PretrainedConfig()
-                fake_model_config.hf_config.model_type = "llama"
-                test_vllm_config.model_config = fake_model_config
-                init_ascend_config(test_vllm_config)
-                check_ascend_config(test_vllm_config, False)
-            # aclgraph + deepseek model
-            with self.assertRaises(NotImplementedError):
-                test_vllm_config.additional_config = {
-                    "torchair_graph_config": {
-                        "enabled": False,
-                    },
-                    "refresh": True
-                }
-                model_path = os.path.join(os.path.dirname(__file__),
-                                          "fake_weight")
-                fake_model_config = ModelConfig(model=model_path)
-                fake_model_config.hf_config = PretrainedConfig()
-                fake_model_config.hf_config.model_type = "deepseek"
-                test_vllm_config.model_config = fake_model_config
-                init_ascend_config(test_vllm_config)
-                check_ascend_config(test_vllm_config, False)
 
     def test_check_torchair_supported(self):
         test_cases = [('deepseek_v3', True), ('PanguProMoE', True),

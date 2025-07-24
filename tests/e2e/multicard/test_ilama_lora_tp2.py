@@ -1,7 +1,7 @@
 import pytest
 from modelscope import snapshot_download  # type: ignore
 
-from tests.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner
 from tests.e2e.singlecard.test_ilama_lora import (EXPECTED_LORA_OUTPUT,
                                                   MODEL_PATH, do_sample)
 
