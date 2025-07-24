@@ -49,6 +49,7 @@ from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               MergedColumnParallelLinear,                
                                                ReplicatedLinear,
                                                RowParallelLinear,
                                                UnquantizedLinearMethod,
@@ -238,7 +239,7 @@ def mlp_tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
 
 def mlp_tensor_model_parallel_reduce_scatter(input_: torch.Tensor) -> torch.Tensor:
     """reduce scatter the input tensor across model parallel group."""
-    return get_mlptp_group().reduce_scatter(input_)
+    return get_mlptp_group().reduce_scatter(input_, dim=0)
 
 # 临时定义is_prefill方法，验证是否是预填充阶段
 def is_prefill(attn_metadata: Optional[AttentionMetadata] = None) -> bool:
@@ -876,21 +877,37 @@ class CustomDeepseekV2MLP(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         reduce_results: bool = True,
         force_replicate: bool = False,
+        is_shared_experts: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        self.is_shared_experts = is_shared_experts
         if not force_replicate:
-            self.gate_up_proj = CustomDeepseekV2MLPMergedColumnParallelLinear(
+            if is_shared_experts:
+                self.gate_up_proj = MergedColumnParallelLinear(
                 hidden_size, [intermediate_size] * 2,
                 bias=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.gate_up_proj")
-            self.down_proj = CustomDeepseekV2MLPRowParallelLinear(intermediate_size,
+                self.down_proj = RowParallelLinear(intermediate_size,
                                                hidden_size,
                                                bias=False,
                                                quant_config=quant_config,
                                                reduce_results=reduce_results,
                                                prefix=f"{prefix}.down_proj")
+            else:
+                # 用于 Dense MLP
+                self.gate_up_proj = CustomDeepseekV2MLPMergedColumnParallelLinear(
+                    hidden_size, [intermediate_size] * 2,
+                    bias=False,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.gate_up_proj")
+                self.down_proj = CustomDeepseekV2MLPRowParallelLinear(intermediate_size,
+                                                   hidden_size,
+                                                   bias=False,
+                                                   quant_config=quant_config,
+                                                   reduce_results=reduce_results,
+                                                   prefix=f"{prefix}.down_proj")
         else:
             self.gate_up_proj = CustomDeepseekV2MergedReplicatedLinear(
                 hidden_size, [intermediate_size] * 2,
@@ -937,31 +954,33 @@ class CustomDeepseekV2MLP(nn.Module):
                 f"Quantization with [{type(quant_method)}] is NOT supported")
 
     def forward(self, x, is_prefill: bool = False):
-        if is_prefill:
-            pad_size = 0
-            # pd mix use
-            # 临时设置dp_size为4，后续需要根据实际情况修改
-            dp_size = 4
-            # if model_extra_config.parall_config.dp_size > 1:
-            if dp_size > 1:
-                local_length = x.shape[0]
-                # reduce_length = torch.tensor(x.shape[0], dtype=torch.int64, device=current_platform.device_type)
-                reduce_length = torch.tensor(x.shape[0], dtype=torch.int64, device="npu")
-                dist.all_reduce(reduce_length, op=dist.ReduceOp.MAX, async_op=False)
-                global_max_length = reduce_length.item()
-                pad_size = global_max_length - x.shape[0]
+        if not self.is_shared_experts:
+            if is_prefill:
+                pad_size = 0
+                # pd mix use
+                # 临时设置dp_size为4，后续需要根据实际情况修改
+                dp_size = 4
+                # if model_extra_config.parall_config.dp_size > 1:
+                if dp_size > 1:
+                    local_length = x.shape[0]
+                    # reduce_length = torch.tensor(x.shape[0], dtype=torch.int64, device=current_platform.device_type)
+                    reduce_length = torch.tensor(x.shape[0], dtype=torch.int64, device="npu")
+                    dist.all_reduce(reduce_length, op=dist.ReduceOp.MAX, async_op=False)
+                    global_max_length = reduce_length.item()
+                    pad_size = global_max_length - x.shape[0]
 
-                x = torch.nn.functional.pad(
-                    x, (0, 0, 0, pad_size)
-                )
-        x = mlp_tensor_model_parallel_all_gather(x, dim=0)
+                    x = torch.nn.functional.pad(
+                        x, (0, 0, 0, pad_size)
+                    )
+            x = mlp_tensor_model_parallel_all_gather(x, dim=0)
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
-        x = mlp_tensor_model_parallel_reduce_scatter(x)
-        if is_prefill and pad_size > 0:
-            # remove padding
-            x = x[:local_length, :]
+        if not self.is_shared_experts:
+            x = mlp_tensor_model_parallel_reduce_scatter(x)
+            if is_prefill and pad_size > 0:
+                # remove padding
+                x = x[:local_length, :]
         return x
 
 
@@ -1031,6 +1050,7 @@ class CustomDeepseekV2MoE(nn.Module):
                 quant_config=quant_config,
                 reduce_results=reduce_results,
                 force_replicate=self.enable_multistream_moe,
+                is_shared_experts=True,
                 prefix=f"{prefix}.shared_experts",
             )
         else:
