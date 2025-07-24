@@ -83,7 +83,8 @@ class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
         self.mtp_block = CustomDeepseekV2DecoderLayer(config, prefix,
                                                       model_config,
                                                       cache_config,
-                                                      quant_config)
+                                                      quant_config,
+                                                      is_mtp=True)
 
     def forward(
         self,
