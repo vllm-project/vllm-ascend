@@ -139,12 +139,6 @@ class AscendMetadata:
     # Maximum query length in the batch (None for decoding).
     max_query_len: Optional[int] = None
 
-    # TODO: Indicates whether there are only prefill requests.
-    # FlashAttention can be used if there are only prefill requests (decode
-    # requests are not supported), which will result in better performance
-    # than PageAtttention.
-    is_only_prefill: bool = False
-
     # ********************** KV Cache Related Properties ***********************
     # Block addresses per sequence (Seq id -> list of physical block).
     # (batch_size, max_blocks_per_seq)
