@@ -95,7 +95,7 @@ class AscendQwen2VisionAttention(Qwen2VisionAttention):
             for x in (q, k, v)
         ]
 
-        context_layer = torch.torch.empty_like(q)
+        context_layer = torch.empty_like(q)
 
         # operator requires pta version >= 2.5.1
         torch_npu._npu_flash_attention_unpad(
