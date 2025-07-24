@@ -1221,7 +1221,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 slot_indices=attn_metadata.slot_mapping)
         if not self.running_in_graph:
             o_proj_input_shape = (num_actual_toks,
-                                  self.o_proj.weight.data.shape[0])
+                                  self.num_heads * self.v_head_dim)
             o_proj_input = torch.empty(o_proj_input_shape,
                                        dtype=hidden_states_or_q_c.dtype,
                                        device=hidden_states_or_q_c.device)
