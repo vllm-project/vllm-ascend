@@ -44,6 +44,7 @@ git clone --branch |vllm_version| https://github.com/vllm-project/vllm.git
 cd vllm
 pip install -r requirements/build.txt
 VLLM_TARGET_DEVICE="empty" pip install .
+export PYTHONPATH="$(pwd):${PYTHONPATH}"
 cd ..
 
 # Install requirements
