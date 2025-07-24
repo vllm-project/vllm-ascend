@@ -1,26 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Optional
-
 import pytest
-import torch
-from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
-                         SchedulerConfig, SpeculativeConfig, VllmConfig)
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
-from vllm.sampling_params import SamplingParams
-from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
-                                        KVCacheGroupSpec)
-from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.request import Request, RequestStatus
-from vllm.v1.structured_output import StructuredOutputManager
 
 from tests.e2e.conftest import VllmRunner
 from tests.e2e.model_utils import check_outputs_equal
-from vllm_ascend.core.scheduler import AscendScheduler
-from vllm_ascend.utils import vllm_version_is
 
 MODEL = "Qwen/Qwen3-0.6B"
+
 
 def test_concurrent_partial_prefill():
     with VllmRunner(MODEL,
