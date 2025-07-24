@@ -28,7 +28,8 @@ namespace vllm_ascend {
     void *keyDst, void *query, void *key, void *cosSinCache, const int rotDim,
     const int64_t queryStride, const int64_t keyStride, const int64_t dstQueryStride,
     const int64_t dstKeyStride, const int numHeads, const int numKvHeads,
-    const int headSize, const int64_t numTokens);
+    const int headSize, const int64_t numTokens, const uint32_t loopCnt,
+    uint32_t aivNum);
 
   extern void get_masked_input_and_mask_impl(
     void* stream,
@@ -40,7 +41,9 @@ namespace vllm_ascend {
     const int64_t num_org_vocab_padding, 
     const int64_t added_vocab_start_index,
     const int64_t added_vocab_end_index,
-    const int64_t size);
+    const int64_t size,
+    const uint32_t loop_cnt,
+    const uint32_t aiv_num);
     
   torch::Tensor weak_ref_tensor(torch::Tensor& tensor) {
     if (!tensor.is_privateuseone()) {

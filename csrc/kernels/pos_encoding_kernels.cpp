@@ -311,7 +311,7 @@ private:
         __gm__ int64_t* positions, __gm__ void* queryDst, __gm__ void* keyDst, __gm__ TYPE* query, __gm__ TYPE* key,            \
         __gm__ TYPE* cosSinCache, const int rotDim, const int64_t queryStride, const int64_t keyStride,                         \
         const int64_t dstQueryStride, const int64_t dstKeyStride, const int numHeads, const int numKvHeads,                     \
-        const int headSize, const int64_t numTokens, const int coreNum)                                      \
+        const int headSize, const int64_t numTokens, const int loopNum, const int coreNum)                                      \
     {                                                                                                                           \
         AscendC::TPipe pipe;                                                                                                    \
         RotaryEmbedding<TYPE, NEOX> op{};                                                                                       \
@@ -341,12 +341,12 @@ namespace vllm_ascend {
         rope_custom_true_##TYPE<<<blockDim, nullptr, stream>>>(                                                  \
             positions, queryDst, keyDst, reinterpret_cast<TYPE *>(query), reinterpret_cast<TYPE *>(key),         \
             reinterpret_cast<TYPE *>(cosSinCache), rotDim, queryStride, keyStride, dstQueryStride, dstKeyStride, \
-            numHeads, numKvHeads, headSize, numTokens, blockDim);                                       \
+            numHeads, numKvHeads, headSize, numTokens, loopCnt, blockDim);                                       \
     else                                                                                                         \
         rope_custom_false_##TYPE<<<blockDim, nullptr, stream>>>(                                                 \
             positions, queryDst, keyDst, reinterpret_cast<TYPE *>(query), reinterpret_cast<TYPE *>(key),         \
             reinterpret_cast<TYPE *>(cosSinCache), rotDim, queryStride, keyStride, dstQueryStride, dstKeyStride, \
-            numHeads, numKvHeads, headSize, numTokens, blockDim);
+            numHeads, numKvHeads, headSize, numTokens, loopCnt, blockDim);
 
 // maximum number for runtime to launch a ascendc kernel.
 // we use this to constrain the maximum number of block size
@@ -356,7 +356,8 @@ extern void rotary_embedding_impl(AscendType type, bool isNeox, void *stream, in
                                     void *keyDst, void *query, void *key, void *cosSinCache, const int rotDim,
                                     const int64_t queryStride, const int64_t keyStride, const int64_t dstQueryStride,
                                     const int64_t dstKeyStride, const int numHeads, const int numKvHeads,
-                                    const int headSize, const int64_t numTokens)
+                                    const int headSize, const int64_t numTokens, const uint32_t loopCnt,
+                                    uint32_t aivNum)
 {
 
     int blockDim = maxParallelSize > numTokens ? numTokens : maxParallelSize;
