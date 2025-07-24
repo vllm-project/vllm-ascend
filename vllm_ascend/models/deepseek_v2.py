@@ -29,6 +29,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 import torch_npu
+import itertools
 from torch import nn
 import torch.distributed as dist
 from torch.nn.parameter import Parameter, UninitializedParameter 
@@ -42,7 +43,7 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter,
                               divide)
-from vllm.distributed.parallel_state import get_dp_group
+from vllm.distributed.parallel_state import get_dp_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -86,7 +87,9 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.parallel_state import get_ep_group, get_mlptp_group, get_mlp_tensor_model_parallel_world_size, get_mlp_tensor_model_parallel_rank
+from vllm_ascend.distributed.parallel_state import (
+    get_mlp_tp_world_size, get_mlp_tp_rank, 
+    mlp_tp_all_gather, mlp_tp_all_reduce, mlp_tp_reduce_scatter)
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
@@ -226,19 +229,6 @@ class CustomDeepseekV2RowParallelLinear(RowParallelLinear):
             return output
         return output, output_bias
 
-def mlp_tensor_model_parallel_all_gather(input_: torch.Tensor,
-                                     dim: int = -1) -> torch.Tensor:
-    """All-gather the input tensor across model parallel group."""
-    return get_mlptp_group().all_gather(input_, dim)
-
-def mlp_tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
-    """All-reduce the input tensor across model parallel group."""
-    return get_mlptp_group().all_reduce(input_)
-
-def mlp_tensor_model_parallel_reduce_scatter(input_: torch.Tensor) -> torch.Tensor:
-    """reduce scatter the input tensor across model parallel group."""
-    return get_mlptp_group().reduce_scatter(input_, dim=0)
-
 # 临时定义is_prefill方法，验证是否是预填充阶段
 def is_prefill(attn_metadata: Optional[AttentionMetadata] = None) -> bool:
         if attn_metadata is None:
@@ -292,7 +282,7 @@ class CustomDeepseekV2MLPColumnParallelLinear(LinearBase):
         return_bias: bool = True,
     ):
         # Divide the weight matrix along the last dimension.
-        self.tp_size = get_mlp_tensor_model_parallel_world_size()
+        self.tp_size = get_mlp_tp_world_size()
         self.input_size_per_partition = input_size
         self.output_size_per_partition = divide(output_size, self.tp_size)
         self.output_partition_sizes = [self.output_size_per_partition]
@@ -339,7 +329,7 @@ class CustomDeepseekV2MLPColumnParallelLinear(LinearBase):
             self.register_parameter("bias", None)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        tp_rank = get_mlp_tensor_model_parallel_rank()
+        tp_rank = get_mlp_tp_rank()
         output_dim = getattr(param, "output_dim", None)
 
         is_sharded_weight = getattr(param, "is_sharded_weight", False)
@@ -358,7 +348,7 @@ class CustomDeepseekV2MLPColumnParallelLinear(LinearBase):
         if is_gguf_weight and isinstance(param, UninitializedParameter):
             final_shape = list(loaded_weight.shape)
             if output_dim is not None:
-                tp_size = get_mlp_tensor_model_parallel_world_size()
+                tp_size = get_mlp_tp_world_size()
                 assert final_shape[output_dim] % tp_size == 0
                 final_shape[output_dim] = final_shape[output_dim] // tp_size
             param.materialize(final_shape, dtype=loaded_weight.dtype)
@@ -396,7 +386,7 @@ class CustomDeepseekV2MLPColumnParallelLinear(LinearBase):
         output_parallel = self.quant_method.apply(self, input_, bias)
         if self.gather_output:
             # All-gather across the partitions.
-            output = mlp_tensor_model_parallel_all_gather(output_parallel)
+            output = mlp_tp_all_gather(output_parallel)
         else:
             output = output_parallel
         output_bias = self.bias if self.skip_bias_add else None
@@ -408,7 +398,7 @@ class CustomDeepseekV2MLPColumnParallelLinear(LinearBase):
         s = f"in_features={self.input_size}"
         s += f", output_features={self.output_size_per_partition}"
         s += f", bias={self.bias is not None}"
-        s += f", tp_size={get_mlp_tensor_model_parallel_world_size()}"
+        s += f", tp_size={get_mlp_tp_world_size()}"
         s += f", gather_output={self.gather_output}"
         return s
 
@@ -450,7 +440,7 @@ class CustomDeepseekV2MLPMergedColumnParallelLinear(CustomDeepseekV2MLPColumnPar
         return_bias: bool = True,
     ):
         self.output_sizes = output_sizes
-        tp_size = get_mlp_tensor_model_parallel_world_size()
+        tp_size = get_mlp_tp_world_size()
         assert all(output_size % tp_size == 0 for output_size in output_sizes)
         super().__init__(input_size=input_size,
                          output_size=sum(output_sizes),
@@ -483,8 +473,8 @@ class CustomDeepseekV2MLPMergedColumnParallelLinear(CustomDeepseekV2MLPColumnPar
             return
 
         if is_gguf_weight:
-            tp_size = get_mlp_tensor_model_parallel_world_size()
-            tp_rank = get_mlp_tensor_model_parallel_rank()
+            tp_size = get_mlp_tp_world_size()
+            tp_rank = get_mlp_tp_rank()
 
             output_dim = getattr(param, "output_dim", None)
             shard_size = loaded_weight.size(output_dim) // tp_size
@@ -554,8 +544,8 @@ class CustomDeepseekV2MLPMergedColumnParallelLinear(CustomDeepseekV2MLPColumnPar
             return
 
         assert loaded_shard_id < len(self.output_sizes)
-        tp_rank = get_mlp_tensor_model_parallel_rank()
-        tp_size = get_mlp_tensor_model_parallel_world_size()
+        tp_rank = get_mlp_tp_rank()
+        tp_size = get_mlp_tp_world_size()
         if output_dim is not None:
             shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
             shard_size = self.output_sizes[loaded_shard_id] // tp_size
@@ -664,7 +654,7 @@ class CustomDeepseekV2MLPMergedColumnParallelLinear(CustomDeepseekV2MLPColumnPar
 
         assert loaded_shard_id < len(self.output_sizes)
 
-        tp_size = get_mlp_tensor_model_parallel_world_size()
+        tp_size = get_mlp_tp_world_size()
 
         if isinstance(param, BlockQuantScaleParameter):
             from vllm.model_executor.layers.quantization.fp8 import (
@@ -736,8 +726,8 @@ class CustomDeepseekV2MLPRowParallelLinear(LinearBase):
         return_bias: bool = True,
     ):
         # Divide the weight matrix along the first dimension.
-        self.tp_rank = get_mlp_tensor_model_parallel_rank()
-        self.tp_size = get_mlp_tensor_model_parallel_world_size()
+        self.tp_rank = get_mlp_tp_rank()
+        self.tp_size = get_mlp_tp_world_size()
         self.input_size_per_partition = divide(input_size, self.tp_size)
         self.output_size_per_partition = output_size
         self.output_partition_sizes = [output_size]
@@ -779,8 +769,8 @@ class CustomDeepseekV2MLPRowParallelLinear(LinearBase):
             self.register_parameter("bias", None)
 
     def weight_loader(self, param: Parameter, loaded_weight: torch.Tensor):
-        tp_rank = get_mlp_tensor_model_parallel_rank()
-        tp_size = get_mlp_tensor_model_parallel_world_size()
+        tp_rank = get_mlp_tp_rank()
+        tp_size = get_mlp_tp_world_size()
         input_dim = getattr(param, "input_dim", None)
         use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
         is_sharded_weight = getattr(param, "is_sharded_weight", False)
@@ -833,7 +823,7 @@ class CustomDeepseekV2MLPRowParallelLinear(LinearBase):
         if self.input_is_parallel:
             input_parallel = input_
         else:
-            tp_rank = get_mlp_tensor_model_parallel_rank()
+            tp_rank = get_mlp_tp_rank()
             splitted_input = split_tensor_along_last_dim(
                 input_, num_partitions=self.tp_size)
             input_parallel = splitted_input[tp_rank].contiguous()
@@ -847,7 +837,7 @@ class CustomDeepseekV2MLPRowParallelLinear(LinearBase):
                                                   input_parallel,
                                                   bias=bias_)
         if self.reduce_results and self.tp_size > 1:
-            output = mlp_tensor_model_parallel_all_reduce(output_parallel)
+            output = mlp_tp_all_reduce(output_parallel)
         else:
             output = output_parallel
 
@@ -970,12 +960,12 @@ class CustomDeepseekV2MLP(nn.Module):
                     x = torch.nn.functional.pad(
                         x, (0, 0, 0, pad_size)
                     )
-            x = mlp_tensor_model_parallel_all_gather(x, dim=0)
+            x = mlp_tp_all_gather(x, dim=0)
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         if not self.is_shared_experts:
-            x = mlp_tensor_model_parallel_reduce_scatter(x)
+            x = mlp_tp_reduce_scatter(x)
             if is_prefill and pad_size > 0:
                 # remove padding
                 x = x[:local_length, :]
