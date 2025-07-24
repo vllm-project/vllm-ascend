@@ -217,37 +217,36 @@ class AscendAttentionMetadataBuilder:
         slot_mapping = self.runner.slot_mapping[:num_actual_tokens]
         attn_mask = self.runner.attn_mask
         attn_state = self.runner.attn_state
-        query_start_loc_cpu = self.runner.query_start_loc_cpu[:num_reqs + 1]
 
-        graph_pad_size = kwargs.get("graph_pad_size", -1)
-        use_torchair_graph = graph_pad_size != -1
+        num_token_pad_size = kwargs.get("num_token_pad_size", -1)
+        use_torchair_graph = num_token_pad_size != -1
         if use_torchair_graph and self.runner.attn_state in [
                 AscendAttentionState.DecodeOnly,
                 AscendAttentionState.SpecDecoding
         ]:
             num_seqs = len(seq_lens)  # type: ignore
-            if graph_pad_size != 0:
+            if num_token_pad_size != 0:
                 pad_value = 1
                 padded_seq_lens = seq_lens.tolist() + [  # type: ignore
                     pad_value  # type: ignore
-                ] * graph_pad_size
+                ] * num_token_pad_size
             else:
                 padded_seq_lens = seq_lens.tolist()  # type: ignore
 
             seq_lens = torch.from_numpy(
                 np.array(padded_seq_lens).astype(np.int32))
-            padding = torch.full((graph_pad_size, ),
+            padding = torch.full((num_token_pad_size, ),
                                  PAD_SLOT_ID,
                                  dtype=slot_mapping.dtype,
                                  device=slot_mapping.device)
             slot_mapping = torch.cat([slot_mapping, padding])
             block_table_padding = torch.zeros(
-                (graph_pad_size, ) + block_table.shape[1:],
+                (num_token_pad_size, ) + block_table.shape[1:],
                 dtype=block_table.dtype,
                 device=block_table.device)
             block_table = torch.cat([block_table, block_table_padding], dim=0)
             block_table = self._get_graph_runner_block_tables(
-                num_seqs + graph_pad_size, block_table)
+                num_seqs + num_token_pad_size, block_table)
 
         attn_metadata = AscendMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -255,7 +254,7 @@ class AscendAttentionMetadataBuilder:
             query_start_loc=query_start_loc,
             query_lens=query_lens,
             seq_lens=seq_lens,
-            seq_lens_list=seq_lens_list,
+            seq_lens_list=seq_lens.tolist(),
             max_query_len=max_query_len,
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
@@ -274,6 +273,7 @@ class AscendAttentionMetadataBuilder:
         block_table = self._get_graph_runner_block_tables(
             num_reqs, block_table)
         seq_lens = torch.ones(num_reqs, dtype=torch.int32, device=device)
+        seq_lens_list = [0] * num_reqs
         slot_mapping = torch.full((num_reqs, ),
                                   PAD_SLOT_ID,
                                   dtype=torch.int32,
@@ -292,7 +292,7 @@ class AscendAttentionMetadataBuilder:
             query_start_loc=query_start_loc,
             query_lens=query_lens,
             seq_lens=seq_lens,
-            seq_lens_list=seq_lens.tolist(),
+            seq_lens_list=seq_lens_list,
             max_query_len=query_lens.max().item(),
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,

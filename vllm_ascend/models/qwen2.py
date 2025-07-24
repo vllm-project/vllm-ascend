@@ -251,17 +251,6 @@ class CustomQwen2DecoderLayer(nn.Module):
                 hidden_states, pad_size)
         else:
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-        # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(
-            hidden_states, residual)
-        if flashcomm_v1_enabled:
-            hidden_states = all_gather_and_maybe_unpad(hidden_states, pad_size)
-        hidden_states = self.mlp(hidden_states)
-        if flashcomm_v1_enabled:
-            hidden_states = maybe_pad_and_reduce_scatter(
-                hidden_states, pad_size)
-        else:
-            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         return hidden_states, residual
 
 
