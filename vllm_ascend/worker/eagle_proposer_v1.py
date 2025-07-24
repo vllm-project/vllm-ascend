@@ -132,7 +132,6 @@ class EagleProposer:
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
-            common_prefix_len=0,
         )
         if self.use_cuda_graph and \
             num_tokens <= self.cudagraph_batch_sizes[-1]:
