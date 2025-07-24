@@ -210,7 +210,7 @@ async def send_request_to_service(client: httpx.AsyncClient,
         "remote_block_ids": None,
         "remote_host": None,
         "remote_port": None,
-        "aborted_request": aborted_requests,
+        "aborted_request": list(aborted_requests),
     }
     req_data["stream"] = False
     req_data["max_tokens"] = 1
