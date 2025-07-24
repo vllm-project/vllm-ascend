@@ -278,15 +278,24 @@ class CustomDeepseekV2MoE(nn.Module):
         self.enable_multistream_moe = \
             ascend_config.torchair_graph_config.enable_multistream_moe and \
             self.torchair_graph_enabled
+        self.enable_super_kernel = \
+            ascend_config.torchair_graph_config.enable_super_kernel and \
+            self.enable_multistream_moe
+        self.params_dtype = torch.get_default_dtype()
 
-        self.gate = ReplicatedLinear(config.hidden_size,
-                                     config.n_routed_experts,
-                                     bias=False,
-                                     quant_config=None,
-                                     prefix=f"{prefix}.gate")
+        self.gate = ReplicatedLinear(
+            config.hidden_size,
+            config.n_routed_experts,
+            bias=False,
+            quant_config=None,
+            params_dtype=torch.float32
+            if self.enable_super_kernel else self.params_dtype,
+            prefix=f"{prefix}.gate")
         if config.topk_method == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.n_routed_experts))
+                torch.empty(config.n_routed_experts,
+                            dtype=torch.float if self.enable_super_kernel else
+                            self.params_dtype))
         else:
             self.gate.e_score_correction_bias = None
 
@@ -330,8 +339,6 @@ class CustomDeepseekV2MoE(nn.Module):
         transfer_config = get_current_vllm_config().kv_transfer_config
         if transfer_config is not None:
             self.kv_consumer = transfer_config.kv_role == "kv_consumer"
-
-        self.params_dtype = torch.get_default_dtype()
 
     def forward(
             self,
@@ -855,6 +862,8 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        self.num_dense_layers = self.config.first_k_dense_replace
+        self.num_moe_layers = self.config.num_hidden_layers - self.num_dense_layers
         self.model = CustomDeepseekV2Model(vllm_config=vllm_config,
                                            prefix=maybe_prefix(
                                                prefix, "model"))
@@ -892,6 +901,34 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         loaded_params = super().load_weights(weights)
 
         return loaded_params
+
+    def get_expert_map(self, layer_id):
+        return self.model.layers[layer_id].mlp.experts.get_map()
+
+    def get_log2phy_map(self, layer_id):
+        return self.model.layers[layer_id].mlp.experts.get_log2phy_map()
+
+    def get_all_expert_map(self, num_moe_layers):
+        all_loads = []
+        for layer_id in range(num_moe_layers):
+            load_tensor = self.get_expert_map(
+                layer_id + self.num_dense_layers)  # (num_experts_per_layer,)
+            all_loads.append(load_tensor)
+
+        return torch.stack(all_loads, dim=0)
+
+    def get_all_moe_loads(self):
+        all_moe_loads = torch.stack(
+            [self.model.layers[layer_id + self.num_dense_layers].mlp.experts.moe_load \
+                for layer_id in range(self.num_moe_layers)],
+            dim=0
+        )
+        return all_moe_loads
+
+    def clear_all_moe_loads(self):
+        for layer_id in range(self.num_moe_layers):
+            self.model.layers[
+                layer_id + self.num_dense_layers].mlp.experts.clear_moe_load()
 
 
 class CustomDeepseekV3ForCausalLM(CustomDeepseekV2ForCausalLM):
