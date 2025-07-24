@@ -45,7 +45,6 @@ class EplbUpdator:
         self.rank_id = dist.get_rank()
         self.num_expert_load_gather = 10
         self.periodic_load_gather = True
-        self.redundant_enable = (expert_map_path is not None)
         self.num_iterations_eplb_update: torch.int64 = self.ascend_config.num_iterations_eplb_update
         self.expert_map_path = expert_map_path
 
@@ -80,14 +79,11 @@ class EplbUpdator:
             "expert_maps": None,
         })
 
-        self.eplb = EplbProcess(
-            shared_dict = self.shared_dict,
-            planner_q = self.planner_block_queue,
-            block_update_q = self.block_update_queue,
-            redundant_enable = self.redundant_enable,
-            policy_type = 1,
-            enable_d2d = True
-        )
+        self.eplb = EplbProcess(shared_dict=self.shared_dict,
+                                planner_q=self.planner_block_queue,
+                                block_update_q=self.block_update_queue,
+                                policy_type=1,
+                                enable_d2d=True)
 
         self.eplb_process = self.eplb._launch_process()
 
@@ -124,15 +120,17 @@ class EplbUpdator:
 
     def forward_before(self):
         if self.update_expert_weight_flag():
-            (expert_send_info, expert_recv_info, updated_expert_map, log2phy_map, layer_id) = self.update_info_all.pop(0)
-            rank_id = torch.distributed.get_rank()
-            if self.redundant_enable:
-                log2phy_map_this_rank = torch.from_numpy(numpy.array(log2phy_map))
-                self.eplb_loader.set_log2phy_map(log2phy_map_this_rank)
-            updated_expert_map_this_rank = torch.from_numpy(numpy.array(updated_expert_map))
-            #logger.info(f"check update info, layer = {layer_id}, send = {expert_send_info_this_rank}, recv = {expert_recv_info_this_rank}")
-            self.eplb_loader.generate_expert_d2d_transfer_task(expert_send_info, expert_recv_info,
-                updated_expert_map_this_rank, layer_id + self.adaptor.num_dense_layers)
+            (expert_send_info, expert_recv_info, updated_expert_map,
+             log2phy_map, layer_id) = self.update_info_all.pop(0)
+            log2phy_map_this_rank = torch.from_numpy(numpy.array(log2phy_map))
+            self.eplb_loader.set_log2phy_map(log2phy_map_this_rank)
+            updated_expert_map_this_rank = torch.from_numpy(
+                numpy.array(updated_expert_map))
+            # logger.info(f"check update info, layer = {layer_id}, send = {expert_send_info_this_rank}, recv = {expert_recv_info_this_rank}")
+            self.eplb_loader.generate_expert_d2d_transfer_task(
+                expert_send_info, expert_recv_info,
+                updated_expert_map_this_rank,
+                layer_id + self.adaptor.num_dense_layers)
 
             # set asynchronous stream for d2d expert weight update
             self.reqs = []
@@ -150,7 +148,7 @@ class EplbUpdator:
             self.wakeup_eplb_worker()
 
         if self.update_expert_weight_flag():
-            self.eplb_loader.update_expert_map_and_weight(self.reqs, self.redundant_enable)
+            self.eplb_loader.update_expert_map_and_weight(self.reqs)
 
         self.update_iteration()
 
