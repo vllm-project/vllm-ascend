@@ -268,9 +268,10 @@ class NPUWorker(WorkerBase):
     def _get_max_num_tokens_and_with_prefill(self):
         max_num_tokens = 1
         with_prefill = False
+        enable_dbo = False
         if self.model_runner.dp_size > 1:
-            max_num_tokens, with_prefill = self.model_runner._get_forward_metadata_across_dp(
-                max_num_tokens, with_prefill)
+            max_num_tokens, with_prefill, _ = self.model_runner.get_forward_metadata_across_dp(
+                max_num_tokens, with_prefill, enable_dbo)
         return max_num_tokens, with_prefill
 
     def execute_dummy_batch(self) -> None:
