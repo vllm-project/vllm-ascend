@@ -1170,6 +1170,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
             spec_decode_metadata = None
+
+            if not with_prefill:
+                max_num_reqs_across_dp = padded_num_tokens_across_dp
+            else:
+                num_reqs_tensor = torch.tensor(
+                    [num_reqs],
+                    device=hidden_states.device,
+                    dtype=torch.int32
+                )
+                max_num_reqs_across_dp = get_dp_group().all_gather(num_reqs_tensor, dim=0).max()
+            sample_indices = nn.functional.pad(sample_indices, (0, max_num_reqs_across_dp - sample_indices.shape[0]))
         else:
             # Get the number of draft tokens for each request.
             # Iterate over the dictionary rather than all requests since not all
@@ -1379,6 +1390,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         with ProfileExecuteDuration().capture_async("post process"):
             logits = self.model.compute_logits(hidden_states[sample_indices],
                                                None)
+            logits = logits[:self.input_batch.num_reqs]
 
             # Apply structured output bitmasks if present
             if scheduler_output.grammar_bitmask is not None:
@@ -1763,6 +1775,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=inputs_embeds,
                         **model_kwargs)
+                    
+            if not self.in_profile_run and not is_torchair_compile:
+                if not with_prefill:
+                    max_num_reqs_across_dp = num_reqs
+                else:
+                    num_reqs_tensor = torch.tensor(
+                        [num_reqs],
+                        device=hidden_states.device,
+                        dtype=torch.int32
+                    )
+                    max_num_reqs_across_dp = get_dp_group().all_gather(num_reqs_tensor, dim=0).max()
+                dummy_indices = torch.zeros(max_num_reqs_across_dp, device=hidden_states.device, dtype=torch.int32)
+                model.compute_logits(hidden_states[dummy_indices], None)
+
             if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
                 assert isinstance(self.drafter, MtpProposer)
                 self.drafter.dummy_run(
