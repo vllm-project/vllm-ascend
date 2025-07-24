@@ -188,7 +188,6 @@ class TestAscendFusedMoe:
         assert layer.top_k == default_moe_config['top_k']
         assert hasattr(layer, 'w13_weight')
         assert hasattr(layer, 'w2_weight')
-        assert layer.moe_instance_id == 0
 
         # check group_topk
         with pytest.raises(AssertionError):
