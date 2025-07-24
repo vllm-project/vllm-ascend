@@ -218,8 +218,6 @@ class AscendAttentionMetadataBuilder:
         attn_mask = self.runner.attn_mask
         attn_state = self.runner.attn_state
         query_start_loc_cpu = self.runner.query_start_loc_cpu[:num_reqs + 1]
-        query_start_loc = query_start_loc_cpu.to(self.runner.device,
-                                                 non_blocking=True)
 
         graph_pad_size = kwargs.get("graph_pad_size", -1)
         use_torchair_graph = graph_pad_size != -1
@@ -326,7 +324,7 @@ class AscendAttentionMetadataBuilder:
                 "Currently we only support building dummy metadata for DecodeOnly state"
             )
 
-        attn_metadata.attn_state = attn_state
+        attn_metadata.attn_state = attn_state  # ttttodo 检查是否走这里 可用
         return attn_metadata
 
 

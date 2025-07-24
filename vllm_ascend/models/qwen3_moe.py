@@ -119,7 +119,7 @@ class AscendQwen3MoeSparseMoeBlock(nn.Module):
             is_prefill = True
             enable_force_load_balance = True
         else:
-            is_prefill = attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+            is_prefill = attn_metadata.attn_state != AscendAttentionState.DecodeOnly
             enable_force_load_balance = is_prefill
 
         router_logits, _ = self.gate(hidden_states)
