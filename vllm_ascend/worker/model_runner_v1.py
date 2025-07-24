@@ -606,10 +606,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if batch_changed:
             self.input_batch.refresh_sampling_metadata()
 
-        def _get_forward_metadata_across_dp(
+    def _get_forward_metadata_across_dp(
             self, maybe_padded_num_tokens: int, num_tokens: int,
             with_prefill: bool, enable_dbo: bool, is_profile: bool=False, num_reqs: int=1
-    ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
+        ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
         if self.dp_size == 1:
             return maybe_padded_num_tokens, None, with_prefill, enable_dbo
 
