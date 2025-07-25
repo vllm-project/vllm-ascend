@@ -11,7 +11,7 @@ if is_310p():
                                          bgmv_shrink, sgmv_expand,
                                          sgmv_expand_slice, sgmv_shrink)
 else:
-    from vllm_ascend.lora.punica_wrapper.lora_ops import(
+    from vllm_ascend.lora.punica_wrapper.lora_ops import (
         bgmv_expand, bgmv_expand_slice, bgmv_shrink, sgmv_expand,
         sgmv_expand_slice, sgmv_shrink)
 
