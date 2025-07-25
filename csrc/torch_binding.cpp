@@ -227,7 +227,7 @@ void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
                           lora_rank, scale_f]() -> int {
         auto dtype = get_dtype_from_torch(scalar_type);
         int device_id = 0;
-        uint32_t aiv_num = 0;
+        int64_t aiv_num = 0;
         TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
         int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
         TORCH_CHECK("num_tokens_per_core != 0", "num_tokens_per_core should not be 0");
@@ -272,7 +272,7 @@ at::Tensor bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, a
                           slice_offset, slice_size, output_full_dim]() -> int {
         auto dtype = get_dtype_from_torch(scalar_type);
         int device_id = 0;
-        uint32_t aiv_num = 0;
+        int64_t aiv_num = 0;
         TORCH_CHECK(aclGetDeviceCapability(device_id, ACL_DEVICE_INFO_VECTOR_CORE_NUM, &aiv_num) == ACL_SUCCESS);
         int num_tokens_per_core = (batch_size + aiv_num - 1) / aiv_num;
         TORCH_CHECK("num_tokens_per_core != 0", "num_tokens_per_core should not be 0");
