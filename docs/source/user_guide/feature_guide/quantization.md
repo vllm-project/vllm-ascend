@@ -11,6 +11,7 @@ To quantize a model, users should install [ModelSlim](https://gitee.com/ascend/m
 Currently, only the specific tag [modelslim-VLLM-8.1.RC1.b020_001](https://gitee.com/ascend/msit/blob/modelslim-VLLM-8.1.RC1.b020_001/msmodelslim/README.md) of modelslim works with vLLM Ascend. Please do not install other version until modelslim master version is available for vLLM Ascend in the future.
 
 Install modelslim:
+
 ```bash
 git clone https://gitee.com/ascend/msit -b modelslim-VLLM-8.1.RC1.b020_001
 cd msit/msmodelslim
@@ -21,7 +22,6 @@ pip install accelerate
 ## Quantize model
 
 Take [DeepSeek-V2-Lite](https://modelscope.cn/models/deepseek-ai/DeepSeek-V2-Lite) as an example, you just need to download the model, and then execute the convert command. The command is shown below. More info can be found in modelslim doc [deepseek w8a8 dynamic quantization docs](https://gitee.com/ascend/msit/blob/modelslim-VLLM-8.1.RC1.b020_001/msmodelslim/example/DeepSeek/README.md#deepseek-v2-w8a8-dynamic%E9%87%8F%E5%8C%96).
-
 
 ```bash
 cd example/DeepSeek
@@ -39,6 +39,7 @@ Once convert action is done, there are two important files generated.
 2. [quant_model_description.json](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V2-Lite-W8A8/file/view/master/quant_model_description.json?status=1). All the converted weights info are recorded in this file.
 
 Here is the full converted model files:
+
 ```bash
 .
 ├── config.json

@@ -4,6 +4,7 @@ This document details the benchmark methodology for vllm-ascend, aimed at evalua
 **Benchmark Coverage**: We measure offline e2e latency and throughput, and fixed-QPS online serving benchmarks, for more details see [vllm-ascend benchmark scripts](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks).
 
 ## 1. Run docker container
+
 ```{code-block} bash
    :substitutions:
 # Update DEVICE according to your device (/dev/davinci[0-7])
@@ -29,6 +30,7 @@ docker run --rm \
 ```
 
 ## 2. Install dependencies
+
 ```bash
 cd /workspace/vllm-ascend
 pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
@@ -37,11 +39,13 @@ pip install -r benchmarks/requirements-bench.txt
 
 ## 3. (Optional)Prepare model weights
 For faster running speed, we recommend downloading the model in advance：
+
 ```bash
 modelscope download --model LLM-Research/Meta-Llama-3.1-8B-Instruct
 ```
 
 You can also replace all model paths in the [json](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks/tests) files with your local paths:
+
 ```bash
 [
   {
@@ -59,11 +63,13 @@ You can also replace all model paths in the [json](https://github.com/vllm-proje
 
 ## 4. Run benchmark script
 Run benchmark script:
+
 ```bash
 bash benchmarks/scripts/run-performance-benchmarks.sh
 ```
 
 After about 10 mins, the output is as shown below:
+
 ```bash
 online serving:
 qps 1:
@@ -173,6 +179,7 @@ Throughput: 4.64 requests/s, 2000.51 total tokens/s, 1010.54 output tokens/s
 Total num prompt tokens:  42659
 Total num output tokens:  43545
 ```
+
 The result json files are generated into the path `benchmark/results`
 These files contain detailed benchmarking results for further analysis.
 

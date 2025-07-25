@@ -43,11 +43,13 @@ Execute the following commands on each node in sequence. The results must all be
 
 ### NPU Interconnect Verification:
 #### 1. Get NPU IP Addresses
+
 ```bash
 for i in {0..7}; do hccn_tool -i $i -ip -g | grep ipaddr; done
 ```
 
 #### 2. Cross-Node PING Test
+
 ```bash
 # Execute on the target node (replace with actual IP)
 hccn_tool -i 0 -ping -g address 10.20.0.20
@@ -95,6 +97,7 @@ Before launch the inference server, ensure some environment variables are set fo
 Run the following scripts on two nodes respectively
 
 **node0**
+
 ```shell
 #!/bin/sh
 
@@ -135,6 +138,7 @@ vllm serve /root/.cache/ds_v3 \
 ```
 
 **node1**
+
 ```shell
 #!/bin/sh
 
@@ -173,7 +177,7 @@ vllm serve /root/.cache/ds_v3 \
 --additional-config '{"ascend_scheduler_config":{"enabled":true},"torchair_graph_config":{"enabled":true}}'
 ```
 
-The Deployment view looks like: 
+The Deployment view looks like:
 ![alt text](../assets/multi_node_dp.png)
 
 Once your server is started, you can query the model with input prompts:
@@ -191,6 +195,7 @@ curl http://{ node0 ip:8004 }/v1/completions \
 
 ## Run benchmarks
 For details please refer to [benchmark](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks)
+
 ```shell
 vllm bench serve --model /root/.cache/ds_v3  --served-model-name deepseek_v3 \
 --dataset-name random --random-input-len 128 --random-output-len 128 \

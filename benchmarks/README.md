@@ -26,7 +26,6 @@ This document outlines the benchmarking methodology for vllm-ascend, aimed at ev
 
 **Benchmarking Duration**: about 800 senond for single model.
 
-
 # Quick Use
 ## Prerequisites
 Before running the benchmarks, ensure the following:
@@ -34,11 +33,12 @@ Before running the benchmarks, ensure the following:
 - vllm and vllm-ascend are installed and properly set up in an NPU environment, as these scripts are specifically designed for NPU devices.
 
 - Install necessary dependencies for benchmarks:
-    ```
-    pip install -r benchmarks/requirements-bench.txt
-    ```
-    
-- For performance benchmark, it is recommended to set the [load-format](https://github.com/vllm-project/vllm-ascend/blob/5897dc5bbe321ca90c26225d0d70bff24061d04b/benchmarks/tests/latency-tests.json#L7) as `dummy`, It will construct random weights based on the passed model without downloading the weights from internet, which can greatly reduce the benchmark time. 
+  
+  ```shell
+  pip install -r benchmarks/requirements-bench.txt
+  ```
+  
+- For performance benchmark, it is recommended to set the [load-format](https://github.com/vllm-project/vllm-ascend/blob/5897dc5bbe321ca90c26225d0d70bff24061d04b/benchmarks/tests/latency-tests.json#L7) as `dummy`, It will construct random weights based on the passed model without downloading the weights from internet, which can greatly reduce the benchmark time.
 - If you want to run benchmark customized, feel free to add your own models and parameters in the [JSON](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks/tests), let's take `Qwen2.5-VL-7B-Instruct`as an example:
 
   ```shell
@@ -72,27 +72,28 @@ Before running the benchmarks, ensure the following:
   }
   ]
   ```
-  this Json will be structured and parsed into server parameters and client parameters by the benchmark script. This configuration defines a test case named `serving_qwen2_5vl_7B_tp1`, designed to evaluate the performance of the `Qwen/Qwen2.5-VL-7B-Instruct` model under different request rates. The test includes both server and client parameters, for more parameters details, see vllm benchmark [cli](https://github.com/vllm-project/vllm/tree/main/vllm/benchmarks).
+  
+this Json will be structured and parsed into server parameters and client parameters by the benchmark script. This configuration defines a test case named `serving_qwen2_5vl_7B_tp1`, designed to evaluate the performance of the `Qwen/Qwen2.5-VL-7B-Instruct` model under different request rates. The test includes both server and client parameters, for more parameters details, see vllm benchmark [cli](https://github.com/vllm-project/vllm/tree/main/vllm/benchmarks).
 
   - **Test Overview**
      - Test Name: serving_qwen2_5vl_7B_tp1
 
      - Queries Per Second (QPS): The test is run at four different QPS levels: 1, 4, 16, and inf (infinite load, typically used for stress testing).
 
-   - Server Parameters
-      - Model: Qwen/Qwen2.5-VL-7B-Instruct
+  - Server Parameters
+     - Model: Qwen/Qwen2.5-VL-7B-Instruct
 
-      - Tensor Parallelism: 1 (no model parallelism is used; the model runs on a single device or node)
+     - Tensor Parallelism: 1 (no model parallelism is used; the model runs on a single device or node)
 
-      - Swap Space: 16 GB (used to handle memory overflow by swapping to disk)
+     - Swap Space: 16 GB (used to handle memory overflow by swapping to disk)
 
-      - disable_log_stats: disables logging of performance statistics.
+     - disable_log_stats: disables logging of performance statistics.
 
-      - disable_log_requests: disables logging of individual requests.
+     - disable_log_requests: disables logging of individual requests.
 
-      - Trust Remote Code: enabled (allows execution of model-specific custom code)
+     - Trust Remote Code: enabled (allows execution of model-specific custom code)
 
-      - Max Model Length: 16,384 tokens (maximum context length supported by the model)
+     - Max Model Length: 16,384 tokens (maximum context length supported by the model)
 
   - Client Parameters
 
@@ -110,17 +111,18 @@ Before running the benchmarks, ensure the following:
 
      - Number of Prompts: 200 (the total number of prompts used during the test)
 
-
-
 ## Run benchmarks
 
 ### Use benchmark script
 The provided scripts automatically execute performance tests for serving, throughput, and latency. To start the benchmarking process, run command in the vllm-ascend root directory:
-```
+
+```shell
 bash benchmarks/scripts/run-performance-benchmarks.sh
 ```
+
 Once the script completes, you can find the results in the benchmarks/results folder. The output files may resemble the following:
-```
+
+```shell
 .
 |-- serving_qwen2_5_7B_tp1_qps_1.json
 |-- serving_qwen2_5_7B_tp1_qps_16.json
@@ -129,6 +131,7 @@ Once the script completes, you can find the results in the benchmarks/results fo
 |-- latency_qwen2_5_7B_tp1.json
 |-- throughput_qwen2_5_7B_tp1.json
 ```
+
 These files contain detailed benchmarking results for further analysis.
 
 ### Use benchmark cli
@@ -137,30 +140,36 @@ For more flexible and customized use, benchmark cli is also provided to run onli
 Similarly, let’s take `Qwen2.5-VL-7B-Instruct` benchmark as an example:
 #### Online serving
 1. Launch the server:
-   ```shell
-   vllm serve Qwen2.5-VL-7B-Instruct --max-model-len 16789
-   ```
+
+    ```shell
+    vllm serve Qwen2.5-VL-7B-Instruct --max-model-len 16789
+    ```
+
 2. Running performance tests using cli
-   ```shell
+  
+    ```shell
     vllm bench serve --model Qwen2.5-VL-7B-Instruct\
     --endpoint-type "openai-chat" --dataset-name hf \
     --hf-split train --endpoint "/v1/chat/completions" \
     --dataset-path "lmarena-ai/vision-arena-bench-v0.1" \
     --num-prompts 200 \
     --request-rate 16
-   ```
+    ```
 
 #### Offline
 - **Throughput**
-    ```shell
-    vllm bench throughput --output-json results/throughput_qwen2_5_7B_tp1.json \
-    --model Qwen/Qwen2.5-7B-Instruct --tensor-parallel-size 1 --load-format dummy \
-    --dataset-path /github/home/.cache/datasets/ShareGPT_V3_unfiltered_cleaned_split.json \
-    --num-prompts 200 --backend vllm
-    ```
+
+  ```shell
+  vllm bench throughput --output-json results/throughput_qwen2_5_7B_tp1.json \
+  --model Qwen/Qwen2.5-7B-Instruct --tensor-parallel-size 1 --load-format dummy \
+  --dataset-path /github/home/.cache/datasets/ShareGPT_V3_unfiltered_cleaned_split.json \
+  --num-prompts 200 --backend vllm
+  ```
+
 - **Latency**
-    ```shell
-    vllm bench latency --output-json results/latency_qwen2_5_7B_tp1.json \
-    --model Qwen/Qwen2.5-7B-Instruct --tensor-parallel-size 1 \
-    --load-format dummy --num-iters-warmup 5 --num-iters 15
-    ```
+  
+  ```shell
+  vllm bench latency --output-json results/latency_qwen2_5_7B_tp1.json \
+  --model Qwen/Qwen2.5-7B-Instruct --tensor-parallel-size 1 \
+  --load-format dummy --num-iters-warmup 5 --num-iters 15
+  ```

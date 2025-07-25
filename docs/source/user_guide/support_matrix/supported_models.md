@@ -34,7 +34,6 @@ Get the newest info here: https://github.com/vllm-project/vllm-ascend/issues/160
 | XLM-RoBERTa-based | ✅ |  |
 | Molmo | ✅ |  |
 
-
 ## Multimodal Language Models
 
 ### Generative Models

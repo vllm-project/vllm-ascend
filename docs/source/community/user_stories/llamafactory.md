@@ -4,7 +4,7 @@
 
 [LLaMA-Factory](https://github.com/hiyouga/LLaMA-Factory) is an easy-to-use and efficient platform for training and fine-tuning large language models. With LLaMA-Factory, you can fine-tune hundreds of pre-trained models locally without writing any code.
 
-LLaMA-Facotory users need to evaluate and inference the model after fine-tuning the model. 
+LLaMA-Facotory users need to evaluate and inference the model after fine-tuning the model.
 
 **The Business Challenge**
 
