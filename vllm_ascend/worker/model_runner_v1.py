@@ -24,7 +24,7 @@ import types
 import weakref
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Union, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -45,7 +45,8 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.models.interfaces import has_step_pooler
+from vllm.model_executor.models.interfaces_base import (VllmModelForPooling,
+                                                        is_pooling_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
@@ -74,20 +75,21 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
 from vllm_ascend.attention.attention_v1_torchair import AscendTorchairMetadata
-from vllm_ascend.attention.mla_v1 import (AscendMLAMetadata,
-                                          CommonAttentionMetadata)
+from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
+from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
+                                        write_kv_cache_bytes_to_file)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               ProfileExecuteDuration,
-                               check_torchair_cache_exist, is_310p,
+                               ProfileExecuteDuration, is_310p,
                                maybe_converting_weight_acl_format,
-                               vllm_version_is, write_kv_cache_bytes_to_file)
+                               vllm_version_is)
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if vllm_version_is("0.9.2"):
+    from vllm.model_executor.models.interfaces import has_step_pooler
     from vllm.v1.utils import bind_kv_cache
 else:
     from vllm.v1.worker.utils import bind_kv_cache
@@ -230,7 +232,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.spec_attn_mask = torch.triu(torch.ones(2048,
                                                         2048,
                                                         dtype=torch.bool),
-                                             diagonal=1).to("npu")
+                                             diagonal=1).to(self.device)
             if get_pp_group().is_last_rank:
                 if self.speculative_config.method == "ngram":
                     self.drafter = NgramProposer(self.vllm_config)
@@ -395,12 +397,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
+            pooling_params = new_req_data.pooling_params
             if sampling_params and \
                 sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
             else:
                 generator = None
+
+            if not vllm_version_is("0.9.2") and pooling_params:
+                assert (task := pooling_params.task) is not None, (
+                    "You did not set `task` in the API")
+                model = cast(VllmModelForPooling, self.model)
+                to_update = model.pooler.get_pooling_updates(task)
+                to_update.apply(pooling_params)
 
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
@@ -683,15 +693,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
-
-            # Prepare for cascade attention if enabled & beneficial.
-            common_prefix_len = 0
-
             attn_metadata_i = self.attn_metadata_builder.build(
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
-                common_prefix_len=common_prefix_len,
             )
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
@@ -1038,27 +1043,22 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             extra_builder_kwargs['graph_pad_size'] = graph_pad_size
 
         if self.vllm_config.model_config.use_mla:
-            query_start_loc = self.query_start_loc[:num_reqs + 1]
-            seq_lens = self.seq_lens[:num_reqs]
-            common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=query_start_loc, seq_lens=seq_lens)
+            extra_builder_kwargs[
+                "query_start_loc"] = self.query_start_loc[:num_reqs + 1]
             attn_metadata = self.attn_metadata_builder.build(  # type: ignore
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
-                common_attn_metadata=common_attn_metadata,
-                common_prefix_len=None,
                 **extra_builder_kwargs,
             )
+            attn_metadata.num_input_tokens = num_input_tokens
         else:
             attn_metadata = self.attn_metadata_builder.build(  # type: ignore
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
-                common_prefix_len=None,
                 **extra_builder_kwargs,
             )
-        attn_metadata.num_input_tokens = num_input_tokens
 
         # Prepare input_ids
         token_indices = (positions_np +
@@ -1108,6 +1108,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.torchair_graph_enabled and not with_prefill:
             input_ids = self.input_ids[:padded_batch_size]
             positions = self.positions[:padded_batch_size]
+
+        if get_pp_group().is_first_rank:
+            intermediate_tensors = None
+        else:
+            assert intermediate_tensors is not None
+            assert self.intermediate_tensors is not None
+            for k, v in intermediate_tensors.items():
+                self.intermediate_tensors[k][:num_input_tokens].copy_(
+                    v[:num_input_tokens], non_blocking=True)
+            intermediate_tensors = IntermediateTensors({
+                k: v[:num_input_tokens]
+                for k, v in self.intermediate_tensors.items()
+            })
 
         # Run forward pass
         with set_forward_context(attn_metadata,
@@ -1729,26 +1742,58 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         req_num_tokens = num_tokens // num_reqs
 
-        dummy_metadata = PoolingMetadata(
-            prompt_lens=torch.tensor([h.shape[0] for h in hidden_states_list],
-                                     device=self.device),
-            prompt_token_ids=torch.zeros((num_reqs, req_num_tokens),
-                                         dtype=torch.int32,
-                                         device=self.device),
-            pooling_params=[PoolingParams()] * num_reqs)
+        if vllm_version_is("0.9.2"):
+            dummy_metadata = PoolingMetadata(
+                prompt_lens=torch.tensor(
+                    [h.shape[0] for h in hidden_states_list],
+                    device=self.device),
+                prompt_token_ids=torch.zeros((num_reqs, req_num_tokens),
+                                             dtype=torch.int32,
+                                             device=self.device),
+                pooling_params=[PoolingParams()] * num_reqs)
+            try:
+                pooler_output = self.model.pooler(
+                    hidden_states=hidden_states_list,
+                    pooling_metadata=dummy_metadata)
+            except RuntimeError as e:
+                if 'out of memory' in str(e):
+                    raise RuntimeError(
+                        "NPU out of memory occurred when warming up pooler with "
+                        f"{num_reqs} dummy requests. Please try lowering "
+                        "`max_num_seqs` or `gpu_memory_utilization` when "
+                        "initializing the engine.") from e
+                else:
+                    raise e
+        else:
+            model = cast(VllmModelForPooling, self.model)
+            dummy_task = self.get_supported_pooling_tasks()[0]
+            dummy_pooling_params = PoolingParams(task=dummy_task)
 
-        try:
-            pooler_output = self.model.pooler(hidden_states=hidden_states_list,
-                                              pooling_metadata=dummy_metadata)
-        except RuntimeError as e:
-            if 'out of memory' in str(e):
-                raise RuntimeError(
-                    "NPU out of memory occurred when warming up pooler with "
-                    f"{num_reqs} dummy requests. Please try lowering "
-                    "`max_num_seqs` or `gpu_memory_utilization` when "
-                    "initializing the engine.") from e
-            else:
-                raise e
+            to_update = model.pooler.get_pooling_updates(dummy_task)
+            to_update.apply(dummy_pooling_params)
+
+            dummy_metadata = PoolingMetadata(
+                prompt_lens=torch.tensor(
+                    [h.shape[0] for h in hidden_states_list],
+                    device=self.device),
+                prompt_token_ids=torch.zeros((num_reqs, req_num_tokens),
+                                             dtype=torch.int32,
+                                             device=self.device),
+                pooling_params=[dummy_pooling_params] * num_reqs)
+
+            try:
+                pooler_output = model.pooler(hidden_states=hidden_states_list,
+                                             pooling_metadata=dummy_metadata)
+            except RuntimeError as e:
+                if 'out of memory' in str(e):
+                    raise RuntimeError(
+                        "NPU out of memory occurred when warming up pooler with "
+                        f"{num_reqs} dummy requests. Please try lowering "
+                        "`max_num_seqs` or `gpu_memory_utilization` when "
+                        "initializing the engine.") from e
+                else:
+                    raise e
+
         return pooler_output
 
     def load_model(self) -> None:
@@ -1767,8 +1812,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                    QKVParallelLinear, RowParallelLinear)):
                         module.weight.data = torch_npu.npu_format_cast(
                             module.weight.data, ACL_FORMAT_FRACTAL_NZ)
-            if has_step_pooler(self.model):
-                self.input_batch.logits_processing_needs_token_ids = True
+
+            if vllm_version_is("0.9.2") and has_step_pooler(self.model):
+                self.input_batch.logits_processing_needs_token_ids_bool = True
             if self.drafter:
                 logger.info("Loading drafter model...")
                 if isinstance(self.drafter, EagleProposer):
@@ -2379,3 +2425,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if batch_size <= padded_batch_size < selected_batch_size:
                 selected_batch_size = padded_batch_size
         return selected_batch_size
+
+    def get_supported_pooling_tasks(self):
+        model = self.get_model()
+        if not is_pooling_model(model):
+            return []
+
+        return list(model.pooler.get_supported_tasks())

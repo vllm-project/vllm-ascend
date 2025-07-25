@@ -29,7 +29,7 @@ from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
-                               nd_to_nz_2d)
+                               nd_to_nz_2d, vllm_version_is)
 
 
 class AscendAttentionTorchairBackend(AttentionBackend):
@@ -37,10 +37,12 @@ class AscendAttentionTorchairBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "ASCEND"
+        return "ASCEND_TORCHAIR"
 
     @staticmethod
     def get_impl_cls() -> Type["AscendAttentionTorchairBackendImpl"]:
+        if vllm_version_is("0.9.2"):
+            return AscendAttentionTorchairBackendImpl092
         return AscendAttentionTorchairBackendImpl
 
     @staticmethod
@@ -127,10 +129,8 @@ class AscendTorchairMetadata:
     query_start_loc: torch.Tensor
     query_lens: torch.Tensor
     seq_lens: torch.Tensor
-
     # max value of number of tokens across dp group
     max_num_tokens_across_dp: int = 0
-
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int] = None
     # (num_tokens,). The indices of the token slots that input tokens will be
@@ -138,20 +138,10 @@ class AscendTorchairMetadata:
     # is 16, the three tokens are stored in the 3rd slot in block 2, 2nd slot
     # in block 0, and 1st slot in block 1, respectively.
     slot_mapping: torch.Tensor = None
-    # TODO: Indicates whether there are only prefill requests.
-    # FlashAttention can be used when there are only prefill requests.
-    # FlashAttention has better performance than PageAtttention,
-    # but it does not support decode requests.
-    is_only_prefill: bool = False
     # Current state of this attention run.
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
     attn_mask: Optional[torch.Tensor] = None
-
-    # For logging.
-    num_input_tokens: int = 0  # Number of tokens including padding.
-
     with_prefill_across_dp: bool = False
-
     decode: Optional[AscendDecodeMetadata] = None
 
 
@@ -234,7 +224,6 @@ class AscendAttentionTorchairMetadataBuilder:
               num_reqs,
               num_actual_tokens,
               max_query_len,
-              common_prefix_len,
               graph_pad_size: int = -1,
               max_num_tokens_across_dp: int = 0,
               with_prefill_across_dp: bool = False):
@@ -333,11 +322,10 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
         alibi_slopes: Optional[List[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
-        logits_soft_cap: Optional[float] = None,
-        attn_type: str = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[str] = None,
-        use_irope: bool = False,
+        logits_soft_cap: Optional[float],
+        attn_type: str,
+        kv_sharing_target_layer_name: Optional[str],
+        **kwargs,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -501,3 +489,36 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
                 "to use ascend scheduler.")
 
         return output.view(num_tokens, self.hidden_size)
+
+
+class AscendAttentionTorchairBackendImpl092(AscendAttentionTorchairBackendImpl
+                                            ):
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: Optional[List[float]],
+        sliding_window: Optional[int],
+        kv_cache_dtype: str,
+        blocksparse_params: Optional[Dict[str, Any]] = None,
+        logits_soft_cap: Optional[float] = None,
+        attn_type: str = AttentionType.DECODER,
+        kv_sharing_target_layer_name: Optional[str] = None,
+        use_irope: bool = False,
+    ) -> None:
+        super().__init__(
+            num_heads=num_heads,
+            head_size=head_size,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            alibi_slopes=alibi_slopes,
+            sliding_window=sliding_window,
+            kv_cache_dtype=kv_cache_dtype,
+            logits_soft_cap=logits_soft_cap,
+            attn_type=attn_type,
+            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
+            use_irope=use_irope,
+        )

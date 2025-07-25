@@ -163,3 +163,7 @@ export HCCL_DETERMINISTIC = 1
 export ATB_MATMUL_SHUFFLE_K_ENABLE = 0
 export ATB_LLM_LCOC_ENABLE = 0
 ```
+
+### 19. How to fix the error "ImportError: Please install vllm[audio] for audio support" for Qwen2.5-Omni model？
+The `Qwen2.5-Omni` model requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met `pip install qwen-omni-utils`,
+this package will install `librosa` and its related dependencies, resolving the `ImportError: No module named 'librosa'` issue and ensuring audio processing functionality works correctly.

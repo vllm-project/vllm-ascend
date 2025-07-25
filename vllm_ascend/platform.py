@@ -131,24 +131,6 @@ class NPUPlatform(Platform):
         if kv_cache_dtype is not None:
             vllm_config.cache_config.cache_dtype = kv_cache_dtype
 
-        if parallel_config:
-            # Default value for expert tensor parallel size
-            parallel_config.expert_tensor_parallel_size = parallel_config.tensor_parallel_size
-
-            # NOTE: When enable_expert_parallel is True, we follow vLLM convention:
-            # ep_size = world_size, which means expert_tensor_parallel_size must be 1
-            if parallel_config.enable_expert_parallel:
-                parallel_config.expert_tensor_parallel_size = 1
-            # NOTE: When enable_expert_parallel is False and param `asceend_config.expert_tensor_parallel_size`
-            # is configured, use ascend_config
-            elif ascend_config.expert_tensor_parallel_size > 0:
-                parallel_config.expert_tensor_parallel_size = ascend_config.expert_tensor_parallel_size
-
-            # Calculate expert parallel size based on world size
-            parallel_config.expert_parallel_size = (
-                parallel_config.world_size_across_dp //
-                parallel_config.expert_tensor_parallel_size)
-
         if model_config is None:
             logger.warning("Model config is missing. This may indicate "
                            "that we are running a test case")
@@ -181,7 +163,10 @@ class NPUPlatform(Platform):
             update_aclgraph_sizes(vllm_config)
 
         if parallel_config and parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
+            if ascend_config.torchair_graph_config.enabled:
+                parallel_config.worker_cls = "vllm_ascend.torchair.torchair_worker.NPUTorchairWorker"
+            else:
+                parallel_config.worker_cls = "vllm_ascend.worker.worker_v1.NPUWorker"
 
         if cache_config:
             if cache_config.block_size is None:

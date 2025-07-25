@@ -37,17 +37,7 @@
 # =================
 # ** File: platform/patch_common/patch_distributed.py**
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.distributed.parallel_state.destroy_model_parallel()`
-#    Why:
-#       vllm dose not support outside platform maintain its own `CoordinatorGroup`, vllm-ascend maintain EP and ETP
-#       inside of the repo, and needs a common interface to destroy them, this patch add the interface of destroy
-#       platform owned `CoordinatorGroup` to make sure all the CoordinateGroup can be properly destroyed
-#    How：
-#       Call `vllm_ascend.distributed.parallel_state method `destroy_platform_model_parallel` to destroy all the `CoordinateGroup`
-#    Related PR (if no, explain why):
-#    Future Plan:
-#       Remove those patch when vllm merged them
-#   2. `vllm.config.ParallelConfig.get_next_dp_init_port`
+#   1. `vllm.config.ParallelConfig.get_next_dp_init_port`
 #    Why:
 #       vllm doesn't support get port from environment.
 #    How：
