@@ -139,7 +139,10 @@ def fused_experts_with_mc2(
     shared_experts: Optional[Any] = None,
     is_torchair: bool = False,
     mc2_mask: Optional[torch.Tensor] = None,
+    log2phy: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    if log2phy is not None:
+        topk_ids = log2phy[topk_ids]
     quant_mode = 0
     ep_group = get_mc2_group()
     ep_rank_id = ep_group.rank_in_group
@@ -279,13 +282,14 @@ def fused_experts_with_mc2(
     ) if enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine(
         **kwargs_mc2)
 
+    group_list_type = 1
     if shared_experts is None:
-        return hidden_states
+        return hidden_states, expert_token_nums, group_list_type
     else:
         with npu_stream_switch("moe_secondary", 0):
             npu_wait_tensor(shared_act, down_out_list)
             shared_hidden_states, _ = shared_experts.down_proj(shared_act)
-        return hidden_states, shared_hidden_states
+        return hidden_states, shared_hidden_states, expert_token_nums, group_list_type
 
 
 def apply_mlp(
@@ -484,7 +488,8 @@ def fused_experts_with_all2all(
         )
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
-    return final_hidden_states
+    group_list_type = 0
+    return final_hidden_states, expert_tokens, group_list_type
 
 
 # currently expert parallelism implemented with all2all
@@ -635,7 +640,10 @@ def fused_experts_with_all2allv(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
+    log2phy: Optional[torch.Tensor] = None,
 ):
+    if log2phy is not None:
+        routing_map = log2phy[routing_map]
     # Enable moe alltoallv, it's a balanced policy for precision and efficiency.
     (share_experts_output, dispatched_input,
      tokens_per_expert) = (token_dispatcher.token_permutation(
@@ -643,7 +651,8 @@ def fused_experts_with_all2allv(
 
     expert_output = apply_mlp(dispatched_input, w1, w2, tokens_per_expert)
     output, mlp_bias = token_dispatcher.token_unpermutation(expert_output)
-    return output
+    group_list_type = 1
+    return output, tokens_per_expert, group_list_type
 
 
 def fused_experts(
@@ -820,8 +829,8 @@ def fused_experts(
             expanded_src_to_dst_row=expanded_row_idx,
             export_for_source_row=topk_ids,
         )
-
-    return final_hidden_states
+    group_list_type = 0
+    return final_hidden_states, expert_tokens, group_list_type
 
 
 def native_grouped_topk(
@@ -1010,6 +1019,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         is_prefill: bool = False,
         enable_force_load_balance: bool = False,
         shared_experts: Optional[Any] = None,
+        log2phy: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
 
@@ -1065,6 +1075,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 shared_experts=shared_experts,
                 is_torchair=self.torchair_graph_enabled,
                 mc2_mask=mc2_mask,
+                log2phy=log2phy,
             )
         elif fused_moe_state == FusedMoEState.AllGather:
             max_num_tokens = self.max_num_batched_tokens if self.use_aclgraph else None
@@ -1099,6 +1110,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
+                log2phy=log2phy,
             )
         else:
             max_num_tokens = self.max_num_batched_tokens if self.use_aclgraph else None
@@ -1266,10 +1278,15 @@ class AscendFusedMoE(FusedMoE):
         if envs_ascend.VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ and isinstance(
                 self.quant_method, AscendUnquantizedFusedMoEMethod):
             self.reduce_results = False
+            if expert_map_path and os.path.exists(expert_map_path):
+                self.global_num_experts_eplb = self.global_num_experts + self.global_redundant_expert_num
+            else:
+                self.global_num_experts_eplb = self.global_num_experts
+            self.local_num_experts_eplb = self.global_num_experts_eplb // self.ep_size
             moe_dispatcher_config = (
                 MoEDispatcherConfig().set_num_moe_experts(
-                    self.global_num_experts).set_num_local_experts(
-                        self.local_num_experts).set_moe_router_topk(
+                    self.global_num_experts_eplb).set_num_local_experts(
+                        self.local_num_experts_eplb).set_moe_router_topk(
                             top_k).set_group_topk(topk_group).
                 set_num_groups(num_expert_group).set_expert_bias(
                     e_score_correction_bias).set_scaling_factor(1.0).build())
