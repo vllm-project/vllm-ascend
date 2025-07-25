@@ -46,11 +46,11 @@ repos:
 #     files: ^csrc/.*\.(cpp|hpp|cc|hh|cxx|hxx)$
 #     types_or: [c++]
 #     args: [--style=google, --verbose]
-# - repo: https://github.com/jackdewinter/pymarkdown
-#   rev: v0.9.29
-#   hooks:
-#   - id: pymarkdown
-#     args: [fix]
+- repo: https://github.com/jackdewinter/pymarkdown
+  rev: v0.9.29
+  hooks:
+  - id: pymarkdown
+    args: [fix]
 - repo: https://github.com/rhysd/actionlint
   rev: v1.7.7
   hooks:
@@ -131,6 +131,12 @@ repos:
     types: [python]
     pass_filenames: false
     additional_dependencies: [regex]
+  - id: python-init
+    name: Enforce __init__.py in Python packages
+    entry: python tools/check_python_src_init.py
+    language: python
+    types: [python]
+    pass_filenames: false
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion

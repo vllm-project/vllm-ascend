@@ -30,7 +30,7 @@ docker run --rm \
 
 ## Install modelslim and convert model
 :::{note}
-You can choose to convert the model yourself or use the quantized model we uploaded, 
+You can choose to convert the model yourself or use the quantized model we uploaded,
 see https://www.modelscope.cn/models/vllm-ascend/QwQ-32B-W8A8
 :::
 
@@ -55,6 +55,7 @@ python3 quant_qwen.py --model_path $MODEL_PATH --save_directory $SAVE_PATH --cal
 
 ## Verify the quantized model
 The converted model files looks like:
+
 ```bash
 .
 |-- config.json
@@ -72,11 +73,13 @@ Run the following script to start the vLLM server with quantized model:
 :::{note}
 The value "ascend" for "--quantization" argument will be supported after [a specific PR](https://github.com/vllm-project/vllm-ascend/pull/877) is merged and released, you can cherry-pick this commit for now.
 :::
+
 ```bash
 vllm serve /home/models/QwQ-32B-w8a8  --tensor-parallel-size 4 --served-model-name "qwq-32b-w8a8" --max-model-len 4096 --quantization ascend
 ```
 
 Once your server is started, you can query the model with input prompts
+
 ```bash
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
@@ -93,7 +96,7 @@ curl http://localhost:8000/v1/completions \
 Run the following script to execute offline inference on multi-NPU with quantized model:
 
 :::{note}
-To enable quantization for ascend, quantization method must be "ascend" 
+To enable quantization for ascend, quantization method must be "ascend"
 :::
 
 ```python

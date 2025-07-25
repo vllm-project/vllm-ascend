@@ -6,7 +6,6 @@ Sleep Mode is an API designed to offload model weights and discard KV cache from
 
 Since the generation and training phases may employ different model parallelism strategies, it becomes crucial to free KV cache and even offload model parameters stored within vLLM during training. This ensures efficient memory utilization and avoids resource contention on the NPU.
 
-
 ## Getting started
 
 With `enable_sleep_mode=True`, the way we manage memory(malloc, free) in vllm will under a specific memory pool, during loading model and initialize kv_caches, we tag the memory as a map: `{"weight": data, "kv_cache": data}`.

@@ -35,6 +35,7 @@ docker run --rm \
 # Install curl
 apt-get update -y && apt-get install -y curl
 ```
+
 ::::
 
 ::::{tab-item} openEuler
@@ -63,6 +64,7 @@ docker run --rm \
 # Install curl
 yum update -y && yum install -y curl
 ```
+
 ::::
 :::::
 
@@ -73,6 +75,7 @@ The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed in `/v
 You can use Modelscope mirror to speed up download:
 
 <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
+
 ```bash
 export VLLM_USE_MODELSCOPE=true
 ```
@@ -87,6 +90,7 @@ With vLLM installed, you can start generating texts for list of input prompts (i
 Try to run below Python script directly or use `python3` shell to generate texts:
 
 <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
+
 ```python
 from vllm import LLM, SamplingParams
 
@@ -115,6 +119,7 @@ the following command to start the vLLM server with the
 [Qwen/Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) model:
 
 <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
+
 ```bash
 # Deploy vLLM server (The first run will take about 3-5 mins (10 MB/s) to download models)
 vllm serve Qwen/Qwen2.5-0.5B-Instruct &
@@ -128,11 +133,13 @@ INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
 ```
+
 Congratulations, you have successfully started the vLLM server!
 
 You can query the list the models:
 
 <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
+
 ```bash
 curl http://localhost:8000/v1/models | python3 -m json.tool
 ```
@@ -140,6 +147,7 @@ curl http://localhost:8000/v1/models | python3 -m json.tool
 You can also query the model with input prompts:
 
 <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
+
 ```bash
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
@@ -155,12 +163,14 @@ vLLM is serving as background process, you can use `kill -2 $VLLM_PID` to stop t
 it's equal to `Ctrl-C` to stop foreground vLLM process:
 
 <!-- tests/e2e/doctest/001-quickstart-test.sh should be considered updating as well -->
+
 ```bash
   VLLM_PID=$(pgrep -f "vllm serve")
   kill -2 "$VLLM_PID"
 ```
 
 You will see output as below:
+
 ```
 INFO:     Shutting down FastAPI HTTP server.
 INFO:     Shutting down
