@@ -127,3 +127,19 @@ def test_models_topk() -> None:
                     enforce_eager=True,
                     gpu_memory_utilization=0.7) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
+
+
+def test_models_prompt_logprobs() -> None:
+
+    example_prompts = [
+        "Hello, my name is",
+    ]
+
+    with VllmRunner("Qwen/Qwen2.5-0.5B-Instruct",
+                    max_model_len=8192,
+                    dtype="float16",
+                    enforce_eager=True,
+                    gpu_memory_utilization=0.7) as vllm_model:
+        vllm_model.generate_greedy_logprobs(example_prompts,
+                                            max_tokens=5,
+                                            num_logprobs=1)

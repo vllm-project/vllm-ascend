@@ -101,3 +101,16 @@
 #       - https://github.com/vllm-project/vllm-ascend/pull/1732
 #    Future Plan:
 #       Revert it when the ascend scatter performance improves.
+#
+# ** File: worker/patch_common/patch_sampler.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.v1.sample.sampler.Sampler.gather_logprobs`
+#    Why:
+#       We need to patch gather_logprobs to make sure call batched_count_greater_than
+#       with backend=current_platform.simple_compile_backend
+#    How：
+#       Patch gather_logprobs call new batched_count_greater_than
+#    Related PR (if no, explain why):
+#       - https://github.com/vllm-project/vllm/pull/21591
+#    Future Plan:
+#       Revert it when vLLM merge #21591 and release new version
