@@ -1471,6 +1471,7 @@ class AscendFusedMoE(FusedMoE):
                 dispose_tensor(e_hidden_states)
             else:
                 final_hidden_states = e_hidden_states
+                dispose_tensor(e_hidden_states)
         else:
             final_hidden_states = e_hidden_states
 
