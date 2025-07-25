@@ -114,7 +114,16 @@ def mock_distributed():
                   return_value=Mock(is_first_rank=False, is_last_rank=False)), \
             patch("vllm_ascend.ops.fused_moe.get_current_vllm_config", return_value=mock_vllm_config), \
             patch.dict("vllm.distributed.parallel_state.__dict__", _TP=tp_group, _EP=ep_group, _DP=dp_group,
-                       _PP=pp_group):
+                       _PP=pp_group), \
+            patch.dict("vllm_ascend.distributed.parallel_state.__dict__", _MC2=ep_group):
+        yield
+
+
+@pytest.fixture
+def mock_forward_context():
+    forward_context = Mock(in_profile_run=False, with_prefill=False)
+    with patch("vllm_ascend.models.deepseek_v2.get_forward_context",
+               return_value=forward_context):
         yield
 
 
@@ -205,7 +214,8 @@ def test_custom_deepseek_v2_mlp(mock_distributed, base_config):
                             quant_config=None)
 
 
-def test_custom_deepseek_v2_moe(mock_distributed, base_config):
+def test_custom_deepseek_v2_moe(mock_distributed, base_config,
+                                mock_forward_context):
     base_config.n_shared_experts = 1
     moe = CustomDeepseekV2MoE(config=base_config,
                               quant_config=None,
