@@ -456,11 +456,10 @@ def register_ascend_customop():
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
 
-
+# TODO(zzzzwwjj): It will be judged with _build_info afterwards.
 class AscendSocVersion(Enum):
     A2 = 0
     A3 = 1
-    MAX = 2
 
 
 _ascend_soc_version = None

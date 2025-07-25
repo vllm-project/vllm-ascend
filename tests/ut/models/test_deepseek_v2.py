@@ -122,7 +122,8 @@ def mock_distributed():
 @pytest.fixture
 def mock_forward_context():
     forward_context = Mock(in_profile_run=False, with_prefill=False)
-    with patch("vllm_ascend.models.deepseek_v2.get_forward_context", return_value=forward_context):
+    with patch("vllm_ascend.models.deepseek_v2.get_forward_context",
+               return_value=forward_context):
         yield
 
 
@@ -213,7 +214,8 @@ def test_custom_deepseek_v2_mlp(mock_distributed, base_config):
                             quant_config=None)
 
 
-def test_custom_deepseek_v2_moe(mock_distributed, base_config, mock_forward_context):
+def test_custom_deepseek_v2_moe(mock_distributed, base_config,
+                                mock_forward_context):
     base_config.n_shared_experts = 1
     moe = CustomDeepseekV2MoE(config=base_config,
                               quant_config=None,
