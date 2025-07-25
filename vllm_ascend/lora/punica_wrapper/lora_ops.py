@@ -23,8 +23,8 @@ def bgmv_shrink(inputs: torch.Tensor,
     return torch.ops._C.bgmv_shrink(
         inputs,
         lora_a_weights,
-        output_tensor,
         lora_indices_tensor,
+        output_tensor,
         scaling,
     )
 
@@ -37,11 +37,10 @@ def bgmv_expand(inputs: torch.Tensor,
     return torch.ops._C.bgmv_expand(
         inputs,
         lora_b_weights,
-        output_tensor,
         lora_indices_tensor,
+        output_tensor,
         0,
         output_tensor.size(1),
-        add_inputs,
     )
 
 
