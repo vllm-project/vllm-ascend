@@ -289,7 +289,8 @@ class cmake_build_ext(build_ext):
                         shutil.copy(src_path, dst_path)
                         print(f"Copy: {src_path} -> {dst_path}")
 
-        src = os.path.join(self.build_temp, "vllm_ascend", "lib", "libvllm_ascend_kernels.so")
+        src = os.path.join(self.build_temp, "vllm_ascend", "lib",
+                           "libvllm_ascend_kernels.so")
         dst_dir = os.path.join(os.path.abspath(ROOT_DIR), "vllm_ascend", "lib")
         os.makedirs(dst_dir, exist_ok=True)
         shutil.copy(src, dst_dir)

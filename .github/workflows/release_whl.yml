@@ -48,7 +48,7 @@ jobs:
         # PR only trigger latest version
         python-version: ${{ fromJSON(
           (github.event_name == 'pull_request' && '["3.11"]') ||
-          '["3.9", "3.10", "3.11"]'
+          '["3.10"]'
          ) }}
     runs-on: ${{ matrix.os }}
     steps:
