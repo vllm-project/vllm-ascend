@@ -240,7 +240,7 @@ void bgmv_shrink(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Ten
 }
 
 at::Tensor bgmv_expand(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y,
-                 int64_t slice_offset, int64_t slice_size)
+                       int64_t slice_offset, int64_t slice_size)
 {
     at::ScalarType scalar_type = y.scalar_type();
     TORCH_CHECK(scalar_type == torch::kHalf || scalar_type == torch::kBFloat16, "only support half and bf16");
