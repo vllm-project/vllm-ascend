@@ -141,35 +141,35 @@ Similarly, let’s take `Qwen2.5-VL-7B-Instruct` benchmark as an example:
 #### Online serving
 1. Launch the server:
 
-```shell
-vllm serve Qwen2.5-VL-7B-Instruct --max-model-len 16789
-```
+    ```shell
+    vllm serve Qwen2.5-VL-7B-Instruct --max-model-len 16789
+    ```
 
 2. Running performance tests using cli
   
-```shell
-vllm bench serve --model Qwen2.5-VL-7B-Instruct\
---endpoint-type "openai-chat" --dataset-name hf \
---hf-split train --endpoint "/v1/chat/completions" \
---dataset-path "lmarena-ai/vision-arena-bench-v0.1" \
---num-prompts 200 \
---request-rate 16
-```
+    ```shell
+    vllm bench serve --model Qwen2.5-VL-7B-Instruct\
+    --endpoint-type "openai-chat" --dataset-name hf \
+    --hf-split train --endpoint "/v1/chat/completions" \
+    --dataset-path "lmarena-ai/vision-arena-bench-v0.1" \
+    --num-prompts 200 \
+    --request-rate 16
+    ```
 
 #### Offline
 - **Throughput**
 
-```shell
-vllm bench throughput --output-json results/throughput_qwen2_5_7B_tp1.json \
---model Qwen/Qwen2.5-7B-Instruct --tensor-parallel-size 1 --load-format dummy \
---dataset-path /github/home/.cache/datasets/ShareGPT_V3_unfiltered_cleaned_split.json \
---num-prompts 200 --backend vllm
-```
+  ```shell
+  vllm bench throughput --output-json results/throughput_qwen2_5_7B_tp1.json \
+  --model Qwen/Qwen2.5-7B-Instruct --tensor-parallel-size 1 --load-format dummy \
+  --dataset-path /github/home/.cache/datasets/ShareGPT_V3_unfiltered_cleaned_split.json \
+  --num-prompts 200 --backend vllm
+  ```
 
 - **Latency**
   
-```shell
-vllm bench latency --output-json results/latency_qwen2_5_7B_tp1.json \
---model Qwen/Qwen2.5-7B-Instruct --tensor-parallel-size 1 \
---load-format dummy --num-iters-warmup 5 --num-iters 15
-```
+  ```shell
+  vllm bench latency --output-json results/latency_qwen2_5_7B_tp1.json \
+  --model Qwen/Qwen2.5-7B-Instruct --tensor-parallel-size 1 \
+  --load-format dummy --num-iters-warmup 5 --num-iters 15
+  ```
