@@ -1,4 +1,4 @@
-# Using OpenCompass 
+# Using OpenCompass
 This document will guide you have a accuracy testing using [OpenCompass](https://github.com/open-compass/opencompass).
 
 ## 1. Online Serving
@@ -29,7 +29,9 @@ docker run --rm \
 -it $IMAGE \
 vllm serve Qwen/Qwen2.5-7B-Instruct --max_model_len 26240
 ```
+
 If your service start successfully, you can see the info shown below:
+
 ```
 INFO:     Started server process [6873]
 INFO:     Waiting for application startup.
@@ -37,6 +39,7 @@ INFO:     Application startup complete.
 ```
 
 Once your server is started, you can query the model with input prompts in new terminal:
+
 ```
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \

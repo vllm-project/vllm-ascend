@@ -216,6 +216,7 @@ The first argument of `vllm.ModelRegistry.register_model()` indicates the unique
   ],
 }
 ```
+
 :::
 
 ## Step 3: Verification

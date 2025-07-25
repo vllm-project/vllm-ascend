@@ -190,6 +190,7 @@ git clone https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 docker build -t vllm-ascend-dev-image:latest -f ./Dockerfile .
 ```
+
 :::
 
 ```{code-block} bash

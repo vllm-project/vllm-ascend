@@ -80,6 +80,7 @@ curl http://localhost:8000/v1/completions \
     "temperature": 0.6
   }'
 ```
+
 ::::
 
 ::::{tab-item} Qwen/Qwen2.5-7B-Instruct
@@ -318,6 +319,7 @@ if __name__ == "__main__":
 :::::
 
 Run script:
+
 ```bash
 python example.py
 ```
