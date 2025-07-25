@@ -1,8 +1,10 @@
 import torch
+from torch import nn
 import vllm.envs as envs_vllm
 from vllm.attention.layer import Attention
 from vllm.config import (VllmConfig, get_layers_from_vllm_config,
                          set_current_vllm_config)
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import (
@@ -241,6 +243,18 @@ class MtpProposer:
                         previous_hidden_states=self.
                         hidden_states[:num_input_tokens],
                         kv_caches=self.runner.kv_caches[-1:])
+        
+        if not self.runner.with_prefill:
+            max_num_reqs_across_dp = num_input_tokens
+        else:
+            num_reqs_tensor = torch.tensor(
+                [batch_size],
+                device=hidden_states.device,
+                dtype=torch.int32
+            )
+            max_num_reqs_across_dp = get_dp_group().all_gather(num_reqs_tensor, dim=0).max()
+        last_token_indices = nn.functional.pad(last_token_indices, (0, max_num_reqs_across_dp - last_token_indices.shape[0]))
+
         sample_hidden_states = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
         draft_token_ids = logits.argmax(dim=-1)
@@ -352,6 +366,8 @@ class MtpProposer:
                 self.model(input_ids=input_ids,
                            positions=positions,
                            previous_hidden_states=previous_hidden_states)
+    
+
 
 
 # TODO Using torch instead of triton may result in poor performance

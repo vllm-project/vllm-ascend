@@ -1170,17 +1170,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
             spec_decode_metadata = None
-
-            if not with_prefill:
-                max_num_reqs_across_dp = padded_num_tokens_across_dp
-            else:
-                num_reqs_tensor = torch.tensor(
-                    [num_reqs],
-                    device=hidden_states.device,
-                    dtype=torch.int32
-                )
-                max_num_reqs_across_dp = get_dp_group().all_gather(num_reqs_tensor, dim=0).max()
-            sample_indices = nn.functional.pad(sample_indices, (0, max_num_reqs_across_dp - sample_indices.shape[0]))
         else:
             # Get the number of draft tokens for each request.
             # Iterate over the dictionary rather than all requests since not all
@@ -1194,6 +1183,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens)
             sample_indices = spec_decode_metadata.logits_indices
+        
+        if not with_prefill:
+            max_num_reqs_across_dp = padded_num_tokens_across_dp
+        else:
+            num_reqs_tensor = torch.tensor(
+                [num_reqs],
+                device=hidden_states.device,
+                dtype=torch.int32
+            )
+            max_num_reqs_across_dp = get_dp_group().all_gather(num_reqs_tensor, dim=0).max()
+        sample_indices = nn.functional.pad(sample_indices, (0, max_num_reqs_across_dp - sample_indices.shape[0]))
 
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
                 total_num_scheduled_tokens, sample_indices, finished_sending,
@@ -1797,6 +1797,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     skip_attn=skip_attn,
                     num_reqs=num_reqs,
                     num_tokens_across_dp=num_tokens_across_dp)
+            
+            if not self.in_profile_run and not is_torchair_compile:
+                if not with_prefill:
+                    max_num_reqs_across_dp = num_reqs
+                else:
+                    num_reqs_tensor = torch.tensor(
+                        [num_reqs],
+                        device=hidden_states.device,
+                        dtype=torch.int32
+                    )
+                    max_num_reqs_across_dp = get_dp_group().all_gather(num_reqs_tensor, dim=0).max()
+                dummy_indices = torch.zeros(max_num_reqs_across_dp, device=hidden_states.device, dtype=torch.int32)
+                model.compute_logits(hidden_states[dummy_indices], None)
 
             if self.in_profile_run and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()
