@@ -44,6 +44,9 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -v -e /vllm-workspace/vllm
     python3 -m pip uninstall -y triton && \
     python3 -m pip cache purge
 
+# Install torch-npu
+RUN bash /workspace/vllm-ascend/pta_install.sh
+
 # Install vllm-ascend
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
 RUN export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi && \
