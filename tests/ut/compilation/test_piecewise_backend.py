@@ -1,4 +1,3 @@
-import unittest
 from typing import Callable
 from unittest.mock import MagicMock
 
@@ -13,6 +12,7 @@ from vllm_ascend.compilation.piecewise_backend import (ConcreteSizeEntry,
 
 
 class TestConcreteSizeEntry(TestBase):
+
     def test_init(self):
         entry = ConcreteSizeEntry(runtime_shape=10,
                                   need_to_compile=True,
@@ -34,6 +34,7 @@ class TestConcreteSizeEntry(TestBase):
 
 
 class TestNPUPiecewiseBackend(TestBase):
+
     def setUp(self):
         self.register_fusion_op = register_fusion_op.FUSION_OP_REGISTERED
         self.graph = MagicMock(spec=torch.fx.GraphModule)
