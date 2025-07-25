@@ -994,11 +994,24 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 attn_state = AscendAttentionState.ChunkedPrefill
             else:
                 attn_state = AscendAttentionState.SpecDecoding
+        # requests coming here will be either chunked or prefix cache hit.
+        # only when batch requests do not contain decode requests, attn_state = PrefillCacheHit
+        # otherwise, attn_state = ChunkedPrefill
+        elif np.all(num_scheduled_tokens > 1):
+            attn_state = AscendAttentionState.PrefillCacheHit
         # splitfuse
         elif not ascend_config.ascend_scheduler_config.enabled or self.chunked_prefill_enabled:
             attn_state = AscendAttentionState.ChunkedPrefill
         else:
             attn_state = AscendAttentionState.PrefillCacheHit
+        
+        # in mla, both PrefillCacheHit and ChunkedPrefill will use _npu_ring_mla
+        if self.vllm_config.model_config.use_mla and \
+            attn_state in [
+                AscendAttentionState.PrefillCacheHit, 
+                AscendAttentionState.ChunkedPrefill
+            ]:
+            attn_state = AscendAttentionState.ChunkedPrefill
 
         self.attn_mask = self._make_attention_mask(
             seq_lens=seq_lens,
