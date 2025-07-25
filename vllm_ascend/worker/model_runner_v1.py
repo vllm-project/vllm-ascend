@@ -1798,18 +1798,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_reqs=num_reqs,
                     num_tokens_across_dp=num_tokens_across_dp)
             
-            if not self.in_profile_run and not is_torchair_compile:
-                if not with_prefill:
-                    max_num_reqs_across_dp = num_reqs
-                else:
-                    num_reqs_tensor = torch.tensor(
-                        [num_reqs],
-                        device=hidden_states.device,
-                        dtype=torch.int32
-                    )
-                    max_num_reqs_across_dp = get_dp_group().all_gather(num_reqs_tensor, dim=0).max()
-                dummy_indices = torch.zeros(max_num_reqs_across_dp, device=hidden_states.device, dtype=torch.int32)
-                model.compute_logits(hidden_states[dummy_indices], None)
+                if not self.in_profile_run and not is_torchair_compile:
+                    if not with_prefill:
+                        max_num_reqs_across_dp = num_reqs
+                    else:
+                        num_reqs_tensor = torch.tensor(
+                            [num_reqs],
+                            device=hidden_states.device,
+                            dtype=torch.int32
+                        )
+                        max_num_reqs_across_dp = get_dp_group().all_gather(num_reqs_tensor, dim=0).max()
+                    dummy_indices = torch.zeros(max_num_reqs_across_dp, device=hidden_states.device, dtype=torch.int32)
+                    model.compute_logits(hidden_states[dummy_indices], None)
 
             if self.in_profile_run and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()
