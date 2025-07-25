@@ -273,7 +273,6 @@ class AscendAttentionMetadataBuilder:
         block_table = self._get_graph_runner_block_tables(
             num_reqs, block_table)
         seq_lens = torch.ones(num_reqs, dtype=torch.int32, device=device)
-        seq_lens_list = [0] * num_reqs
         slot_mapping = torch.full((num_reqs, ),
                                   PAD_SLOT_ID,
                                   dtype=torch.int32,
@@ -292,7 +291,7 @@ class AscendAttentionMetadataBuilder:
             query_start_loc=query_start_loc,
             query_lens=query_lens,
             seq_lens=seq_lens,
-            seq_lens_list=seq_lens_list,
+            seq_lens_list=seq_lens.tolist(),
             max_query_len=query_lens.max().item(),
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
