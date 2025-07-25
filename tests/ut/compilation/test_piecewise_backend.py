@@ -7,7 +7,7 @@ from vllm.compilation.backends import VllmBackend
 from vllm.config import VllmConfig
 
 from tests.ut.base import TestBase
-from tests.ut.compilation import func_import
+from tests.ut.compilation import register_fusion_op
 from vllm_ascend.compilation.piecewise_backend import (ConcreteSizeEntry,
                                                        NPUPiecewiseBackend)
 
@@ -35,7 +35,7 @@ class TestConcreteSizeEntry(TestBase):
 
 class TestNPUPiecewiseBackend(TestBase):
     def setUp(self):
-        self.register_fusion_op = func_import.FUSION_OP_REGISTERED
+        self.register_fusion_op = register_fusion_op.FUSION_OP_REGISTERED
         self.graph = MagicMock(spec=torch.fx.GraphModule)
         self.vllm_config = MagicMock(spec=VllmConfig)
         self.vllm_config.compilation_config = MagicMock()
