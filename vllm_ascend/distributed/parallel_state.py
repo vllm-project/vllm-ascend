@@ -11,7 +11,7 @@ from vllm.distributed.parallel_state import (GroupCoordinator, get_world_group,
 # customize parallel solution
 _LOCAL_COMM_GROUP: Optional[GroupCoordinator] = None
 
-def model_parallel_initialized():
+def ascend_model_parallel_initialized():
     return _LOCAL_COMM_GROUP is not None
 
 def calculate_effective_local_size(local_size: int, world_size: int) -> int:
@@ -103,7 +103,7 @@ def init_ascend_model_parallel(
     world_size: Optional[int] = None,
     backend: Optional[str] = None,
 ):
-    if model_parallel_initialized():
+    if ascend_model_parallel_initialized():
         return
     initialize_local_comm_group(backend)
     
