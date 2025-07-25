@@ -72,26 +72,18 @@ class CustomLogitsProcessor(LogitsProcessor):
         # # Gather logits for TP
         # logits = self._gather_logits(logits)
         # cu_tokens_across_dp_cpu = get_forward_context().dp_metadata.cu_tokens_across_dp_cpu
-        lm_tp_size = lm_head.lm_tp_size
-        
-        print("##############cu_tokens_across_dp_cpu",cu_tokens_across_dp_cpu,"rank: ", lm_head.lm_tp_rank)
-        print("##############hidden_states",hidden_states.shape,"rank: ", lm_head.lm_tp_rank)
-        
-        lm_group_batch_size = cu_tokens_across_dp_cpu.numpy()
         local_batch_size = hidden_states.size(0)
         local_output_dim = lm_head.num_embeddings_per_partition
         lm_total_batchsize = sum(cu_tokens_across_dp_cpu.numpy())
         
-        gathered_input = []
-        for x in range(len(num_tokens_across_dp)):
-            if num_tokens_across_dp[x] != 1:
-                gathered_input.append(torch.empty(cu_tokens_across_dp_cpu[x], hidden_states.size(1), dtype=hidden_states.dtype, device=hidden_states.device))
-            else:
-                gathered_input.append(torch.tensor(1, dtype=hidden_states.dtype, device=hidden_states.device))
-        # gathered_input = [torch.empty(batch_size, hidden_states.size(
-        #     1), dtype=hidden_states.dtype, device=hidden_states.device) for batch_size in cu_tokens_across_dp_cpu]
-        for x in gathered_input:
-            print("######################x",x.shape, "rank: ", lm_head.lm_tp_rank)
+        # gathered_input = []
+        # for x in range(len(num_tokens_across_dp)):
+        #     if num_tokens_across_dp[x] != 1:
+        #         gathered_input.append(torch.empty(cu_tokens_across_dp_cpu[x], hidden_states.size(1), dtype=hidden_states.dtype, device=hidden_states.device))
+        #     else:
+        #         gathered_input.append(torch.tensor(1, dtype=hidden_states.dtype, device=hidden_states.device))
+        gathered_input = [torch.empty(batch_size, hidden_states.size(
+            1), dtype=hidden_states.dtype, device=hidden_states.device) for batch_size in cu_tokens_across_dp_cpu]
         torch.distributed.all_gather(
             gathered_input, hidden_states, group=get_lm_tp_group().device_group)
         complete_input = torch.cat(gathered_input, dim=0)
@@ -100,9 +92,6 @@ class CustomLogitsProcessor(LogitsProcessor):
         logits = lm_head.quant_method.apply(lm_head,
                                             complete_input,
                                             bias=embedding_bias)
-        print("##############logits",logits.shape,"rank: ", lm_head.lm_tp_rank)
-        print("##############lm_group_batch_size",lm_group_batch_size,"rank: ", lm_head.lm_tp_rank)
-
         # # Prepare for all-to-all communication to redistribute logits
         input_splits = cu_tokens_across_dp_cpu.int().tolist()
         output_splits = []
@@ -116,12 +105,6 @@ class CustomLogitsProcessor(LogitsProcessor):
         output_splits = torch.Tensor(output_splits).int().tolist()
         all_to_all_result = torch.empty(lm_total_batchsize * local_output_dim,
                                         dtype=logits.dtype, device=logits.device)
-        print("##############input_splits",input_splits, type(input_splits), "rank: ", lm_head.lm_tp_rank)
-        print("##############output_splits",output_splits, type(output_splits),"rank: ", lm_head.lm_tp_rank)
-        print("##############all_to_all_result", type(all_to_all_result),"rank: ", lm_head.lm_tp_rank)
-        print("##############logits", type(logits),"rank: ", lm_head.lm_tp_rank)
-        print("##############get_lm_tp_group", type(logits),"rank: ", get_lm_tp_group().world_size)
-
         # # # Perform all-to-all communication to get correct logit partitions
         torch.distributed.all_to_all_single(
                             all_to_all_result,

@@ -613,12 +613,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.dp_size == 1:
             return maybe_padded_num_tokens, None, with_prefill, enable_dbo
 
-        print("##################self.dp_size",self.dp_size,"is_profile",is_profile," self.dp_rank", self.dp_rank)
         num_tokens_across_dp = [0] * self.dp_size * 2
         num_tokens_across_dp[self.dp_rank] = maybe_padded_num_tokens
         num_tokens_across_dp[self.dp_size + self.dp_rank] = num_tokens
-        print("##################maybe_padded_num_tokens",maybe_padded_num_tokens)
-        print("##################num_tokens_across_dp allreduce before",num_tokens_across_dp," self.dp_rank", self.dp_rank)
         forward_metadata = torch.tensor(num_tokens_across_dp +
                                         [with_prefill, not enable_dbo],
                                         device="cpu",
@@ -633,7 +630,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             maybe_padded_num_tokens = num_tokens
         else:
             num_tokens_across_dp = forward_metadata[:self.dp_size]
-        print("##################num_tokens_across_dp@@@@@@@@@",num_tokens_across_dp)
 
         # NOTE: when in torchair_graph_mode, we need to pad local_num_tokens to
         # `max_num_tokens_across_dp`, in other situation it is not necessary.
@@ -643,7 +639,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                 self.dp_size,
                                                 device="cpu",
                                                 dtype=torch.int32)
-        print("##################num_tokens_across_dp",num_tokens_across_dp," self.dp_rank", self.dp_rank)
         cu_tokens_across_dp_cpu = torch.cumsum(num_tokens_across_dp, dim=0)
         num_reqs_across_dp = [0] * self.dp_size * 2
         if is_profile:
@@ -672,8 +667,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                     2]
         else:
             num_reqs_across_dp = num_reqs_forward_metadata[:self.dp_size]
-        print("##################num_reqs_across_dp",num_reqs_across_dp," self.dp_rank", self.dp_rank)
-        
         
         return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, not bool(
             forward_metadata[-1]), cu_tokens_across_dp_cpu, num_reqs_across_dp, num_reqs
@@ -914,8 +907,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
         num_scheduled_tokens = np.empty(num_reqs, dtype=np.int32)
-        print("#############first num_reqs",num_reqs)
-        print("#############first num_scheduled_tokens",num_scheduled_tokens)
         num_valid_tokens = np.empty(num_reqs, dtype=np.int32)
         max_num_scheduled_tokens = 0
         for i, req_id in enumerate(self.input_batch.req_ids):
@@ -939,7 +930,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         sample_indices = cu_num_tokens - 1
         sample_indices = torch.from_numpy(sample_indices).to(self.device,
                                                              non_blocking=True)
-        print("#############sample_indices",sample_indices)
         arange = self.arange_np[:total_num_scheduled_tokens] - cumsums_offsets
 
         positions_np = self.positions_np[:total_num_scheduled_tokens]
@@ -1048,8 +1038,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
              maybe_padded_num_tokens, total_num_scheduled_tokens, with_prefill,
              enable_dbo, False, num_reqs)
         
-        print("#################num_reqs_across_dp",num_reqs_across_dp)
-        print("#################num_reqs",num_reqs)
         extra_builder_kwargs['enable_dbo_across_dp'] = enable_dbo
 
         # TODO(zzzzwwjj): this code need to refactor afterwards.
@@ -1197,7 +1185,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_draft_tokens, cu_num_tokens)
             sample_indices = spec_decode_metadata.logits_indices
         
-        print("#############sample_indices after",sample_indices)
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
                 total_num_scheduled_tokens, sample_indices, finished_sending,
                 finished_recving, num_reqs_across_dp, num_tokens_across_dp)
@@ -1384,10 +1371,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                      intermediate_tensors))
 
         with ProfileExecuteDuration().capture_async("post process"):
-            print("############sample_indices",sample_indices)
-            print("############ProfileExecuteDuration hidden_states",hidden_states)
-            # temp = len(sample_indices)
-            # num_scheduled = torch.Tensor([temp] * self.dp_size).int()
             logits = self.model.compute_logits(hidden_states[sample_indices], num_reqs_across_dp, num_tokens_across_dp,
                                                None)
 
@@ -1650,8 +1633,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         (num_tokens, num_tokens_across_dp, with_prefill,
          enable_dbo, cu_tokens_across_dp_cpu, num_reqs_across_dp, num_reqs) = self._get_forward_metadata_across_dp(
              maybe_padded_num_tokens, num_tokens, with_prefill, False, True, 1)
-        print("#################num_reqs_across_dp",num_reqs_across_dp)
-        print("#################num_reqs",num_reqs)
         
         # # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # # for dummy run with LoRA so that the num_reqs collectively
@@ -1838,15 +1819,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         model_kwargs = {}
                         if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
                             model_kwargs["graph_enable"] = False  # type: ignore
-                        print(":################dummy_tokens#input_ids",dummy_input_ids)
-                        print(":###############dummy_tokens##positions",dummy_positions)
                         hidden_states = model(
                             input_ids=dummy_input_ids,
                             positions=dummy_positions,
                             intermediate_tensors=intermediate_tensors,
                             inputs_embeds=inputs_embeds,
                             **model_kwargs)
-                        print(":#################dummy_tokens hidden_states",hidden_states.shape, hidden_states)
                 else:
                     with set_ascend_forward_context(
                             attn_metadata,
@@ -1860,15 +1838,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         model_kwargs = {}
                         if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
                             model_kwargs["graph_enable"] = False  # type: ignore
-                        print(":#################input_ids",input_ids.shape)
-                        print(":#################positions",positions.shape)
                         hidden_states = model(
                             input_ids=input_ids,
                             positions=positions,
                             intermediate_tensors=intermediate_tensors,
                             inputs_embeds=inputs_embeds,
                             **model_kwargs)
-                        print(":#################dummy run hidden_states",hidden_states.shape, hidden_states)
             if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
                 assert isinstance(self.drafter, MtpProposer)
                 self.drafter.dummy_run(num_reqs, with_prefill=with_prefill)

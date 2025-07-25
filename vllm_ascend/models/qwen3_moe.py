@@ -71,9 +71,10 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
-        cu_tokens_across_dp_cpu,
+        cu_tokens_across_dp_cpu: torch.Tensor,
+        num_tokens_across_dp: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor2(self.lm_head, hidden_states, cu_tokens_across_dp_cpu,
+        logits = self.logits_processor2(self.lm_head, hidden_states, cu_tokens_across_dp_cpu, num_tokens_across_dp,
                                        sampling_metadata)
         return logits
