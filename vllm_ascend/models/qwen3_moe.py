@@ -16,6 +16,8 @@
 # Adapted from vllm/model_executor/models/qwen3_moe.py
 # This file is a part of the vllm-ascend project.
 
+import torch
+
 import vllm.model_executor.models.qwen3_moe as qwen3
 from torch import nn
 from vllm.config import VllmConfig
@@ -63,3 +65,33 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+
+        self.num_moe_layers = self.config.num_hidden_layers
+
+    def get_expert_map(self, layer_id):
+        return self.model.layers[layer_id].mlp.experts.get_map()
+
+    def get_log2phy_map(self, layer_id):
+        return self.model.layers[layer_id].mlp.experts.get_log2phy_map()
+
+    def get_all_expert_map(self, num_moe_layers):
+        all_loads = []
+        for layer_id in range(num_moe_layers):
+            load_tensor = self.get_expert_map(
+                layer_id)  # (num_experts_per_layer,)
+            all_loads.append(load_tensor)
+
+        return torch.stack(all_loads, dim=0)
+
+    def get_all_moe_loads(self):
+        all_moe_loads = torch.stack(
+            [self.model.layers[layer_id].mlp.experts.moe_load \
+             for layer_id in range(self.num_moe_layers)],
+            dim=0
+        )
+        return all_moe_loads
+
+    def clear_all_moe_loads(self):
+        for layer_id in range(self.num_moe_layers):
+            self.model.layers[
+                layer_id].mlp.experts.clear_moe_load()

@@ -139,7 +139,11 @@ def fused_experts_with_mc2(
     shared_experts: Optional[Any] = None,
     is_torchair: bool = False,
     mc2_mask: Optional[torch.Tensor] = None,
+    log2phy=None,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    if log2phy:
+        topk_ids = log2phy[topk_ids]
+
     quant_mode = 0
     ep_group = get_mc2_group()
     ep_rank_id = ep_group.rank_in_group
@@ -278,14 +282,14 @@ def fused_experts_with_mc2(
         **kwargs_mc2
     ) if enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine(
         **kwargs_mc2)
-
+    group_list_type = 1
     if shared_experts is None:
-        return hidden_states
+        return hidden_states, expert_token_nums, group_list_type
     else:
         with npu_stream_switch("moe_secondary", 0):
             npu_wait_tensor(shared_act, down_out_list)
             shared_hidden_states, _ = shared_experts.down_proj(shared_act)
-        return hidden_states, shared_hidden_states
+        return hidden_states, shared_hidden_states, expert_token_nums, group_list_type
 
 
 def apply_mlp(
@@ -481,7 +485,8 @@ def fused_experts_with_all2all(
         )
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
-    return final_hidden_states
+    group_list_type = 0
+    return final_hidden_states, expert_tokens, group_list_type
 
 
 # currently expert parallelism implemented with all2all
@@ -620,7 +625,7 @@ def fused_experts_with_all2all_buffer(
 
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
-    return final_hidden_states
+    return final_hidden_states, expert_tokens, group_list_type
 
 
 def fused_experts_with_all2allv(
@@ -813,8 +818,8 @@ def fused_experts(
             expanded_src_to_dst_row=expanded_row_idx,
             export_for_source_row=topk_ids,
         )
-
-    return final_hidden_states
+    group_list_type = 0
+    return final_hidden_states, expert_tokens, group_list_type
 
 
 def native_grouped_topk(
