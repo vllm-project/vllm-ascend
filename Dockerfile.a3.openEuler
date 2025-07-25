@@ -43,7 +43,7 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -e /vllm-workspace/vllm/ -
     python3 -m pip cache purge
 
 # Install torch-npu
-RUN bash /workspace/vllm-ascend/pta_install.sh
+RUN bash /vllm-workspace/vllm-ascend/pta_install.sh
 
 # Install vllm-ascend
 RUN export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi && \

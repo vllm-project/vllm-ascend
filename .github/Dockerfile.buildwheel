@@ -30,7 +30,7 @@ WORKDIR /workspace
 
 COPY . /workspace/vllm-ascend/
 
-RUN bash /workspace/vllm-ascend/pta_install.sh
+RUN bash /vllm-workspace/vllm-ascend/pta_install.sh
 
 # Install req
 RUN python3 -m pip install --no-build-isolation -r vllm-ascend/requirements.txt --extra-index https://download.pytorch.org/whl/cpu/ && \

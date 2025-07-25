@@ -45,7 +45,7 @@ RUN VLLM_TARGET_DEVICE="empty" python3 -m pip install -v -e /vllm-workspace/vllm
     python3 -m pip cache purge
 
 # Install torch-npu
-RUN bash /workspace/vllm-ascend/pta_install.sh
+RUN bash /vllm-workspace/vllm-ascend/pta_install.sh
 
 # Install vllm-ascend
 # Append `libascend_hal.so` path (devlib) to LD_LIBRARY_PATH
