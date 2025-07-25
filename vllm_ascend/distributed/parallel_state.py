@@ -58,6 +58,9 @@ def initialize_local_comm_group(backend) -> None:
     for i in range(num_local_groups):
         ranks = list(range(i * local_size, (i + 1) * local_size))
         group_ranks.append(ranks)
+    
+    logger.info(f"vllm-ascend: world size {world_size}, visible device count {visible_devices_count}, local size {local_size}, "
+            "num local groups {num_local_groups}, group ranks {group_ranks}")
 
     _LOCAL_COMM_GROUP = init_model_parallel_group(
                 group_ranks,
@@ -100,17 +103,15 @@ def get_local_comm_group() -> GroupCoordinator:
     return _LOCAL_COMM_GROUP
 
 def init_ascend_model_parallel(
-    world_size: Optional[int] = None,
     backend: Optional[str] = None,
 ):
     if ascend_model_parallel_initialized():
         return
     initialize_local_comm_group(backend)
     
-    # ToDo log
     logger.info(
     "vllm-ascend: rank %s in world size %s is assigned as "
-    "MLP TP rank %s", torch.distributed.get_rank(), world_size, get_mlp_tp_rank())
+    "MLP TP rank %s", torch.distributed.get_rank(), torch.distributed.get_world_size(), get_mlp_tp_rank())
 
 
 def destory_ascend_model_parallel():
