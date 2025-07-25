@@ -55,11 +55,10 @@ def bgmv_expand_slice(inputs: torch.Tensor,
     return torch.ops._C.bgmv_expand(
         inputs,
         lora_b_weights,
-        output_tensor,
         lora_indices_tensor,
+        output_tensor,
         slice_offset,
-        slice_size,
-        add_inputs,
+        slice_size
     )
 
 
