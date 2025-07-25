@@ -25,6 +25,7 @@ on:
       - 'cmake/**'
       - 'CMakeLists.txt'
       - 'csrc/**'
+      - 'pta_install.sh'
   push:
     # Publish image when tagging, the Dockerfile in tag will be build as tag image
     branches:
@@ -42,6 +43,8 @@ on:
       - 'cmake/**'
       - 'CMakeLists.txt'
       - 'csrc/**'
+      - 'pta_install.sh'
+
 jobs:
 
   build:

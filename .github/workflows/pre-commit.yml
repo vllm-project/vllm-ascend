@@ -27,9 +27,23 @@ jobs:
       run: |
         pip install -r requirements/build.txt --extra-index-url https://download.pytorch.org/whl/cpu
         VLLM_TARGET_DEVICE=empty pip install .
+    - name: Install pta
+      run: |
+        if [ ! -d /root/.cache/pta ]; then
+          mkdir -p /root/.cache/pta
+        fi
+
+        if [ ! -f /root/.cache/pta/torch_npu-2.7.1.dev20250724-cp310-cp310-manylinux_2_28_x86_64.whl ]; then
+          cd /root/.cache/pta
+          rm -rf pytorch_v2.7.1_py310*
+          wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.7.1/20250724.3/pytorch_v2.7.1_py310.tar.gz
+          tar -zxvf pytorch_v2.7.1_py310.tar.gz
+        fi
+
+        pip install /root/.cache/pta/torch_npu-2.7.1.dev20250724-cp310-cp310-manylinux_2_28_x86_64.whl
     - name: Install vllm-ascend dev
       run: |
-        pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
+        pip install --no-build-isolation -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
     - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
       env:
         SHELLCHECK_OPTS: "--exclude=SC2046,SC2006,SC2086" # Exclude SC2046, SC2006, SC2086 for actionlint
