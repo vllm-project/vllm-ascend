@@ -19,8 +19,9 @@
 # we need to import patch_utils here first to make sure the patch is applied.
 import vllm_ascend.patch.worker.patch_common.patch_utils  # type: ignore[import]  # isort: skip  # noqa
 
+from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 from vllm.distributed import get_tensor_model_parallel_rank
@@ -29,8 +30,8 @@ from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                RowParallelLinear,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.quantization import \
-    register_quantization_config
+from vllm.model_executor.layers.quantization import (
+    register_quantization_config)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
@@ -94,12 +95,9 @@ class AscendQuantConfig(QuantizationConfig):
                 return UnquantizedLinearMethod()
             return AscendLinearMethod(self, prefix,
                                       self.packed_modules_mapping)
-        elif isinstance(layer, Attention) and \
-            'fa_quant_type' in self.quant_description.keys() and \
-            self.quant_description['fa_quant_type'] is not None:
-            return AscendKVCacheMethod(self, prefix)
-        elif isinstance(layer, Attention) and self.quant_description.get(
-                'kv_quant_type') == 'C8':
+        elif isinstance(layer, Attention) and (
+                self.quant_description.get('fa_quant_type') is not None
+                or self.quant_description.get('kv_quant_type') == 'C8'):
             return AscendKVCacheMethod(self, prefix)
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix,

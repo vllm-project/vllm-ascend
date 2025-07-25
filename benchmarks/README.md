@@ -4,25 +4,25 @@ This document outlines the benchmarking methodology for vllm-ascend, aimed at ev
 # Overview
 **Benchmarking Coverage**: We measure latency, throughput, and fixed-QPS serving on the Atlas800I A2 (see [quick_start](../docs/source/quick_start.md) to learn more supported devices list), with different models(coming soon).
 - Latency tests
-    - Input length: 32 tokens.
-    - Output length: 128 tokens.
-    - Batch size: fixed (8).
-    - Models: Qwen2.5-7B-Instruct, Qwen3-8B.
-    - Evaluation metrics: end-to-end latency (mean, median, p99).
+  - Input length: 32 tokens.
+  - Output length: 128 tokens.
+  - Batch size: fixed (8).
+  - Models: Qwen2.5-7B-Instruct, Qwen3-8B.
+  - Evaluation metrics: end-to-end latency (mean, median, p99).
 
 - Throughput tests
-    - Input length: randomly sample 200 prompts from ShareGPT dataset (with fixed random seed).
-    - Output length: the corresponding output length of these 200 prompts.
-    - Batch size: dynamically determined by vllm to achieve maximum throughput.
-    - Models: Qwen2.5-VL-7B-Instruct, Qwen2.5-7B-Instruct, Qwen3-8B.
-    - Evaluation metrics: throughput.
+  - Input length: randomly sample 200 prompts from ShareGPT dataset (with fixed random seed).
+  - Output length: the corresponding output length of these 200 prompts.
+  - Batch size: dynamically determined by vllm to achieve maximum throughput.
+  - Models: Qwen2.5-VL-7B-Instruct, Qwen2.5-7B-Instruct, Qwen3-8B.
+  - Evaluation metrics: throughput.
 - Serving tests
-    - Input length: randomly sample 200 prompts from ShareGPT dataset (with fixed random seed).
-    - Output length: the corresponding output length of these 200 prompts.
-    - Batch size: dynamically determined by vllm and the arrival pattern of the requests.
-    - **Average QPS (query per second)**: 1, 4, 16 and inf. QPS = inf means all requests come at once. For other QPS values, the arrival time of each query is determined using a random Poisson process (with fixed random seed).
-    - Models: Qwen2.5-VL-7B-Instruct, Qwen2.5-7B-Instruct, Qwen3-8B.
-    - Evaluation metrics: throughput, TTFT (time to the first token, with mean, median and p99), ITL (inter-token latency, with mean, median and p99).
+  - Input length: randomly sample 200 prompts from ShareGPT dataset (with fixed random seed).
+  - Output length: the corresponding output length of these 200 prompts.
+  - Batch size: dynamically determined by vllm and the arrival pattern of the requests.
+  - **Average QPS (query per second)**: 1, 4, 16 and inf. QPS = inf means all requests come at once. For other QPS values, the arrival time of each query is determined using a random Poisson process (with fixed random seed).
+  - Models: Qwen2.5-VL-7B-Instruct, Qwen2.5-7B-Instruct, Qwen3-8B.
+  - Evaluation metrics: throughput, TTFT (time to the first token, with mean, median and p99), ITL (inter-token latency, with mean, median and p99).
 
 **Benchmarking Duration**: about 800 senond for single model.
 
@@ -75,10 +75,10 @@ Before running the benchmarks, ensure the following:
   
 this Json will be structured and parsed into server parameters and client parameters by the benchmark script. This configuration defines a test case named `serving_qwen2_5vl_7B_tp1`, designed to evaluate the performance of the `Qwen/Qwen2.5-VL-7B-Instruct` model under different request rates. The test includes both server and client parameters, for more parameters details, see vllm benchmark [cli](https://github.com/vllm-project/vllm/tree/main/vllm/benchmarks).
 
-  - **Test Overview**
-     - Test Name: serving_qwen2_5vl_7B_tp1
+- **Test Overview**
+  - Test Name: serving_qwen2_5vl_7B_tp1
 
-     - Queries Per Second (QPS): The test is run at four different QPS levels: 1, 4, 16, and inf (infinite load, typically used for stress testing).
+  - Queries Per Second (QPS): The test is run at four different QPS levels: 1, 4, 16, and inf (infinite load, typically used for stress testing).
 
   - Server Parameters
      - Model: Qwen/Qwen2.5-VL-7B-Instruct
@@ -95,21 +95,21 @@ this Json will be structured and parsed into server parameters and client parame
 
      - Max Model Length: 16,384 tokens (maximum context length supported by the model)
 
-  - Client Parameters
+- Client Parameters
 
-     - Model: Qwen/Qwen2.5-VL-7B-Instruct (same as the server)
+  - Model: Qwen/Qwen2.5-VL-7B-Instruct (same as the server)
 
-     - Backend: openai-chat (suggests the client uses the OpenAI-compatible chat API format)
+  - Backend: openai-chat (suggests the client uses the OpenAI-compatible chat API format)
 
-     - Dataset Source: Hugging Face (hf)
+  - Dataset Source: Hugging Face (hf)
 
-     - Dataset Split: train
+  - Dataset Split: train
 
-     - Endpoint: /v1/chat/completions (the REST API endpoint to which chat requests are sent)
+  - Endpoint: /v1/chat/completions (the REST API endpoint to which chat requests are sent)
 
-     - Dataset Path: lmarena-ai/vision-arena-bench-v0.1 (the benchmark dataset used for evaluation, hosted on Hugging Face)
+  - Dataset Path: lmarena-ai/vision-arena-bench-v0.1 (the benchmark dataset used for evaluation, hosted on Hugging Face)
 
-     - Number of Prompts: 200 (the total number of prompts used during the test)
+  - Number of Prompts: 200 (the total number of prompts used during the test)
 
 ## Run benchmarks
 

@@ -19,8 +19,8 @@ from typing import Callable, Optional
 
 import torch
 from vllm.config import CompilationLevel, get_current_vllm_config
-from vllm.model_executor.layers.fused_moe.layer import \
-    UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe.layer import (
+    UnquantizedFusedMoEMethod)
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ops.fused_moe import (fused_experts, fused_experts_moge,
@@ -36,7 +36,9 @@ def unquantized_fused_moe_init_func(self, *args, **kwargs):
     original_unquantized_fused_moe_init_func(self, *args, **kwargs)
     vllm_config = get_current_vllm_config()
     self.max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-    self.use_aclgraph = vllm_config.compilation_config.level == CompilationLevel.PIECEWISE and not vllm_config.model_config.enforce_eager
+    self.use_aclgraph = (vllm_config.compilation_config.level
+                         == CompilationLevel.PIECEWISE
+                         and not vllm_config.model_config.enforce_eager)
 
 
 def forward_oot(

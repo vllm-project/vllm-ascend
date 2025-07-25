@@ -595,7 +595,7 @@ class AscendW8A8DynamicLinearMethod:
             output_dtype = config.get("output_dtype", x.dtype)
             quantized_x, dynamic_scale = torch_npu.npu_dynamic_quant(x)
         else:
-            assert "output_dtype" in config.keys(), (
+            assert "output_dtype" in config, (
                 f"DynamicLinearMethod needs explicitly specified `output_dtype`"
                 f"for pre-quantized input, got config [{config}]")
             output_dtype = config["output_dtype"]
@@ -729,7 +729,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 # out_flag=False, # todo new api; 第三个输出是否输出
                 # y2_flag=False, # old api; 第三个输出是否输出
                 routed_scaling_factor=1,
-                eps=float(1e-20))
+                eps=1e-20)
         else:
             topk_weights, topk_ids = select_experts(
                 hidden_states=x,

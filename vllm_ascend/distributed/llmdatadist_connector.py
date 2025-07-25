@@ -15,10 +15,10 @@
 # limitations under the License.
 #
 import os
-import re
 import subprocess
 from typing import TYPE_CHECKING, List, Tuple, Union
 
+import regex as re
 import torch
 import torch_npu
 import torchair  # type: ignore
@@ -52,9 +52,8 @@ HCCN_TOOL_PATH = envs.HCCN_PATH
 def get_device_ips():
     world_size = 8
     npu_info = subprocess.run(['npu-smi', 'info', '-m'],
-                              stdout=subprocess.PIPE,
-                              stderr=subprocess.PIPE,
-                              universal_newlines=True)
+                              capture_output=True,
+                              text=True)
     if npu_info.returncode != 0 or not os.path.exists(HCCN_TOOL_PATH):
         raise RuntimeError("No npu-smi/hccn_tool tools provided for NPU.")
     re_result = re.match(r'.*\n\t([0-9]+).*', npu_info.stdout)
@@ -66,10 +65,7 @@ def get_device_ips():
         cmd = [
             HCCN_TOOL_PATH, '-i', f'{npu_start_idx + ip_offset}', '-ip', '-g'
         ]
-        device_ip_info = subprocess.run(cmd,
-                                        stdout=subprocess.PIPE,
-                                        stderr=subprocess.PIPE,
-                                        universal_newlines=True)
+        device_ip_info = subprocess.run(cmd, capture_output=True, text=True)
         re_result = re.match(r'ipaddr:(.*)\n', device_ip_info.stdout)
         if re_result is None:
             raise RuntimeError("Can't find npu ip")

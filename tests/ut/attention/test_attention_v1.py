@@ -3,15 +3,12 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.attention.attention_v1 import \
-    AscendAttentionBackendImpl092  # isort: skip
-from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
-                                                AscendAttentionBackendImpl,
-                                                AscendAttentionMetadataBuilder,
-                                                AscendAttentionState,
-                                                AscendMetadata,
-                                                CommonAttentionState)
 from vllm_ascend.utils import vllm_version_is
+
+from vllm_ascend.attention.attention_v1 import (  # isort: skip
+    AscendAttentionBackend, AscendAttentionBackendImpl,
+    AscendAttentionBackendImpl092, AscendAttentionMetadataBuilder,
+    AscendAttentionState, AscendMetadata, CommonAttentionState)
 
 
 class TestAscendAttentionBackend(TestBase):

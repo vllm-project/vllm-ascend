@@ -339,7 +339,8 @@ class SimpleConnector(KVConnectorBase):
                     dtype=kv_caches[0].dtype,
                     device=kv_caches[0].device)
                 logger.warning(
-                    "[Detect there is more one DP rank in this decode node, in this scenario, no recompute is expected when kv cache dose not received.]"
+                    "[Detect there is more one DP rank in this decode node, in this scenario, " \
+                    "no recompute is expected when kv cache dose not received.]"
                 )
             else:
                 logger.warning(
@@ -354,7 +355,8 @@ class SimpleConnector(KVConnectorBase):
                 torch.distributed.get_rank(),
             )
             # Can't directly concat here which might cause error when bs = 1.
-            # hidden_or_intermediate_states = torch.empty(total_num_tokens, hidden_size, dtype=kv_caches[0].dtype, device=kv_caches[0].device)
+            # hidden_or_intermediate_states = torch.empty(total_num_tokens, hidden_size,
+            # dtype=kv_caches[0].dtype, device=kv_caches[0].device)
             if len(hidden_or_intermediate_states_for_one_req) == 1:
                 hidden = hidden_or_intermediate_states_for_one_req[0]
                 tmp_indice = torch.tensor([0] * hidden.shape[0],

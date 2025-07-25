@@ -4,8 +4,8 @@ from unittest.mock import MagicMock, patch
 from vllm.distributed.utils import StatelessProcessGroup
 
 from tests.ut.base import TestBase
-from vllm_ascend.distributed.device_communicators.pyhccl import \
-    PyHcclCommunicator
+from vllm_ascend.distributed.device_communicators.pyhccl import (
+    PyHcclCommunicator)
 
 
 class MockHcclLib:

@@ -24,8 +24,8 @@ from vllm.distributed.parallel_state import (get_world_group,
                                              init_distributed_environment)
 from vllm.utils import update_environment_variables
 
-from vllm_ascend.distributed.device_communicators.pyhccl import \
-    PyHcclCommunicator
+from vllm_ascend.distributed.device_communicators.pyhccl import (
+    PyHcclCommunicator)
 
 
 def distributed_run(fn, world_size):

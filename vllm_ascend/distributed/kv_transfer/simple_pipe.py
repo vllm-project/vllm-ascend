@@ -87,9 +87,8 @@ class SimplePipe(KVPipeBase):
         if self.role == llm_datadist.LLMRole.DECODER:
             self.cluster = self._make_cluster()
             _, ret = self.data_dist.link_clusters([self.cluster], 20000)
-            logger.info(
-                f"rank {self.rank}, local_rank {self.local_rank} link, ret={ret}"
-            )
+            logger.info("rank %s, local_rank %s link, ret=%s", self.rank,
+                        self.local_rank, ret)
 
         # If `proxy_ip` or `proxy_port` is `""`,
         # then the ping thread will not be enabled.

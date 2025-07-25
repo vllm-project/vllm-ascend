@@ -20,8 +20,8 @@ from typing import List, Optional
 
 import llm_datadist  # type: ignore
 import torch
-from vllm.distributed.kv_transfer.kv_lookup_buffer.base import \
-    KVLookupBufferBase
+from vllm.distributed.kv_transfer.kv_lookup_buffer.base import (
+    KVLookupBufferBase)
 from vllm.logger import init_logger
 
 from vllm_ascend.distributed.kv_transfer.simple_pipe import SimplePipe
@@ -183,7 +183,7 @@ class SimpleBuffer(KVLookupBufferBase):
                 self.data_pipe.deallocate_buffer(self.hidden_buffer)
             except Exception as e:
                 logger.warning(
-                    f"Failed to free kv cache buffer, Error code: {str(e)}")
+                    "Failed to free kv cache buffer, Error code: %s", str(e))
 
         try:
             self.key_buffer, key = self.data_pipe.recv_tensor(
@@ -199,8 +199,10 @@ class SimpleBuffer(KVLookupBufferBase):
             hidden = hidden.view(num_tokens, self.hidden_size)
         except Exception as e:
             logger.warning(
-                f"Fail to receive kv cache and hidden states of request: {orig_req_id} "
-                f"Error is {str(e)}")
+                "Fail to receive kv cache and hidden states of request: %s Error is %s",
+                orig_req_id,
+                str(e),
+            )
             return [None, None, None, None]
 
         return [key, value, hidden, roi]

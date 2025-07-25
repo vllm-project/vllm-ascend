@@ -206,39 +206,16 @@ def generate_md(model_name, tasks_list, args, datasets):
             else:
                 n_shot = "0"
             flag = ACCURACY_FLAG.get(task_name, "")
-            row = (
-                f"| {task_name:<37} "
-                f"| {flt:<6} "
-                f"| {n_shot:6} "
-                f"| {metric:<6} "
-                f"| {flag}{value:>5.4f} "
-                f"| ± {stderr:>5.4f} |"
-            )
+            row = f"| {task_name:<37} | {flt:<6} | {n_shot:6} | {metric:<6} | {flag}{value:>5.4f} | ± {stderr:>5.4f} |"
             if not task_name.startswith("-"):
                 rows.append(row)
                 rows_sub.append(
-                    "<details>"
-                    + "\n"
-                    + "<summary>"
-                    + task_name
-                    + " details"
-                    + "</summary>"
-                    + "\n" * 2
-                    + header
+                    "<details>" + "\n" + "<summary>" + task_name + " details" + "</summary>" + "\n" * 2 + header
                 )
             rows_sub.append(row)
         rows_sub.append("</details>")
     # Combine all Markdown sections
-    md = (
-        preamble
-        + "\n"
-        + header
-        + "\n"
-        + "\n".join(rows)
-        + "\n"
-        + "\n".join(rows_sub)
-        + "\n"
-    )
+    md = preamble + "\n" + header + "\n" + "\n".join(rows) + "\n" + "\n".join(rows_sub) + "\n"
     print(md)
     return md
 
@@ -268,9 +245,7 @@ def main(args):
     # Evaluate model on each dataset
     for dataset in datasets:
         accuracy_expected = EXPECTED_VALUE[args.model][dataset]
-        p = multiprocessing.Process(
-            target=run_accuracy_test, args=(result_queue, args.model, dataset)
-        )
+        p = multiprocessing.Process(target=run_accuracy_test, args=(result_queue, args.model, dataset))
         p.start()
         p.join()
         if p.is_alive():
@@ -281,11 +256,7 @@ def main(args):
         time.sleep(10)
         result = result_queue.get()
         print(result)
-        if (
-            accuracy_expected - RTOL
-            < result[dataset][FILTER[dataset]]
-            < accuracy_expected + RTOL
-        ):
+        if accuracy_expected - RTOL < result[dataset][FILTER[dataset]] < accuracy_expected + RTOL:
             ACCURACY_FLAG[dataset] = "✅"
         else:
             ACCURACY_FLAG[dataset] = "❌"
@@ -297,9 +268,7 @@ def main(args):
 if __name__ == "__main__":
     multiprocessing.set_start_method("spawn", force=True)
     # Initialize argument parser
-    parser = argparse.ArgumentParser(
-        description="Run model accuracy evaluation and generate report"
-    )
+    parser = argparse.ArgumentParser(description="Run model accuracy evaluation and generate report")
     parser.add_argument("--output", type=str, required=True)
     parser.add_argument("--model", type=str, required=True)
     parser.add_argument("--vllm_ascend_version", type=str, required=False)

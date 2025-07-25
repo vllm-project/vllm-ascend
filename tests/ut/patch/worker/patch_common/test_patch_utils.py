@@ -20,8 +20,8 @@ import torch
 from torch.library import Library
 
 from tests.ut.base import TestBase
-from vllm_ascend.patch.worker.patch_common.patch_utils import \
-    ascend_direct_register_custom_op
+from vllm_ascend.patch.worker.patch_common.patch_utils import (
+    ascend_direct_register_custom_op)
 
 
 class TestPatchUtils(TestBase):
