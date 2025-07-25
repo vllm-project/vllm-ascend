@@ -117,7 +117,6 @@ jobs:
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
-          pip install "transformers<=4.52.4"
           pip install -e .
           pip install -r benchmarks/requirements-bench.txt
 
