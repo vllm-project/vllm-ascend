@@ -1390,7 +1390,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         with ProfileExecuteDuration().capture_async("post process"):
             logits = self.model.compute_logits(hidden_states[sample_indices],
                                                None)
-            logits = logits[:self.input_batch.num_reqs]
 
             # Apply structured output bitmasks if present
             if scheduler_output.grammar_bitmask is not None:
@@ -1399,11 +1398,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Sample the next token and get logprobs if needed.
             sampling_metadata = self.input_batch.sampling_metadata
             if spec_decode_metadata is None:
+                logits = logits[:self.input_batch.num_reqs]
+
                 sampler_output = self.sampler(
                     logits=logits,
                     sampling_metadata=sampling_metadata,
                 )
             else:
+                logits = logits[:len(spec_decode_metadata.logits_indices)]
                 # When indexing with a tensor (bonus_logits_indices), PyTorch
                 # creates a new tensor with separate storage from the original
                 # logits tensor. This means any in-place operations on bonus_logits
