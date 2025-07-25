@@ -36,6 +36,12 @@ on:
       - '.github/workflows/image_310p_ubuntu.yml'
       - 'Dockerfile.310p'
       - 'vllm_ascend/**'
+      - 'setup.py'
+      - 'pyproject.toml'
+      - 'requirements.txt'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'csrc/**'
 jobs:
 
   build:

@@ -140,9 +140,6 @@ class AscendTorchairMetadata:
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
     attn_mask: Optional[torch.Tensor] = None
 
-    # For logging.
-    num_input_tokens: int = 0  # Number of tokens including padding.
-
     decode: Optional[AscendDecodeMetadata] = None
 
 
@@ -225,7 +222,6 @@ class AscendAttentionTorchairMetadataBuilder:
               num_reqs,
               num_actual_tokens,
               max_query_len,
-              common_prefix_len,
               graph_pad_size: int = -1):
 
         device = self.runner.device

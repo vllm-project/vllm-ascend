@@ -457,11 +457,11 @@ def register_ascend_customop():
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
 
 
+# TODO(zzzzwwjj): It will be judged with _build_info afterwards.
 class AscendSocVersion(Enum):
     A2 = 0
     A3 = 1
-    MAX = 2
-
+    UNDEFINED = 2
 
 _ascend_soc_version = None
 
@@ -474,7 +474,7 @@ def init_ascend_soc_version():
     elif 250 <= soc_version <= 255:
         _ascend_soc_version = AscendSocVersion.A3
     else:
-        _ascend_soc_version = AscendSocVersion.MAX
+        _ascend_soc_version = AscendSocVersion.UNDEFINED
 
 
 def get_ascend_soc_version():

@@ -830,7 +830,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 AscendAttentionState.ChunkedPrefill,
                 AscendAttentionState.SpecDecoding,
                 AscendAttentionState.PrefillCacheHit
-        ] and not self.ascend_config.chunked_prefill_for_mla:
+        ] and not ascend_config.chunked_prefill_for_mla:
             attn_output = attn_output_torch
 
         current_ms_metadata = get_multistream_comm_context()

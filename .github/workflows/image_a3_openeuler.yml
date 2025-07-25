@@ -36,6 +36,12 @@ on:
       - '.github/workflows/image_a3_openeuler.yml'
       - 'Dockerfile.a3.openEuler'
       - 'vllm_ascend/**'
+      - 'setup.py'
+      - 'pyproject.toml'
+      - 'requirements.txt'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - 'csrc/**'
 
 jobs:
   build:

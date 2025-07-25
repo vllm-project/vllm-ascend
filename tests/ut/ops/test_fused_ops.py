@@ -18,12 +18,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 import torch.nn as nn
+import torch_npu
 from pytest_mock import MockerFixture
 
+from vllm_ascend.ascend_forward_context import get_fused_moe_state
 from vllm_ascend.ops.fused_moe import (AscendFusedMoE,
                                        AscendUnquantizedFusedMoEMethod)
-from vllm_ascend.utils import adapt_patch, AscendSocVersion  # noqa E402
-from vllm_ascend.ascend_forward_context import get_fused_moe_state
+from vllm_ascend.utils import AscendSocVersion, adapt_patch  # noqa E402
 
 adapt_patch(True)
 
@@ -107,13 +108,7 @@ def mock_moe_env(mocker: MockerFixture):
         patch("torch_npu.npu_moe_distribute_dispatch", return_value=(
                 torch.randn(16, 2)
         )), \
-        patch("torch_npu.npu_moe_distribute_dispatch_v2", return_value=(
-                torch.randn(16, 2)
-        )), \
         patch("torch_npu.npu_moe_distribute_combine", return_value=(
-                torch.randn(16, 2)
-        )), \
-        patch("torch_npu.npu_moe_distribute_combine_v2", return_value=(
                 torch.randn(16, 2)
         )), \
         patch("torch_npu.npu_grouped_matmul", return_value=(
@@ -130,7 +125,14 @@ def mock_moe_env(mocker: MockerFixture):
         patch("torch_npu.npu_moe_finalize_routing", return_value=(
                 torch.randn(16, 2)
         )):
-        yield
+        if hasattr(torch_npu, 'npu_moe_distribute_dispatch_v2'):
+            with patch("torch_npu.npu_moe_distribute_dispatch_v2", return_value=(
+                torch.randn(16, 2))), \
+                patch("torch_npu.npu_moe_distribute_combine_v2", return_value=(
+                torch.randn(16, 2))):
+                yield
+        else:
+            yield
 
 
 @pytest.fixture
@@ -245,8 +247,11 @@ class TestAscendFusedMoe:
             moe.moe_parallel_config.ep_size = 1
 
         moe.quant_method = MockQuantMethod(shared_experts, num_tokens)
-        forward_context = MagicMock(mc2_mask=torch.zeros(num_tokens, dtype=torch.bool), padded_num_tokens=num_tokens)
-        with patch("vllm_ascend.ops.fused_moe.get_forward_context", return_value=forward_context):
+        forward_context = MagicMock(mc2_mask=torch.zeros(num_tokens,
+                                                         dtype=torch.bool),
+                                    padded_num_tokens=num_tokens)
+        with patch("vllm_ascend.ops.fused_moe.get_forward_context",
+                   return_value=forward_context):
             output = moe.forward(inputs,
                                  router_logits,
                                  is_prefill=is_prefill,
@@ -306,7 +311,8 @@ class TestAscendUnquantizedFusedMoEMethod:
         global_num_experts, ep_size, select_softmax = others_param
         is_prefill = False
         is_deepseek_v3_r1 = global_num_experts == 256
-        forward_context = MagicMock(fused_moe_state=get_fused_moe_state(ep_size, is_prefill, is_deepseek_v3_r1))
+        forward_context = MagicMock(fused_moe_state=get_fused_moe_state(
+            ep_size, is_prefill, is_deepseek_v3_r1))
         with patch(
                 "vllm_ascend.ops.fused_moe.SELECT_GATING_TOPK_SOTFMAX_EXPERTS",
                 select_softmax), \
@@ -342,7 +348,8 @@ class TestAscendUnquantizedFusedMoEMethod:
         """
         ep_size, alltoall_buffer = others_param
         is_prefill = False
-        forward_context = MagicMock(fused_moe_state=get_fused_moe_state(ep_size, is_prefill, True))
+        forward_context = MagicMock(
+            fused_moe_state=get_fused_moe_state(ep_size, is_prefill, True))
         with patch("vllm_ascend.ops.fused_moe.MOE_ALL2ALL_BUFFER",
                    alltoall_buffer), \
              patch("vllm_ascend.ops.fused_moe.get_forward_context", return_value=forward_context), \
