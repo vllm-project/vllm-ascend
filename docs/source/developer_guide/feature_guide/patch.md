@@ -38,15 +38,15 @@ vllm_ascend
 
 In both **platform** and **worker** folder, there are several patch modules. They are used for patching different version of vLLM.
 
-- `patch_0_9_2`: This module is used for patching vLLM 0.9.2. The version is always the nearest version of vLLM. Once vLLM is released, we will drop this patch module and bump to a new version. For example, `patch_0_9_2` is used for patching vLLM 0.9.2.
+- `patch_0_10_0`: This module is used for patching vLLM 0.10.0. The version is always the nearest version of vLLM. Once vLLM is released, we will drop this patch module and bump to a new version. For example, `patch_0_10_0` is used for patching vLLM 0.10.0.
 - `patch_main`: This module is used for patching the code in vLLM main branch.
-- `patch_common`: This module is used for patching both vLLM 0.9.2 and vLLM main branch.
+- `patch_common`: This module is used for patching both vLLM 0.10.0 and vLLM main branch.
 
 ## How to write a patch
 
 Before writing a patch, following the principle above, we should patch the least code. If it's necessary, we can patch the code in either **platform** and **worker** folder. Here is an example to patch `distributed` module in vLLM.
 
-1. Decide which version of vLLM we should patch. For example, after analysis, here we want to patch both 0.9.2 and main of vLLM.
+1. Decide which version of vLLM we should patch. For example, after analysis, here we want to patch both 0.10.0 and main of vLLM.
 2. Decide which process we should patch. For example, here `distributed` belongs to the vLLM main process, so we should patch `platform`.
 3. Create the patch file in the right folder. The file should be named as `patch_{module_name}.py`. The example here is `vllm_ascend/patch/platform/patch_common/patch_distributed.py`.
 4. Write your patch code in the new file. Here is an example:
@@ -82,4 +82,4 @@ Before writing a patch, following the principle above, we should patch the least
 
 ## Limitation
 1. In V1 Engine, vLLM starts three kinds of process: Main process, EngineCore process and Worker process. Now vLLM Ascend only support patch the code in Main process and Worker process by default. If you want to patch the code runs in EngineCore process, you should patch EngineCore process entirely during setup, the entry code is here `vllm.v1.engine.core`. Please override `EngineCoreProc` and `DPEngineCoreProc` entirely.
-2. If you are running an edited vLLM code, the version of the vLLM may be changed automatically. For example, if you runs an edited vLLM based on v0.9.n, the version of vLLM may be change to v0.9.nxxx, in this case, the patch for v0.9.n in vLLM Ascend would not work as expect, because that vLLM Ascend can't distinguish the version of vLLM you're using. In this case, you can set the environment variable `VLLM_VERSION` to specify the version of vLLM you're using, then the patch for v0.9.2 should work.
+2. If you are running an edited vLLM code, the version of the vLLM may be changed automatically. For example, if you runs an edited vLLM based on v0.9.n, the version of vLLM may be change to v0.9.nxxx, in this case, the patch for v0.9.n in vLLM Ascend would not work as expect, because that vLLM Ascend can't distinguish the version of vLLM you're using. In this case, you can set the environment variable `VLLM_VERSION` to specify the version of vLLM you're using, then the patch for v0.10.0 should work.

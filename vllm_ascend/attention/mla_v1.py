@@ -1,12 +1,11 @@
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type,
-                    TypeVar)
+from typing import TYPE_CHECKING, Optional, Tuple, Type, TypeVar
 
 import numpy as np
 import torch
 import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
-                                              AttentionMetadata, AttentionType,
+                                              AttentionMetadata,
                                               MLAAttentionImpl)
 from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import get_current_vllm_config
@@ -22,7 +21,7 @@ from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
-from vllm_ascend.utils import npu_prefetch, vllm_version_is
+from vllm_ascend.utils import npu_prefetch
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:
@@ -54,8 +53,6 @@ class AscendMLABackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> Type["MLAAttentionImpl"]:
-        if vllm_version_is("0.9.2"):
-            return AscendMLAImpl092
         return AscendMLAImpl
 
 
@@ -1212,34 +1209,3 @@ class AscendMLAImpl(MLAAttentionImpl):
                 output[:num_decode_tokens] = output_decode
 
         return output_padded
-
-
-class AscendMLAImpl092(AscendMLAImpl):
-
-    def __init__(self,
-                 num_heads: int,
-                 head_size: int,
-                 scale: float,
-                 num_kv_heads: int,
-                 alibi_slopes: Optional[List[float]],
-                 sliding_window: Optional[int],
-                 kv_cache_dtype: str,
-                 blocksparse_params: Optional[Dict[str, Any]] = None,
-                 logits_soft_cap: Optional[float] = None,
-                 attn_type: str = AttentionType.DECODER,
-                 kv_sharing_target_layer_name: Optional[str] = None,
-                 use_irope: bool = False,
-                 **kwargs) -> None:
-        super().__init__(
-            num_heads=num_heads,
-            head_size=head_size,
-            scale=scale,
-            num_kv_heads=num_kv_heads,
-            alibi_slopes=alibi_slopes,
-            sliding_window=sliding_window,
-            kv_cache_dtype=kv_cache_dtype,
-            logits_soft_cap=logits_soft_cap,
-            attn_type=attn_type,
-            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
-            use_irope=use_irope,
-            **kwargs)

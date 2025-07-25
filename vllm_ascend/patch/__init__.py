@@ -24,9 +24,9 @@
 #           each worker's `__init__` function.
 #
 # Then in each kind of patch, there are three folders:
-# - patch_0_9_2: contains the patches applied when vllm version is 0.9.2.
+# - patch_0_10_0: contains the patches applied when vllm version is 0.10.0.
 # - patch_main: contains the patches applied when vllm version is main branch.
-# - patch_common: contains the patches applied in both 0.9.2 and main branch.
+# - patch_common: contains the patches applied in both 0.10.0 and main branch.
 #
 # Once a new patch is added in vllm-ascend, please add the patch description into this file as well.
 # ----------------------------------------------------------------------------------
