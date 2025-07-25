@@ -545,8 +545,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             hidden_states_or_q_c = self.q_a_layernorm(ckq)
         else:
             hidden_states_or_q_c = hidden_states
-        is_mtp_model = attn_metadata is not None and attn_metadata.is_mtp_model
-        if self.torchair_graph_enabled and not is_mtp_model:
+        if self.torchair_graph_enabled:
             if self.enable_prefill_optimizations and self.debug_layer_idx > 3 and self.debug_layer_idx < 61:
                 hidden_states_or_q_c = get_tp_group().all_gather(
                     hidden_states_or_q_c, 0)
