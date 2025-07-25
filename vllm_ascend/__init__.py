@@ -27,7 +27,11 @@ def register_model():
     # is upgraded to 2.7.0
     import vllm_ascend.patch.worker.patch_common.patch_utils  # noqa: F401
 
+    import os
+    if os.getenv("VLLM_ASCEND_ENABLE_PD_CHUNK_SCHEDULE") == '1':
+        import vllm_ascend.patch.platform.patch_0_9_1.patch_scheduler  # isort: skip  # noqa: F401
+
     from .models import register_model
 
-    import vllm_ascend.patch.platform.patch_0_9_1.patch_decorator  # isort: skip  # noqa: F401
+    import vllm_ascend.patch.platform.patch_0_9_1.patch_decorator  # noqa: F401
     register_model()

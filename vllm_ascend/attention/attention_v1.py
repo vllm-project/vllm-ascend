@@ -106,6 +106,7 @@ class AscendAttentionState(Enum):
     DecodeOnly = 2
     ChunkedPrefill = 3
     SpecDecoding = 4
+    PChunkedPrefill = 5
 
 
 @dataclass
@@ -411,6 +412,20 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         out=output)
                     handle = torch.npu.graph_task_group_end(stream)
                     graph_params.handles[num_tokens].append(handle)
+            # Chunked prefill in P batch, just in PD situation
+            elif attn_metadata.attn_state == AscendAttentionState.PChunkedPrefill:
+                batch_size = attn_metadata.query_lens.shape[0]
+                block_tables = attn_metadata.block_tables[:batch_size, :]
+                output = torch_npu.atb.npu_self_attention_prefix_encoder(
+                            query=query,
+                            key=self.key_cache,
+                            value=self.value_cache,
+                            block_tables=block_tables,
+                            seqlen=attn_metadata.query_lens,
+                            kv_seqlen=attn_metadata.seq_lens,
+                            q_headnum=self.num_heads,
+                            kv_headnum=self.num_kv_heads,
+                            qk_scale=self.scale)
             # Normal V1 situation.
             else:
                 # use chunked prefill for head size 192 scenario, like deepseek
