@@ -298,20 +298,14 @@ class MtpProposer:
             config.experimental_config.enable_view_optimize = \
             get_ascend_config().torchair_graph_config.enable_view_optimize
             torch.npu.set_compile_mode(jit_compile=False)
-            if not self.runner.use_cached_npu_graph:
-                npu_backend = torchair.get_npu_backend(compiler_config=config)
-                self.torchair_compiled_model = torch.compile(
-                    self.model,
-                    dynamic=True,
-                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                    backend=npu_backend)
-            else:
-                self.torchair_compiled_model = torchair.inference.cache_compile(
-                    self.model.forward,
-                    dynamic=True,
-                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                    config=config,
-                    ge_cache=False)
+            # TODO(linfeng): Need to refactor compilation logic here for mutliple
+            # torchair_graph_batch_sizes and cache_compile.
+            npu_backend = torchair.get_npu_backend(compiler_config=config)
+            self.torchair_compiled_model = torch.compile(
+                self.model,
+                dynamic=True,
+                fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                backend=npu_backend)
 
     @torch.inference_mode()
     def dummy_run(self,
