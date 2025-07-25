@@ -141,7 +141,11 @@ def fused_experts_with_mc2(
     is_torchair: bool = False,
     hidden_states_for_share: Optional[Any] = None,
     mc2_mask: Optional[torch.Tensor] = None,
+    log2phy: Optional[torch.Tensor] = None,
+    global_redundant_expert_num: int = 0
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    if log2phy is not None:
+        topk_ids = log2phy[topk_ids]
     quant_mode = 0
     ep_group = get_mc2_group()
     ep_rank_id = ep_group.rank_in_group
@@ -163,7 +167,7 @@ def fused_experts_with_mc2(
 
     enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
 
-    moe_expert_num = len(expert_map)
+    moe_expert_num = len(expert_map) + global_redundant_expert_num
     kwargs_mc2 = {
         "x": hidden_states,
         "expert_ids": topk_ids,
@@ -349,17 +353,16 @@ def apply_mlp(
 
 # currently expert parallelism implemented with all2all
 # is under-optimized.
-def fused_experts_with_all2all(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    top_k: int,
-    expert_map: torch.Tensor = None,
-    ep_group: GroupCoordinator = None,
-    max_num_tokens: Optional[int] = None,
-):
+def fused_experts_with_all2all(hidden_states: torch.Tensor,
+                               w1: torch.Tensor,
+                               w2: torch.Tensor,
+                               topk_weights: torch.Tensor,
+                               topk_ids: torch.Tensor,
+                               top_k: int,
+                               expert_map: torch.Tensor = None,
+                               ep_group: GroupCoordinator = None,
+                               max_num_tokens: Optional[int] = None,
+                               global_redundant_expert_num: int = 0):
     original_shape = hidden_states.shape
     if len(original_shape) == 3:
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
@@ -369,7 +372,7 @@ def fused_experts_with_all2all(
     device = hidden_states.device
 
     if expert_map is not None:
-        global_num_experts = len(expert_map)
+        global_num_experts = len(expert_map) + global_redundant_expert_num
         local_num_experts = global_num_experts // ep_group.world_size
         row_idx_len = num_tokens * top_k
         row_idx = (torch.arange(0,
@@ -639,7 +642,10 @@ def fused_experts_with_all2allv(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
+    log2phy: Optional[torch.Tensor] = None,
 ):
+    if log2phy is not None:
+        routing_map = log2phy[routing_map]
     # Enable moe alltoallv, it's a balanced policy for precision and efficiency.
     (share_experts_output, dispatched_input,
      tokens_per_expert) = (token_dispatcher.token_permutation(
@@ -824,8 +830,8 @@ def fused_experts(
             expanded_src_to_dst_row=expanded_row_idx,
             export_for_source_row=topk_ids,
         )
-
-    return final_hidden_states
+    group_list_type = 0
+    return final_hidden_states, expert_tokens, group_list_type
 
 
 def native_grouped_topk(
@@ -1015,6 +1021,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         enable_force_load_balance: bool = False,
         hidden_states_for_share: Optional[Any] = None,
         shared_experts: Optional[Any] = None,
+        log2phy: Optional[Any] = None,
+        global_redundant_expert_num: int = 0,
         **kwargs,
     ) -> torch.Tensor:
 
@@ -1071,6 +1079,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 is_torchair=self.torchair_graph_enabled,
                 hidden_states_for_share=hidden_states_for_share,
                 mc2_mask=mc2_mask,
+                log2phy=log2phy,
+                global_redundant_expert_num=global_redundant_expert_num,
             )
         elif fused_moe_state == FusedMoEState.AllGather:
             max_num_tokens = self.max_num_batched_tokens if self.use_aclgraph else None
@@ -1105,18 +1115,20 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
-            )
+                log2phy=log2phy)
         else:
             max_num_tokens = self.max_num_batched_tokens if self.use_aclgraph else None
-            return fused_experts_with_all2all(hidden_states=x,
-                                              w1=layer.w13_weight,
-                                              w2=layer.w2_weight,
-                                              topk_weights=topk_weights,
-                                              topk_ids=topk_ids,
-                                              top_k=top_k,
-                                              expert_map=expert_map,
-                                              ep_group=get_ep_group(),
-                                              max_num_tokens=max_num_tokens)
+            return fused_experts_with_all2all(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                top_k=top_k,
+                expert_map=expert_map,
+                ep_group=get_ep_group(),
+                max_num_tokens=max_num_tokens,
+                global_redundant_expert_num=global_redundant_expert_num)
 
 
 class AscendFusedMoE(FusedMoE):
@@ -1273,6 +1285,10 @@ class AscendFusedMoE(FusedMoE):
         if envs_ascend.VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ and isinstance(
                 self.quant_method, AscendUnquantizedFusedMoEMethod):
             self.reduce_results = False
+            if expert_map_path and os.path.exists(expert_map_path):
+                self.global_num_experts = self.global_num_experts + self.global_redundant_expert_num
+                self.local_num_experts = self.global_num_experts // self.ep_size
+
             moe_dispatcher_config = (
                 MoEDispatcherConfig().set_num_moe_experts(
                     self.global_num_experts).set_num_local_experts(
