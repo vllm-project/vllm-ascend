@@ -61,8 +61,8 @@ Before writing a patch, following the principle above, we should patch the least
     vllm.distributed.parallel_state.destroy_model_parallel = patch_destroy_model_parallel
     ```
 
-6. Import the patch file in `__init__.py`. In this example, add `import vllm_ascend.patch.platform.patch_common.patch_distributed` into `vllm_ascend/patch/platform/patch_common/__init__.py`.
-7. Add the description of the patch in `vllm_ascend/patch/__init__.py`. The description format is as follows:
+5. Import the patch file in `__init__.py`. In this example, add `import vllm_ascend.patch.platform.patch_common.patch_distributed` into `vllm_ascend/patch/platform/patch_common/__init__.py`.
+6. Add the description of the patch in `vllm_ascend/patch/__init__.py`. The description format is as follows:
 
     ```
     # ** File: <The patch file name> **
@@ -78,7 +78,7 @@ Before writing a patch, following the principle above, we should patch the least
     #       <Describe the future plan to remove the patch>
     ```
 
-9. Add the Unit Test and E2E Test. Any newly added code in vLLM Ascend should contain the Unit Test and E2E Test as well. You can find more details in [test guide](../contribution/testing.md)
+7. Add the Unit Test and E2E Test. Any newly added code in vLLM Ascend should contain the Unit Test and E2E Test as well. You can find more details in [test guide](../contribution/testing.md)
 
 ## Limitation
 1. In V1 Engine, vLLM starts three kinds of process: Main process, EngineCore process and Worker process. Now vLLM Ascend only support patch the code in Main process and Worker process by default. If you want to patch the code runs in EngineCore process, you should patch EngineCore process entirely during setup, the entry code is here `vllm.v1.engine.core`. Please override `EngineCoreProc` and `DPEngineCoreProc` entirely.
