@@ -49,6 +49,7 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
 class NPUWorker(WorkerBase):
+
     def __init__(
             self,
             vllm_config: VllmConfig,
