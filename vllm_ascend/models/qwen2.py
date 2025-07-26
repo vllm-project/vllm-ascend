@@ -107,19 +107,11 @@ class CustomQwen2Attention(Qwen2Attention):
             self,
             positions: torch.Tensor,
             hidden_states: torch.Tensor,
-            cos: Optional[torch.Tensor] = None,
-            sin: Optional[torch.Tensor] = None,
             kv_cache: Optional[torch.Tensor] = None,
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         if self.torchair_graph_enabled and attn_metadata is not None and attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-            q, k = self.rotary_emb(positions,
-                                   q,
-                                   k,
-                                   cos=cos,
-                                   sin=sin,
-                                   is_cos_sin_cached=True)
             forward_kwargs = {}
             if envs.VLLM_USE_V1:
                 output_shape = q.shape
@@ -139,7 +131,6 @@ class CustomQwen2Attention(Qwen2Attention):
             output, _ = self.o_proj(attn_output)
             return output
         else:
-            q, k = self.rotary_emb(positions, q, k)
             attn_output = self.attn(q, k, v)
             output, _ = self.o_proj(attn_output)
             return output
@@ -231,8 +222,6 @@ class CustomQwen2DecoderLayer(nn.Module):
                     hidden_states, pad_size)
         hidden_states = self.self_attn(positions=positions,
                                        hidden_states=hidden_states,
-                                       cos=cos,
-                                       sin=sin,
                                        kv_cache=kv_cache,
                                        attn_metadata=attn_metadata)
         if flashcomm_v1_enabled:
@@ -275,7 +264,6 @@ class CustomQwen2Model(Qwen2Model):
                          prefix=prefix,
                          decoder_layer_type=decoder_layer_type)
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.cos_sin_cache = self.layers[0].self_attn.rotary_emb.cos_sin_cache
 
     def forward(
         self,
@@ -309,18 +297,6 @@ class CustomQwen2Model(Qwen2Model):
             pad_size = (self.tp_size -
                         (num_tokens % self.tp_size)) % self.tp_size
 
-        # Generate cos and sin outside layers to avoid repeated calculation.
-        cos, sin = None, None
-        if type(self.layers[0].self_attn.rotary_emb) is RotaryEmbedding:
-            cos_sin = self.cos_sin_cache.index_select(0, positions)
-            last_dim = cos_sin.size()[-1]
-            cos, sin = cos_sin.reshape(-1, 2,
-                                       last_dim // 2).repeat(1, 1,
-                                                             2).chunk(2,
-                                                                      dim=-2)
-            cos, sin = cos.view(1, -1, 1, last_dim).contiguous(), sin.view(
-                1, -1, 1, last_dim).contiguous()
-
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             kv_cache = kv_caches[i - self.start_layer] \
@@ -330,8 +306,6 @@ class CustomQwen2Model(Qwen2Model):
                                             residual,
                                             flashcomm_v1_enabled,
                                             pad_size,
-                                            cos=cos,
-                                            sin=sin,
                                             kv_cache=kv_cache,
                                             attn_metadata=attn_metadata)
         if not get_pp_group().is_last_rank:
