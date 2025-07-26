@@ -169,7 +169,7 @@ class AscendAttentionMetadataBuilder:
               max_query_len,
               common_attn_metadata: CommonAttentionMetadata,
               enable_dbo_across_dp: bool = False,
-              is_only_prefill:bool = False,
+              is_only_prefill: bool = False,
               *args,
               **kwargs):
 

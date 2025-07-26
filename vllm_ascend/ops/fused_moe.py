@@ -539,8 +539,8 @@ def fused_experts_with_all2all_buffer(
         dtype=expert_idx_buffer_scatter.dtype,
         device=expert_idx_buffer_scatter.device,
     )
-    non_pad_len = torch.sum(
-        (expert_idx_buffer_scatter != global_num_experts).to(torch.int32))
+    non_pad_len = torch.sum((expert_idx_buffer_scatter
+                             != global_num_experts).to(torch.int32))
     hidden_states_pad_idx[expert_idx_buffer_scatter != global_num_experts] = (
         torch.arange(
             non_pad_len,
@@ -602,8 +602,8 @@ def fused_experts_with_all2all_buffer(
     dist.all_to_all_single(hidden_states_gatter,
                            hidden_states_scatter,
                            group=ep_group.device_group)
-    hidden_states_gatter = hidden_states_gatter[
-        expert_idx_buffer_scatter != global_num_experts]
+    hidden_states_gatter = hidden_states_gatter[expert_idx_buffer_scatter !=
+                                                global_num_experts]
     if hidden_states_gatter.shape[0] != row_idx_len:
         hidden_states = torch.zeros(
             (row_idx_len, hidden_states.shape[1]),
@@ -800,9 +800,10 @@ def fused_experts(
         # This created multiple NaN and index_add_ will mix them up which harms accuracy
         # remove this mask and filter after it being fixed
         num_valid_tokens = mask.sum()
-        valid_token_mask = (torch.arange(
-            0, sorted_token_indices.shape[0], device=device).unsqueeze(1) <
-                            num_valid_tokens)
+        valid_token_mask = (torch.arange(0,
+                                         sorted_token_indices.shape[0],
+                                         device=device).unsqueeze(1)
+                            < num_valid_tokens)
         valid_output = torch.where(
             valid_token_mask, weighted_down_out,
             torch.zeros_like(weighted_down_out)).to(dtype)
@@ -1339,9 +1340,7 @@ class AscendFusedMoE(FusedMoE):
         if enable_sp:
             tp_rank = get_tensor_model_parallel_rank()
             mc2_mask_sp = _metadata_for_padding.mc2_mask
-            chunk_mc2_mask = torch.tensor_split(mc2_mask_sp,
-                                                tp_size,
-                                                dim=0)
+            chunk_mc2_mask = torch.tensor_split(mc2_mask_sp, tp_size, dim=0)
             mc2_mask = chunk_mc2_mask[tp_rank]
 
         if fused_moe_state != FusedMoEState.AllGather and not enable_sp:
@@ -1574,7 +1573,6 @@ class AscendSparseMoeBlock(nn.Module):
             top_k=self.top_k,
             enable_force_load_balance=enable_force_load_balance,
             shared_experts=None,
-            _metadata_for_padding=_metadata_for_padding
-        )
+            _metadata_for_padding=_metadata_for_padding)
 
         return hidden_states

@@ -82,38 +82,36 @@ class AscendQwen3MoeDecoderLayer(nn.Module):
                 config.num_experts > 0 and
             (layer_idx + 1) % config.decoder_sparse_step == 0):
             self.mlp = AscendSparseMoeBlock(config=config,
-                                              quant_config=quant_config,
-                                              prefix=f"{prefix}.mlp")
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.mlp")
         else:
             self.mlp = Qwen3MoeMLP(hidden_size=config.hidden_size,
-                                  intermediate_size=config.intermediate_size,
-                                  hidden_act=config.hidden_act,
-                                  quant_config=quant_config,
-                                  prefix=f"{prefix}.mlp")
+                                   intermediate_size=config.intermediate_size,
+                                   hidden_act=config.hidden_act,
+                                   quant_config=quant_config,
+                                   prefix=f"{prefix}.mlp")
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
-        
+
         self.enable_sequence_parallelism = (
-            vllm_config.compilation_config.pass_config.enable_sequence_parallelism
-            if vllm_config is not None 
-            else False
-        )
+            vllm_config.compilation_config.pass_config.
+            enable_sequence_parallelism if vllm_config is not None else False)
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-        _metadata_for_padding:  Optional[MetadataForPadding] = None,
+        _metadata_for_padding: Optional[MetadataForPadding] = None,
     ) -> torch.Tensor:
-        
+
         # To prevent precision issues during the decoder phase when only prefilling enables SP
         if not self.enable_sequence_parallelism:
             self.self_attn.o_proj.reduce_results = True
         else:
-            self.self_attn.o_proj.reduce_results =  not _metadata_for_padding.not_dummy_and_is_prefill
+            self.self_attn.o_proj.reduce_results = not _metadata_for_padding.not_dummy_and_is_prefill
 
         # Self Attention
         if residual is None:
@@ -127,21 +125,24 @@ class AscendQwen3MoeDecoderLayer(nn.Module):
                 hidden_states, residual)
 
             if _metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill:
-                hidden_states = _metadata_for_padding.allgather_unpadding_aligned(hidden_states)
-        
+                hidden_states = _metadata_for_padding.allgather_unpadding_aligned(
+                    hidden_states)
+
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
 
         if _metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill:
-            hidden_states = _metadata_for_padding.padding_aligned_reduce_scatter(hidden_states)
+            hidden_states = _metadata_for_padding.padding_aligned_reduce_scatter(
+                hidden_states)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
 
-        hidden_states = self.mlp(hidden_states, _metadata_for_padding=_metadata_for_padding)
+        hidden_states = self.mlp(hidden_states,
+                                 _metadata_for_padding=_metadata_for_padding)
 
         return hidden_states, residual
 
@@ -165,11 +166,12 @@ class AscendQwen3MoeModel(Qwen3MoeModel):
             prefix=f"{prefix}.embed_tokens")
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: AscendQwen3MoeDecoderLayer(config=config,
-                                                      cache_config=cache_config,
-                                                      quant_config=quant_config,
-                                                      vllm_config=vllm_config,
-                                                      prefix=prefix),
+            lambda prefix: AscendQwen3MoeDecoderLayer(
+                config=config,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                vllm_config=vllm_config,
+                prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -183,7 +185,7 @@ class AscendQwen3MoeModel(Qwen3MoeModel):
         positions: torch.Tensor,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
-        _metadata_for_padding:  Optional[MetadataForPadding] = None,
+        _metadata_for_padding: Optional[MetadataForPadding] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
@@ -197,7 +199,11 @@ class AscendQwen3MoeModel(Qwen3MoeModel):
             residual = intermediate_tensors["residual"]
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
-            hidden_states, residual = layer(positions, hidden_states, residual, _metadata_for_padding=_metadata_for_padding)
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+                _metadata_for_padding=_metadata_for_padding)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
@@ -207,7 +213,8 @@ class AscendQwen3MoeModel(Qwen3MoeModel):
         hidden_states, _ = self.norm(hidden_states, residual)
 
         if _metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill:
-            hidden_states = _metadata_for_padding.allgather_unpadding_aligned(hidden_states)
+            hidden_states = _metadata_for_padding.allgather_unpadding_aligned(
+                hidden_states)
 
         return hidden_states
 
@@ -254,7 +261,8 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        _metadata_for_padding = init_metadata_for_sp(input_ids, self.enable_sequence_parallelism)
+        _metadata_for_padding = init_metadata_for_sp(
+            input_ids, self.enable_sequence_parallelism)
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                    inputs_embeds, _metadata_for_padding)
         return hidden_states
