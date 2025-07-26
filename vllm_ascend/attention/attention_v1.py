@@ -375,7 +375,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         slot_indices: torch.Tensor) -> None:
 
         key = key.view(-1, 1, self.num_kv_heads, self.head_size).contiguous()
-        value = value.view(-1, 1, self.num_kv_heads, self.head_size).contiguous()
+        value = value.view(-1, 1, self.num_kv_heads,
+                           self.head_size).contiguous()
 
         block_size = key_cache.shape[1]
         slot_indices = slot_indices.view(-1, 1, 1).to(torch.int64)

@@ -213,11 +213,12 @@ class CustomQwen3MoeAttention(Qwen3MoeAttention):
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
 
-    def forward(self,
-                positions: torch.Tensor,
-                hidden_states: torch.Tensor,
-                kv_cache: Optional[torch.Tensor] = None,
-                attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
+    def forward(
+            self,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor,
+            kv_cache: Optional[torch.Tensor] = None,
+            attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         # Add qk-norm
@@ -329,11 +330,12 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-        hidden_states = self.self_attn(positions=positions,
-                                       hidden_states=hidden_states,
-                                       kv_cache=kv_cache,
-                                       attn_metadata=attn_metadata,
-                                       )
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+        )
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
@@ -396,16 +398,13 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
+                positions, hidden_states, residual,
                 kv_caches[i -
                           self.start_layer] if kv_caches is not None else None,
-                       attn_metadata)
+                attn_metadata)
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
