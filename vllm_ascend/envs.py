@@ -156,7 +156,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # then the cached kv cache size will be used.
     "VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE":
     lambda: int(
-        os.getenv("VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE", 64)),
+        os.getenv("VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE", '0')),
 }
 
 # end-env-vars-definition
