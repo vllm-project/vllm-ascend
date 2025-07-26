@@ -113,10 +113,26 @@ jobs:
         run: |
           VLLM_TARGET_DEVICE=empty pip install -e .
 
+      - name: Install pta
+        run: |
+          if [ ! -d /root/.cache/pta ]; then
+            mkdir -p /root/.cache/pta
+          fi
+
+          if [ ! -f /root/.cache/pta/torch_npu-2.7.1.dev20250724-cp310-cp310-manylinux_2_28_aarch64.whl ]; then
+            cd /root/.cache/pta
+            rm -rf pytorch_v2.7.1_py310*
+            wget https://pytorch-package.obs.cn-north-4.myhuaweicloud.com/pta/Daily/v2.7.1/20250724.3/pytorch_v2.7.1_py310.tar.gz
+            tar -zxvf pytorch_v2.7.1_py310.tar.gz
+          fi
+
+          pip install /root/.cache/pta/torch_npu-2.7.1.dev20250724-cp310-cp310-manylinux_2_28_aarch64.whl
+
       - name: Install vllm-project/vllm-ascend
         env:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
+          pip install "transformers==4.53.0"
           pip install -e .
           pip install -r benchmarks/requirements-bench.txt
 
@@ -177,7 +193,7 @@ jobs:
             git checkout $commit_id
             commit_time=$(git show -s --format=%cd $commit_hash --date=iso-strict)
             commit_time_no_tz=${commit_time::19}
-            pip install -e .
+            pip install -v --no-build-isolation -e . 
 
             echo "------------------------"
             echo "commit_id: $commit_id"

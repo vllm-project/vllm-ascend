@@ -193,7 +193,7 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask(
             size,
             loop_cnt,
             aiv_num);
-            
+
         return 0;
     });
     cmd.Run();
