@@ -150,8 +150,8 @@ def _get_pcie_info(devices: List[int], keyword="PCIeBusInfo"):
 
 
 def _get_numa_info(pcie_tbl, keyword="NUMAnode"):
-    device_numa_tbl: Dict[int, int] = {}  # key is device id, value is numa id
-    numa_devices_tbl: Dict[int, List[int]] = {}  # key is numa id, value is device id list
+    device_numa_tbl: Dict[int, int] = {}  # device id -> numa id
+    numa_devices_tbl: Dict[int, List[int]] = {}  # numa id -> device ids
 
     for device, pcie_no in pcie_tbl.items():
         numa_info = execute_command(["lspci", "-s", f"{pcie_no}",
