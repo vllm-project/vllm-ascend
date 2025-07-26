@@ -272,20 +272,23 @@ class NPUWorker(WorkerBase):
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_runner.pin_lora(lora_id)
 
-    def _get_max_num_tokens_and_with_prefill(self):
-        max_num_tokens = 1
-        with_prefill = False
-        if self.model_runner.dp_size > 1:
-            max_num_tokens, with_prefill = self.model_runner._get_forward_metadata_across_dp(
-                max_num_tokens, with_prefill)
-        return max_num_tokens, with_prefill
-
     def execute_dummy_batch(self) -> None:
-        max_num_tokens, with_prefill = self._get_max_num_tokens_and_with_prefill(
-        )
-        self.model_runner._dummy_run(max_num_tokens,
-                                     is_compile=False,
-                                     with_prefill=with_prefill)
+        if self.runner.dp_size <= 1:
+            raise ValueError(
+                "Dummy batch execution should only be "
+                "performed with data parallelism enabled, but got "
+                f"dp_size={self.runner.dp_size}.")
+
+        # Indicate to other data parallel (DP) ranks that this is a dummy run by
+        # using '-1' as the num_tokens flag. The actual batch size will be
+        # determined and set within the model runner after synchronization
+        # across DP ranks.
+        num_tokens, num_tokens_across_dp, with_prefill = \
+            self.model_runner._get_forward_metadata_across_dp(-1, False)
+        self.runner._dummy_run(num_tokens,
+                               is_compile=False,
+                               num_tokens_across_dp=num_tokens_across_dp,
+                               with_prefill=with_prefill)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
