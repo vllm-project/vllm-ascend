@@ -154,7 +154,11 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Whether to enable mla_pa for deepseek mla decode, this flag will be removed after its available torch_npu is public accessible
     # and the mla_pa will be the default path of deepseek decode path.
     "VLLM_ASCEND_MLA_PA":
-    lambda: int(os.getenv("VLLM_ASCEND_MLA_PA", 0))
+    lambda: int(os.getenv("VLLM_ASCEND_MLA_PA", 0)),
+    # Whether to enable MatmulAllReduce fusion kernel when tensor parallel is enabled.
+    # this feature is supported in A2, and eager mode will get better performance.
+    "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", '0'))),
 }
 
 # end-env-vars-definition
