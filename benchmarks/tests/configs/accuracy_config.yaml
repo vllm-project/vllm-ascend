@@ -1,0 +1,18 @@
+"Qwen3-8B-Base":
+  base_config:
+    model: "vllm"
+    model_args: "pretrained=Qwen/Qwen3-8B-Base,max_model_len=4096,dtype=auto,tensor_parallel_size=2,gpu_memory_utilization=0.6"
+    apply_chat_template: true
+    fewshot_as_multiturn: true
+    num_fewshot: 5
+
+  datasets:
+    ceval-valid:
+      batch_size: 1
+      groundtruth: 0.82
+      filter: "acc,none"
+    gsm8k:
+      batch_size: "auto"
+      groundtruth: 0.83
+      filter: "exact_match,flexible-extract"
+

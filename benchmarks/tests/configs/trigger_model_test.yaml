@@ -1,0 +1,23 @@
+schedule:
+  Qwen/Qwen3-30B-A3B
+  Qwen/Qwen2.5-VL-7B-Instruct
+  Qwen/Qwen3-8B-Base
+
+manual-input:
+  all:
+    Qwen/Qwen3-30B-A3B
+    Qwen/Qwen2.5-VL-7B-Instruct
+    Qwen/Qwen3-8B-Base
+
+label:
+  accuracy-test:
+    Qwen/Qwen3-8B-Base
+
+  dense-accuracy-test:
+    Qwen/Qwen3-8B-Base
+
+  vl-accuracy-test:
+    Qwen/Qwen2.5-VL-7B-Instruct
+
+  moe-accuracy-test:
+    Qwen/Qwen3-30B-A3B

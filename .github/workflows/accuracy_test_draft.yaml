@@ -1,0 +1,243 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
+# This test will be triggered:
+# 1. PR labeled with: '*accuracy-test' (ONLY 1 label valid) & 'ready-for-test'
+# 2. workflow_dispatch with models input
+# See detail rule in strategy.matrix note
+name: Benchmarks / accuracy-test-draft
+
+on:
+  schedule:
+    # Runs every 6 hours
+    - cron:  '0 */6 * * *'
+  pull_request:
+    types: [ labeled ]
+  workflow_dispatch:
+    inputs:
+      vllm-version:
+        description: 'vllm version:'
+        required: true
+        type: choice
+        # Please also update this when bump matched version
+        # Current supported vLLM versions
+        options:
+          - main
+          - v0.9.2
+          - v0.9.1
+          - v0.7.3
+        default: main
+
+      vllm-ascend-version:
+        description: 'vllm-ascend version:'
+        required: true
+        type: choice
+        options:
+          - main
+          - v0.9.1-dev
+          - v0.7.3-dev
+        default: main
+        
+      models:
+        description: 'model:'
+        required: true
+        type: choice
+        options:
+          - all
+          - Qwen/Qwen2.5-VL-7B-Instruct
+          - Qwen/Qwen3-8B-Base
+          - Qwen/Qwen3-30B-A3B
+        default: all
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+# only cancel in-progress runs of the same workflow
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+
+  parse-config:
+    runs-on: ubuntu-latest
+    outputs:
+      schedule_models: ${{ steps.parse-config.outputs.schedule_models }}
+      all_models: ${{ steps.parse-config.outputs.all_models }}
+      accuracy_test: ${{ steps.parse-config.outputs.accuracy_test }}
+      dense_accuracy_test: ${{ steps.parse-config.outputs.dense_accuracy_test }}
+      vl_accuracy_test: ${{ steps.parse-config.outputs.vl_accuracy_test }}
+      moe_accuracy_test: ${{ steps.parse-config.outputs.moe_accuracy_test }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Parse config.yaml
+        id: parse-config
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const yaml = require('js-yaml');
+            const fs = require('fs');
+            const config = yaml.load(fs.readFileSync('./benchmarks/tests/configs/trigger_model_test.yaml', 'utf8'));
+            core.setOutput('schedule_models', JSON.stringify(config.schedule));
+            core.setOutput('all_models', JSON.stringify(config['manual-input'].all));
+            core.setOutput('accuracy_test', JSON.stringify(config.label['accuracy-test']));
+            core.setOutput('dense_accuracy_test', JSON.stringify(config.label['dense-accuracy-test']));
+            core.setOutput('vl_accuracy_test', JSON.stringify(config.label['vl-accuracy-test']));
+            core.setOutput('moe_accuracy_test', JSON.stringify(config.label['moe-accuracy-test']));
+
+  accuracy_tests:
+    # test will be triggered when tag '*-accuracy-test' & 'ready-for-test' or workflow_dispatch job
+    needs: parse-config
+    if:  >-
+      ${{
+      (contains(github.event.pull_request.labels.*.name, 'accuracy-test') ||
+      contains(github.event.pull_request.labels.*.name, 'vl-accuracy-test') ||
+      contains(github.event.pull_request.labels.*.name, 'moe-accuracy-test') ||
+      contains(github.event.pull_request.labels.*.name, 'dense-accuracy-test')) &&
+      contains(github.event.pull_request.labels.*.name, 'ready-for-test') ||
+      github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
+      }}
+    runs-on: >-
+      ${{
+          (matrix.model_name == 'Qwen/Qwen3-30B-A3B' && 'linux-arm64-npu-4') ||
+          'linux-arm64-npu-2'
+      }}
+    strategy:
+      matrix:
+        # the accuracy test will run:
+        # 1. workflow_dispatch with models input
+        #   - all: all of the manual input in accuracy/config.yaml
+        #   - specified but not all: selected model
+        # 2. PR labeled with "*-accuracy-test"
+        #   - accuracy-test: accuracy-test in accuracy/config.yaml
+        #   - dense-accuracy-test: dense-accuracy-test in accuracy/config.yaml
+        #   - vl-accuracy-test: vl-accuracy-test in accuracy/config.yaml
+        #   - moe-accuracy-test: moe-accuracy-test in accuracy/config.yaml
+        model_name: ${{ fromJSON(
+          (github.event_name == 'schedule' && steps.parse-config.outputs.schedule_models) ||
+          (github.event_name == 'workflow_dispatch' && (
+            (github.event.inputs.models == 'all' && steps.parse-config.outputs.all_models) ||
+            (format('["{0}"]', github.event.inputs.models))
+          )) ||
+          contains(github.event.pull_request.labels.*.name, 'accuracy-test') && steps.parse-config.outputs.accuracy_test ||
+          contains(github.event.pull_request.labels.*.name, 'dense-accuracy-test') && steps.parse-config.outputs.dense_accuracy_test ||
+          contains(github.event.pull_request.labels.*.name, 'vl-accuracy-test') && steps.parse-config.outputs.vl_accuracy_test ||
+          contains(github.event.pull_request.labels.*.name, 'moe-accuracy-test') && steps.parse-config.outputs.moe_accuracy_test
+          ) }}
+      fail-fast: false
+  
+    name: ${{ matrix.model_name }} accuracy
+
+    container:
+      image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
+      env:
+        DATASET_SOURCE: ModelScope
+        VLLM_USE_MODELSCOPE: True
+        USE_MODELSCOPE_HUB: 1
+        # 1. If version specified (work_dispatch), do specified branch accuracy test
+        # 2. If no version (labeled PR), do accuracy test by default ref:
+        # The branch, tag or SHA to checkout. When checking out the repository that
+        # triggered a workflow, this defaults to the reference or SHA for that event.
+        # Otherwise, uses the default branch.
+        GHA_VLLM_ASCEND_VERSION: ${{ github.event.inputs.vllm-ascend-version }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt install git -y
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          path: ./vllm-empty
+          ref: ${{ github.event.inputs.vllm-version}}
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Resolve vllm-ascend version
+        run: |
+          VERSION_INPUT="${{ github.event.inputs.vllm-ascend-version }}"
+          
+          if [[ "$VERSION_INPUT" == "main" ]]; then
+            TAGS=$(git ls-remote --tags --sort=-v:refname https://github.com/vllm-project/vllm-ascend "v*" | cut -f2 | sed 's|refs/tags/||')
+            LATEST_TAG=$(echo "$TAGS" | head -n1)
+            if [[ -z "$LATEST_TAG" ]]; then
+              RESOLVED_VERSION="main"
+            else
+              RESOLVED_VERSION="$LATEST_TAG"
+            fi
+          else
+            RESOLVED_VERSION="$VERSION_INPUT"
+          fi
+          echo "GHA_VLLM_ASCEND_VERSION=$RESOLVED_VERSION" >> $GITHUB_ENV
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm-ascend
+          path: ./vllm-ascend
+          ref: ${{ env.GHA_VLLM_ASCEND_VERSION }}
+
+      - name: Install vllm-project/vllm-ascend
+        working-directory: ./vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e . 
+
+      - name: Install lm-eval, ray, and datasets
+        run: |
+            pip install lm-eval==0.4.8
+
+      - name: Run Accuracy Test
+        id: report
+        working-directory: ./benchmarks
+        env:
+          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+        run: |
+          model_base_name=$(basename ${{ matrix.model_name }})
+          # Convert model name to lowercase and replace '-' with '_'
+          model_formatted=$(echo "$model_base_name" | tr '[:upper:]' '[:lower:]' | tr '-' '_')
+          mkdir -p ./accuracy
+          python ./tests/e2e/singlecard/test_models_${model_formatted}.py
