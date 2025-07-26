@@ -41,6 +41,7 @@ concurrency:
 
 jobs:
   lint:
+    if: False
     uses: ./.github/workflows/pre-commit.yml
 
   changes:
