@@ -27,11 +27,7 @@ from tests.e2e.conftest import VllmRunner
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
 
-def _deepseek_torchair_test_fixture(
-    additional_config: Dict,
-    *,
-    tensor_parallel_size=4,
-):
+def _deepseek_torchair_test_fixture(additional_config: Dict):
     example_prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -51,8 +47,6 @@ def _deepseek_torchair_test_fixture(
     with VllmRunner(
             "vllm-ascend/DeepSeek-V3-Pruning",
             dtype="half",
-            tensor_parallel_size=tensor_parallel_size,
-            distributed_executor_backend="mp",
             enforce_eager=False,
             additional_config=additional_config,
     ) as vllm_model:
@@ -95,11 +89,7 @@ def test_e2e_deepseekv3_with_torchair_ms_mla():
     _deepseek_torchair_test_fixture(additional_config)
 
 
-def _pangu_torchair_test_fixture(
-    additional_config: Dict,
-    *,
-    tensor_parallel_size=4,
-):
+def _pangu_torchair_test_fixture(additional_config: Dict):
     example_prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -119,8 +109,6 @@ def _pangu_torchair_test_fixture(
     with VllmRunner(
             "vllm-ascend/pangu-pro-moe-pruing",
             dtype="half",
-            tensor_parallel_size=tensor_parallel_size,
-            distributed_executor_backend="mp",
             enforce_eager=False,
             additional_config=additional_config,
             enable_expert_parallel=True,

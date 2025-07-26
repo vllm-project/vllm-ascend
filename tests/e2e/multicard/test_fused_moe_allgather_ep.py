@@ -35,12 +35,11 @@ from tests.e2e.conftest import VllmRunner
         "TASK_QUEUE_ENABLE": "1",
         "VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP": "1"
     })
-def test_generate_with_allgather():
-    example_prompts = ["Hello, my name is"]
+def test_generate_with_allgather(example_prompts):
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 
     with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V3-Pruning"),
-                    tensor_parallel_size=4,
+                    tensor_parallel_size=2,
                     enforce_eager=True,
                     max_model_len=1024,
                     dtype="auto",
@@ -58,12 +57,11 @@ def test_generate_with_allgather():
     "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
     "TASK_QUEUE_ENABLE": "1"
 })
-def test_generate_with_alltoall():
-    example_prompts = ["Hello, my name is"]
+def test_generate_with_alltoall(example_prompts):
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 
     with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V3-Pruning"),
-                    tensor_parallel_size=4,
+                    tensor_parallel_size=2,
                     enforce_eager=True,
                     max_model_len=1024,
                     dtype="auto",
