@@ -248,10 +248,13 @@ class MtpProposer:
             max_num_reqs_across_dp = num_input_tokens
         else:
             max_num_reqs_across_dp = self.vllm_config.scheduler_config.max_num_seqs
-        last_token_indices = nn.functional.pad(last_token_indices, (0, max_num_reqs_across_dp - last_token_indices.shape[0]))
+        num_indices = last_token_indices.shape[0]
+        last_token_indices = nn.functional.pad(last_token_indices, (0, max_num_reqs_across_dp - num_indices))
 
         sample_hidden_states = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
+        if num_indices < logits.shape[0]:
+            logits = logits[:num_indices]
         draft_token_ids = logits.argmax(dim=-1)
 
         # [batch_size, 1]
