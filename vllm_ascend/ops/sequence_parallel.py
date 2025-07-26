@@ -89,7 +89,6 @@ def init_metadata_for_sp(input_ids, enable_sequence_parallelism):
     is_perifll = 0
     attn_metadata = get_forward_context().attn_metadata
     tp_size = get_tensor_model_parallel_world_size()
-    global _metadata_for_padding
     if attn_metadata is not None:
         if hasattr(attn_metadata,
                    'is_only_prefill') and attn_metadata.is_only_prefill:

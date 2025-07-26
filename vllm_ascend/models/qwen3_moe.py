@@ -111,7 +111,7 @@ class AscendQwen3MoeDecoderLayer(nn.Module):
         if not self.enable_sequence_parallelism:
             self.self_attn.o_proj.reduce_results = True
         else:
-            self.self_attn.o_proj.reduce_results = not _metadata_for_padding.not_dummy_and_is_prefill
+            self.self_attn.o_proj.reduce_results = not _metadata_for_padding.not_dummy_and_is_prefill if _metadata_for_padding is not None else True
 
         # Self Attention
         if residual is None:
