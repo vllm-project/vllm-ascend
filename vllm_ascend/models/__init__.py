@@ -49,6 +49,10 @@ def register_model():
             "Qwen3MoeForCausalLM",
             "vllm_ascend.models.qwen3_dbo:CustomQwen3MoeForCausalLMDBO")
 
+        ModelRegistry.register_model(
+            "Qwen3ForCausalLM",
+            "vllm_ascend.models.qwen3_dense_dbo:CustomQwen3DBOForCausalLM")
+
     else:
         ModelRegistry.register_model(
             "DeepseekV2ForCausalLM",
@@ -62,5 +66,6 @@ def register_model():
             "Qwen3MoeForCausalLM",
             "vllm_ascend.models.qwen3_moe:CustomQwen3MoeForCausalLM")
 
-    ModelRegistry.register_model(
-        "Qwen3ForCausalLM", "vllm_ascend.models.qwen3:CustomQwen3ForCausalLM")
+        ModelRegistry.register_model(
+            "Qwen3ForCausalLM",
+            "vllm_ascend.models.qwen3:CustomQwen3ForCausalLM")
