@@ -17,6 +17,7 @@ import torch
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.torchair.torchair_model_runner import NPUTorchairModelRunner
 from vllm_ascend.torchair.utils import (check_kv_cache_bytes_cache_exist,
                                         check_torchair_cache_exist,
                                         delete_torchair_cache_file,
@@ -26,6 +27,12 @@ from vllm_ascend.worker.worker_v1 import NPUWorker
 
 class NPUTorchairWorker(NPUWorker):
     """Torchair worker bases on NPUWorker. Only torchair specified code should be added in this class."""
+
+    def init_device(self):
+        """Override init_device to init torchair model runner"""
+        device = self._init_device()
+        # Init ModelRunner here, so that we have access to self.device.
+        self.model_runner = NPUTorchairModelRunner(self.vllm_config, device)
 
     def determine_available_memory(self) -> int:
         """Override determine_available_memory to use cached torchair kv_cache_bytes."""
