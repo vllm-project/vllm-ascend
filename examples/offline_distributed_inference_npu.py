@@ -1,3 +1,4 @@
+#
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # Copyright 2023 The vLLM team.
 #
@@ -13,35 +14,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
+# Adapted from vllm-project/vllm/examples/offline_inference/basic.py
 #
-import pytest
 
-from tests.conftest import VllmRunner
-
-MODELS = [
-    "Qwen/Qwen3-0.6B",
-]
-
-TENSOR_PARALLELS = [2]
-PIPELINE_PARALLELS = [2]
-DIST_EXECUTOR_BACKEND = ["mp", "ray"]
+from vllm import LLM, SamplingParams
 
 prompts = [
     "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
     "The future of AI is",
 ]
 
+# Create a sampling params object.
+sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
+# Create an LLM.
+llm = LLM(
+    model="Qwen/Qwen2.5-0.5B-Instruct",
+    tensor_parallel_size=2,
+    distributed_executor_backend="mp",
+    trust_remote_code=True,
+)
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("tp_size", TENSOR_PARALLELS)
-@pytest.mark.parametrize("pp_size", PIPELINE_PARALLELS)
-@pytest.mark.parametrize("distributed_executor_backend", DIST_EXECUTOR_BACKEND)
-def test_models(model: str, tp_size: int, pp_size: int,
-                distributed_executor_backend: str) -> None:
-    with VllmRunner(model,
-                    tensor_parallel_size=tp_size,
-                    pipeline_parallel_size=pp_size,
-                    distributed_executor_backend=distributed_executor_backend,
-                    enforce_eager=True,
-                    gpu_memory_utilization=0.7) as vllm_model:
-        vllm_model.generate_greedy(prompts, 64)
+# Generate texts from the prompts.
+outputs = llm.generate(prompts, sampling_params)
+for output in outputs:
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
