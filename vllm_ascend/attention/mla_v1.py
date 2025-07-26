@@ -663,21 +663,28 @@ class AscendMLAImpl(MLAAttentionImpl):
         q_nope = query[..., :self.qk_nope_head_dim]
 
         seq_len1 = torch.tensor(prefill_metadata.query_lens, dtype=torch.int32)
-        latent_kv_dim = kv_c_and_k_pe_cache.size(3) - rope_dim
-        cache_kv_c = kv_c_and_k_pe_cache[:, :, :, :latent_kv_dim]
-        cache_k_pe = kv_c_and_k_pe_cache[:, :, :, latent_kv_dim:]
+        if not self.running_chunkprefilll_with_torchair:
+            latent_kv_dim = kv_c_and_k_pe_cache.size(3) - rope_dim
+            cache_kv_c = kv_c_and_k_pe_cache[:, :, :, :latent_kv_dim]
+            cache_k_pe = kv_c_and_k_pe_cache[:, :, :, latent_kv_dim:]
+            num_heads = kv_c_and_k_pe_cache.size(2)
+        else:
+            latent_kv_dim = kv_c_and_k_pe_cache[0].size(-1)
+            cache_kv_c = kv_c_and_k_pe_cache[0]
+            cache_k_pe = kv_c_and_k_pe_cache[1]
+            num_heads = cache_k_pe.size(2)
         for i in range(iters):
             toks = prefill_metadata.chunked_context.seq_tot[i]
 
             seq_len2 = prefill_metadata.chunked_context.chunk_seq_lens[i]
             seq_len = torch.stack([seq_len1, seq_len2])
             kv_c_normed = torch.empty(toks,
-                                      kv_c_and_k_pe_cache.size(2),
+                                      num_heads,
                                       latent_kv_dim,
                                       dtype=query.dtype,
                                       device=query.device)
             k_pe = torch.empty(toks,
-                               kv_c_and_k_pe_cache.size(2),
+                               num_heads,
                                rope_dim,
                                dtype=query.dtype,
                                device=query.device)
@@ -936,7 +943,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             [num_tokens, self.num_heads, self.kv_lora_rank],
             dtype=q.dtype,
             device=q.device)
-        if self.running_in_graph:
+        if self.running_in_graph or self.running_chunkprefilll_with_torchair:
             # TorchAir's shape is [bs, num_heads_per_rank, q_seq_len, dim]
             if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
                 assert num_tokens % self.spec_token_num == 0
@@ -1033,13 +1040,13 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.running_in_graph = self.torchair_graph_enabled and attn_metadata.attn_state in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
+        self.running_chunkprefilll_with_torchair = self.torchair_graph_enabled and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
         num_actual_toks = attn_metadata.num_actual_tokens
         if k_pe is None and not self.running_in_graph:
-            if not self.torchair_graph_enabled:
-                kv_c, k_pe = self.kv_a_proj_with_mqa(
-                    hidden_states_or_kv_c_normed)[0].split(
-                        [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-                kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+            kv_c, k_pe = self.kv_a_proj_with_mqa(
+                hidden_states_or_kv_c_normed)[0].split(
+                    [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+            kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
         else:
             kv_c_normed = hidden_states_or_kv_c_normed
         assert attn_metadata.num_decodes is not None and \
@@ -1052,24 +1059,23 @@ class AscendMLAImpl(MLAAttentionImpl):
             # Inputs and outputs may be padded for CUDA graphs
             output_padded = output
             output = output[:num_actual_toks, ...]
-            if not self.torchair_graph_enabled:
-                kv_c_normed = kv_c_normed[:num_actual_toks, ...]
-                prefill_k_c_normed = kv_c_normed[num_decode_tokens:]
+            kv_c_normed = kv_c_normed[:num_actual_toks, ...]
+            prefill_k_c_normed = kv_c_normed[num_decode_tokens:]
         if not self.running_in_graph:
             hidden_states_or_q_c = hidden_states_or_q_c[:num_actual_toks, ...]
             prefill_hs_or_q_c = hidden_states_or_q_c[num_decode_tokens:]
-            if not self.torchair_graph_enabled:
-                decode_hs_or_q_c = hidden_states_or_q_c[:num_decode_tokens]
-                k_pe = k_pe[:num_actual_toks, ...]
-                k_pe = k_pe.unsqueeze(1)
-                decode_k_pe = k_pe[:num_decode_tokens]
-                prefill_k_pe = k_pe[num_decode_tokens:]
+            decode_hs_or_q_c = hidden_states_or_q_c[:num_decode_tokens]
+            prefill_hs = hidden_states_or_kv_c_normed[num_decode_tokens:]
+            k_pe = k_pe[:num_actual_toks, ...]
+            k_pe = k_pe.unsqueeze(1)
+            decode_k_pe = k_pe[:num_decode_tokens]
+            prefill_k_pe = k_pe[num_decode_tokens:]
         else:
             decode_hs_or_q_c = hidden_states_or_q_c
         if has_decode:
             decode_k_nope = None
             assert attn_metadata.decode is not None
-            if self.running_in_graph:
+            if self.running_in_graph or self.running_chunkprefilll_with_torchair:
                 seq_len = self.rotary_emb.max_position_embeddings * self.rotary_emb.scaling_factor
                 cos = self.rotary_emb.cos_cached[:seq_len].to(
                     dtype=decode_hs_or_q_c.dtype)
@@ -1079,15 +1085,23 @@ class AscendMLAImpl(MLAAttentionImpl):
                 sin = sin[attn_metadata.decode.input_positions]
                 cos = cos[:, None, None, :]
                 sin = sin[:, None, None, :]
-                with npu_stream_switch("mla_secondary",
-                                       0,
-                                       enabled=enable_multistream_mla):
-                    npu_wait_tensor(hidden_states_or_kv_c_normed,
-                                    ckq,
-                                    enabled=enable_multistream_mla)
+                slots = attn_metadata.slot_mapping
+                if self.running_chunkprefilll_with_torchair:
+                    decode_hs = (
+                        hidden_states_or_kv_c_normed[:num_decode_tokens])
+                    slots = attn_metadata.slot_mapping[:num_decode_tokens]
                     decode_k_pe, decode_k_nope, decode_kv = self.exec_kv(
-                        hidden_states_or_kv_c_normed, cos, sin, kv_cache,
-                        attn_metadata.slot_mapping)
+                        decode_hs, cos, sin, kv_cache, slots)
+                else:
+                    with npu_stream_switch("mla_secondary",
+                                           0,
+                                           enabled=enable_multistream_mla):
+                        npu_wait_tensor(hidden_states_or_kv_c_normed,
+                                        ckq,
+                                        enabled=enable_multistream_mla)
+                        decode_k_pe, decode_k_nope, decode_kv = self.exec_kv(
+                            hidden_states_or_kv_c_normed, cos, sin, kv_cache,
+                            slots)
                 # Without explicitly controlling the order, IndexByTensor operations
                 # would be placed after `matmul W_KV_T` hindering the overlapping of
                 # KvRmsNormRopeCache and SingleRope.
@@ -1111,6 +1125,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                                     decode_k_pe,
                                     enabled=enable_multistream_mla)
                     decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
+            elif self.running_chunkprefilll_with_torchair:
+                decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
             else:
                 decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
                     attn_metadata.decode.input_positions,
@@ -1137,11 +1153,11 @@ class AscendMLAImpl(MLAAttentionImpl):
 
                 prefill_q_pe = self.rope_single(prefill_q_pe, cos, sin)
                 prefill_k_pe, prefill_k_nope = self.exec_kv_prefill(
-                    hidden_states_or_kv_c_normed, cos, sin, kv_cache,
-                    attn_metadata.slot_mapping)
+                    prefill_hs, cos, sin, kv_cache,
+                    attn_metadata.slot_mapping[num_decode_tokens:])
 
                 kv_c_normed = prefill_k_nope[:num_actual_toks, ...]
-                prefill_k_c_normed = prefill_k_nope[num_decode_tokens:]
+                prefill_k_c_normed = prefill_k_nope
                 prefill_k_pe = prefill_k_pe.view(num_tokens, self.num_kv_heads,
                                                  -1)
                 prefill_q = torch.cat([prefill_q_nope, prefill_q_pe], dim=-1)
@@ -1152,9 +1168,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                     prefill_k_pe,
                     max_seq_len=attn_metadata.prefill.max_seq_lens)
         if self.torchair_graph_enabled:
-            if len(kv_cache) > 0 and kv_cache[0].numel(
-            ) > 0 and attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-                slots = attn_metadata.slot_mapping
+            if len(kv_cache) > 0 and kv_cache[0].numel() > 0 and has_prefill:
+                slots = attn_metadata.slot_mapping[num_decode_tokens:]
                 # NOTE: Separate the kv cache in advance to avoid OOM or other issues
                 torch_npu._npu_reshape_and_cache(key=kv_c_normed.view(
                     num_tokens, self.num_kv_heads, -1),
