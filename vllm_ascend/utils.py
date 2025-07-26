@@ -387,25 +387,24 @@ def get_graph_params():
     return _graph_params
 
 
-
 def get_torchair_current_work_dir(file_name=None):
     if file_name is None:
-        return TORCHAIR_CACHE_DIR    
+        return TORCHAIR_CACHE_DIR
     return os.path.join(TORCHAIR_CACHE_DIR, file_name)
 
 
 def check_torchair_cache_exist():
-    res = False    
+    res = False
     torch_air_abs_path = get_torchair_current_work_dir()
     if os.path.exists(torch_air_abs_path):
         file_list = os.listdir(torch_air_abs_path)
         if len(file_list) != 0:
-            res = True    
+            res = True
             return res
 
 
 def check_kv_cache_bytes_cache_exist():
-    res = False    
+    res = False
     kv_cache_bytes_cache_abs_path = get_torchair_current_work_dir(
         KV_CACHE_BYTES_CACHE_PATH_NAME)
     if os.path.exists(kv_cache_bytes_cache_abs_path):
@@ -432,7 +431,7 @@ def read_kv_cache_bytes_from_file(rank) -> int:
 def file_lock(file_descriptor, lock_type):
     fcntl.flock(file_descriptor, lock_type)
     try:
-        yield    
+        yield
     finally:
         fcntl.flock(file_descriptor, fcntl.LOCK_UN)
 

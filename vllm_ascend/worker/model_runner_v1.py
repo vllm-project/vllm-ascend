@@ -2097,6 +2097,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 NPUPlatform.synchronize()
                 torch._dynamo.reset()
                 self.torchair_compiled_models.clear()
+                if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
+                    self.drafter.torchair_compiled_models.clear()
             if self.use_cached_npu_graph:
                 logger.info(
                     "Loading torchair graph cache, this usually takes %.1f~%.1f mins.",
