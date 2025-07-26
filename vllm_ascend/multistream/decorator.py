@@ -1,9 +1,5 @@
-from vllm.logger import init_logger
-
 from .context import (get_multistream_layer_context,
                       get_multistream_microbatch_context)
-
-logger = init_logger(__name__)
 
 
 # vllm v1 use get_forward_context to get the attn_metadata,
