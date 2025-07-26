@@ -1,12 +1,30 @@
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+
 from collections.abc import Iterable
-from typing import Any, Optional, Union
+from typing import Any, List, Optional, Union
 
 import torch
 import torch.nn.functional as F
+import vllm
 import vllm.envs as envs
 from torch import nn
 from transformers import Qwen2Config
-from vllm.attention import AttentionType
+from vllm.attention import AttentionMetadata, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
@@ -21,14 +39,16 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
-from vllm.model_executor.models.qwen2 import (Qwen2Attention, Qwen2MLP,
-                                              Qwen2Model)
+from vllm.model_executor.models.qwen2 import Qwen2Attention  # noqa: F401
+from vllm.model_executor.models.qwen2 import Qwen2ForCausalLM  # noqa: F401
+from vllm.model_executor.models.qwen2 import Qwen2MLP, Qwen2Model
 from vllm.model_executor.models.utils import (AutoWeightsLoader,
                                               PPMissingLayer, maybe_prefix)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as ascend_envs
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
 
@@ -80,28 +100,40 @@ class CustomQwen2Attention(Qwen2Attention):
             prefix=prefix,
             attn_type=attn_type,
             dual_chunk_attention_config=dual_chunk_attention_config)
+        ascend_config = get_ascend_config()
+        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
 
-    def forward(self,
-                positions: torch.Tensor,
-                hidden_states: torch.Tensor,
-                cos: Optional[torch.Tensor] = None,
-                sin: Optional[torch.Tensor] = None) -> torch.Tensor:
+    def forward(
+            self,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor,
+            kv_cache: Optional[torch.Tensor] = None,
+            attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        if type(self.rotary_emb) is RotaryEmbedding:
-            # We optimized RotaryEmbedding by moving index_select of cos & sin outside.
-            # if cos & sin are provided, set is_cos_sin_cached to True to skip index_select.
-            q, k = self.rotary_emb(positions,
-                                   q,
-                                   k,
-                                   cos=cos,
-                                   sin=sin,
-                                   is_cos_sin_cached=True)
+        if self.torchair_graph_enabled and attn_metadata is not None and attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
+            forward_kwargs = {}
+            if envs.VLLM_USE_V1:
+                output_shape = q.shape
+                output = torch.empty(output_shape,
+                                     dtype=q.dtype,
+                                     device=q.device)
+                forward_kwargs['output'] = output
+
+            attn_output = self.attn.impl.forward(self.attn,
+                                                 q,
+                                                 k,
+                                                 v,
+                                                 kv_cache=kv_cache,
+                                                 attn_metadata=attn_metadata,
+                                                 trace_flag=False,
+                                                 **forward_kwargs)
+            output, _ = self.o_proj(attn_output)
+            return output
         else:
-            q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
-        return output
+            attn_output = self.attn(q, k, v)
+            output, _ = self.o_proj(attn_output)
+            return output
 
 
 class CustomQwen2DecoderLayer(nn.Module):
@@ -170,6 +202,8 @@ class CustomQwen2DecoderLayer(nn.Module):
         pad_size: int,
         cos: Optional[torch.Tensor] = None,
         sin: Optional[torch.Tensor] = None,
+        kv_cache: Optional[torch.Tensor] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
@@ -188,8 +222,8 @@ class CustomQwen2DecoderLayer(nn.Module):
                     hidden_states, pad_size)
         hidden_states = self.self_attn(positions=positions,
                                        hidden_states=hidden_states,
-                                       cos=cos,
-                                       sin=sin)
+                                       kv_cache=kv_cache,
+                                       attn_metadata=attn_metadata)
         if flashcomm_v1_enabled:
             hidden_states = maybe_pad_and_reduce_scatter(
                 hidden_states, pad_size)
@@ -230,12 +264,13 @@ class CustomQwen2Model(Qwen2Model):
                          prefix=prefix,
                          decoder_layer_type=decoder_layer_type)
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.cos_sin_cache = self.layers[0].self_attn.rotary_emb.cos_sin_cache
 
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        kv_caches: Optional[List[torch.Tensor]] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
@@ -262,28 +297,17 @@ class CustomQwen2Model(Qwen2Model):
             pad_size = (self.tp_size -
                         (num_tokens % self.tp_size)) % self.tp_size
 
-        # Generate cos and sin outside layers to avoid repeated calculation.
-        cos, sin = None, None
-        if type(self.layers[0].self_attn.rotary_emb) is RotaryEmbedding:
-            cos_sin = self.cos_sin_cache.index_select(0, positions)
-            last_dim = cos_sin.size()[-1]
-            cos, sin = cos_sin.reshape(-1, 2,
-                                       last_dim // 2).repeat(1, 1,
-                                                             2).chunk(2,
-                                                                      dim=-2)
-            cos, sin = cos.view(1, -1, 1, last_dim).contiguous(), sin.view(
-                1, -1, 1, last_dim).contiguous()
-
-        for layer in self.layers[self.start_layer:self.end_layer]:
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-                flashcomm_v1_enabled,
-                pad_size,
-                cos=cos,
-                sin=sin,
-            )
+        for i in range(self.start_layer, self.end_layer):
+            layer = self.layers[i]
+            kv_cache = kv_caches[i - self.start_layer] \
+                if kv_caches is not None else None
+            hidden_states, residual = layer(positions,
+                                            hidden_states,
+                                            residual,
+                                            flashcomm_v1_enabled,
+                                            pad_size,
+                                            kv_cache=kv_cache,
+                                            attn_metadata=attn_metadata)
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,
@@ -346,10 +370,13 @@ class CustomQwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
+        kv_caches: Optional[List[torch.Tensor]] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        hidden_states = self.model(input_ids, positions, intermediate_tensors,
+        hidden_states = self.model(input_ids, positions, kv_caches,
+                                   attn_metadata, intermediate_tensors,
                                    inputs_embeds)
         return hidden_states
 
@@ -370,3 +397,6 @@ class CustomQwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                            if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights)
+
+
+vllm.model_executor.models.qwen2.Qwen2ForCausalLM = CustomQwen2ForCausalLM

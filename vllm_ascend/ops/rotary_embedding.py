@@ -19,9 +19,13 @@ import math
 from typing import Optional, Tuple
 
 import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch_npu
 from vllm.model_executor.layers.rotary_embedding import (
     DeepseekScalingRotaryEmbedding, MRotaryEmbedding, RotaryEmbedding)
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import enable_custom_op
 
 
@@ -36,8 +40,6 @@ def rope_forward_oot(
         query: torch.Tensor,
         key: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
-        cos: torch.Tensor = None,
-        sin: torch.Tensor = None,
         is_neox_style_override: Optional[bool] = None,
         is_cos_sin_cached: bool = False) -> Tuple[torch.Tensor, torch.Tensor]:
     import torch_npu
@@ -64,24 +66,16 @@ def rope_forward_oot(
         raise NotImplementedError(
             "Batched rotary embedding is currently not supported on NPU.")
     else:
-        if is_cos_sin_cached and neox_style and self.head_size == self.rotary_dim and self.head_size == 128:
-            # If cos and sin are generated outside, use npu_apply_rotary_pos_emb to avoid redundant calculation.
-            # This method requires head_size and rotary_dim equal 128 and neox_style is True
-            query = query.contiguous().view(1, query.shape[0], -1,
-                                            self.head_size)
-            key = key.contiguous().view(1, key.shape[0], -1, self.head_size)
-            torch_npu.npu_apply_rotary_pos_emb(query, key, cos, sin)
-        else:
-            query = query.contiguous().view(query.shape[0], -1)
-            key = key.contiguous().view(key.shape[0], -1)
-            torch_npu._npu_rotary_embedding(
-                positions,
-                query,
-                key,
-                self.head_size,
-                self.cos_sin_cache,
-                neox_style,
-            )
+        query = query.contiguous().view(query.shape[0], -1)
+        key = key.contiguous().view(key.shape[0], -1)
+        torch_npu._npu_rotary_embedding(
+            positions,
+            query,
+            key,
+            self.head_size,
+            self.cos_sin_cache,
+            neox_style,
+        )
     return query.view(query_shape), key.view(key_shape)
 
 
@@ -243,6 +237,97 @@ def _set_cos_sin_cache(self, max_seq_len, device, dtype):
     self.register_buffer("sin_cached", sin_cached, persistent=False)
 
 
+def __set_cos_sin_cache(self, seq_len, device, dtype):
+    inv_freq = 1.0 / (self.base**(torch.arange(
+        0, self.rotary_dim, 2, device=device, dtype=torch.float32) *
+                                  (1 / self.rotary_dim)))
+    self.register_buffer("inv_freq", inv_freq)
+
+    t = torch.arange(self.max_position_embeddings,
+                     device=self.inv_freq.device,
+                     dtype=torch.float32)
+    freqs = torch.einsum("i,j->ij", t, self.inv_freq)
+
+    emb = torch.cat((freqs, freqs), dim=-1)
+    self.register_buffer("cos", emb.cos().to(dtype=dtype), persistent=False)
+    self.register_buffer("sin", emb.sin().to(dtype=dtype), persistent=False)
+    self.embed = F.embedding
+
+
+def qwen_rope_init_func(
+    self,
+    head_size: int,
+    rotary_dim: int,
+    max_position_embeddings: int,
+    base: float,
+    is_neox_style: bool,
+    dtype: torch.dtype,
+) -> None:
+    super(RotaryEmbedding, self).__init__()
+    self.head_size = head_size
+    self.rotary_dim = rotary_dim
+    self.max_position_embeddings = max_position_embeddings
+    self.base = base
+    self.is_neox_style = is_neox_style
+    self.dtype = dtype
+
+    cache = self._compute_cos_sin_cache()
+    cache = cache.to(dtype)
+    self.cos_sin_cache: torch.Tensor
+    self.register_buffer("cos_sin_cache", cache, persistent=False)
+    if get_ascend_config().torchair_graph_config.enabled:
+        __set_cos_sin_cache(self,
+                            seq_len=max_position_embeddings,
+                            device="npu",
+                            dtype=dtype)
+
+
+def rope_forward(
+    self,
+    positions_ids: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    offsets: Optional[torch.Tensor] = None,
+    max_seq_len: Optional[int] = None,
+    is_prefill: Optional[bool] = True,
+):
+    if not get_ascend_config().torchair_graph_config.enabled or is_prefill:
+        return rope_forward_oot(self, positions_ids, query, key, offsets,
+                                max_seq_len)
+
+    if max_seq_len is not None and torch.gt(max_seq_len,
+                                            self.max_position_embeddings):
+        __set_cos_sin_cache(self,
+                            seq_len=max_seq_len,
+                            device=query.device,
+                            dtype=torch.float32)
+
+    # b s n d/b n s d
+    if positions_ids is not None:
+        cos = self.embed(positions_ids, self.cos)
+        sin = self.embed(positions_ids, self.sin)
+        self.cos_embed = cos
+        self.sin_embed = sin
+        # [128] -> [1,1,1,128]
+        # [4096,128] -> [4096,1,1,128]
+    else:
+        cos = self.cos_embed
+        sin = self.sin_embed
+
+    query = query.view(*query.shape[:-1], -1, self.head_size).contiguous()
+    key = key.view(*key.shape[:-1], -1, self.head_size).contiguous()
+
+    cos = cos.unsqueeze(-2).unsqueeze(-2)  # 增在倒数第二个位置插入两个维度
+    sin = sin.unsqueeze(-2).unsqueeze(-2)
+
+    # makesure query's shape [4096, 1, 14, 128]
+    query = query.unsqueeze(1)  # 在第二个位置插入维度
+    key = key.unsqueeze(1)  # 在第二个位置插入维度
+
+    q_embed, k_embed = torch_npu.npu_apply_rotary_pos_emb(query, key, cos, sin)
+    return q_embed.flatten(-2), k_embed.flatten(-2)
+
+
 def deepseek_rope_init_func(
     self,
     head_size: int,
@@ -300,7 +385,8 @@ def mrope_forward(
 
 
 MRotaryEmbedding.forward = mrope_forward
-RotaryEmbedding.forward_oot = rope_forward_oot
+RotaryEmbedding.__init__ = qwen_rope_init_func
+RotaryEmbedding.forward_oot = rope_forward
 
 # Note: we adopt the native huggingface deepseek rope initialization code from
 # https://huggingface.co/deepseek-ai/DeepSeek-V3-0324/blob/main/modeling_deepseek.py for
