@@ -4,8 +4,8 @@
 
 import argparse
 import asyncio
+import heapq
 import os
-import random
 import sys
 from contextlib import asynccontextmanager
 from typing import List
@@ -40,7 +40,7 @@ class ServerState:
         self.active_kv_cache = 0  # Only for prefiller
         self.active_requests = 0  # Number of active requests
         self.aborted_requests = set()  # Track aborted requests
-        self.lock = asyncio.Lock()  # Per-server lock for state updates
+        # Removed individual server lock - will use global locks instead
 
 
 class ProxyState:
@@ -55,74 +55,111 @@ class ProxyState:
         self.req_to_prefiller = {}
         self.req_id_lock = asyncio.Lock()
         self.req_id_counter = 0
+        # Removed selection locks - no longer needed for synchronous methods
 
-    async def abort_prefiller_request(self, server_idx: int, request_id):
+        # Initialize priority queues for efficient server selection
+        # Each entry is (priority_score, server_index, server_reference)
+        # Lower priority score = higher priority (less loaded)
+        self.prefiller_heap = [(0, i, server)
+                               for i, server in enumerate(self.prefillers)]
+        self.decoder_heap = [(0, i, server)
+                             for i, server in enumerate(self.decoders)]
+        heapq.heapify(self.prefiller_heap)
+        heapq.heapify(self.decoder_heap)
+
+    def _update_prefiller_priority(self, server_idx: int):
+        """Update the priority of a prefiller server in the heap."""
+        server = self.prefillers[server_idx]
+        # Priority based on active_tokens and active_kv_cache
+        priority = server.active_tokens + server.active_kv_cache * 0.3
+        # Remove old entry and add new one
+        self.prefiller_heap = [(p, i, s) for p, i, s in self.prefiller_heap
+                               if i != server_idx]
+        heapq.heappush(self.prefiller_heap, (priority, server_idx, server))
+
+    def _update_decoder_priority(self, server_idx: int):
+        """Update the priority of a decoder server in the heap."""
+        server = self.decoders[server_idx]
+        priority = server.active_tokens
+        # Remove old entry and add new one
+        self.decoder_heap = [(p, i, s) for p, i, s in self.decoder_heap
+                             if i != server_idx]
+        heapq.heappush(self.decoder_heap, (priority, server_idx, server))
+
+    def abort_prefiller_request(self, server_idx: int,
+                                request_id):  # Changed to synchronous
         """
         Mark a request as aborted. This will helps to release kv cache in
         prefiller node.
         """
-        async with self.prefillers[server_idx].lock:
-            self.prefillers[server_idx].aborted_requests.add(request_id)
+        # No lock needed - atomic operation
+        self.prefillers[server_idx].aborted_requests.add(request_id)
 
-    async def aquire_aborted_prefiller_requests(self, server_idx: int):
+    def aquire_aborted_prefiller_requests(
+            self, server_idx: int):  # Changed to synchronous
         """
         Get the set of aborted requests and clear it.
         This is used to release kv cache in prefiller node.
         """
-        async with self.req_id_lock:
-            aborted_requests = self.prefillers[server_idx].aborted_requests.copy()
-            self.prefillers[server_idx].aborted_requests.clear()
-            return aborted_requests
+        # No lock needed - atomic operation
+        aborted_requests = self.prefillers[server_idx].aborted_requests.copy()
+        self.prefillers[server_idx].aborted_requests.clear()
+        return aborted_requests
 
     async def next_req_id(self):
         async with self.req_id_lock:
             self.req_id_counter += 1
             return str(self.req_id_counter)
 
-    async def select_prefiller(self, token_count):
-        # Find the best prefiller
-        min_tokens = min(p.active_tokens for p in self.prefillers)
-        candidates = [
-            i for i, p in enumerate(self.prefillers)
-            if p.active_tokens == min_tokens
-        ]
-        min_kv = min(self.prefillers[i].active_kv_cache for i in candidates)
-        final_candidates = [
-            i for i in candidates
-            if self.prefillers[i].active_kv_cache == min_kv
-        ]
-        chosen = final_candidates[0] if len(
-            final_candidates) == 1 else random.choice(final_candidates)
-        # Only lock the chosen server for update
-        async with self.prefillers[chosen].lock:
-            self.prefillers[chosen].active_tokens += token_count
-            self.prefillers[chosen].active_kv_cache += token_count
+    def select_prefiller(self, token_count):  # Changed to synchronous
+        # No lock needed - entire function is atomic
+        if not self.prefiller_heap:
+            raise RuntimeError("No prefiller servers available")
+
+        priority, chosen, server = heapq.heappop(self.prefiller_heap)
+
+        # Update the chosen server atomically
+        self.prefillers[chosen].active_tokens += token_count
+        self.prefillers[chosen].active_kv_cache += token_count
+
+        # Update priority and re-add to heap
+        self._update_prefiller_priority(chosen)
+
         return chosen
 
-    async def release_prefiller(self, idx, token_count):
-        async with self.prefillers[idx].lock:
-            self.prefillers[idx].active_tokens -= token_count
+    def release_prefiller(self, idx, token_count):  # Changed to synchronous
+        # No lock needed - atomic operation
+        self.prefillers[idx].active_tokens -= token_count
+        # Update priority queue after releasing
+        self._update_prefiller_priority(idx)
 
-    async def release_prefiller_kv(self, idx, token_count):
-        async with self.prefillers[idx].lock:
-            if self.prefillers[idx].active_kv_cache > 0:
-                self.prefillers[idx].active_kv_cache -= token_count
+    def release_prefiller_kv(self, idx, token_count):  # Changed to synchronous
+        # No lock needed - atomic operation
+        if self.prefillers[idx].active_kv_cache > 0:
+            self.prefillers[idx].active_kv_cache -= token_count
+        # Update priority queue after releasing
+        self._update_prefiller_priority(idx)
 
-    async def select_decoder(self, token_count):
-        min_tokens = min(d.active_tokens for d in self.decoders)
-        candidates = [
-            i for i, d in enumerate(self.decoders)
-            if d.active_tokens == min_tokens
-        ]
-        chosen = candidates[0] if len(candidates) == 1 else random.choice(
-            candidates)
-        async with self.decoders[chosen].lock:
-            self.decoders[chosen].active_tokens += token_count
+    def select_decoder(self, token_count):  # Changed to synchronous
+        # No lock needed - entire function is atomic
+        if not self.decoder_heap:
+            raise RuntimeError("No decoder servers available")
+
+        priority, chosen, server = heapq.heappop(self.decoder_heap)
+
+        # Update the chosen server atomically
+        self.decoders[chosen].active_tokens += token_count
+
+        # Update priority and re-add to heap
+        self._update_decoder_priority(chosen)
+
         return chosen
 
-    async def release_decoder(self, idx, token_count):
-        async with self.decoders[idx].lock:
-            self.decoders[idx].active_tokens -= token_count
+    def release_decoder(self, idx, token_count):  # Changed to synchronous
+        # No lock needed - atomic operation
+        self.decoders[idx].active_tokens -= token_count
+        # Update priority queue after releasing
+        self._update_decoder_priority(idx)
 
     # Omni_infer's calculate_input_scores function
     def calculate_prefill_scores(self, request_length: int) -> float:
@@ -201,7 +238,8 @@ async def send_request_to_service(client: httpx.AsyncClient,
                                   request_id: str,
                                   max_retries: int = 3,
                                   base_delay: float = 0.2):
-    aborted_requests = await proxy_state.aquire_aborted_prefiller_requests(prefiller_id)
+    aborted_requests = proxy_state.aquire_aborted_prefiller_requests(
+        prefiller_id)
     req_data = req_data.copy()
     req_data['kv_transfer_params'] = {
         "do_remote_decode": True,
@@ -304,7 +342,7 @@ async def _handle_completions(api: str, request: Request):
         )
         request_id = await proxy_state.next_req_id()
         # Select prefiller
-        prefiller_idx = await proxy_state.select_prefiller(prefiller_score)
+        prefiller_idx = proxy_state.select_prefiller(prefiller_score)
         prefiller = proxy_state.prefillers[prefiller_idx]
         # Send request to prefiller
         response = await send_request_to_service(
@@ -315,7 +353,7 @@ async def _handle_completions(api: str, request: Request):
             request_id,
             max_retries=global_args.max_retries,
             base_delay=global_args.retry_delay)
-        await proxy_state.release_prefiller(prefiller_idx, prefiller_score)
+        proxy_state.release_prefiller(prefiller_idx, prefiller_score)
         response_json = response.json()
         kv_transfer_params = response_json.get('kv_transfer_params', {})
         if kv_transfer_params:
@@ -324,7 +362,7 @@ async def _handle_completions(api: str, request: Request):
         decoder_score = proxy_state.calculate_decode_scores(request_length)
         logger.debug("Decoder score: %f", decoder_score)
         # Use the prefiller's kv_transfer_params to select decoder
-        decoder_idx = await proxy_state.select_decoder(decoder_score)
+        decoder_idx = proxy_state.select_decoder(decoder_score)
         decoder = proxy_state.decoders[decoder_idx]
         logger.debug("Using %s %s", prefiller.url, decoder.url)
         # Stream response from decoder
@@ -335,14 +373,14 @@ async def _handle_completions(api: str, request: Request):
             # Only one await per chunk, minimal logic in loop
             try:
                 async for chunk in stream_service_response_with_retry(
-                    decoder.client,
-                    api,
-                    req_data,
-                    request_id=request_id,
-                    max_retries=global_args.max_retries,
-                    base_delay=global_args.retry_delay):
+                        decoder.client,
+                        api,
+                        req_data,
+                        request_id=request_id,
+                        max_retries=global_args.max_retries,
+                        base_delay=global_args.retry_delay):
                     if not released_kv and chunk:
-                        await proxy_state.release_prefiller_kv(
+                        proxy_state.release_prefiller_kv(
                             prefiller_idx, prefiller_score)
                         released_kv = True
                     yield chunk
@@ -351,10 +389,11 @@ async def _handle_completions(api: str, request: Request):
                     f"Error during streaming from decoder {decoder.url}: {str(e)} the aborted request {request_id} will be routing to the target prefiller when new request is ready to dispatch to it"
                 )
                 proxy_state.abort_prefiller_request(prefiller_idx, request_id)
-                proxy_state.release_prefiller_kv(prefiller_idx, prefiller_score)
+                proxy_state.release_prefiller_kv(prefiller_idx,
+                                                 prefiller_score)
 
             # After streaming done, release tokens
-            await proxy_state.release_decoder(decoder_idx, decoder_score)
+            proxy_state.release_decoder(decoder_idx, decoder_score)
 
         return StreamingResponse(generate_stream(),
                                  media_type="application/json")
