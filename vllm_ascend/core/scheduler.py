@@ -32,8 +32,6 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
-from vllm_ascend.utils import vllm_version_is
-
 
 class AscendScheduler(Scheduler):
     """This Scheduler extends vllm's original v1 scheduler
@@ -283,23 +281,12 @@ class AscendScheduler(Scheduler):
                     # allow the lower-priority requests to be scheduled.
                     req_index += 1
                     continue
-                if vllm_version_is("0.9.2"):
-                    num_draft_tokens = max(
-                        num_new_tokens + request.num_computed_tokens -
-                        request.num_tokens, 0)
 
                 while True:
-                    if vllm_version_is("0.9.2"):
-                        new_blocks = self.kv_cache_manager.allocate_slots(
-                            request,
-                            num_new_tokens,
-                            num_draft_tokens=num_draft_tokens,
-                            num_lookahead_tokens=self.num_lookahead_tokens)
-                    else:
-                        new_blocks = self.kv_cache_manager.allocate_slots(
-                            request,
-                            num_new_tokens,
-                            num_lookahead_tokens=self.num_lookahead_tokens)
+                    new_blocks = self.kv_cache_manager.allocate_slots(
+                        request,
+                        num_new_tokens,
+                        num_lookahead_tokens=self.num_lookahead_tokens)
                     if new_blocks is None:
                         # The request cannot be scheduled.
                         # Preempt the lowest-priority request.

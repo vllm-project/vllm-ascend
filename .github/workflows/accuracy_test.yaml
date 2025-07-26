@@ -37,7 +37,7 @@ on:
         # Current supported vLLM versions
         options:
           - main
-          - v0.9.2
+          - v0.10.0
           - v0.9.1
           - v0.7.3
       vllm-ascend-version:
@@ -163,7 +163,7 @@ jobs:
           repository: vllm-project/vllm
           path: ./vllm-empty
           # Please also update this when bump matched version
-          ref: ${{ github.event.inputs.vllm-version || 'v0.9.2' }}
+          ref: ${{ github.event.inputs.vllm-version || 'v0.10.0' }}
 
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty

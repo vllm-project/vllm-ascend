@@ -45,7 +45,7 @@ from vllm_ascend.utils import (sleep_mode_enabled, try_register_lib,
                                vllm_version_is)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
-if not vllm_version_is("0.9.2"):
+if not vllm_version_is("0.10.0"):
     from vllm.tasks import SupportedTask
 
 
