@@ -52,6 +52,7 @@ if not vllm_version_is("0.9.2"):
 
 
 class NPUWorker(WorkerBase):
+
     def __init__(
             self,
             vllm_config: VllmConfig,
