@@ -1,5 +1,5 @@
 from collections.abc import Iterable
-from typing import Any, Optional, Union
+from typing import Optional, Union
 
 import torch
 import torch.nn.functional as F
@@ -53,33 +53,6 @@ def maybe_pad_and_reduce_scatter(
 
 
 class CustomQwen2Attention(Qwen2Attention):
-
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        max_position: int = 4096 * 32,
-        rope_theta: float = 10000,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        rope_scaling: Optional[tuple] = None,
-        prefix: str = "",
-        attn_type: str = AttentionType.DECODER,
-        dual_chunk_attention_config: Optional[dict[str, Any]] = None,
-    ) -> None:
-        super().__init__(
-            hidden_size=hidden_size,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-            max_position=max_position,
-            rope_theta=rope_theta,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            rope_scaling=rope_scaling,
-            prefix=prefix,
-            attn_type=attn_type,
-            dual_chunk_attention_config=dual_chunk_attention_config)
 
     def forward(self,
                 positions: torch.Tensor,
@@ -230,7 +203,10 @@ class CustomQwen2Model(Qwen2Model):
                          prefix=prefix,
                          decoder_layer_type=decoder_layer_type)
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.cos_sin_cache = self.layers[0].self_attn.rotary_emb.cos_sin_cache
+        self.cos_sin_cache = None
+        first_existing_layer = self.layers[self.start_layer]
+        if type(first_existing_layer.self_attn.rotary_emb) is RotaryEmbedding:
+            self.cos_sin_cache = first_existing_layer.self_attn.rotary_emb.cos_sin_cache
 
     def forward(
         self,
@@ -264,7 +240,7 @@ class CustomQwen2Model(Qwen2Model):
 
         # Generate cos and sin outside layers to avoid repeated calculation.
         cos, sin = None, None
-        if type(self.layers[0].self_attn.rotary_emb) is RotaryEmbedding:
+        if self.cos_sin_cache is not None:
             cos_sin = self.cos_sin_cache.index_select(0, positions)
             last_dim = cos_sin.size()[-1]
             cos, sin = cos_sin.reshape(-1, 2,
