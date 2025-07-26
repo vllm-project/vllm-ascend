@@ -21,10 +21,8 @@ TORCHAIR_MODEL_LIST = ["deepseek", "pangu"]
 
 
 def _check_torchair_supported(model_type: str):
-    for supported_model in TORCHAIR_MODEL_LIST:
-        if supported_model in model_type.lower():
-            return True
-    return False
+    return any(supported_model in model_type.lower()
+               for supported_model in TORCHAIR_MODEL_LIST)
 
 
 class AscendConfig:
@@ -128,8 +126,8 @@ def check_ascend_config(vllm_config, enforce_eager):
         # torchair_graph cannot be enabled with eager mode.
         if ascend_config.torchair_graph_config.enabled:
             raise RuntimeError(
-                "Can't enable graph mode and eager mode at the same time. Please set `enforce_eager=False` if you attempt to enable NPU graph mode."
-            )
+                "Can't enable graph mode and eager mode at the same time. Please set `enforce_eager=False`"
+                " if you attempt to enable NPU graph mode.")
     # for graph mode
     else:
         # torchair_graph case

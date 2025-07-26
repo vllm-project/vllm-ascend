@@ -29,24 +29,23 @@ from vllm.distributed import (GroupCoordinator, get_tensor_model_parallel_rank,
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
                                              get_tp_group)
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fused_moe.config import \
-    FusedMoEConfig  # isort: skip
-from vllm.model_executor.layers.fused_moe.config import \
-    FusedMoEParallelConfig  # isort: skip
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
-from vllm.model_executor.layers.quantization.base_config import \
-    QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.distributed.communication_op import \
-    data_parallel_reduce_scatter
+from vllm_ascend.distributed.communication_op import (
+    data_parallel_reduce_scatter)
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (FusedMoEState, dispose_tensor,
                                get_all_reduce_merge_state, get_fused_moe_state,
                                get_rm_router_logits_state, is_310p)
+
+from vllm.model_executor.layers.fused_moe.config import (  # isort: skip
+    FusedMoEConfig, FusedMoEParallelConfig)
 
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
 SELECT_GATING_TOPK_SOTFMAX_EXPERTS: bool = envs_ascend.SELECT_GATING_TOPK_SOTFMAX_EXPERTS
@@ -1046,7 +1045,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 # out_flag=False, # todo new api; 第三个输出是否输出
                 # y2_flag=False, # old api; 第三个输出是否输出
                 routed_scaling_factor=1,
-                eps=float(1e-20))
+                eps=1e-20)
         elif SELECT_GATING_TOPK_SOTFMAX_EXPERTS:
             topk_weights, topk_ids = select_gating_top_k_softmax_experts(
                 hidden_states=x,
@@ -1289,20 +1288,18 @@ class AscendFusedMoE(FusedMoE):
 
         assert self.quant_method is not None
 
-        if top_k:
-            real_top_k = top_k
-        else:
-            real_top_k = self.top_k
+        real_top_k = top_k if top_k else self.top_k
 
         num_tokens, hidden_size = hidden_states.shape
         is_deepseek_v3_r1 = self.global_num_experts == 256
 
         fused_moe_state = get_fused_moe_state(self.moe_parallel_config.ep_size,
                                               is_prefill, is_deepseek_v3_r1)
-        if shared_experts:
-            if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
-                # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
-                shared_hidden_states = shared_experts(hidden_states)
+        # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp,
+        # but waits until shared_experts + router_experts are completed before doing all_reduce.
+        if shared_experts and (not self.enable_multistream_moe
+                               or fused_moe_state != FusedMoEState.MC2):
+            shared_hidden_states = shared_experts(hidden_states)
 
         tp_size = get_tensor_model_parallel_world_size()
         if (tp_size > 1 and fused_moe_state not in [
@@ -1381,9 +1378,8 @@ class AscendFusedMoE(FusedMoE):
             and self.enable_multistream_moe and not is_prefill else None,
         )
 
-        if shared_experts:
-            if isinstance(e_hidden_states, tuple):
-                e_hidden_states, shared_hidden_states = e_hidden_states
+        if shared_experts and isinstance(e_hidden_states, tuple):
+            e_hidden_states, shared_hidden_states = e_hidden_states
 
         if (tp_size > 1 and fused_moe_state not in [
                 FusedMoEState.AllGather, FusedMoEState.AllGatherEP,

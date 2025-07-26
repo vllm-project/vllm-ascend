@@ -6,8 +6,8 @@ from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 from tests.ut.base import TestBase
 from vllm_ascend.distributed.kv_transfer.simple_buffer import SimpleBuffer
-from vllm_ascend.distributed.kv_transfer.simple_connector import \
-    SimpleConnector
+from vllm_ascend.distributed.kv_transfer.simple_connector import (
+    SimpleConnector)
 from vllm_ascend.distributed.kv_transfer.simple_pipe import SimplePipe
 
 
