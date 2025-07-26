@@ -1419,6 +1419,14 @@ class AscendFusedMoE(FusedMoE):
             final_hidden_states = tensor_model_parallel_all_reduce(
                 final_hidden_states)
 
+        if tp_size > 1 and envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and self.all_reduce_merge and fused_moe_state in [
+                FusedMoEState.MC2
+        ]:
+            # Prefill uses the AllGatherEP solution (using the VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP switch), and Decode uses the MC2 solution.
+            # This solution uses the all_reduce_merge optimization in Prefill, but does not use the all_reduce_merge optimization in the decode part.
+            shared_hidden_states = tensor_model_parallel_all_reduce(
+                shared_hidden_states)
+
         if shared_experts:
             return final_hidden_states, shared_hidden_states
         else:
