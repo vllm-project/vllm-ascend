@@ -140,8 +140,8 @@ class NPUWorker(WorkerBase):
                 logger.error(f"{e} in {self.local_rank}")
             except ValueError as e:
                 logger.error(f"{e} in {self.local_rank}")
-            except Exception as e:
-                logger.info(f"Skip binding cpu.")
+            except Exception:
+                logger.info("Skip binding cpu.")
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
