@@ -208,6 +208,12 @@ class NPUPlatform(Platform):
                     vllm_config.scheduler_config,
                     ascend_config.ascend_scheduler_config)
                 vllm_config.scheduler_config = ascend_scheduler_config
+            else:
+                from vllm_ascend.core.schedule_config import \
+                    AscendSchedulerV1Config
+                ascend_scheduler_v1_config = AscendSchedulerV1Config.initialize_from_config(
+                    vllm_config.scheduler_config)
+                vllm_config.scheduler_config = ascend_scheduler_v1_config
 
         if compilation_config.pass_config.enable_sequence_parallelism and parallel_config.enable_expert_parallel:
             assert parallel_config.expert_parallel_size > 1, "For better performance in MoE, SP works exclusively with MC2, AllToAll, and AllToAllV."
