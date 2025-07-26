@@ -26,7 +26,6 @@ from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -40,6 +39,7 @@ from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import CustomDeepseekV2DecoderLayer
 from vllm_ascend.ops.lmhead import ParallelLMHead
+from vllm_ascend.ops.logits_processor import CustomLogitsProcessor
 
 
 class CustomDeepSeekShareHead(SharedHead):
@@ -146,7 +146,7 @@ class CustomDeepSeekMultiTokenPredictor(DeepSeekMultiTokenPredictor):
             for idx in range(self.mtp_start_layer_idx,
                              self.mtp_start_layer_idx + self.num_mtp_layers)
         ]
-        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.logits_processor = CustomLogitsProcessor(config.vocab_size)
 
     def forward(
         self,

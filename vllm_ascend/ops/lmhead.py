@@ -13,46 +13,14 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase, method_has_implemented_embedding)
+    QuantizationConfig, QuantizeMethodBase, method_has_implemented_embedding,
+    UnquantizedEmbeddingMethod)
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 
-from vllm_ascend.distributed.parallel_state import get_lmhead_group
-
 DEFAULT_VOCAB_PADDING_SIZE = 64
-
-
-class UnquantizedEmbeddingMethod(QuantizeMethodBase):
-    """Unquantized method for embeddings."""
-
-    def create_weights(self, layer: torch.nn.Module,
-                       input_size_per_partition: int,
-                       output_partition_sizes: list[int], input_size: int,
-                       output_size: int, params_dtype: torch.dtype,
-                       **extra_weight_attrs):
-        """Create weights for embedding layer."""
-        weight = Parameter(torch.empty(sum(output_partition_sizes),
-                                       input_size_per_partition,
-                                       dtype=params_dtype),
-                           requires_grad=False)
-        set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
-        layer.register_parameter("weight", weight)
-        set_weight_attrs(weight, extra_weight_attrs)
-
-    def apply(self,
-              layer: torch.nn.Module,
-              x: torch.Tensor,
-              bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        x = get_lmhead_group().all_gather(x, 0)
-        output = dispatch_unquantized_gemm()(x, layer.weight, bias)
-        output = get_lmhead_group().all_to_all(output)
-        return output
-
-    def embedding(self, layer: torch.nn.Module,
-                  input_: torch.Tensor) -> torch.Tensor:
-        return F.embedding(input_, layer.weight)
 
 
 def pad_vocab_size(vocab_size: int,

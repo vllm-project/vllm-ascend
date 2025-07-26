@@ -46,7 +46,6 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import get_sampler
@@ -70,6 +69,7 @@ from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import dispose_tensor, npu_prefetch
 from vllm_ascend.ops.lmhead import ParallelLMHead
+from vllm_ascend.ops.logits_processor import CustomLogitsProcessor
 
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
@@ -755,7 +755,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                                               prefix, "lm_head"))
         else:
             self.lm_head = PPMissingLayer()
-        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.logits_processor = CustomLogitsProcessor(config.vocab_size)
         self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
