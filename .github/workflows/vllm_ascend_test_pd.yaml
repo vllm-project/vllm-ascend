@@ -42,8 +42,7 @@ jobs:
     strategy:
       matrix:
         vllm_verison: [
-            # revert me when V1 disaggregation prefill is merged in main
-            # main, 
+            main, 
             v0.9.1
           ]
     name: vLLM Ascend prefilling decoding disaggregation test
@@ -107,6 +106,6 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
-      - name: Run vllm-project/vllm-ascend PD Disaggregation test
+      - name: Run vllm-project/vllm-ascend PD Disaggregation edge test
         run: |
-          pytest -sv tests/e2e/pd_disaggreate/test_pd_e2e.py
+          bash tests/e2e/pd_disaggreate/run_edge_case_test.sh
