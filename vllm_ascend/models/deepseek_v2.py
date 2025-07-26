@@ -520,7 +520,6 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         self.prefix = prefix
         self.debug_layer_idx = int(self.prefix.split(".")[-2])
 
-        ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_multistream_mla = \
             ascend_config.torchair_graph_config.enable_multistream_mla and \
@@ -568,12 +567,6 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 hidden_states_or_q_c = get_tp_group().all_gather(
                     hidden_states_or_q_c, 0)
                 kv_no_split = get_tp_group().all_gather(kv_no_split, 0)
-
-                attn_metadata = forward_context.attn_metadata
-                if attn_metadata is not None:
-                    num_tokens = attn_metadata.num_actual_tokens
-                else:
-                    num_tokens = hidden_states_or_q_c.shape[0]
 
             kv_c, k_pe = kv_no_split.split(
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)

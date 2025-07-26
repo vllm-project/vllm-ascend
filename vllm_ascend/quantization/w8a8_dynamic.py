@@ -663,7 +663,6 @@ def fused_experts_with_all2all(hidden_states: torch.Tensor,
 
 def fused_experts_with_all2all_v2(
         hidden_states: torch.Tensor,
-        top_k: int,
         topk_ids: torch.Tensor,
         topk_weight: torch.Tensor,
         w1: torch.Tensor,
@@ -677,58 +676,44 @@ def fused_experts_with_all2all_v2(
     if log2phy is not None:
         topk_ids = log2phy[topk_ids]
 
-    num_tokens, _ = hidden_states.shape
     topk_weight = topk_weight.to(hidden_states.dtype)
     global_num_experts = len(expert_map) + global_redundant_expert_num
     local_num_experts = global_num_experts // ep_group.world_size
 
-    # Step 1: Routing initialization
-    row_idx = (torch.arange(0,
-                            num_tokens * top_k,
-                            dtype=torch.int32,
-                            device=hidden_states.device).view(
-                                top_k, -1).permute(1, 0).contiguous())
-
-    routed_tokens, expanded_row_idx, expert_indices = torch_npu.npu_moe_init_routing(
+    quantized_tokens, expanded_row_idx, tokens_per_expert, _, token_scales = torch_npu.npu_moe_init_routing_quant(
         hidden_states,
-        row_idx=row_idx,
-        expert_idx=topk_ids,
-        active_num=num_tokens)
+        expert_idx=topk_ids.to(torch.int32),
+        active_num=0,
+        expert_capacity=0,
+        expert_num=global_num_experts,
+        drop_pad_mode=0,
+        expert_tokens_num_mode=2,
+        expert_tokens_before_capacity_flag=False,
+        quant_mode=1,
+    )
 
-    expanded_row_idx = (expanded_row_idx.view(top_k, -1).permute(
-        1, 0).contiguous().view(-1))
-
-    tokens_per_expert = torch.bincount(expert_indices,
-                                       minlength=global_num_experts).to(
-                                           torch.int32)
-
-    # Step 2: Quantize
-    quantized_tokens, token_scales = torch_npu.npu_dynamic_quant(routed_tokens)
-
-    # Step 3: All-to-All communication of token counts
-    tokens_per_expert_recv = torch.empty_like(tokens_per_expert)
+    tokens_per_expert_recv = tokens_per_expert.new_empty(
+        tokens_per_expert.shape[0])
     dist.all_to_all_single(tokens_per_expert_recv, tokens_per_expert)
 
     token_counts_combined = torch.stack(
         [tokens_per_expert_recv, tokens_per_expert], dim=0)
     token_counts_combined = token_counts_combined.view(2, ep_group.world_size,
-                                                       -1).sum(dim=2)
-
-    total_received_tokens = token_counts_combined[0].sum()
-    input_splits = token_counts_combined[1].cpu().tolist()
-    output_splits = token_counts_combined[0].cpu().tolist()
-
-    # Step 4: All-to-All token exchange
-    gathered_tokens = quantized_tokens.new_empty(total_received_tokens.item(),
+                                                       -1).sum(2)
+    token_counts_combined_cpu = token_counts_combined.to(
+        torch.device("cpu"), non_blocking=True).numpy()
+    all_tokens = tokens_per_expert_recv.sum()
+    gathered_tokens = quantized_tokens.new_empty(all_tokens.item(),
                                                  quantized_tokens.shape[1])
-    gathered_scales = token_scales.new_empty(total_received_tokens.item())
+    gathered_scales = token_scales.new_empty(gathered_tokens.shape[0])
+
+    input_splits = token_counts_combined_cpu[1]
+    output_splits = token_counts_combined_cpu[0]
 
     dist.all_to_all_single(gathered_tokens, quantized_tokens, output_splits,
                            input_splits)
     dist.all_to_all_single(gathered_scales, token_scales, output_splits,
                            input_splits)
-
-    # Step 5: Re-routing received tokens
     routed_tokens_by_expert, gathered_scales, inverse_indices, tokens_per_local_expert = torch_npu.npu_moe_re_routing(
         gathered_tokens,
         tokens_per_expert_recv.view(ep_group.world_size, -1),
@@ -744,25 +729,22 @@ def fused_experts_with_all2all_v2(
                                 dynamic_scale=gathered_scales,
                                 local_num_experts=local_num_experts)
 
-    # Step 6: Reorder outputs back to original token order
     reordered_outputs = torch.index_select(
         expert_outputs,
         dim=0,
         index=inverse_indices.to(torch.float32).argsort().to(torch.int32))
 
-    # Step 7: Final All-to-All to return outputs to original ranks
-    final_gathered_tokens = reordered_outputs.new_empty(
-        *quantized_tokens.shape)
-    dist.all_to_all_single(final_gathered_tokens, reordered_outputs,
-                           input_splits, output_splits)
+    gathered_tokens = reordered_outputs.new_empty(*quantized_tokens.shape)
+    dist.all_to_all_single(gathered_tokens, reordered_outputs, input_splits,
+                           output_splits)
 
     # Step 8: Final routing aggregation
     final_hidden_states = torch_npu.npu_moe_finalize_routing(
-        final_gathered_tokens,
+        gathered_tokens,
         skip1=None,
         skip2=None,
         bias=None,
-        scales=topk_weight.to(final_gathered_tokens.dtype),
+        scales=topk_weight.to(gathered_tokens.dtype),
         expanded_src_to_dst_row=expanded_row_idx,
         export_for_source_row=None,
         drop_pad_mode=2)
@@ -1163,7 +1145,6 @@ class AscendW8A8DynamicFusedMoEMethod:
         elif self.enable_prefill_optimizations:
             return fused_experts_with_all2all_v2(
                 hidden_states=x,
-                top_k=top_k,
                 topk_ids=topk_ids,
                 topk_weight=topk_weights,
                 w1=layer.w13_weight,
