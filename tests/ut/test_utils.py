@@ -260,6 +260,61 @@ class TestUtils(TestBase):
         hits = utils.vllm_version_is.cache_info().hits
         self.assertEqual(hits, 1)
 
+    def test_get_max_hidden_layers(self):
+        from transformers import PretrainedConfig
+
+        class SimpleConfig(PretrainedConfig):
+
+            def __init__(self, num_hidden_layers=12):
+                self.num_hidden_layers = num_hidden_layers
+
+            def to_dict(self):
+                return {"num_hidden_layers": self.num_hidden_layers}
+
+        self.assertEqual(utils.get_max_hidden_layers(SimpleConfig()), 12)
+        self.assertEqual(utils.get_max_hidden_layers(SimpleConfig(24)), 24)
+
+        class NestedConfig(PretrainedConfig):
+
+            def to_dict(self):
+                return {
+                    "model": {
+                        "encoder": {
+                            "num_hidden_layers": 8
+                        },
+                        "decoder": {
+                            "num_hidden_layers": 12
+                        }
+                    },
+                    "other_setting": True
+                }
+
+        self.assertEqual(utils.get_max_hidden_layers(NestedConfig()), 12)
+
+        class MultiValueConfig(PretrainedConfig):
+
+            def to_dict(self):
+                return {
+                    "num_hidden_layers": 6,
+                    "submodule": {
+                        "num_hidden_layers": 18,
+                        "subsub": {
+                            "num_hidden_layers": 9
+                        }
+                    }
+                }
+
+        self.assertEqual(utils.get_max_hidden_layers(MultiValueConfig()), 18)
+
+        class NoLayerConfig(PretrainedConfig):
+
+            def to_dict(self):
+                return {"attention_heads": 8}
+
+        with self.assertRaises(ValueError) as context:
+            utils.get_max_hidden_layers(NoLayerConfig())
+        self.assertIn("num_hidden_layers", str(context.exception))
+
     def test_update_aclgraph_sizes(self):
         # max_num_batch_sizes < len(original_sizes)
         test_compilation_config = CompilationConfig(

@@ -288,6 +288,24 @@ def vllm_version_is(target_vllm_version: str):
             "format of x.y.z.")
 
 
+def get_max_hidden_layers(hf_config) -> int:
+    cfg_dict = hf_config.to_dict()
+    layer_counts = []
+
+    def _rec_find(d):
+        if isinstance(d, dict):
+            for k, v in d.items():
+                if k == "num_hidden_layers" and isinstance(v, int):
+                    layer_counts.append(v)
+                else:
+                    _rec_find(v)
+
+    _rec_find(cfg_dict)
+    if not layer_counts:
+        raise ValueError("Not found num_hidden_layers in model config.")
+    return max(layer_counts)
+
+
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     """Update ACL graph capture sizes based on hardware limitations"""
     # Store original configuration and temporarily clear it
@@ -296,7 +314,11 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         compilation_config.cudagraph_capture_sizes, None
 
     # Calculate parallel configuration factor
-    num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
+    hf_config = vllm_config.model_config.hf_config
+    if hasattr(hf_config, 'num_hidden_layers'):
+        num_hidden_layers = hf_config.num_hidden_layers
+    else:
+        num_hidden_layers = get_max_hidden_layers(hf_config)
     parallel_config = vllm_config.parallel_config
 
     # TODO: Find out whether we need to take into account the pp_size

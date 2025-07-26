@@ -27,6 +27,7 @@ import pytest
 import vllm  # noqa: F401
 from modelscope import snapshot_download  # type: ignore[import-untyped]
 from vllm import SamplingParams
+from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 
 import vllm_ascend  # noqa: F401
@@ -36,12 +37,18 @@ MODELS = [
     "Qwen/Qwen2.5-0.5B-Instruct",
     "Qwen/Qwen3-0.6B-Base",
 ]
-MULTIMODALITY_MODELS = ["Qwen/Qwen2.5-VL-3B-Instruct"]
+MULTIMODALITY_VL_MODELS = ["Qwen/Qwen2.5-VL-3B-Instruct"]
+MULTIMODALITY_AUDIO_MODELS = ["Qwen/Qwen2-Audio-7B-Instruct"]
 
 QUANTIZATION_MODELS = [
     "vllm-ascend/Qwen2.5-0.5B-Instruct-W8A8",
 ]
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
+AUDIO_ASSETS = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
+AUDIO_PROMPT_TEMPLATES = {
+    1: "What is recited in the audio?",
+    2: "What sport and what nursery rhyme are referenced?"
+}
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -84,8 +91,8 @@ def test_quantization_models(model: str, max_tokens: int) -> None:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-@pytest.mark.parametrize("model", MULTIMODALITY_MODELS)
-def test_multimodal(model, prompt_template, vllm_runner):
+@pytest.mark.parametrize("model", MULTIMODALITY_VL_MODELS)
+def test_multimodal_vl(model, prompt_template, vllm_runner):
     image = ImageAsset("cherry_blossom") \
         .pil_image.convert("RGB")
     img_questions = [
@@ -106,6 +113,45 @@ def test_multimodal(model, prompt_template, vllm_runner):
         vllm_model.generate_greedy(prompts=prompts,
                                    images=images,
                                    max_tokens=64)
+
+
+def prepare_audio_inputs(audio_count: int):
+    audio_prompt = "".join([
+        f"Audio {idx+1}: <|audio_bos|><|AUDIO|><|audio_eos|>\n"
+        for idx in range(audio_count)
+    ])
+    question = AUDIO_PROMPT_TEMPLATES[audio_count]
+    prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
+              "<|im_start|>user\n"
+              f"{audio_prompt}{question}<|im_end|>\n"
+              "<|im_start|>assistant\n")
+    mm_data = {
+        "audio":
+        [asset.audio_and_sample_rate for asset in AUDIO_ASSETS[:audio_count]]
+    }
+    inputs = {"prompt": prompt, "multi_modal_data": mm_data}
+    return inputs
+
+
+@pytest.mark.parametrize("model", MULTIMODALITY_AUDIO_MODELS)
+@pytest.mark.parametrize("audio_count", [2])
+@pytest.mark.parametrize("max_tokens", [10])
+def test_multimodal_audio(model: str, audio_count: int,
+                          max_tokens: int) -> None:
+    inputs = prepare_audio_inputs(audio_count)
+
+    sampling_params = SamplingParams(temperature=0.2,
+                                     max_tokens=max_tokens,
+                                     stop_token_ids=None)
+
+    with VllmRunner(model,
+                    max_model_len=4096,
+                    max_num_seqs=5,
+                    enforce_eager=False,
+                    dtype="bfloat16",
+                    limit_mm_per_prompt={"audio": audio_count},
+                    gpu_memory_utilization=0.9) as vllm_model:
+        vllm_model.generate(inputs, sampling_params=sampling_params)
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION": "1"})
