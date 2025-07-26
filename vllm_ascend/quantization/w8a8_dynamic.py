@@ -709,7 +709,7 @@ def fused_experts_with_all2all_v2(
     gathered_tokens = expanded_x.new_empty(
         all_tokens.item(), expanded_x.shape[1]
     )
-    gathered_pertoken_scale = pertoken_scale.new_empty(gathered_tokens.shape[0])
+    gathered_scales = pertoken_scale.new_empty(gathered_tokens.shape[0])
 
     # alltoall input splits, the total number of tokens routed from the current rank to other ranks
     input_splits = combine_tokens_cpu[1]
@@ -717,28 +717,30 @@ def fused_experts_with_all2all_v2(
     output_splits = combine_tokens_cpu[0]
 
     dist.all_to_all_single(gathered_tokens, expanded_x, output_splits, input_splits)
-    dist.all_to_all_single(gathered_pertoken_scale, pertoken_scale, output_splits, input_splits)
+    dist.all_to_all_single(gathered_scales, pertoken_scale, output_splits, input_splits)
     # reroute
     # Tokens merged by experts, scales merged by experts, indices for FinalizeRouting, number of tokens processed by each expert
-    hidden_states_sorted_by_experts, gathered_pertoken_scale, gathered_idxs_unsort, tokens_per_local_expert = torch_npu.npu_moe_re_routing(
+    routed_tokens_by_expert, gathered_scales, gathered_idxs_unsort, tokens_per_local_expert = torch_npu.npu_moe_re_routing(
         gathered_tokens,
-        tokens_per_expert_group.view(ep_size, -1),
-        per_token_scales=gathered_pertoken_scale
-    )
-    hidden_states_ordered_by_experts = gmm_expert(
-        hidden_states_sorted_by_experts,
-        expert_tokens=tokens_per_local_expert.to(torch.int64),
-        w1=w1,
-        w2=w2,
-        w1_scale=w1_scale,
-        w2_scale=w2_scale,
-        dynamic_scale=gathered_pertoken_scale,
-        local_num_experts=local_num_experts
-    )
-    new_x = torch.index_select(hidden_states_ordered_by_experts, 0, gathered_idxs_unsort.to(torch.float32).argsort().to(torch.int32))
-    gathered_tokens = new_x.new_empty(*expanded_x.shape)
-
-    dist.all_to_all_single(gathered_tokens, new_x, input_splits, output_splits)
+        tokens_per_expert_group.view(ep_group.world_size, -1),
+        per_token_scales=gathered_scales)
+    expert_outputs = gmm_expert(routed_tokens_by_expert,
+                                expert_tokens=tokens_per_local_expert.to(
+                                    torch.int64),
+                                w1=w1,
+                                w2=w2,
+                                w1_scale=w1_scale,
+                                w2_scale=w2_scale,
+                                dynamic_scale=gathered_scales,
+                                local_num_experts=local_num_experts)
+    reordered_outputs = torch.index_select(
+        expert_outputs,
+        dim=0,
+        index=gathered_idxs_unsort.to(torch.float32).argsort().to(torch.int32))
+    gathered_tokens = reordered_outputs.new_empty(
+        *expanded_x.shape)
+    dist.all_to_all_single(gathered_tokens, reordered_outputs,
+                           input_splits, output_splits)
 
     final_hidden_states = torch_npu.npu_moe_finalize_routing(
         gathered_tokens,
@@ -748,8 +750,8 @@ def fused_experts_with_all2all_v2(
         scales=topk_weight.to(gathered_tokens.dtype),
         expanded_src_to_dst_row=expanded_row_idx,
         export_for_source_row=None,
-        drop_pad_mode=2
-    )
+        drop_pad_mode=2)
+
     return final_hidden_states
 
 
