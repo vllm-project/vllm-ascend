@@ -41,6 +41,8 @@ from vllm.model_executor.models.qwen2_5_vl import (
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 
+from vllm_ascend.models.qwen2_5_vl import AscendQwen2_5_VisionRotaryEmbedding
+
 
 class AscendQwen2_5_VisionAttention_Without_Padding(Qwen2_5_VisionAttention):
 
@@ -160,6 +162,9 @@ class AscendQwen2_5_VisionTransformer_Without_Padding(Qwen2_5_VisionTransformer
         super().__init__(vision_config, norm_eps, quant_config, prefix)
         norm_layer = partial(RMSNorm, eps=norm_eps)
         self.interleaved = interleaved
+        head_dim = self.hidden_size // self.num_heads
+        self.rotary_pos_emb = AscendQwen2_5_VisionRotaryEmbedding(head_dim //
+                                                                  2)
         self.patch_embed = AscendQwen2_5_VisionPatchEmbed_Without_Padding(
             patch_size=vision_config.patch_size,
             temporal_patch_size=vision_config.temporal_patch_size,
