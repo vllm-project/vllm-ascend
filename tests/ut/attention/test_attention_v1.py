@@ -251,7 +251,10 @@ class TestAscendAttentionBackendImpl(TestBase):
         query = torch.randn(10, 8 * 64)
         key = torch.randn(10, 8 * 64)
         value = torch.randn(10, 8 * 64)
-        kv_cache = torch.ones(1, 1, 10, 8, 64, dtype=torch.int8)
+        k_cache = torch.ones(1, 10, 8, 64, dtype=torch.int8)
+        v_cache = torch.ones(1, 10, 8, 64, dtype=torch.int8)
+        kv_cache = [k_cache, v_cache]
+        ret_value = torch.ones(1, 1, 10, 8, 64, dtype=torch.int8)
 
         metadata = MagicMock()
         metadata.num_actual_tokens = torch.randn(10, 8 * 64)
@@ -261,7 +264,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.query_lens = torch.randn(10, 8 * 64)
         layer = self.layer
         layer.quant_method = MagicMock()
-        layer.quant_method.apply.return_value = kv_cache
+        layer.quant_method.apply.return_value = ret_value
 
         output = self.impl.forward(layer,
                                    query,
