@@ -24,16 +24,10 @@ import os
 from unittest.mock import patch
 
 import pytest
-import vllm  # noqa: F401
-from modelscope import snapshot_download  # type: ignore[import-untyped]
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
 
-import vllm_ascend  # noqa: F401
 from tests.e2e.conftest import VllmRunner
-from vllm.assets.image import ImageAsset
-
-from tests.conftest import VllmRunner
 
 MODELS = [
     "Qwen/Qwen2.5-0.5B-Instruct", "Qwen/Qwen3-0.6B-Base",

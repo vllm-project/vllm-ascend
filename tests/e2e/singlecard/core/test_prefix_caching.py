@@ -9,7 +9,7 @@ from tests.e2e.model_utils import check_outputs_equal
 
 MODELS = [
     # for MHA
-    "Qwen/Qwen3-8B-Base",
+    "Qwen/Qwen3-0.6B-Base",
     # for MLA
     "deepseek-ai/DeepSeek-V2-Lite-Chat"
 ]

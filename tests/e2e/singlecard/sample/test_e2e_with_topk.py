@@ -22,7 +22,7 @@ from unittest.mock import patch
 import pytest
 from vllm import SamplingParams
 
-from tests.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner
 
 MODELS = ["deepseek-ai/DeepSeek-V2-Lite", "Qwen/Qwen2.5-0.5B-Instruct"]
 

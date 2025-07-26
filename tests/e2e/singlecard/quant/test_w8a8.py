@@ -17,10 +17,9 @@
 #
 
 import pytest
-
 from modelscope import snapshot_download
 
-from tests.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner
 
 MODELS = [
     "vllm-ascend/DeepSeek-V2-Lite-W8A8",

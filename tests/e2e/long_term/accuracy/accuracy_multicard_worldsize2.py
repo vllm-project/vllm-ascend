@@ -91,9 +91,9 @@ MORE_ARGS = {
     "Qwen/Qwen2.5-0.5B-Instruct":
     None,
     "Qwen/Qwen3-30B-A3B":
-    "tensor_parallel_size=4,enable_expert_parallel=True,enforce_eager=True",
+    "tensor_parallel_size=2,enable_expert_parallel=True,enforce_eager=True",
     "deepseek-ai/DeepSeek-V2-Lite":
-    "tensor_parallel_size=4,trust_remote_code=True,enforce_eager=True"
+    "tensor_parallel_size=2,trust_remote_code=True,enforce_eager=True"
 }
 
 multiprocessing.set_start_method("spawn", force=True)
@@ -146,12 +146,14 @@ def test_lm_eval_accuracy(monkeypatch: pytest.MonkeyPatch, model):
 
 
 @pytest.mark.parametrize("max_tokens", [10])
-@pytest.mark.parametrize("model", ["Qwen/Qwen2.5-0.5B-Instruct"])
-def test_lm_eval_accuracy_dp(model, max_tokens):
-    log_file = open("accuracy_pd.log", "a+")
+@pytest.mark.parametrize("model", ["Qwen/Qwen3-30B-A3B"])
+def test_lm_eval_accuracy_etp(model, max_tokens):
+    log_file = open("accuracy_etp.log", "a+")
     cmd = [
         "vllm", "serve", model, "--max_model_len", "4096",
-        "--tensor_parallel_size", "2", "--data_parallel_size", "2"
+        "--tensor_parallel_size", "2", "--enforce_eager",
+        "--enable_expert_parallel", "--additional_config",
+        '{"expert_tensor_parallel_size": "2"}'
     ]
     server_proc = subprocess.Popen(cmd,
                                    stdout=log_file,
@@ -190,7 +192,7 @@ def test_lm_eval_accuracy_dp(model, max_tokens):
         data = resp.json()
 
         generated = data["choices"][0]["text"].strip()
-        expected = "city in north china, it has many famous attractions"
+        expected = "city in china. it is the capital city of"
         assert generated == expected, f"Expected `{expected}`, got `{generated}`"
 
     finally:
