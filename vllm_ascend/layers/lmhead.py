@@ -1,21 +1,33 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
+#
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# Adapted from vllm/model_executor/layers/lmhead.py
+# This file is a part of the vllm-ascend project.
 
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Optional
 
 import torch
-import torch.nn.functional as F
 from torch.nn.parameter import Parameter, UninitializedParameter
-
-from vllm.distributed import (divide, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_reduce)
+from vllm.distributed import divide, tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase, method_has_implemented_embedding)
-from vllm.model_executor.layers.vocab_parallel_embedding import UnquantizedEmbeddingMethod
-from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
+from vllm.model_executor.layers.vocab_parallel_embedding import \
+    UnquantizedEmbeddingMethod
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
@@ -95,17 +107,17 @@ class VocabParallelEmbeddingShardIndices:
 
     def __post_init__(self):
         # sanity checks
-        assert (self.padded_org_vocab_start_index
-                <= self.padded_org_vocab_end_index)
-        assert (self.padded_added_vocab_start_index
-                <= self.padded_added_vocab_end_index)
+        assert (self.padded_org_vocab_start_index <=
+                self.padded_org_vocab_end_index)
+        assert (self.padded_added_vocab_start_index <=
+                self.padded_added_vocab_end_index)
 
         assert self.org_vocab_start_index <= self.org_vocab_end_index
         assert self.added_vocab_start_index <= self.added_vocab_end_index
 
         assert self.org_vocab_start_index <= self.padded_org_vocab_start_index
-        assert (self.added_vocab_start_index
-                <= self.padded_added_vocab_start_index)
+        assert (self.added_vocab_start_index <=
+                self.padded_added_vocab_start_index)
         assert self.org_vocab_end_index <= self.padded_org_vocab_end_index
         assert self.added_vocab_end_index <= self.padded_added_vocab_end_index
 
@@ -121,8 +133,8 @@ def get_masked_input_and_mask(
         added_vocab_end_index: int) -> tuple[torch.Tensor, torch.Tensor]:
     # torch.compile will fuse all of the pointwise ops below
     # into a single kernel, making it very fast
-    org_vocab_mask = (input_ >= org_vocab_start_index) & (
-        input_ < org_vocab_end_index)
+    org_vocab_mask = (input_ >= org_vocab_start_index) & (input_ <
+                                                          org_vocab_end_index)
     added_vocab_mask = (input_ >= added_vocab_start_index) & (
         input_ < added_vocab_end_index)
     added_offset = added_vocab_start_index - (
