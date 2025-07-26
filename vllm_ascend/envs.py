@@ -106,6 +106,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE", '0'))
                  ),
+    # Whether to enable the cpu binding
+    "VLLM_ASCEND_CPU_BINDING":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_CPU_BINDING", '0'))),
     # VLLM_ASCEND_MOE_ALL2ALL_BUFFER:
     #   0: default, normal init.
     #   1: enable moe_all2all_buffer.
