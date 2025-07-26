@@ -247,12 +247,7 @@ class MtpProposer:
         if not self.runner.with_prefill:
             max_num_reqs_across_dp = num_input_tokens
         else:
-            num_reqs_tensor = torch.tensor(
-                [batch_size],
-                device=hidden_states.device,
-                dtype=torch.int32
-            )
-            max_num_reqs_across_dp = get_dp_group().all_gather(num_reqs_tensor, dim=0).max()
+            max_num_reqs_across_dp = self.vllm_config.scheduler_config.max_num_seqs
         last_token_indices = nn.functional.pad(last_token_indices, (0, max_num_reqs_across_dp - last_token_indices.shape[0]))
 
         sample_hidden_states = hidden_states[last_token_indices]

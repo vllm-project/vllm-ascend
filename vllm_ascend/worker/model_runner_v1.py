@@ -1187,12 +1187,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if not with_prefill:
             max_num_reqs_across_dp = padded_num_tokens_across_dp
         else:
-            num_reqs_tensor = torch.tensor(
-                [num_reqs],
-                device=hidden_states.device,
-                dtype=torch.int32
-            )
-            max_num_reqs_across_dp = get_dp_group().all_gather(num_reqs_tensor, dim=0).max()
+            max_num_reqs_across_dp = self.max_num_reqs
         sample_indices = nn.functional.pad(sample_indices, (0, max_num_reqs_across_dp - sample_indices.shape[0]))
 
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
@@ -1782,12 +1777,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if not with_prefill:
                     max_num_reqs_across_dp = num_reqs
                 else:
-                    num_reqs_tensor = torch.tensor(
-                        [num_reqs],
-                        device=hidden_states.device,
-                        dtype=torch.int32
-                    )
-                    max_num_reqs_across_dp = get_dp_group().all_gather(num_reqs_tensor, dim=0).max()
+                    max_num_reqs_across_dp = max_num_reqs
                 dummy_indices = torch.zeros(max_num_reqs_across_dp, device=hidden_states.device, dtype=torch.int32)
                 model.compute_logits(hidden_states[dummy_indices], None)
 
@@ -1804,12 +1794,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     if not with_prefill:
                         max_num_reqs_across_dp = num_reqs
                     else:
-                        num_reqs_tensor = torch.tensor(
-                            [num_reqs],
-                            device=hidden_states.device,
-                            dtype=torch.int32
-                        )
-                        max_num_reqs_across_dp = get_dp_group().all_gather(num_reqs_tensor, dim=0).max()
+                        max_num_reqs_across_dp = max_num_reqs
                     dummy_indices = torch.zeros(max_num_reqs_across_dp, device=hidden_states.device, dtype=torch.int32)
                     model.compute_logits(hidden_states[dummy_indices], None)
 
