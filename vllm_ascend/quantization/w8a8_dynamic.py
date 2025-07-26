@@ -694,24 +694,20 @@ def fused_experts_with_all2all_v2(
     )
 
     tokens_per_expert_recv = tokens_per_expert.new_empty(tokens_per_expert.shape[0])
-    dist.all_to_all_single(tokens_per_expert_recv, tokens_per_expert)  # (total_experts,) --> (total_ranks * n_routed_experts_per_rank)
+    dist.all_to_all_single(tokens_per_expert_recv, tokens_per_expert)
 
-    # combine tensors, do reduceSum and D2H toghter
-    combine_tokens = torch.stack([tokens_per_expert_recv, tokens_per_expert], dim=0)
-    # view: EP, E//EP
-    # sum: EP, the number of tokens each rank receives from other cards
-    # ep_size = get_expert_parallel_world_size()
-    combine_tokens = combine_tokens.view(2, ep_group.world_size, -1).sum(2)
-    combine_tokens_cpu = combine_tokens.to(torch.device("cpu"), non_blocking=True).numpy()
+    token_counts_combined = torch.stack(
+        [tokens_per_expert_recv, tokens_per_expert], dim=0)
+    token_counts_combined = token_counts_combined.view(2, ep_group.world_size, -1).sum(2)
+    token_counts_combined_cpu = token_counts_combined.to(torch.device("cpu"), non_blocking=True).numpy()
     all_tokens = tokens_per_expert_recv.sum()
-    # alltoall output, unfolded into one dimension, the size is the sum of the number of tokens routed from other cards to the current rank.
     gathered_tokens = quantized_tokens.new_empty(
         all_tokens.item(), quantized_tokens.shape[1]
     )
     gathered_scales = token_scales.new_empty(gathered_tokens.shape[0])
 
-    input_splits = combine_tokens_cpu[1]
-    output_splits = combine_tokens_cpu[0]
+    input_splits = token_counts_combined_cpu[1]
+    output_splits = token_counts_combined_cpu[0]
 
     dist.all_to_all_single(gathered_tokens, quantized_tokens, output_splits,
                            input_splits)
@@ -721,6 +717,7 @@ def fused_experts_with_all2all_v2(
         gathered_tokens,
         tokens_per_expert_recv.view(ep_group.world_size, -1),
         per_token_scales=gathered_scales)
+
     expert_outputs = gmm_expert(routed_tokens_by_expert,
                                 expert_tokens=tokens_per_local_expert.to(
                                     torch.int64),
@@ -730,10 +727,12 @@ def fused_experts_with_all2all_v2(
                                 w2_scale=w2_scale,
                                 dynamic_scale=gathered_scales,
                                 local_num_experts=local_num_experts)
+
     reordered_outputs = torch.index_select(
         expert_outputs,
         dim=0,
         index=inverse_indices.to(torch.float32).argsort().to(torch.int32))
+
     gathered_tokens = reordered_outputs.new_empty(
         *quantized_tokens.shape)
     dist.all_to_all_single(gathered_tokens, reordered_outputs,
