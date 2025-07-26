@@ -134,6 +134,16 @@ class NPUWorker(WorkerBase):
 
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
+        # Bind cpu
+        if ascend_envs.VLLM_ASCEND_CPU_BINDING:
+            try:
+                bind_cpus(self.local_rank, ratio=1.0)
+            except RuntimeError as e:
+                logger.error(f"{e} in {self.local_rank}")
+            except ValueError as e:
+                logger.error(f"{e} in {self.local_rank}")
+            except Exception:
+                logger.info("Skip binding cpu.")
         # Set random seed.
         NPUPlatform.seed_everything(self.model_config.seed)
 
