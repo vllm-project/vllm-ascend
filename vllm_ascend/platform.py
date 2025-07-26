@@ -209,6 +209,9 @@ class NPUPlatform(Platform):
                     ascend_config.ascend_scheduler_config)
                 vllm_config.scheduler_config = ascend_scheduler_config
 
+        if compilation_config.pass_config.enable_sequence_parallelism and parallel_config.enable_expert_parallel:
+            assert parallel_config.expert_parallel_size > 1, "For better performance in MoE, SP works exclusively with MC2, AllToAll, and AllToAllV."
+
     @classmethod
     def get_attn_backend_cls(cls, selected_backend, head_size, dtype,
                              kv_cache_dtype, block_size, use_v1, use_mla):
