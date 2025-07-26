@@ -58,7 +58,8 @@ class NpuHbmInfo:
         for device in devices:
             device_info = device_map_info.get(device)
             if device_info is None:
-                raise RuntimeError(f"Device {device} not found in device_map_info")
+                raise RuntimeError(
+                    f"Device {device} not found in device_map_info")
             npu_ids.append(device_info.npu_id)
         cls.visible_npu_ids = npu_ids
 
