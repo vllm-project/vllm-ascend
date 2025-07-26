@@ -1187,6 +1187,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens)
             sample_indices = spec_decode_metadata.logits_indices
+        
+        if not with_prefill:
+            max_num_reqs_across_dp = padded_num_tokens_across_dp
+        else:
+            max_num_reqs_across_dp = self.max_num_reqs
+        sample_indices = nn.functional.pad(sample_indices, (0, max_num_reqs_across_dp - sample_indices.shape[0]))
 
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
                 total_num_scheduled_tokens, sample_indices, finished_sending,
@@ -1391,11 +1397,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Sample the next token and get logprobs if needed.
             sampling_metadata = self.input_batch.sampling_metadata
             if spec_decode_metadata is None:
+                logits = logits[:self.input_batch.num_reqs]
+
                 sampler_output = self.sampler(
                     logits=logits,
                     sampling_metadata=sampling_metadata,
                 )
             else:
+                logits = logits[:len(spec_decode_metadata.logits_indices)]
                 # When indexing with a tensor (bonus_logits_indices), PyTorch
                 # creates a new tensor with separate storage from the original
                 # logits tensor. This means any in-place operations on bonus_logits
@@ -1767,6 +1776,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=inputs_embeds,
                         **model_kwargs)
+                    
+            if not self.in_profile_run and not is_torchair_compile:
+                if not with_prefill:
+                    max_num_reqs_across_dp = num_reqs
+                else:
+                    max_num_reqs_across_dp = max_num_reqs
+                dummy_indices = torch.zeros(max_num_reqs_across_dp, device=hidden_states.device, dtype=torch.int32)
+                model.compute_logits(hidden_states[dummy_indices], None)
+
             if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
                 assert isinstance(self.drafter, MtpProposer)
                 self.drafter.dummy_run(
@@ -1775,6 +1793,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     skip_attn=skip_attn,
                     num_reqs=num_reqs,
                     num_tokens_across_dp=num_tokens_across_dp)
+            
+                if not self.in_profile_run and not is_torchair_compile:
+                    if not with_prefill:
+                        max_num_reqs_across_dp = num_reqs
+                    else:
+                        max_num_reqs_across_dp = max_num_reqs
+                    dummy_indices = torch.zeros(max_num_reqs_across_dp, device=hidden_states.device, dtype=torch.int32)
+                    model.compute_logits(hidden_states[dummy_indices], None)
 
             if self.in_profile_run and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()

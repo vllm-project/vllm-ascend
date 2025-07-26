@@ -1,5 +1,6 @@
 import torch
 import vllm.envs as envs_vllm
+from torch import nn
 from vllm.attention.layer import Attention
 from vllm.config import (VllmConfig, get_layers_from_vllm_config,
                          set_current_vllm_config)
@@ -241,8 +242,19 @@ class MtpProposer:
                         previous_hidden_states=self.
                         hidden_states[:num_input_tokens],
                         kv_caches=self.runner.kv_caches[-1:])
+
+        if not self.runner.with_prefill:
+            max_num_reqs_across_dp = num_input_tokens
+        else:
+            max_num_reqs_across_dp = self.vllm_config.scheduler_config.max_num_seqs
+        num_indices = last_token_indices.shape[0]
+        last_token_indices = nn.functional.pad(
+            last_token_indices, (0, max_num_reqs_across_dp - num_indices))
+
         sample_hidden_states = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
+        if num_indices < logits.shape[0]:
+            logits = logits[:num_indices]
         draft_token_ids = logits.argmax(dim=-1)
 
         # [batch_size, 1]
