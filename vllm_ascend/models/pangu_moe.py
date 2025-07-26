@@ -58,6 +58,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.parallel_state import get_ep_group,get_ae_group
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p
 
 _ROUTER_SCALE = None
@@ -793,28 +794,28 @@ class PanguProMoEDecoderLayer(nn.Module):
                 # 发送给对应的exprot
                 # AE分离场景下，attention 所在的卡（例如卡0）需要将hidden_states、attn_metadata
                 # send 给export所在的卡（例如卡4）
-                dst_rank = (rank ) % 4 + 4
-                dist.send(hidden_states, dst_rank)
-                dist.send(residual, dst_rank)
+                ae_group = get_ae_group()
+                # dst_rank = (rank ) % 4 + 4
+                ae_group.send(hidden_states)
+                ae_group.send(residual)
                 # recv
                 # 接收export发送的数据
-                src_rank = (rank ) % 4 + 4
-                dist.recv(hidden_states,src_rank)
+                hidden_states = ae_group.recv(hidden_states.size(),dtype=hidden_states.dtype)
                 # print(f"接收export发送的数据 recv_matedata_list is == {hidden_states.shape}")
             # export
             else:
                 # print(f"rank is == {rank} , start export")
                 # recv
                 # 接收attn发送的数据
-                src_rank = (rank ) % 4 
-                dist.recv(hidden_states,src_rank)
-                dist.recv(residual,src_rank)
+                ae_group = get_ae_group()
+                # src_rank = (rank ) % 4 
+                hidden_states = ae_group.recv(hidden_states.size(),dtype=hidden_states.dtype)
+                residual = ae_group.recv(residual.size(),dtype=residual.dtype)
                 # print(f"接收attn发送的数据 recv_matedata_list is == {hidden_states.shape}")
                 # 计算mlp
                 hidden_states = self.mlp(hidden_states, attn_metadata=attn_metadata)
                 # send
-                dst_rank = src_rank
-                dist.send(hidden_states, dst_rank)
+                ae_group.send(hidden_states)
         else:
             #=============================
             hidden_states = self.self_attn(

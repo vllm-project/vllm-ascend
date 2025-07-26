@@ -10,6 +10,7 @@ import vllm_ascend.envs as envs_ascend
 # Currently, mc2 op need their own group coordinator.
 _MC2: Optional[GroupCoordinator] = None
 _MLP_TP: Optional[GroupCoordinator] = None
+_AE: Optional[GroupCoordinator] = None
 
 
 def get_mc2_group() -> GroupCoordinator:
@@ -20,6 +21,11 @@ def get_mc2_group() -> GroupCoordinator:
 def get_mlp_tp_group() -> GroupCoordinator:
     assert _MLP_TP is not None, ("mlp group is not initialized")
     return _MLP_TP
+
+
+def get_ae_group() -> GroupCoordinator:
+    assert _AE is not None, ("tensor model parallel group is not initialized")
+    return _AE  
 
 
 def model_parallel_initialized():
@@ -123,16 +129,16 @@ def init_ascend_model_parallel_for_AE_split(
     #                                     backend,
     #                                     group_name="tp")
     
-    # global _AE
-    # group_ranks = []
-    # for i in range(expert_parallel_size):
-    #     ranks = list(range(i, expert_parallel_size * 2, expert_parallel_size))
-    #     group_ranks.append(ranks)
-    # print(f"_AE group_ranks is === {group_ranks}")
-    # _AE = init_model_parallel_group(group_ranks,
-    #                                 get_world_group().local_rank,
-    #                                 backend,
-    #                                 group_name="ae")
+    global _AE
+    group_ranks = []
+    for i in range(expert_parallel_size):
+        ranks = list(range(i, expert_parallel_size * 2, expert_parallel_size))
+        group_ranks.append(ranks)
+    #print(f"_AE group_ranks is === {group_ranks}")
+    _AE = init_model_parallel_group(group_ranks,
+                                    get_world_group().local_rank,
+                                    backend,
+                                    group_name="ae")
 
     group_ranks = []
     global _ETP
@@ -147,7 +153,7 @@ def init_ascend_model_parallel_for_AE_split(
                                         get_world_group().local_rank,
                                         backend,
                                         group_name="etp")
-    
+
 
 def get_mlp_tensor_model_parallel_world_size():
     """Return world size for the tensor model parallel group."""
