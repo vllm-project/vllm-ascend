@@ -40,7 +40,7 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce,
                               tensor_model_parallel_reduce_scatter)
-from vllm.distributed.parallel_state import get_dp_group, get_ep_group
+from vllm.distributed.parallel_state import get_dp_group,get_world_group, get_ep_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -70,6 +70,7 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.parallel_state import get_ep_group,get_ae_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
@@ -642,6 +643,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         model_config: ModelConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        enable_attn_export_split: bool = False
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = config.hidden_size
@@ -649,6 +651,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
+        self.enable_attn_export_split = enable_attn_export_split
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep='.')[-1])
@@ -736,30 +739,89 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         if mla_moe_communication and self.layer_idx > self.first_k_dense_replace:
             hidden_states = tensor_model_parallel_all_gather(hidden_states,
                                                              dim=0)
-
-        hidden_states = self.self_attn(
+        rank = get_world_group().rank_in_group
+        if self.enable_attn_export_split:
+            # 如果是Attn就计算一次Attn，否则就不计算
+            if rank < 4:
+                # print(f"rank is == {rank} , start attn")
+                # 计算attention
+                hidden_states = self.self_attn(
+                    positions=positions,
+                    hidden_states=hidden_states,
+                    kv_cache=kv_cache,
+                    attn_metadata=attn_metadata,
+                )
+                # Fully Connected
+                hidden_states, residual = self.post_attention_layernorm(
+                    hidden_states, residual)
+                # 发送给对应的exprot
+                # AE分离场景下，attention 所在的卡（例如卡0）需要将hidden_states、attn_metadata
+                # send 给export所在的卡（例如卡4）
+                ae_group = get_ae_group()
+                ae_group.send(hidden_states)
+                ae_group.send(residual)
+                # recv
+                # 接收export发送的数据
+                hidden_states = ae_group.recv(hidden_states.size(),dtype=hidden_states.dtype)
+                # print(f"接收export发送的数据 recv_matedata_list is == {hidden_states.shape}")
+            # export
+            else:
+                # print(f"rank is == {rank} , start export")
+                # recv
+                # 接收attn发送的数据
+                ae_group = get_ae_group()
+                hidden_states = ae_group.recv(hidden_states.size(),dtype=hidden_states.dtype)
+                residual = ae_group.recv(residual.size(),dtype=residual.dtype)
+                # print(f"接收attn发送的数据 recv_matedata_list is == {hidden_states.shape}")
+                # 计算mlp
+                if isinstance(self.mlp, CustomDeepseekV2MoE):
+                    hidden_states = self.mlp(hidden_states,
+                                        attn_metadata,
+                                        replace_allreduce=mla_moe_communication)
+                else:
+                    hidden_states = self.mlp(hidden_states)
+                
+                if isinstance(
+                    self.mlp,
+                    CustomDeepseekV2MLP) and hidden_states.dtype == torch.float16:
+                    # Fix FP16 overflow
+                    # Scaling the DeepseekV2MLP output, it is the input of
+                    # input_layernorm of next decoder layer.
+                    # The scaling of DeepseekV2MOE output would be done in the forward
+                    # of DeepseekV2MOE
+                    hidden_states *= 1. / self.routed_scaling_factor
+                
+                if mla_moe_communication and self.layer_idx == self.layers - 1:
+                    hidden_states = tensor_model_parallel_all_gather(hidden_states,
+                                                                    dim=0)
+                    residual = tensor_model_parallel_all_gather(residual, dim=0)
+                # send
+                # dst_rank = src_rank
+                ae_group.send(hidden_states)
+        else:
+            #=============================
+            hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
+            if mla_moe_communication and residual.shape[0] != hidden_states.shape[
+                    0]:
+                chunk_hidden_states = torch.tensor_split(residual,
+                                                        self.tp_size,
+                                                        dim=0)
+                residual = chunk_hidden_states[self.tp_rank]
 
-        if mla_moe_communication and residual.shape[0] != hidden_states.shape[
-                0]:
-            chunk_hidden_states = torch.tensor_split(residual,
-                                                     self.tp_size,
-                                                     dim=0)
-            residual = chunk_hidden_states[self.tp_rank]
-
-        if hidden_states.dtype == torch.float16:
-            # Fix FP16 overflow
-            # We scale both hidden_states and residual before
-            # rmsnorm, and rmsnorm result would not affect by scale.
-            hidden_states *= 1. / self.routed_scaling_factor
-            if self.layer_idx == 0:
-                # The residual is shared by all layers, we only scale it on
-                # first layer.
-                residual *= 1. / self.routed_scaling_factor
+            if hidden_states.dtype == torch.float16:
+                # Fix FP16 overflow
+                # We scale both hidden_states and residual before
+                # rmsnorm, and rmsnorm result would not affect by scale.
+                hidden_states *= 1. / self.routed_scaling_factor
+                if self.layer_idx == 0:
+                    # The residual is shared by all layers, we only scale it on
+                    # first layer.
+                    residual *= 1. / self.routed_scaling_factor
 
         tp_size = get_tensor_model_parallel_world_size()
         if self.enable_shared_expert_dp and (
@@ -777,27 +839,28 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
 
-        if isinstance(self.mlp, CustomDeepseekV2MoE):
-            hidden_states = self.mlp(hidden_states,
-                                     attn_metadata,
-                                     replace_allreduce=mla_moe_communication)
-        else:
-            hidden_states = self.mlp(hidden_states)
+            if isinstance(self.mlp, CustomDeepseekV2MoE):
+                hidden_states = self.mlp(hidden_states,
+                                        attn_metadata,
+                                        replace_allreduce=mla_moe_communication)
+            else:
+                hidden_states = self.mlp(hidden_states)
 
-        if isinstance(
-                self.mlp,
-                CustomDeepseekV2MLP) and hidden_states.dtype == torch.float16:
-            # Fix FP16 overflow
-            # Scaling the DeepseekV2MLP output, it is the input of
-            # input_layernorm of next decoder layer.
-            # The scaling of DeepseekV2MOE output would be done in the forward
-            # of DeepseekV2MOE
-            hidden_states *= 1. / self.routed_scaling_factor
-        if mla_moe_communication and self.layer_idx == self.layers - 1:
-            hidden_states = tensor_model_parallel_all_gather(hidden_states,
-                                                             dim=0)
-            residual = tensor_model_parallel_all_gather(residual, dim=0)
-
+            if isinstance(
+                    self.mlp,
+                    CustomDeepseekV2MLP) and hidden_states.dtype == torch.float16:
+                # Fix FP16 overflow
+                # Scaling the DeepseekV2MLP output, it is the input of
+                # input_layernorm of next decoder layer.
+                # The scaling of DeepseekV2MOE output would be done in the forward
+                # of DeepseekV2MOE
+                hidden_states *= 1. / self.routed_scaling_factor
+            if mla_moe_communication and self.layer_idx == self.layers - 1:
+                hidden_states = tensor_model_parallel_all_gather(hidden_states,
+                                                                dim=0)
+                residual = tensor_model_parallel_all_gather(residual, dim=0)
+        # print(f"rank == {rank} 最后的 hidden_states is == {hidden_states}")
+        # print(f"rank == {rank} 最后的 residual is == {residual}")
         # for last layer of main model and mtp layer.
         if self.enable_shared_expert_dp and self.layer_idx >= (
                 self.layers - 1) and tp_size > 1:
@@ -832,6 +895,7 @@ class CustomDeepseekV2Model(nn.Module):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.enable_attn_export_split = vllm_config.parallel_config.enable_attn_export_split
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -850,6 +914,7 @@ class CustomDeepseekV2Model(nn.Module):
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                enable_attn_export_split = self.enable_attn_export_split
             ),
             prefix=f"{prefix}.layers")
 
