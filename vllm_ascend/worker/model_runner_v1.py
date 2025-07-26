@@ -1160,6 +1160,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if self.torchair_graph_enabled:
                     model_kwargs["kv_caches"] = self.kv_caches
                     model_kwargs["attn_metadata"] = attn_metadata
+                if envs_ascend.VLLM_ASCEND_ENABLE_DBO and with_prefill:
+                    model_kwargs["graph_enable"] = False  # type: ignore
                 if self.torchair_graph_enabled and not with_prefill:
                     maybe_converting_weight_acl_format(self.model,
                                                        ACL_FORMAT_FRACTAL_NZ)
@@ -1171,8 +1173,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         positions=positions,
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=inputs_embeds,
-                        **model_kwargs,
-                    )
+                        **model_kwargs)
                 else:
                     assert self.model is not None
                     maybe_converting_weight_acl_format(self.model,
@@ -1183,8 +1184,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         positions=positions,
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=inputs_embeds,
-                        **model_kwargs,
-                    )
+                        **model_kwargs)
 
         self.maybe_wait_for_kv_save()
         finished_sending, finished_recving = self.get_finished_kv_transfer(
@@ -1761,18 +1761,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
                     compiled_model = self._get_torchair_lazy_compiled_model(
                         num_tokens)
+                    model_kwargs["kv_caches"] = self.kv_caches
+                    model_kwargs["attn_metadata"] = attn_metadata
+                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+                        model_kwargs["graph_enable"] = True  # type: ignore
                     hidden_states = compiled_model(
                         input_ids=input_ids,
                         positions=positions,
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=None,
-                        kv_caches=self.kv_caches,
-                        attn_metadata=attn_metadata,
+                        **model_kwargs,
                     )
                 else:
                     maybe_converting_weight_acl_format(self.model,
                                                        ACL_FORMAT_FRACTAL_ND)
-
                     hidden_states = model(
                         input_ids=input_ids,
                         positions=positions,
@@ -1786,6 +1788,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             self.drafter, EagleProposer):
                         self.drafter.dummy_run(num_tokens)
             return hidden_states
+
+    @contextmanager
+    def set_in_profile_run(self):
+        self.in_profile_run = True
+        try:
+            yield
+        finally:
+            self.in_profile_run = False
 
     def profile_run(self) -> None:
         # Trigger compilation for general shape.
