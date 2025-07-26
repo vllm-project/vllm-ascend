@@ -38,11 +38,13 @@ from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 
+import vllm_ascend.envs as ascend_envs
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (sleep_mode_enabled, try_register_lib,
                                vllm_version_is)
+from vllm_ascend.worker.cpu_binding import bind_cpus
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 if not vllm_version_is("0.9.2"):
@@ -50,7 +52,6 @@ if not vllm_version_is("0.9.2"):
 
 
 class NPUWorker(WorkerBase):
-
     def __init__(
             self,
             vllm_config: VllmConfig,
