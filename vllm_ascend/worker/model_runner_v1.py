@@ -45,8 +45,9 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.models.interfaces_base import (VllmModelForPooling,
-                                                        is_pooling_model)
+from vllm.model_executor.models.interfaces import supports_transcription
+from vllm.model_executor.models.interfaces_base import (
+    VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
@@ -82,15 +83,14 @@ from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         write_kv_cache_bytes_to_file)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                ProfileExecuteDuration, is_310p,
-                               maybe_converting_weight_acl_format)
+                               maybe_converting_weight_acl_format,
+                               vllm_version_is)
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
-from vllm.model_executor.models.interfaces import supports_transcription
-from vllm.model_executor.models.interfaces_base import is_text_generation_model
-from vllm.tasks import GenerationTask, SupportedTask
-from vllm.v1.worker.utils import bind_kv_cache
+if not vllm_version_is("0.10.0"):
+    from vllm.tasks import GenerationTask, SupportedTask
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
