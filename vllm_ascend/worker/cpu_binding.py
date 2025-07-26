@@ -2,7 +2,7 @@ import os
 import subprocess
 from dataclasses import dataclass
 from itertools import accumulate
-from typing import Dict, List, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import psutil
 import torch_npu
@@ -31,18 +31,18 @@ class DeviceInfo:
     chip_name: str = ""
 
     def __post_init__(self):
-        self.npu_id, self.chip_id, self.chip_logic_id, self.chip_name = self._info_line.strip(
+        npu_id_str, chip_id_str, chip_logic_id_str, self.chip_name = self._info_line.strip(
         ).split(None, 3)
-        self.npu_id = int(self.npu_id)
-        self.chip_id = int(self.chip_id)
-        if self.chip_logic_id.isnumeric():
-            self.chip_logic_id = int(self.chip_logic_id)
+        self.npu_id = int(npu_id_str)
+        self.chip_id = int(chip_id_str)
+        if chip_logic_id_str.isnumeric():
+            self.chip_logic_id = int(chip_logic_id_str)
 
 
 class NpuHbmInfo:
-    visible_npu_ids: List = None
-    hbm_capacity: int = None
-    hbm_usage: int = None
+    visible_npu_ids: Optional[List[int]] = None
+    hbm_capacity: Optional[int] = None
+    hbm_usage: Optional[int] = None
 
     @classmethod
     def set_visible_devices(cls, world_size):
@@ -51,11 +51,14 @@ class NpuHbmInfo:
         if ASCEND_RT_VISIBLE_DEVICES is None:
             devices = sorted(list(_get_device_map_info().keys()))
         else:
-            devices = ASCEND_RT_VISIBLE_DEVICES
+            devices_str = ASCEND_RT_VISIBLE_DEVICES
+            devices = [int(x) for x in devices_str.split(",")]
         device_map_info = _get_device_map_info()
         npu_ids = []
         for device in devices:
             device_info = device_map_info.get(device)
+            if device_info is None:
+                raise RuntimeError(f"Device {device} not found in device_map_info")
             npu_ids.append(device_info.npu_id)
         cls.visible_npu_ids = npu_ids
 
@@ -147,8 +150,8 @@ def _get_pcie_info(devices: List[int], keyword="PCIeBusInfo"):
 
 
 def _get_numa_info(pcie_tbl, keyword="NUMAnode"):
-    device_numa_tbl = dict()  # key is device id, value is numa id
-    numa_devices_tbl = dict()  # key is numa id, value is device id list
+    device_numa_tbl: Dict[int, int] = {}  # key is device id, value is numa id
+    numa_devices_tbl: Dict[int, List[int]] = {}  # key is numa id, value is device id list
 
     for device, pcie_no in pcie_tbl.items():
         numa_info = execute_command(["lspci", "-s", f"{pcie_no}",
@@ -236,7 +239,8 @@ def bind_cpus(rank_id, ratio=0.5):
     if visible_devices is None:
         devices = sorted(list(_get_device_map_info().keys()))
     else:
-        devices = ASCEND_RT_VISIBLE_DEVICES
+        devices_str = ASCEND_RT_VISIBLE_DEVICES
+        devices = [int(x) for x in devices_str.split(",")]
 
     device_pcie_tbl = _get_pcie_info(devices)
     device_numa_tbl, numa_devices_tbl = _get_numa_info(device_pcie_tbl)
