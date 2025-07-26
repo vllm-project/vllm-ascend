@@ -13,12 +13,14 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase, method_has_implemented_embedding,
-    UnquantizedEmbeddingMethod)
+    QuantizationConfig, QuantizeMethodBase, method_has_implemented_embedding)
+from vllm.model_executor.layers.vocab_parallel_embedding import UnquantizedEmbeddingMethod
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+
+from vllm_ascend.distributed.parallel_state import get_lmhead_group
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
 
