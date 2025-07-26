@@ -213,13 +213,16 @@ class NPUPiecewiseBackend:
 
         if self.is_debugging_mode:
             # check if the input addresses are the same
-            new_input_addresses = [
-                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
-            ]
-            assert new_input_addresses == entry.input_addresses, (
-                "Input addresses for aclgraphs are different during replay."
-                f" Expected {entry.input_addresses}, got {new_input_addresses}"
-            )
+            tensor_args = [x for x in args if isinstance(x, torch.Tensor)]
+            new_addresses = [x.data_ptr() for x in tensor_args]
+
+            if new_addresses != entry.input_addresses:
+                mismatch_idx = next(i for i, (new, exp) in enumerate(
+                    zip(new_addresses, entry.input_addresses)) if new != exp)
+                raise AssertionError(
+                    f"Input address {mismatch_idx} changed during replay: "
+                    f"expected {entry.input_addresses[mismatch_idx]}, got {new_addresses[mismatch_idx]}. "
+                    f"Tensor: {tensor_args[mismatch_idx]}")
 
         entry.aclgraph.replay()
         return entry.output
