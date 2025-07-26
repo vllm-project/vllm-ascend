@@ -45,8 +45,9 @@ from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.model_loader import get_model
-from vllm.model_executor.models.interfaces_base import (VllmModelForPooling,
-                                                        is_pooling_model)
+from vllm.model_executor.models.interfaces import supports_transcription
+from vllm.model_executor.models.interfaces_base import (
+    VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
@@ -66,7 +67,7 @@ from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.utils import (gather_mm_placeholders,
+from vllm.v1.worker.utils import (bind_kv_cache, gather_mm_placeholders,
                                   sanity_check_mm_encoder_outputs,
                                   scatter_mm_placeholders)
 
@@ -88,15 +89,8 @@ from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
-if vllm_version_is("0.9.2"):
-    from vllm.model_executor.models.interfaces import has_step_pooler
-    from vllm.v1.utils import bind_kv_cache
-else:
-    from vllm.model_executor.models.interfaces import supports_transcription
-    from vllm.model_executor.models.interfaces_base import \
-        is_text_generation_model
+if not vllm_version_is("0.10.0"):
     from vllm.tasks import GenerationTask, SupportedTask
-    from vllm.v1.worker.utils import bind_kv_cache
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -409,7 +403,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             else:
                 generator = None
 
-            if not vllm_version_is("0.9.2") and pooling_params:
+            if pooling_params:
                 assert (task := pooling_params.task) is not None, (
                     "You did not set `task` in the API")
                 model = cast(VllmModelForPooling, self.model)
@@ -585,10 +579,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        if vllm_version_is("0.9.2"):
-            self.input_batch.block_table.commit(num_reqs)
-        else:
-            self.input_batch.block_table.commit_block_table(num_reqs)
+        self.input_batch.block_table.commit_block_table(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         req_ids = self.input_batch.req_ids
@@ -939,10 +930,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
-        if vllm_version_is("0.9.2"):
-            self.input_batch.block_table.commit(num_reqs)
-        else:
-            self.input_batch.block_table.commit_block_table(num_reqs)
+        self.input_batch.block_table.commit_block_table(num_reqs)
 
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
@@ -1771,57 +1759,33 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         req_num_tokens = num_tokens // num_reqs
 
-        if vllm_version_is("0.9.2"):
-            dummy_metadata = PoolingMetadata(
-                prompt_lens=torch.tensor(
-                    [h.shape[0] for h in hidden_states_list],
-                    device=self.device),
-                prompt_token_ids=torch.zeros((num_reqs, req_num_tokens),
-                                             dtype=torch.int32,
-                                             device=self.device),
-                pooling_params=[PoolingParams()] * num_reqs)
-            try:
-                pooler_output = self.model.pooler(
-                    hidden_states=hidden_states_list,
-                    pooling_metadata=dummy_metadata)
-            except RuntimeError as e:
-                if 'out of memory' in str(e):
-                    raise RuntimeError(
-                        "NPU out of memory occurred when warming up pooler with "
-                        f"{num_reqs} dummy requests. Please try lowering "
-                        "`max_num_seqs` or `gpu_memory_utilization` when "
-                        "initializing the engine.") from e
-                else:
-                    raise e
-        else:
-            model = cast(VllmModelForPooling, self.model)
-            dummy_task = self.get_supported_pooling_tasks()[0]
-            dummy_pooling_params = PoolingParams(task=dummy_task)
+        model = cast(VllmModelForPooling, self.model)
+        dummy_task = self.get_supported_pooling_tasks()[0]
+        dummy_pooling_params = PoolingParams(task=dummy_task)
 
-            to_update = model.pooler.get_pooling_updates(dummy_task)
-            to_update.apply(dummy_pooling_params)
+        to_update = model.pooler.get_pooling_updates(dummy_task)
+        to_update.apply(dummy_pooling_params)
 
-            dummy_metadata = PoolingMetadata(
-                prompt_lens=torch.tensor(
-                    [h.shape[0] for h in hidden_states_list],
-                    device=self.device),
-                prompt_token_ids=torch.zeros((num_reqs, req_num_tokens),
-                                             dtype=torch.int32,
-                                             device=self.device),
-                pooling_params=[dummy_pooling_params] * num_reqs)
+        dummy_metadata = PoolingMetadata(
+            prompt_lens=torch.tensor([h.shape[0] for h in hidden_states_list],
+                                     device=self.device),
+            prompt_token_ids=torch.zeros((num_reqs, req_num_tokens),
+                                         dtype=torch.int32,
+                                         device=self.device),
+            pooling_params=[dummy_pooling_params] * num_reqs)
 
-            try:
-                pooler_output = model.pooler(hidden_states=hidden_states_list,
-                                             pooling_metadata=dummy_metadata)
-            except RuntimeError as e:
-                if 'out of memory' in str(e):
-                    raise RuntimeError(
-                        "NPU out of memory occurred when warming up pooler with "
-                        f"{num_reqs} dummy requests. Please try lowering "
-                        "`max_num_seqs` or `gpu_memory_utilization` when "
-                        "initializing the engine.") from e
-                else:
-                    raise e
+        try:
+            pooler_output = model.pooler(hidden_states=hidden_states_list,
+                                         pooling_metadata=dummy_metadata)
+        except RuntimeError as e:
+            if 'out of memory' in str(e):
+                raise RuntimeError(
+                    "NPU out of memory occurred when warming up pooler with "
+                    f"{num_reqs} dummy requests. Please try lowering "
+                    "`max_num_seqs` or `gpu_memory_utilization` when "
+                    "initializing the engine.") from e
+            else:
+                raise e
 
         return pooler_output
 
@@ -1841,9 +1805,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                    QKVParallelLinear, RowParallelLinear)):
                         module.weight.data = torch_npu.npu_format_cast(
                             module.weight.data, ACL_FORMAT_FRACTAL_NZ)
-
-            if vllm_version_is("0.9.2") and has_step_pooler(self.model):
-                self.input_batch.logits_processing_needs_token_ids_bool = True
             if self.drafter:
                 logger.info("Loading drafter model...")
                 if isinstance(self.drafter, EagleProposer):

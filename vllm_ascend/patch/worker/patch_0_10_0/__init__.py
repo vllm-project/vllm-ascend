@@ -14,3 +14,5 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
+
+import vllm_ascend.patch.worker.patch_0_10_0.patch_sampler_gather_logprobs  # noqa
