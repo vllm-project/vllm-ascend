@@ -43,7 +43,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-arm64-npu-1, linux-arm64-npu-4]
-        vllm_version: [main, v0.9.2]
+        vllm_version: [main, v0.10.0]
     name: vLLM Ascend long term test
     runs-on: ${{ matrix.os }}
     container:
