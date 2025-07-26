@@ -1332,7 +1332,6 @@ class AscendFusedMoE(FusedMoE):
 
         mc2_mask = forward_context.mc2_mask
         tp_size = get_tensor_model_parallel_world_size()
-
         if fused_moe_state != FusedMoEState.AllGather:
             if fused_moe_state in {
                     FusedMoEState.MC2, FusedMoEState.MC2_PREFILL

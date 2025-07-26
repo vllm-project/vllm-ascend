@@ -681,7 +681,7 @@ def fused_experts_with_all2all_v2(
     global_num_experts = len(expert_map) + global_redundant_expert_num
     local_num_experts = global_num_experts // ep_group.world_size
 
-    expanded_x, expanded_row_idx, tokens_per_expert, _, pertoken_scale = torch_npu.npu_moe_init_routing_quantv2(
+    quantized_tokens, expanded_row_idx, tokens_per_expert, _, token_scales = torch_npu.npu_moe_init_routing_quantv2(
         hidden_states,
         expert_idx=topk_ids.to(torch.int32),
         active_num=0,
@@ -693,36 +693,33 @@ def fused_experts_with_all2all_v2(
         quant_mode=1,
     )
 
-    ep_size = ep_group.world_size
-    tokens_per_expert_group = tokens_per_expert.new_empty(tokens_per_expert.shape[0])
-    dist.all_to_all_single(tokens_per_expert_group, tokens_per_expert)  # (total_experts,) --> (total_ranks * n_routed_experts_per_rank)
+    tokens_per_expert_recv = tokens_per_expert.new_empty(tokens_per_expert.shape[0])
+    dist.all_to_all_single(tokens_per_expert_recv, tokens_per_expert)  # (total_experts,) --> (total_ranks * n_routed_experts_per_rank)
 
     # combine tensors, do reduceSum and D2H toghter
-    combine_tokens = torch.stack([tokens_per_expert_group, tokens_per_expert], dim=0)
+    combine_tokens = torch.stack([tokens_per_expert_recv, tokens_per_expert], dim=0)
     # view: EP, E//EP
     # sum: EP, the number of tokens each rank receives from other cards
     # ep_size = get_expert_parallel_world_size()
-    combine_tokens = combine_tokens.view(2, ep_size, -1).sum(2)
+    combine_tokens = combine_tokens.view(2, ep_group.world_size, -1).sum(2)
     combine_tokens_cpu = combine_tokens.to(torch.device("cpu"), non_blocking=True).numpy()
-    all_tokens = tokens_per_expert_group.sum()
+    all_tokens = tokens_per_expert_recv.sum()
     # alltoall output, unfolded into one dimension, the size is the sum of the number of tokens routed from other cards to the current rank.
-    gathered_tokens = expanded_x.new_empty(
-        all_tokens.item(), expanded_x.shape[1]
+    gathered_tokens = quantized_tokens.new_empty(
+        all_tokens.item(), quantized_tokens.shape[1]
     )
-    gathered_scales = pertoken_scale.new_empty(gathered_tokens.shape[0])
+    gathered_scales = token_scales.new_empty(gathered_tokens.shape[0])
 
-    # alltoall input splits, the total number of tokens routed from the current rank to other ranks
     input_splits = combine_tokens_cpu[1]
-    # alltoall output splits, the number of tokens each rank receives from other cards
     output_splits = combine_tokens_cpu[0]
 
-    dist.all_to_all_single(gathered_tokens, expanded_x, output_splits, input_splits)
-    dist.all_to_all_single(gathered_scales, pertoken_scale, output_splits, input_splits)
-    # reroute
-    # Tokens merged by experts, scales merged by experts, indices for FinalizeRouting, number of tokens processed by each expert
-    routed_tokens_by_expert, gathered_scales, gathered_idxs_unsort, tokens_per_local_expert = torch_npu.npu_moe_re_routing(
+    dist.all_to_all_single(gathered_tokens, quantized_tokens, output_splits,
+                           input_splits)
+    dist.all_to_all_single(gathered_scales, token_scales, output_splits,
+                           input_splits)
+    routed_tokens_by_expert, gathered_scales, inverse_indices, tokens_per_local_expert = torch_npu.npu_moe_re_routing(
         gathered_tokens,
-        tokens_per_expert_group.view(ep_group.world_size, -1),
+        tokens_per_expert_recv.view(ep_group.world_size, -1),
         per_token_scales=gathered_scales)
     expert_outputs = gmm_expert(routed_tokens_by_expert,
                                 expert_tokens=tokens_per_local_expert.to(
@@ -736,9 +733,9 @@ def fused_experts_with_all2all_v2(
     reordered_outputs = torch.index_select(
         expert_outputs,
         dim=0,
-        index=gathered_idxs_unsort.to(torch.float32).argsort().to(torch.int32))
+        index=inverse_indices.to(torch.float32).argsort().to(torch.int32))
     gathered_tokens = reordered_outputs.new_empty(
-        *expanded_x.shape)
+        *quantized_tokens.shape)
     dist.all_to_all_single(gathered_tokens, reordered_outputs,
                            input_splits, output_splits)
 
