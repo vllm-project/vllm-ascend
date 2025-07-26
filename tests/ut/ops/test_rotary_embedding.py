@@ -219,14 +219,12 @@ class TestNativeRopeDeepseekForward(TestBase):
 
         mock_rope_forward_oot.return_value = (query, key)
 
-        q_pe, k_pe = native_rope_deepseek_forward(module,
-                                                  positions,
-                                                  query,
-                                                  key,
-                                                  max_seq_len=2048)
-
-        assert q_pe.shape == query.shape
-        assert k_pe.shape == key.shape
+        with self.assertRaises(ValueError):
+            native_rope_deepseek_forward(module,
+                                         positions,
+                                         query,
+                                         key,
+                                         max_seq_len=2048)
 
     @patch('vllm_ascend.ops.rotary_embedding.rope_forward_oot')
     def test_native_rope_deepseek_forward_key_reshaping(

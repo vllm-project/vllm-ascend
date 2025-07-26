@@ -93,7 +93,9 @@ def native_rope_deepseek_forward(self,
                                  offsets: Optional[torch.Tensor] = None,
                                  max_seq_len: Optional[int] = None):
     if max_seq_len is not None and max_seq_len > self.max_seq_len:
-        _set_cos_sin_cache(self, max_seq_len, query.device, query.dtype)
+        raise ValueError(f"Unable to reach here, max_seq_len {max_seq_len} "
+                         "exceeds the maximum sequence length "
+                         f"{self.max_seq_len} for rotary embedding.")
     if len(key.shape) == 2:
         key = key[:, None, :]
     # Note: we implement the non neox_style method with shuffle the last dim and neox style
@@ -209,7 +211,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, unsqueeze_dim=1):
 
 
 def _set_cos_sin_cache(self, seq_len, device, dtype):
-    self.max_seq_len_cached = seq_len
+    self.max_seq_len = seq_len * self.scaling_factor
     dim = self.rotary_dim
 
     freq_extra = 1.0 / (self.base**(
@@ -276,7 +278,6 @@ def deepseek_rope_init_func(
     super(DeepseekScalingRotaryEmbedding,
           self).__init__(head_size, rotary_dim, max_position_embeddings, base,
                          is_neox_style, dtype)
-    self.max_seq_len = max_position_embeddings
     _set_cos_sin_cache(self,
                        max_position_embeddings,
                        dtype=dtype,
