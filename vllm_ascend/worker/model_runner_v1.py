@@ -51,13 +51,15 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LazyLoader, cdiv)
+                        LazyLoader, cdiv, is_pin_memory_available)
+from vllm.v1.core.encoder_cache_manager import compute_encoder_budget
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
@@ -164,6 +166,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.device = device
+        self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
         self.sampler = Sampler()
 
@@ -197,6 +200,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         self.graph_block_tables = np.zeros(
             (self.max_num_reqs, self.max_num_blocks_per_req), dtype=np.int32)
+
+        # Multi-modal data support
+        self.mm_registry = MULTIMODAL_REGISTRY
+        self.uses_mrope = self.model_config.uses_mrope
+
+        encoder_compute_budget, encoder_cache_size = compute_encoder_budget(
+            model_config=self.model_config,
+            scheduler_config=self.scheduler_config,
+            mm_registry=self.mm_registry,
+        )
+        self.max_num_encoder_input_tokens = encoder_compute_budget
+        self.encoder_cache_size = encoder_cache_size
 
         # Set up Attention
         self.attn_backend = get_attn_backend(
@@ -1847,6 +1862,77 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.in_profile_run = False
 
     def profile_run(self) -> None:
+        # Profile with multimodal encoder & encoder cache.
+        # TODO: handle encoder-decoder models once we support them.
+        if (self.is_multimodal_model and self.max_num_encoder_input_tokens > 0
+                and self.encoder_cache_size > 0):
+
+            # NOTE: Currently model is profiled with a single non-text
+            # modality with the max possible input tokens even when
+            # it supports multiple.
+            max_tokens_by_modality_dict = self.mm_registry \
+                .get_max_tokens_per_item_by_nonzero_modality(self.model_config)
+            dummy_data_modality, max_tokens_per_mm_item = max(
+                max_tokens_by_modality_dict.items(), key=lambda item: item[1])
+
+            # Check how many items of this modality can be supported by
+            # the encoder budget.
+            encoder_budget = min(self.max_num_encoder_input_tokens,
+                                 self.encoder_cache_size)
+
+            max_num_mm_items_encoder_budget = encoder_budget // \
+                max_tokens_per_mm_item
+
+            # Check how many items of this modality can be supported by
+            # the decoder budget.
+            max_mm_items_per_req = self.mm_registry.get_mm_limits_per_prompt(
+                self.model_config)[dummy_data_modality]
+
+            # NOTE: We do not consider max_num_batched_tokens on purpose
+            # because the multimodal embeddings can be generated in advance
+            # and chunked prefilled.
+            max_num_mm_items_decoder_budget = self.max_num_reqs * \
+                max_mm_items_per_req
+
+            max_num_mm_items = max(
+                1,
+                min(max_num_mm_items_encoder_budget,
+                    max_num_mm_items_decoder_budget))
+
+            logger.info(
+                "Encoder cache will be initialized with a budget of %s tokens,"
+                " and profiled with %s %s items of the maximum feature size.",
+                encoder_budget, max_num_mm_items, dummy_data_modality)
+
+            # Create dummy batch of multimodal inputs.
+            dummy_mm_kwargs = self.mm_registry.get_decoder_dummy_data(
+                model_config=self.model_config,
+                seq_len=max_tokens_per_mm_item,
+                mm_counts={
+                    dummy_data_modality: 1
+                },
+            ).multi_modal_data
+
+            batched_dummy_mm_inputs = MultiModalKwargs.batch(
+                [dummy_mm_kwargs] * max_num_mm_items,
+                pin_memory=self.pin_memory)
+            batched_dummy_mm_inputs = MultiModalKwargs.as_kwargs(
+                batched_dummy_mm_inputs,
+                device=self.device,
+            )
+
+            # Run multimodal encoder.
+            dummy_encoder_outputs = self.model.get_multimodal_embeddings(
+                **batched_dummy_mm_inputs)
+
+            sanity_check_mm_encoder_outputs(
+                dummy_encoder_outputs,
+                expected_num_items=max_num_mm_items,
+            )
+
+            # Cache the dummy encoder outputs.
+            self.encoder_cache["tmp"] = dict(enumerate(dummy_encoder_outputs))
+
         # Trigger compilation for general shape.
         with self.set_in_profile_run():
             hidden_states = self._dummy_run(self.max_num_tokens,
