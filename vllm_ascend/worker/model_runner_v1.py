@@ -92,6 +92,10 @@ if vllm_version_is("0.9.2"):
     from vllm.model_executor.models.interfaces import has_step_pooler
     from vllm.v1.utils import bind_kv_cache
 else:
+    from vllm.model_executor.models.interfaces import supports_transcription
+    from vllm.model_executor.models.interfaces_base import \
+        is_text_generation_model
+    from vllm.tasks import GenerationTask, SupportedTask
     from vllm.v1.worker.utils import bind_kv_cache
 
 if TYPE_CHECKING:
@@ -705,6 +709,31 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
     def get_model(self) -> nn.Module:
         return self.model
+
+    def get_supported_generation_tasks(self) -> "list[GenerationTask]":
+        model = self.get_model()
+        supported_tasks = list[GenerationTask]()
+
+        if is_text_generation_model(model):
+            supported_tasks.append("generate")
+
+        if supports_transcription(model):
+            if model.supports_transcription_only:
+                return ["transcription"]
+
+            supported_tasks.append("transcription")
+
+        return supported_tasks
+
+    def get_supported_tasks(self) -> "tuple[SupportedTask, ...]":
+        tasks = list[SupportedTask]()
+
+        if self.model_config.runner_type == "generate":
+            tasks.extend(self.get_supported_generation_tasks())
+        if self.model_config.runner_type == "pooling":
+            tasks.extend(self.get_supported_pooling_tasks())
+
+        return tuple(tasks)
 
     def _make_attention_mask(self, seq_lens, query_lens, position,
                              attn_state) -> torch.Tensor:
