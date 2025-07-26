@@ -70,6 +70,7 @@ class NpuHbmInfo:
             return cls.hbm_capacity
         if not cls.visible_npu_ids:
             cls.set_visible_devices(world_size)
+        assert cls.visible_npu_ids is not None
         npu_id = cls.visible_npu_ids[rank]
         memory_info = execute_command(
             ["npu-smi", "info", "-i", f"{npu_id}", "-t",
@@ -96,6 +97,7 @@ class NpuHbmInfo:
             return cls.hbm_usage
         if not cls.visible_npu_ids:
             cls.set_visible_devices(world_size)
+        assert cls.visible_npu_ids is not None
         npu_id = cls.visible_npu_ids[rank]
         usage_info = execute_command(
             ["npu-smi", "info", "-i", f"{npu_id}", "-t",
@@ -200,7 +202,8 @@ def _get_numa_info_v2(
 
     device_numa_tbl = {
         device: numa
-        for numa, _devices in numa_devices_tbl.items() for device in _devices
+        for numa, _devices in numa_devices_tbl.items()
+        for device in _devices
     }
 
     return device_numa_tbl, numa_devices_tbl
@@ -240,8 +243,7 @@ def bind_cpus(rank_id, ratio=0.5):
     if visible_devices is None:
         devices = sorted(list(_get_device_map_info().keys()))
     else:
-        devices_str = ASCEND_RT_VISIBLE_DEVICES
-        devices = [int(x) for x in devices_str.split(",")]
+        devices = [int(x) for x in visible_devices.split(",")]
 
     device_pcie_tbl = _get_pcie_info(devices)
     device_numa_tbl, numa_devices_tbl = _get_numa_info(device_pcie_tbl)
