@@ -546,19 +546,8 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         else:
             hidden_states_or_q_c = hidden_states
         if self.torchair_graph_enabled:
-            if self.enable_prefill_optimizations and self.debug_layer_idx > 3 and self.debug_layer_idx < 61:
-                hidden_states_or_q_c = get_tp_group().all_gather(
-                    hidden_states_or_q_c, 0)
-                hidden_states = get_tp_group().all_gather(hidden_states, 0)
             if envs.VLLM_USE_V1:
-                if not self.enable_prefill_optimizations or self.debug_layer_idx < 3:
-                    output_shape = hidden_states.shape
-                else:
-                    num_tokens = hidden_states.shape[0]
-                    rows = num_tokens // self.tp_size
-                    if num_tokens % self.tp_size:
-                        rows += 1
-                    output_shape = (rows, hidden_states.shape[1])
+                output_shape = hidden_states.shape
                 output = torch.empty(output_shape,
                                      dtype=hidden_states_or_q_c.dtype,
                                      device=hidden_states_or_q_c.device)
@@ -745,12 +734,13 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         if self.enable_prefill_optimizations and self.layer_idx >= 60 and tp_size > 1:
             hidden_states = get_tp_group().all_gather(hidden_states, 0)
             residual = get_tp_group().all_gather(residual, 0)
-            
+
             attn_metadata = get_forward_context().attn_metadata
             if attn_metadata is not None:
                 num_tokens = attn_metadata.num_actual_tokens
             else:
                 num_tokens = hidden_states.shape[0]
+
             if num_tokens < hidden_states.shape[0]:
                 hidden_states = hidden_states[:num_tokens]
                 residual = residual[:num_tokens]
