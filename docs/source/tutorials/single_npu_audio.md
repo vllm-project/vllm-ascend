@@ -90,8 +90,7 @@ def main(audio_count: int):
     llm = LLM(model="Qwen/Qwen2-Audio-7B-Instruct",
               max_model_len=4096,
               max_num_seqs=5,
-              limit_mm_per_prompt={"audio": audio_count},
-              enforce_eager=True)
+              limit_mm_per_prompt={"audio": audio_count})
 
     inputs = prepare_inputs(audio_count)
 
