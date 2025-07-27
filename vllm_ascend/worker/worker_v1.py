@@ -43,8 +43,11 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (init_ascend_soc_version, sleep_mode_enabled,
-                               try_register_lib)
+                               try_register_lib, vllm_version_is)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+if not vllm_version_is("0.10.0"):
+    from vllm.tasks import SupportedTask
 
 
 class NPUWorker(WorkerBase):
@@ -76,6 +79,9 @@ class NPUWorker(WorkerBase):
                          is_driver_worker=is_driver_worker)
 
         # Try to import mindie_turbo to accelerate vLLM inference.
+        local_dp_rank = self.vllm_config.parallel_config.data_parallel_rank_local
+        world_size = self.vllm_config.parallel_config.world_size
+        self.local_rank_across_dp = local_dp_rank * world_size + self.local_rank
         try_register_lib(
             "mindie_turbo",
             "MindIE Turbo is installed. vLLM inference will be accelerated with MindIE Turbo."
@@ -318,3 +324,6 @@ class NPUWorker(WorkerBase):
 
     def get_supported_pooling_tasks(self):
         return self.model_runner.get_supported_pooling_tasks()
+
+    def get_supported_tasks(self) -> "tuple[SupportedTask, ...]":
+        return self.model_runner.get_supported_tasks()

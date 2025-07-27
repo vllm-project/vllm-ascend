@@ -71,6 +71,7 @@ curl http://localhost:8000/v1/completions \
     "temperature": 0.6
   }'
 ```
+
 ::::
 
 ::::{tab-item} v1/chat/completions
@@ -91,6 +92,7 @@ curl http://localhost:8000/v1/chat/completions \
         "add_special_tokens" : true
     }'
 ```
+
 ::::
 :::::
 
@@ -170,9 +172,11 @@ if __name__ == "__main__":
     del llm
     clean_up()
 ```
+
 ::::
 
 ::::{tab-item} Eager Mode
+
 ```{code-block} python
    :substitutions:
 import gc
@@ -226,6 +230,7 @@ if __name__ == "__main__":
     del llm
     clean_up()
 ```
+
 ::::
 :::::
 

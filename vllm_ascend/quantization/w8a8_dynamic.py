@@ -128,6 +128,7 @@ def fused_experts_with_mc2(
     assert mc2_mask is not None
     if log2phy is not None:
         topk_ids = log2phy[topk_ids]
+
     quant_mode = 2
     ep_group = get_mc2_group()
     ep_rank_id = ep_group.rank_in_group
