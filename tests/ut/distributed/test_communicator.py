@@ -12,7 +12,7 @@ def update_environment_variables(envs: dict[str, str]):
     print(f"Initializing distributed environment with {envs=}")
     for k, v in envs.items():
         if k in os.environ and os.environ[k] != v:
-            logger.warning(
+            print(
                 "Overwriting environment variable %s "
                 "from '%s' to '%s'",
                 k,
@@ -68,12 +68,12 @@ def test_all_to_all_without_sizes():
 class PatchTorchDistributed:
 
     def __init__(self, func):
-        rank = int(os.getenv("RANK"))
+        rank = int(os.getenv("RANK", 0))
         self.mock_rank_patcher = patch("torch.distributed.get_rank",
                                        return_value=rank)
         self.mock_world_size_patcher = patch(
             "torch.distributed.get_world_size",
-            return_value=int(os.getenv("WORLD_SIZE")),
+            return_value=int(os.getenv("WORLD_SIZE", 0)),
         )
 
         def patched_all_to_all(output_tensor_list,
