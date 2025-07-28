@@ -109,7 +109,8 @@ class CustomLogitsProcessor(LogitsProcessor):
                             output_splits,
                             input_splits,
                             group=get_lm_tp_group().device_group)
-        logits = all_to_all_result.view(local_batch_size, -1)
+        reshaped = all_to_all_result.view(lm_tp_size, local_batch_size, local_output_dim)
+        logits = reshaped.permute(1, 0, 2).reshape(local_batch_size, -1)
      
 
         # Remove paddings in vocab (if any).
