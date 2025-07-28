@@ -114,3 +114,19 @@
 #       - https://github.com/vllm-project/vllm/pull/21591
 #    Future Plan:
 #       Revert it when vLLM merge #21591 and release new version
+# ** File: worker/patch_common/patch_linear.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.linear.RowParallelLinear`
+#    Why:
+#       We need to fuse matmul and allreuce in `RowParallelLinear`
+#       to improve performance.
+#    How：
+#       Create a new class `AscendRowParallelLinear` that inherits from `RowParallelLinear`.
+#       In this class, we override the `forward` method to use
+#       torch_npu.npu_mm_all_reduce_base to replace matmul and allreduce.
+#    Related PR (if no, explain why):
+#       - https://github.com/vllm-project/vllm-ascend/pull/1926
+#    Future Plan:
+#       Validate more models in all kinds of scenario,
+#       if performance is always improved, we can enable this patch by default and remove the env
+#       variable `VLLM_ASCEND_ENABLE_FUSE_MATMUL_ALLREDUCE` in the future.
