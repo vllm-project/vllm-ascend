@@ -44,8 +44,8 @@ def initialize_local_comm_group(backend) -> None:
     if not torch.distributed.is_initialized():
         raise RuntimeError("torch.distributed must be initialized")
     world_size: int = torch.distributed.get_world_size()
-    logger.info(f"ASCEND_RT_VISIBLE_DEVICES {os.getenv("ASCEND_RT_VISIBLE_DEVICES")}")
-    logger.info(f"ASCEND_VISIBLE_DEVICES {os.getenv("ASCEND_VISIBLE_DEVICES")}")
+    logger.info(f"ASCEND_RT_VISIBLE_DEVICES {os.getenv("ASCEND_RT_VISIBLE_DEVICES", "")}")
+    logger.info(f"ASCEND_VISIBLE_DEVICES {os.getenv("ASCEND_VISIBLE_DEVICES", "")}")
     if os.getenv("ASCEND_RT_VISIBLE_DEVICES") is not None:
         local_size = len(os.getenv("ASCEND_RT_VISIBLE_DEVICES").split(","))
         logger.info(f"Using ASCEND_RT_VISIBLE_DEVICES: {local_size} devices")
