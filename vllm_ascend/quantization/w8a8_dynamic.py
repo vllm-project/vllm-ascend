@@ -661,8 +661,36 @@ def fused_experts_with_all2all(hidden_states: torch.Tensor,
     return final_hidden_states, expert_tokens, group_list_type
 
 
+def init_routing_quant(hidden_states, top_k, topk_ids, global_num_experts):
+    num_tokens, _ = hidden_states.shape
+    # Step 1: Routing initialization
+    row_idx = (torch.arange(0,
+                            num_tokens * top_k,
+                            dtype=torch.int32,
+                            device=hidden_states.device).view(
+                                top_k, -1).permute(1, 0).contiguous())
+
+    routed_tokens, expanded_row_idx, expert_indices = torch_npu.npu_moe_init_routing(
+        hidden_states,
+        row_idx=row_idx,
+        expert_idx=topk_ids,
+        active_num=num_tokens)
+
+    expanded_row_idx = (expanded_row_idx.view(top_k, -1).permute(
+        1, 0).contiguous().view(-1))
+
+    tokens_per_expert = torch.bincount(expert_indices,
+                                       minlength=global_num_experts).to(
+                                           torch.int32)
+
+    # Step 2: Quantize
+    quantized_tokens, token_scales = torch_npu.npu_dynamic_quant(routed_tokens)
+    return quantized_tokens, expanded_row_idx, tokens_per_expert, token_scales
+
+
 def fused_experts_with_all2all_v2(
         hidden_states: torch.Tensor,
+        top_k: int,
         topk_ids: torch.Tensor,
         topk_weight: torch.Tensor,
         w1: torch.Tensor,
@@ -680,17 +708,23 @@ def fused_experts_with_all2all_v2(
     global_num_experts = len(expert_map) + global_redundant_expert_num
     local_num_experts = global_num_experts // ep_group.world_size
 
-    quantized_tokens, expanded_row_idx, tokens_per_expert, _, token_scales = torch_npu.npu_moe_init_routing_quant(
-        hidden_states,
-        expert_idx=topk_ids.to(torch.int32),
-        active_num=0,
-        expert_capacity=0,
-        expert_num=global_num_experts,
-        drop_pad_mode=0,
-        expert_tokens_num_mode=2,
-        expert_tokens_before_capacity_flag=False,
-        quant_mode=1,
-    )
+    enable_init_routing_quant = hasattr(torch_npu,
+                                        "npu_moe_init_routing_quant")
+    if enable_init_routing_quant:
+        quantized_tokens, expanded_row_idx, tokens_per_expert, _, token_scales = torch_npu.npu_moe_init_routing_quant(
+            hidden_states,
+            expert_idx=topk_ids.to(torch.int32),
+            active_num=0,
+            expert_capacity=0,
+            expert_num=global_num_experts,
+            drop_pad_mode=0,
+            expert_tokens_num_mode=2,
+            expert_tokens_before_capacity_flag=False,
+            quant_mode=1,
+        )
+    else:
+        quantized_tokens, expanded_row_idx, tokens_per_expert, token_scales = init_routing_quant(
+            hidden_states, top_k, topk_ids, global_num_experts)
 
     tokens_per_expert_recv = tokens_per_expert.new_empty(
         tokens_per_expert.shape[0])
@@ -738,7 +772,6 @@ def fused_experts_with_all2all_v2(
     dist.all_to_all_single(gathered_tokens, reordered_outputs, input_splits,
                            output_splits)
 
-    # Step 8: Final routing aggregation
     final_hidden_states = torch_npu.npu_moe_finalize_routing(
         gathered_tokens,
         skip1=None,
@@ -1145,6 +1178,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         elif self.enable_prefill_optimizations:
             return fused_experts_with_all2all_v2(
                 hidden_states=x,
+                top_k=top_k,
                 topk_ids=topk_ids,
                 topk_weight=topk_weights,
                 w1=layer.w13_weight,
