@@ -7,12 +7,9 @@ from vllm.model_executor.layers.linear import LinearBase
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.mla_v1 import (AscendMLABackend,
-                                          AscendMLADecodeMetadata,
-                                          AscendMLAImpl, AscendMLAImpl092,
-                                          AscendMLAMetadata,
-                                          AscendMLAMetadataBuilder,
-                                          AscendMLAPrefillMetadata)
+from vllm_ascend.attention.mla_v1 import (
+    AscendMLABackend, AscendMLADecodeMetadata, AscendMLAImpl, AscendMLAImpl092,
+    AscendMLAMetadata, AscendMLAMetadataBuilder, AscendMLAPrefillMetadata)
 
 
 class TestAscendMLABackend(TestBase):
