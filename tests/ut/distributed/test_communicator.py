@@ -1,7 +1,5 @@
 import multiprocessing
 import os
-import unittest
-import functools
 from unittest.mock import MagicMock, patch
 
 import torch
@@ -15,7 +13,8 @@ def update_environment_variables(envs: dict[str, str]):
     for k, v in envs.items():
         if k in os.environ and os.environ[k] != v:
             logger.warning(
-                "Overwriting environment variable %s " "from '%s' to '%s'",
+                "Overwriting environment variable %s "
+                "from '%s' to '%s'",
                 k,
                 os.environ[k],
                 v,
@@ -35,7 +34,9 @@ def distributed_run(fn, world_size, *args, **kwargs):
         env["MASTER_ADDR"] = "localhost"
         env["MASTER_PORT"] = "12345"
         # _init_distributed_environment.decorator == fn
-        p = multiprocessing.Process(target=fn, args=(env, *args), kwargs=kwargs)
+        p = multiprocessing.Process(target=fn,
+                                    args=(env, *args),
+                                    kwargs=kwargs)
         processes.append(p)
         p.start()
 
@@ -68,27 +69,29 @@ class PatchTorchDistributed:
 
     def __init__(self, func):
         rank = int(os.getenv("RANK"))
-        self.mock_rank_patcher = patch("torch.distributed.get_rank", return_value=rank)
+        self.mock_rank_patcher = patch("torch.distributed.get_rank",
+                                       return_value=rank)
         self.mock_world_size_patcher = patch(
             "torch.distributed.get_world_size",
             return_value=int(os.getenv("WORLD_SIZE")),
         )
 
-        def patched_all_to_all(
-            output_tensor_list, input_tensor_list, group=None, async_op=False
-        ):
+        def patched_all_to_all(output_tensor_list,
+                               input_tensor_list,
+                               group=None,
+                               async_op=False):
             if func.__name__ == "all_to_all_with_sizes":
                 output_tensor_list[:] = (
-                    [torch.tensor([10, 20]), torch.tensor([50, 60])]
-                    if rank == 0
-                    else [torch.tensor([30, 40]), torch.tensor([70, 80])]
-                )
+                    [torch.tensor([10, 20]),
+                     torch.tensor([50, 60])] if rank == 0 else
+                    [torch.tensor([30, 40]),
+                     torch.tensor([70, 80])])
             elif func.__name__ == "all_to_all_without_sizes":
                 output_tensor_list[:] = (
-                    [torch.tensor([[10, 20]]), torch.tensor([[50, 60]])]
-                    if rank == 0
-                    else [torch.tensor([[30, 40]]), torch.tensor([[70, 80]])]
-                )
+                    [torch.tensor([[10, 20]]),
+                     torch.tensor([[50, 60]])] if rank == 0 else
+                    [torch.tensor([[30, 40]]),
+                     torch.tensor([[70, 80]])])
 
             if async_op:
                 mock_work = MagicMock()
@@ -99,27 +102,28 @@ class PatchTorchDistributed:
         # rank 0: [10, 20, 30, 40] -> [10, 20, 50, 60]
         # rank 1: [50, 60, 70, 80] -> [30, 40, 70, 80]
         self.mock_all_to_all_patcher = patch(
-            "torch.distributed.all_to_all", new_callable=lambda: patched_all_to_all
-        )
+            "torch.distributed.all_to_all",
+            new_callable=lambda: patched_all_to_all)
 
         # Patch get group ranks
-        self.patch_get_pgr = patch(
-            "torch.distributed.get_process_group_ranks", return_value={0: 0, 1: 1}
-        )
-        self.patch_get_gr = patch(
-            "torch.distributed.get_group_rank", return_value={0: 0, 1: 1}
-        )
+        self.patch_get_pgr = patch("torch.distributed.get_process_group_ranks",
+                                   return_value={
+                                       0: 0,
+                                       1: 1
+                                   })
+        self.patch_get_gr = patch("torch.distributed.get_group_rank",
+                                  return_value={
+                                      0: 0,
+                                      1: 1
+                                  })
 
         # Patch torch npu
-        self.mock_npu_device_patcher = patch(
-            "torch.npu.current_device", return_value=MagicMock()
-        )
-        self.mock_npu_set_device_patcher = patch(
-            "torch.npu.set_device", return_value=MagicMock()
-        )
+        self.mock_npu_device_patcher = patch("torch.npu.current_device",
+                                             return_value=MagicMock())
+        self.mock_npu_set_device_patcher = patch("torch.npu.set_device",
+                                                 return_value=MagicMock())
         self.mock_torch_device_patcher = patch(
-            "torch.device", return_value=torch.device("cpu")
-        )
+            "torch.device", return_value=torch.device("cpu"))
 
     def __enter__(self):
         self.mock_rank_patcher.start()
@@ -161,13 +165,13 @@ def all_to_all_with_sizes():
         gather_sizes = [2, 2]
         input_ = torch.tensor([50, 60, 70, 80], device=device)
 
-    comm = NPUCommunicator(
-        cpu_group=dist.group.WORLD, device=device, device_group=dist.group.WORLD
-    )
+    comm = NPUCommunicator(cpu_group=dist.group.WORLD,
+                           device=device,
+                           device_group=dist.group.WORLD)
 
-    output = comm.all_to_all(
-        input_, scatter_sizes=scatter_sizes, gather_sizes=gather_sizes
-    )
+    output = comm.all_to_all(input_,
+                             scatter_sizes=scatter_sizes,
+                             gather_sizes=gather_sizes)
 
     if rank == 0:
         assert output.tolist() == [10, 20, 50, 60]
@@ -187,9 +191,9 @@ def all_to_all_without_sizes():
     else:
         input_ = torch.tensor([[50, 60], [70, 80]], device=device)
 
-    comm = NPUCommunicator(
-        cpu_group=dist.group.WORLD, device_group=dist.group.WORLD, device=device
-    )
+    comm = NPUCommunicator(cpu_group=dist.group.WORLD,
+                           device_group=dist.group.WORLD,
+                           device=device)
     output = comm.all_to_all(input_, scatter_dim=0, gather_dim=0)
 
     if rank == 0:
@@ -197,4 +201,5 @@ def all_to_all_without_sizes():
     else:
         assert output.tolist() == [[30, 40], [70, 80]]
 
-    print("all_to_all_without_sizes", "Rank %d done." % rank, "output:", output)
+    print("all_to_all_without_sizes", "Rank %d done." % rank, "output:",
+          output)
