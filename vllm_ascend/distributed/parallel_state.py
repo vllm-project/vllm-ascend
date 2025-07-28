@@ -44,7 +44,9 @@ def initialize_mlp_tp_group(backend) -> None:
     if not torch.distributed.is_initialized():
         raise RuntimeError("torch.distributed must be initialized")
     world_size: int = torch.distributed.get_world_size()
-    local_size = torch.npu.device_count()
+    # local_size = torch.npu.device_count()
+    # temp set local_size = 4
+    local_size = 4
     local_size = calculate_effective_local_size(local_size, world_size)
 
     backend = backend or torch.distributed.get_backend(get_world_group().device_group)
