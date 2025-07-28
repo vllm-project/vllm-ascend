@@ -10,6 +10,7 @@ from vllm.distributed.parallel_state import (GroupCoordinator, get_world_group,
 # vllm-ascend will maintain its own _LOCAL_COMM GroupCoordinator for
 # customize parallel solution
 _LOCAL_COMM_GROUP: Optional[GroupCoordinator] = None
+_enable_node_mlp: bool = False
 
 def ascend_model_parallel_initialized():
     return _LOCAL_COMM_GROUP is not None
@@ -44,21 +45,6 @@ def initialize_local_comm_group(backend) -> None:
     if not torch.distributed.is_initialized():
         raise RuntimeError("torch.distributed must be initialized")
     world_size: int = torch.distributed.get_world_size()
-    #logger.info(f"ASCEND_RT_VISIBLE_DEVICES {os.getenv('ASCEND_RT_VISIBLE_DEVICES')}")
-    #logger.info(f"ASCEND_VISIBLE_DEVICES {os.getenv('ASCEND_VISIBLE_DEVICES')}")
-    #if os.getenv("ASCEND_RT_VISIBLE_DEVICES") is not None:
-    #    local_size = len(os.getenv("ASCEND_RT_VISIBLE_DEVICES").split(","))
-    #    logger.info(f"Using ASCEND_RT_VISIBLE_DEVICES: {local_size} devices")
-    #elif os.getenv("ASCEND_VISIBLE_DEVICES") is not None:
-    #    local_size = len(os.getenv("ASCEND_VISIBLE_DEVICES").split(","))
-    #    logger.info(f"Using ASCEND_VISIBLE_DEVICES: {local_size} devices")
-    #else:
-    #    local_size = torch.npu.device_count()
-    #    logger.info(f"Using torch.npu.device_count(): {local_size} devices")
-        
-    # local_size = len(os.getenv("ASCEND_RT_VISIBLE_DEVICES").split(",")) \
-    #     if os.getenv("ASCEND_RT_VISIBLE_DEVICES") is not None \
-    #     else torch.npu.device_count()
     local_size = torch.npu.device_count()
     local_size = calculate_effective_local_size(local_size, world_size)
 
@@ -72,9 +58,6 @@ def initialize_local_comm_group(backend) -> None:
     for i in range(num_local_groups):
         ranks = list(range(i * local_size, (i + 1) * local_size))
         group_ranks.append(ranks)
-    
-    logger.info(f"vllm-ascend: world size {world_size}, local size {local_size}, "
-                f"num local groups {num_local_groups}, group ranks {group_ranks}")
 
     _LOCAL_COMM_GROUP = init_model_parallel_group(
                 group_ranks,
@@ -94,7 +77,7 @@ def get_mlp_tp_rank():
 def get_mlp_world_group() -> GroupCoordinator:
     # Can be enabled
     # ToDo 配置化
-    if True:
+    if _enable_node_mlp:
         return get_local_comm_group()
     else:
         return get_ep_group()
@@ -117,11 +100,14 @@ def get_local_comm_group() -> GroupCoordinator:
     return _LOCAL_COMM_GROUP
 
 def init_ascend_model_parallel(
+    enable_node_mlp: bool = False,
     backend: Optional[str] = None,
 ):
     if ascend_model_parallel_initialized():
         return
     initialize_local_comm_group(backend)
+    global _enable_node_mlp
+    _enable_node_mlp = enable_node_mlp
     
     logger.info(
     "vllm-ascend: rank %s in world size %s is assigned as "

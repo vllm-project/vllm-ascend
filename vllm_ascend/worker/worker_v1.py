@@ -291,7 +291,10 @@ class NPUWorker(WorkerBase):
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
         ensure_kv_transfer_initialized(self.vllm_config)
-        init_ascend_model_parallel(backend)
+        addtional_config = self.vllm_config.additional_config
+        if addtional_config is not None and "enable_node_mlp" in addtional_config:
+            enable_node_mlp = bool(addtional_config["enable_node_mlp"])
+        init_ascend_model_parallel(enable_node_mlp=enable_node_mlp, backend=backend)
 
     def _init_profiler(self):
         # Torch profiler. Enabled and configured through env vars:
