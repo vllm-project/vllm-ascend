@@ -398,16 +398,16 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
                                       "AscendAttentionTorchairBackendImpl")
 
         if kv_cache is not None and kv_cache[0].numel() > 0:
-            key_cache, value_cache = kv_cache[0], kv_cache[1]
+            self.key_cache, self.value_cache = kv_cache[0], kv_cache[1]
             slots = attn_metadata.slot_mapping
 
-            block_size = key_cache.shape[1]
+            block_size = kv_cache[0].shape[1]
             slots_indices = slots.reshape(-1, 1)
             block_indices = slots_indices // block_size
             slots_indices = slots_indices % block_size
             indices = torch.cat((block_indices, slots_indices), dim=1)
-            torch_npu.npu_scatter_nd_update_(key_cache, indices, key)
-            torch_npu.npu_scatter_nd_update_(value_cache, indices, value)
+            torch_npu.npu_scatter_nd_update_(self.key_cache, indices, key)
+            torch_npu.npu_scatter_nd_update_(self.value_cache, indices, value)
 
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
             assert attn_metadata is not None
@@ -444,12 +444,22 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
         elif attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
             assert attn_metadata is not None
             assert attn_metadata.attn_mask is not None
+            assert self.key_cache is not None
+            assert self.value_cache is not None
             compress_mask = attn_metadata.attn_mask
+            q = query.view(query.shape[0], self.num_heads, -1)
+            k_cache = self.key_cache.view(self.key_cache.shape[0],
+                                          self.key_cache.shape[1],
+                                          self.num_kv_heads, -1)
+            v_cache = self.value_cache.view(self.value_cache.shape[0],
+                                            self.value_cache.shape[1],
+                                            self.num_kv_heads, -1)
             torch_npu._npu_flash_attention_qlens(
-                query=query,
-                key_cache=self.key_cache,
-                value_cache=self.value_cache,
-                block_table=attn_metadata.block_tables,
+                query=q,
+                key_cache=k_cache,
+                value_cache=v_cache,
+                block_table=attn_metadata.block_tables[:attn_metadata.
+                                                       query_lens.shape[0], :],
                 mask=compress_mask,
                 seq_len=attn_metadata.query_lens,
                 context_lens=attn_metadata.seq_lens,
@@ -460,15 +470,17 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
         elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
             decode_meta = attn_metadata.decode
             assert decode_meta is not None
+            assert self.key_cache is not None
+            assert self.value_cache is not None
             seq_lens = decode_meta.seq_lens_list
             block_table = decode_meta.block_table
-            block_size = key_cache.shape[1]
+            block_size = self.key_cache.shape[1]
             query = query.view(num_tokens, 1,
                                self.num_heads * self.head_size).contiguous()
             output = torch_npu.npu_incre_flash_attention(
                 query,
-                key_cache,
-                value_cache,
+                self.key_cache,
+                self.value_cache,
                 num_key_value_heads=self.num_kv_heads,
                 num_heads=self.num_heads,
                 actual_seq_lengths=seq_lens,
