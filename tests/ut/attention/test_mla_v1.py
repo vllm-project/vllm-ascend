@@ -7,12 +7,16 @@ from vllm.model_executor.layers.linear import LinearBase
 
 from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.mla_v1 import (
-    AscendMLABackend, AscendMLADecodeMetadata, AscendMLAImpl, AscendMLAImpl092,
-    AscendMLAMetadata, AscendMLAMetadataBuilder, AscendMLAPrefillMetadata)
+from vllm_ascend.attention.mla_v1 import (AscendMLABackend,
+                                          AscendMLADecodeMetadata,
+                                          AscendMLAImpl, AscendMLAImpl092,
+                                          AscendMLAMetadata,
+                                          AscendMLAMetadataBuilder,
+                                          AscendMLAPrefillMetadata)
 
 
 class TestAscendMLABackend(TestBase):
+
     def test_get_name(self):
         self.assertEqual(AscendMLABackend.get_name(), "ASCEND_MLA")
 
@@ -42,6 +46,7 @@ class TestAscendMLABackend(TestBase):
 
 
 class TestAscendMLAPrefillMetadata(TestBase):
+
     def test_ascend_mla_prefill_metadata_default(self):
         attn_mask = torch.tensor([[1, 0], [1, 1]], dtype=torch.bool)
         query_lens = [1, 2]
@@ -111,6 +116,7 @@ class TestAscendMLAPrefillMetadata(TestBase):
 
 
 class TestAscendMLADecodeMetadata(TestBase):
+
     def test_ascend_mla_decode_metadata_default(self):
         input_positions = torch.tensor([[1, 2, 3, 4], [1, 2, 3, 4]])
         block_table = torch.tensor([[0, 3, 2, 1], [0, 2, 1, 3]])
@@ -132,6 +138,7 @@ class TestAscendMLADecodeMetadata(TestBase):
 
 
 class TestAscendMLAMetadata(TestBase):
+
     def test_ascend_mla_metadata_default(self):
         num_actual_tokens = 100
         slot_mapping = torch.randn(100, 4, 1024)
@@ -183,6 +190,7 @@ class TestAscendMLAMetadata(TestBase):
 
 
 class TestAscendMLAMetadataBuilder(TestBase):
+
     def test_ascend_mla_metadata_builder_default(self):
         runner = MagicMock()
         runner.scheduler_config = MagicMock()
@@ -363,6 +371,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
 
 
 class TestAscendMLAImpl(TestBase):
+
     @patch('vllm.distributed.parallel_state._TP',
            new_callable=lambda: MagicMock(spec=GroupCoordinator))
     @patch("vllm.distributed.get_tensor_model_parallel_world_size",
