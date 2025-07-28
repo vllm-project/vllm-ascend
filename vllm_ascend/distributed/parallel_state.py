@@ -47,7 +47,7 @@ def init_ascend_model_parallel(
     
     global _LM_HEAD_TP
     assert _LM_HEAD_TP is None, ("lm head tensor model parallel group is already initialized")
-    lm_tp  = 8
+    lm_tp  = 4
     
     all_ranks_lm_head = torch.arange(world_size).reshape(
         -1, lm_tp, pipeline_parallel_size, 1)  # noqa
