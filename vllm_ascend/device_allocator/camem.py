@@ -24,7 +24,8 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 import torch
 from acl.rt import memcpy  # type: ignore # noqa: F401
 from vllm.logger import logger
-from vllm.utils import is_pin_memory_available
+
+from vllm_ascend.platform import NPUPlatform
 
 
 def find_loaded_library(lib_name) -> Optional[str]:
@@ -199,7 +200,7 @@ class CaMemAllocator:
                     size_in_bytes,
                     dtype=torch.uint8,
                     device='cpu',
-                    pin_memory=is_pin_memory_available())
+                    pin_memory=NPUPlatform.is_pin_memory_available())
                 cpu_ptr = cpu_backup_tensor.data_ptr()
                 ACL_MEMCPY_DEVICE_TO_HOST = 2
                 dest_max = cpu_ptr + size_in_bytes * 2
