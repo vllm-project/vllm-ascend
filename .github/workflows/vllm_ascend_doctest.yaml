@@ -65,6 +65,12 @@ jobs:
           cd /vllm-workspace/vllm
           git --no-pager log -1 || true
 
+      - name: Pin transformers to v4.53.3
+        run: |
+          # Pin transformers to v4.53.3
+          # Revert me when https://github.com/vllm-project/vllm-ascend/issues/2046 solved
+          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+          pip install transformers==4.53.3
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
 

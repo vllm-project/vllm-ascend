@@ -17,7 +17,7 @@
 #
 
 import pytest
-from modelscope import snapshot_download
+from modelscope import snapshot_download  # type: ignore[import-untyped]
 
 from tests.e2e.conftest import VllmRunner
 
