@@ -143,8 +143,6 @@ class TestAscendMLAMetadata(TestBase):
 
         num_input_tokens = 2
 
-        max_num_tokens_across_dp = 2
-        with_prefill_across_dp = False
         query_lens = None
         head_dim = None
         attn_mask = None
@@ -168,10 +166,6 @@ class TestAscendMLAMetadata(TestBase):
         self.assertEqual(metadata.num_decode_tokens, num_decode_tokens)
         self.assertEqual(metadata.num_prefills, num_prefills)
         self.assertEqual(metadata.num_input_tokens, num_input_tokens)
-        self.assertEqual(metadata.max_num_tokens_across_dp,
-                         max_num_tokens_across_dp)
-        self.assertEqual(metadata.with_prefill_across_dp,
-                         with_prefill_across_dp)
         self.assertEqual(metadata.query_lens, query_lens)
         self.assertEqual(metadata.head_dim, head_dim)
         self.assertEqual(metadata.attn_mask, attn_mask)
@@ -343,7 +337,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         with patch.object(builder,
                           "_get_graph_runner_block_tables",
                           side_effect=lambda x, y: y):
-            metadata = builder.build_dummy(3, 3)
+            metadata = builder.build_torchair_graph_dummy(3, 3)
 
         self.assertIsInstance(metadata, AscendMLAMetadata)
         self.assertEqual(metadata.num_input_tokens, 3)
