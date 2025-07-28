@@ -1,19 +1,18 @@
 from typing import Optional
 
-import os
-
 import torch
 from vllm.distributed.parallel_state import (GroupCoordinator, get_world_group,
                                              init_model_parallel_group,
-                                             logger, get_ep_group)
+                                             logger, get_tp_group)
 
-# vllm-ascend will maintain its own _LOCAL_COMM GroupCoordinator for
-# customize parallel solution
-_LOCAL_COMM_GROUP: Optional[GroupCoordinator] = None
+_MLP_TP_GROUP: Optional[GroupCoordinator] = None
 _enable_node_mlp: bool = False
 
+def is_enable_node_mlp():
+    return _enable_node_mlp
+
 def ascend_model_parallel_initialized():
-    return _LOCAL_COMM_GROUP is not None
+    return _MLP_TP_GROUP is not None
 
 def calculate_effective_local_size(local_size: int, world_size: int) -> int:
     """
@@ -40,7 +39,7 @@ def calculate_effective_local_size(local_size: int, world_size: int) -> int:
         )
     return effective_local_size
 
-def initialize_local_comm_group(backend) -> None:
+def initialize_mlp_tp_group(backend) -> None:
     # Get world size and rank. Ensure some consistencies.
     if not torch.distributed.is_initialized():
         raise RuntimeError("torch.distributed must be initialized")
@@ -51,15 +50,15 @@ def initialize_local_comm_group(backend) -> None:
     backend = backend or torch.distributed.get_backend(get_world_group().device_group)
 
     num_local_groups: int = world_size // local_size
-    global _LOCAL_COMM_GROUP
-    if _LOCAL_COMM_GROUP is not None:
-        raise RuntimeError("_LOCAL_COMM_GROUP must be None")
+    global _MLP_TP_GROUP
+    if _MLP_TP_GROUP is not None:
+        raise RuntimeError("_MLP_TP_GROUP must be None")
     group_ranks = []
     for i in range(num_local_groups):
         ranks = list(range(i * local_size, (i + 1) * local_size))
         group_ranks.append(ranks)
 
-    _LOCAL_COMM_GROUP = init_model_parallel_group(
+    _MLP_TP_GROUP = init_model_parallel_group(
                 group_ranks,
                 get_world_group().local_rank,
                 backend,
@@ -75,29 +74,27 @@ def get_mlp_tp_rank():
     return get_mlp_world_group().rank_in_group
 
 def get_mlp_world_group() -> GroupCoordinator:
-    # Can be enabled
-    # ToDo 配置化
     if _enable_node_mlp:
-        return get_local_comm_group()
+        return get_mlp_tp_group()
     else:
-        return get_ep_group()
+        return get_tp_group()
 
 def mlp_tp_all_gather(input_: torch.Tensor,
                                      dim: int = -1) -> torch.Tensor:
-    """All-gather the input tensor across model parallel group."""
+    """All-gather the input tensor across mlp tp group."""
     return get_mlp_world_group().all_gather(input_, dim)
 
 def mlp_tp_all_reduce(input_: torch.Tensor) -> torch.Tensor:
-    """All-reduce the input tensor across model parallel group."""
+    """All-reduce the input tensor across mlp tp group."""
     return get_mlp_world_group().all_reduce(input_)
 
 def mlp_tp_reduce_scatter(input_: torch.Tensor) -> torch.Tensor:
-    """reduce scatter the input tensor across model parallel group."""
+    """reduce scatter the input tensor across mlp tp group."""
     return get_mlp_world_group().reduce_scatter(input_, dim=0)
 
 
-def get_local_comm_group() -> GroupCoordinator:
-    return _LOCAL_COMM_GROUP
+def get_mlp_tp_group() -> GroupCoordinator:
+    return _MLP_TP_GROUP
 
 def init_ascend_model_parallel(
     enable_node_mlp: bool = False,
@@ -105,17 +102,18 @@ def init_ascend_model_parallel(
 ):
     if ascend_model_parallel_initialized():
         return
-    initialize_local_comm_group(backend)
-    global _enable_node_mlp
-    _enable_node_mlp = enable_node_mlp
+    if enable_node_mlp:
+        initialize_mlp_tp_group(backend)
+        global _enable_node_mlp
+        _enable_node_mlp = enable_node_mlp
     
-    logger.info(
-    "vllm-ascend: rank %s in world size %s is assigned as "
-    "MLP TP rank %s", torch.distributed.get_rank(), torch.distributed.get_world_size(), get_mlp_tp_rank())
+        logger.info(
+        "vllm-ascend: rank %s in world size %s is assigned as "
+        "MLP TP rank %s", torch.distributed.get_rank(), torch.distributed.get_world_size(), get_mlp_tp_rank())
 
 
 def destory_ascend_model_parallel():
-    global _LOCAL_COMM_GROUP
-    if _LOCAL_COMM_GROUP:
-        _LOCAL_COMM_GROUP.destroy()
-    _LOCAL_COMM_GROUP = None
+    global _MLP_TP_GROUP
+    if _MLP_TP_GROUP:
+        _MLP_TP_GROUP.destroy()
+    _MLP_TP_GROUP = None

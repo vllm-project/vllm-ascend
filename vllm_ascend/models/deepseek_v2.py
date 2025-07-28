@@ -35,7 +35,7 @@ import torch.distributed as dist
 from torch.nn.parameter import Parameter, UninitializedParameter 
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig, ParallelConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               get_tp_group, split_tensor_along_last_dim,
@@ -89,7 +89,7 @@ from vllm.sequence import IntermediateTensors
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import (
     get_mlp_tp_world_size, get_mlp_tp_rank, 
-    mlp_tp_all_gather, mlp_tp_all_reduce, mlp_tp_reduce_scatter)
+    mlp_tp_all_gather, mlp_tp_all_reduce, mlp_tp_reduce_scatter, is_enable_node_mlp)
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
@@ -867,9 +867,11 @@ class CustomDeepseekV2MLP(nn.Module):
         force_replicate: bool = False,
         is_shared_experts: bool = False,
         prefix: str = "",
+        parallel_config: Optional[ParallelConfig] = None,
     ) -> None:
         super().__init__()
         self.is_shared_experts = is_shared_experts
+        self.parallel_config = parallel_config
         if not force_replicate:
             if is_shared_experts:
                 self.gate_up_proj = MergedColumnParallelLinear(
@@ -884,7 +886,7 @@ class CustomDeepseekV2MLP(nn.Module):
                                                reduce_results=reduce_results,
                                                prefix=f"{prefix}.down_proj")
             else:
-                # 用于 Dense MLP
+                # Used For Dense MLP
                 self.gate_up_proj = CustomDeepseekV2MLPMergedColumnParallelLinear(
                     hidden_size, [intermediate_size] * 2,
                     bias=False,
@@ -943,32 +945,31 @@ class CustomDeepseekV2MLP(nn.Module):
 
     def forward(self, x, is_prefill: bool = False):
         if not self.is_shared_experts:
-            if is_prefill:
-                pad_size = 0
-                # pd mix use
-                # 临时设置dp_size为4，后续需要根据实际情况修改
-                dp_size = 4
-                # if model_extra_config.parall_config.dp_size > 1:
-                if dp_size > 1:
-                    local_length = x.shape[0]
-                    # reduce_length = torch.tensor(x.shape[0], dtype=torch.int64, device=current_platform.device_type)
-                    reduce_length = torch.tensor(x.shape[0], dtype=torch.int64, device="npu")
-                    dist.all_reduce(reduce_length, op=dist.ReduceOp.MAX, async_op=False)
-                    global_max_length = reduce_length.item()
-                    pad_size = global_max_length - x.shape[0]
+            if is_enable_node_mlp():
+                if is_prefill:
+                    pad_size = 0
+                    # pd mix use
+                    if self.parallel_config is not None and \
+                            self.parallel_config.dp_size > 1:
+                        local_length = x.shape[0]
+                        reduce_length = torch.tensor(x.shape[0], dtype=torch.int64, device="npu")
+                        dist.all_reduce(reduce_length, op=dist.ReduceOp.MAX, async_op=False)
+                        global_max_length = reduce_length.item()
+                        pad_size = global_max_length - x.shape[0]
 
-                    x = torch.nn.functional.pad(
-                        x, (0, 0, 0, pad_size)
-                    )
-            x = mlp_tp_all_gather(x, dim=0)
+                        x = torch.nn.functional.pad(
+                            x, (0, 0, 0, pad_size)
+                        )
+                x = mlp_tp_all_gather(x, dim=0)
         gate_up, _ = self.gate_up_proj(x)
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         if not self.is_shared_experts:
-            x = mlp_tp_reduce_scatter(x)
-            if is_prefill and pad_size > 0:
-                # remove padding
-                x = x[:local_length, :]
+            if is_enable_node_mlp():
+                x = mlp_tp_reduce_scatter(x)
+                if is_prefill and pad_size > 0:
+                    # remove padding
+                    x = x[:local_length, :]
         return x
 
 
@@ -1295,6 +1296,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         model_config: ModelConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        parallel_config: Optional[ParallelConfig] = None,
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = config.hidden_size
@@ -1350,6 +1352,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                parallel_config=parallel_config,
             )
             self.mla_moe_communication = False
         self.input_layernorm = RMSNorm(config.hidden_size,
@@ -1451,6 +1454,7 @@ class CustomDeepseekV2Model(nn.Module):
         model_config = vllm_config.model_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        parallel_config = vllm_config.parallel_config
 
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -1473,6 +1477,7 @@ class CustomDeepseekV2Model(nn.Module):
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                parallel_config=parallel_config,
             ),
             prefix=f"{prefix}.layers")
 
