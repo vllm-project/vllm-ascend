@@ -17,7 +17,6 @@
 
 from typing import Any, Dict, Optional
 
-import numpy as np
 import torch
 import torch_npu
 from vllm.config import get_current_vllm_config
@@ -29,8 +28,11 @@ class AscendW4A8DynamicLinearMethod:
 
     def __init__(self):
         self.transpose_weight = True
-        self.group_size = get_current_vllm_config(
-        ).quant_config.quant_description.get("group_size", 256)
+        try:
+            self.group_size = get_current_vllm_config(
+            ).quant_config.quant_description.get("group_size", 256)
+        except AttributeError:
+            self.group_size = 256
 
     @staticmethod
     def get_weight(input_size: int, output_size: int,
@@ -70,24 +72,15 @@ class AscendW4A8DynamicLinearMethod:
 
     @staticmethod
     def process_scale_second(weight: torch.Tensor, scale: torch.Tensor,
-                             pergroup_scale: torch.Tensor):
+                             per_group_scale: torch.Tensor):
         k, n = weight.shape
-        group_num, n = pergroup_scale.shape
+        group_num, n = per_group_scale.shape
         weight_high = weight.to(torch.float32).reshape(
-            group_num, -1, n) * pergroup_scale.reshape(group_num, 1, n)
+            group_num, -1, n) * per_group_scale.reshape(group_num, 1, n)
         weight_high = weight_high.reshape(k, n)
         bias = 8 * (weight_high.to(torch.float32) * scale).sum(dim=0)
-        scale_second = (scale * pergroup_scale).reshape(group_num, n).to(
-            torch.float16).to(torch.float32)
-        scale_second_uint32 = scale_second.cpu().numpy()
-        scale_second_uint32.dtype = np.uint32
-        scale_second_uint64 = np.zeros((group_num, n * 2), dtype=np.uint32)
-        scale_second_uint64[..., ::2] = scale_second_uint32
-        scale_second_uint64 = np.frombuffer(scale_second_uint64.tobytes(),
-                                            dtype=np.int64).copy()
-        scale_second_uint64 = torch.from_numpy(scale_second_uint64).reshape(
-            group_num, n)
-        return scale_second_uint64.npu(), bias
+        antiquant_scale = (scale * per_group_scale).reshape(group_num, n)
+        return antiquant_scale.npu(), bias
 
     def apply(
         self,
@@ -96,15 +89,12 @@ class AscendW4A8DynamicLinearMethod:
         bias: Optional[torch.Tensor] = None,
         tp_rank: Optional[int] = None,
     ) -> torch.Tensor:
-        quantized_x, dynamic_scale = torch_npu.npu_dynamic_quant(x)
-        return torch_npu.npu_quant_matmul(
-            x1=quantized_x,
-            x2=layer.weight,
-            scale=layer.weight_scale_second,
-            pertoken_scale=dynamic_scale.unsqueeze(dim=-1),
-            offset=layer.weight_scale_bias,
-            group_sizes=[0, 0, self.group_size],
-            output_dtype=x.dtype)
+        return torch_npu.npu_weight_quant_batchmatmul(
+            x,
+            layer.weight,
+            antiquant_scale=layer.weight_scale_second.to(x.dtype),
+            antiquant_group_size=self.group_size,
+        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         if self.transpose_weight:
