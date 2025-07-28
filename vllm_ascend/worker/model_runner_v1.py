@@ -54,7 +54,7 @@ from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
+from vllm.multimodal.inputs import MultiModalKwargs
 from vllm.multimodal.utils import group_mm_inputs_by_modality
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
@@ -94,12 +94,13 @@ from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
-if not vllm_version_is("0.10.0"):
-    from vllm.tasks import GenerationTask, SupportedTask
-
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
+    from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.core.sched.output import SchedulerOutput
+
+    if not vllm_version_is("0.10.0"):
+        from vllm.tasks import GenerationTask, SupportedTask
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
 

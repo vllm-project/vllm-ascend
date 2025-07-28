@@ -36,8 +36,6 @@ from vllm_ascend.ascend_config import get_ascend_config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-else:
-    VllmConfig = None
 
 # NOTE: Currently, we can only capture 1920 graphs at most,
 # due to the limitation of ACL graph. This number is bounded by
@@ -57,6 +55,8 @@ _IS_310P = None
 _SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
 _ASCEND_CUSTOMOP_IS_REIGISTERED = False
+
+PAD_SLOT_ID = -1
 
 
 def is_310p():

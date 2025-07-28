@@ -7,7 +7,6 @@ import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
-from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (LinearBase,
@@ -22,7 +21,7 @@ from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
 from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
-from vllm_ascend.utils import npu_prefetch
+from vllm_ascend.utils import PAD_SLOT_ID, npu_prefetch
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 if TYPE_CHECKING:

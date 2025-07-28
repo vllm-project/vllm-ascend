@@ -25,7 +25,7 @@
 # # vllm-project/vllm/vllm/model_executor/models/deepseek_v2.py
 # """Inference-only DeepseekV2/DeepseekV3 model."""
 
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -33,7 +33,6 @@ import torch_npu  # noqa: F401
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
                               get_tp_group, tensor_model_parallel_all_reduce)
@@ -62,7 +61,6 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.sequence import IntermediateTensors
 
-import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.deepseek_v2 import (CustomDeepseekV2MLP,
                                             CustomDeepseekV2RowParallelLinear)
@@ -79,7 +77,8 @@ from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.utils import dispose_tensor
 
-VLLM_ASCEND_ENABLE_DBO: bool = envs_ascend.VLLM_ASCEND_ENABLE_DBO
+if TYPE_CHECKING:
+    from vllm.config import CacheConfig, ModelConfig, VllmConfig
 
 
 class CustomDeepseekDBOMLP(CustomDeepseekV2MLP):
@@ -809,19 +808,18 @@ class CustomDeepseekDBOModel(nn.Module):
                 ["hidden_states", "residual"], config.hidden_size))
 
         # tbo related members
-        if VLLM_ASCEND_ENABLE_DBO:
-            self.use_mla = model_config.use_mla
-            self.multistream_config = MultiStreamConfig()
-            multistream_metadata = make_multistream_metadata_ds(
-                start_layer=self.start_layer + self.first_k_dense_replace,
-                end_layer=self.end_layer,
-                causal_lm=getattr(config, "causal_lm", True),
-                multistream_config=self.multistream_config,
-            )
-            self.ms_pre_layer = MultiStreamPreTransformerLayer(
-                multistream_metadata)
-            self.ms_post_layer = MultiStreamPostTransformerLayer(
-                multistream_metadata)
+        self.use_mla = model_config.use_mla
+        self.multistream_config = MultiStreamConfig()
+        multistream_metadata = make_multistream_metadata_ds(
+            start_layer=self.start_layer + self.first_k_dense_replace,
+            end_layer=self.end_layer,
+            causal_lm=getattr(config, "causal_lm", True),
+            multistream_config=self.multistream_config,
+        )
+        self.ms_pre_layer = MultiStreamPreTransformerLayer(
+            multistream_metadata)
+        self.ms_post_layer = MultiStreamPostTransformerLayer(
+            multistream_metadata)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -846,8 +844,7 @@ class CustomDeepseekDBOModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        num_normal_layers = (self.first_k_dense_replace
-                             if VLLM_ASCEND_ENABLE_DBO and self.can_run_ms()
+        num_normal_layers = (self.first_k_dense_replace if self.can_run_ms()
                              else self.end_layer - self.start_layer)
 
         moe_start_layer = self.start_layer + num_normal_layers

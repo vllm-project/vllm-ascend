@@ -15,7 +15,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Set,
+                    Tuple, Union)
 
 import torch
 import torch.distributed as dist
@@ -26,7 +27,6 @@ from torch.nn import Parameter
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (divide, get_pp_group,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -59,6 +59,9 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p
+
+if TYPE_CHECKING:
+    from vllm.config import CacheConfig, VllmConfig
 
 logger = init_logger(__name__)
 

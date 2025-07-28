@@ -23,13 +23,13 @@ import torch
 import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
-from vllm.attention.backends.utils import PAD_SLOT_ID, CommonAttentionState
+from vllm.attention.backends.utils import CommonAttentionState
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
-                               nd_to_nz_2d)
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, PAD_SLOT_ID, aligned_16,
+                               is_310p, nd_to_nz_2d)
 
 
 class AscendAttentionTorchairBackend(AttentionBackend):

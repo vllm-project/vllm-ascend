@@ -17,13 +17,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
-from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -38,6 +36,10 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import CustomDeepseekV2DecoderLayer
+
+if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttentionMetadata
+    from vllm.config import CacheConfig, ModelConfig, VllmConfig
 
 
 class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):

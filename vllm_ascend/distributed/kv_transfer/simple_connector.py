@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 import torch
 import torch_npu
 import vllm.envs as vllm_envs
-from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import logger
@@ -30,6 +29,7 @@ from vllm_ascend.distributed.kv_transfer.simple_buffer import SimpleBuffer
 from vllm_ascend.distributed.kv_transfer.simple_pipe import SimplePipe
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 

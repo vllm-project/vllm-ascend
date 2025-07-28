@@ -19,7 +19,7 @@
 
 from collections.abc import Iterable
 from functools import partial
-from typing import Callable, Optional, Set, Tuple, Type
+from typing import TYPE_CHECKING, Callable, Optional, Set, Tuple, Type
 
 import torch
 import torch.nn as nn
@@ -27,7 +27,6 @@ import torch_npu
 from einops import rearrange
 from transformers.models.qwen2_vl.configuration_qwen2_vl import \
     Qwen2VLVisionConfig
-from vllm.config import VllmConfig
 from vllm.distributed import utils as dist_utils
 from vllm.model_executor.layers.activation import QuickGELU
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -42,6 +41,9 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 
 MIN_PAD_SIZE = 64  # min_size to pad weight
 MAX_PAD_SIZE = 128  # max_size to pad weight
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 class AscendQwen2VisionAttention(Qwen2VisionAttention):
