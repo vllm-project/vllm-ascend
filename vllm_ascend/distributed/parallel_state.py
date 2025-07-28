@@ -44,7 +44,6 @@ def initialize_local_comm_group(backend) -> None:
     if not torch.distributed.is_initialized():
         raise RuntimeError("torch.distributed must be initialized")
     world_size: int = torch.distributed.get_world_size()
-    visible_devices_count = len(os.getenv("ASCEND_RT_VISIBLE_DEVICES", "").split(","))
     local_size = len(os.getenv("ASCEND_RT_VISIBLE_DEVICES", "").split(",")) \
         if os.getenv("ASCEND_RT_VISIBLE_DEVICES") is not None \
         else torch.npu.device_count()
@@ -61,7 +60,7 @@ def initialize_local_comm_group(backend) -> None:
         ranks = list(range(i * local_size, (i + 1) * local_size))
         group_ranks.append(ranks)
     
-    logger.info(f"vllm-ascend: world size {world_size}, visible device count {visible_devices_count}, local size {local_size}, "
+    logger.info(f"vllm-ascend: world size {world_size}, local size {local_size}, "
                 f"num local groups {num_local_groups}, group ranks {group_ranks}")
 
     _LOCAL_COMM_GROUP = init_model_parallel_group(
