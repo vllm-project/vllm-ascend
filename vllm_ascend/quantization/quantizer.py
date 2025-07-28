@@ -82,7 +82,7 @@ class VLLMAscendQuantizer:
                     "vllm.model_executor.layers.layernorm.RMSNorm",
                     "forward_oot", [wrapper_rmsnorm_forward_oot])
                 VLLMAscendQuantizer.apply_patch(
-                    "vllm_ascend.worker.model_runner.NPUModelRunnerBase",
+                    "vllm_ascend.worker.model_runner_v1.NPUModelRunner",
                     "load_model", [wrapper_load_model])
                 break
         VLLMAscendQuantizer.patched = True
