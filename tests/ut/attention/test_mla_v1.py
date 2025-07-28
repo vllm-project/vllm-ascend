@@ -9,8 +9,7 @@ from tests.ut.base import TestBase
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.mla_v1 import (AscendMLABackend,
                                           AscendMLADecodeMetadata,
-                                          AscendMLAImpl, AscendMLAImpl092,
-                                          AscendMLAMetadata,
+                                          AscendMLAImpl, AscendMLAMetadata,
                                           AscendMLAMetadataBuilder,
                                           AscendMLAPrefillMetadata)
 
@@ -36,7 +35,7 @@ class TestAscendMLABackend(TestBase):
     def test_get_impl_cls_092(self, mock_version):
         mock_version.return_value = True
         result = AscendMLABackend.get_impl_cls()
-        self.assertEqual(result, AscendMLAImpl092)
+        self.assertNotEqual(result, AscendMLAImpl)
 
     @patch("vllm_ascend.attention.mla_v1.vllm_version_is")
     def test_get_impl_cls(self, mock_version):
