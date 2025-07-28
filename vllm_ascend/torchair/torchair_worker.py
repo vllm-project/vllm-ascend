@@ -52,13 +52,3 @@ class NPUTorchairWorker(NPUWorker):
         self.model_runner.new_kv_cache_bytes = available_kv_cache_memory
 
         return available_kv_cache_memory
-
-    def _get_max_num_tokens_and_with_prefill(self):
-        """Override _get_max_num_tokens_and_with_prefill to update max_num_tokens."""
-
-        max_num_tokens, with_prefill = super(
-        )._get_max_num_tokens_and_with_prefill()
-        if not with_prefill:
-            max_num_tokens = self.model_runner.select_torchair_padded_batch_size(
-                max_num_tokens)
-        return max_num_tokens, with_prefill

@@ -429,15 +429,6 @@ def npu_prefetch(input: torch.Tensor,
     torch_npu.npu_prefetch(input, dependency, max_size)
 
 
-# TODO(zzzzwwjj): move this into forward_context
-class FusedMoEState(Enum):
-    AllGather = 0
-    All2All = 1
-    MC2 = 2
-    AllGatherEP = 3
-    NaiveMulticast = 4
-
-
 # TODO(ttanzhiqiang): rm_router_logits
 # dp>1 will trigger
 # In theory, this solution is only applicable to AllGather and AllGatherEP, because in the dp scenario, the previous operation was gate + two communications, and now it is changed to one communication + gate operation, which can save some communication time. In theory, all moe AllGather and AllGatherEP solutions can follow this logic, but now other moe models (qwen3-235b) dp solutions are not adjusted, so use the switch to control it to prevent code errors.
@@ -468,26 +459,6 @@ def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
     return False
 
 
-# TODO(zzzzwwjj): add soc_version to choose branch
-def get_fused_moe_state(ep_size: int, with_prefill: bool,
-                        is_deepseek_v3_r1: bool):
-    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
-    # only supports deepseek v3/r1
-    if (envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
-            and is_deepseek_v3_r1):
-        return FusedMoEState.AllGatherEP
-    elif ep_size == 1:
-        if with_prefill:
-            return FusedMoEState.NaiveMulticast
-        else:
-            return FusedMoEState.AllGather
-    # NOTE: mc2 need ep_size >= 16 & all2all can't use in torchair graph.
-    elif ep_size < 16 or with_prefill:
-        return FusedMoEState.All2All
-    else:
-        return FusedMoEState.MC2
-
-
 def register_ascend_customop():
     """Register Ascend CustomOP
 
@@ -506,3 +477,30 @@ def register_ascend_customop():
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
+
+
+# TODO(zzzzwwjj): It will be judged with _build_info afterwards.
+class AscendSocVersion(Enum):
+    A2 = 0
+    A3 = 1
+    UNDEFINED = 2
+
+
+_ascend_soc_version = None
+
+
+def init_ascend_soc_version():
+    soc_version = torch_npu.npu.get_soc_version()
+    global _ascend_soc_version
+    if 220 <= soc_version <= 225:
+        _ascend_soc_version = AscendSocVersion.A2
+    elif 250 <= soc_version <= 255:
+        _ascend_soc_version = AscendSocVersion.A3
+    else:
+        _ascend_soc_version = AscendSocVersion.UNDEFINED
+
+
+def get_ascend_soc_version():
+    global _ascend_soc_version
+    assert _ascend_soc_version is not None
+    return _ascend_soc_version

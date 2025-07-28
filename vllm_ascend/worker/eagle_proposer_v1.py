@@ -7,13 +7,13 @@ from vllm.attention.layer import Attention
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.sample.metadata import SamplingMetadata
 
+from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
@@ -142,9 +142,9 @@ class EagleProposer:
         self.positions[:num_tokens] = target_positions.to(device)
         self.hidden_states[:num_tokens] = target_hidden_states
         attn_metadata.block_tables = block_table.to(device)
-        with set_forward_context(attn_metadata,
-                                 self.vllm_config,
-                                 num_tokens=num_input_tokens):
+        with set_ascend_forward_context(attn_metadata,
+                                        self.vllm_config,
+                                        num_tokens=num_input_tokens):
             last_hidden_states, hidden_states = self.model(
                 input_ids=self.input_ids[:num_input_tokens],
                 positions=self.positions[:num_input_tokens],
@@ -239,9 +239,9 @@ class EagleProposer:
             attn_metadata.attn_mask = attn_mask
             attn_metadata.block_tables = block_table.to(device)
             # Run the model.
-            with set_forward_context(attn_metadata,
-                                     self.vllm_config,
-                                     num_tokens=input_batch_size):
+            with set_ascend_forward_context(attn_metadata,
+                                            self.vllm_config,
+                                            num_tokens=input_batch_size):
 
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:input_batch_size],
@@ -344,8 +344,9 @@ class EagleProposer:
         self,
         num_tokens: int,
     ) -> None:
-        with set_forward_context(None, self.vllm_config,
-                                 num_tokens=num_tokens):
+        with set_ascend_forward_context(None,
+                                        self.vllm_config,
+                                        num_tokens=num_tokens):
             self.model(
                 input_ids=self.input_ids[:num_tokens],
                 positions=self.positions[:num_tokens],

@@ -22,8 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from vllm.logger import logger
 
-from .func_wrapper import (wrapper_load_model, wrapper_rmsnorm_forward_oot,
-                           wrapper_rmsnorm_init)
+from .func_wrapper import wrapper_rmsnorm_forward_oot, wrapper_rmsnorm_init
 from .w8a8 import (AscendC8KVCacheMethod, AscendW8A8FusedMoEMethod,
                    AscendW8A8LinearMethod)
 from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
@@ -81,9 +80,6 @@ class VLLMAscendQuantizer:
                 VLLMAscendQuantizer.apply_patch(
                     "vllm.model_executor.layers.layernorm.RMSNorm",
                     "forward_oot", [wrapper_rmsnorm_forward_oot])
-                VLLMAscendQuantizer.apply_patch(
-                    "vllm_ascend.worker.model_runner.NPUModelRunnerBase",
-                    "load_model", [wrapper_load_model])
                 break
         VLLMAscendQuantizer.patched = True
         logger.info("Using the vLLM Ascend Quantizer version now!")

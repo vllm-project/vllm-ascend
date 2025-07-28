@@ -837,12 +837,8 @@ class PanguProMoEModel(nn.Module):
             # if attn_meatadata is not passed, we try to get it from forward_context.
             if attn_metadata is None:
                 attn_metadata = get_forward_context().attn_metadata
-            if attn_metadata is None:
-                # when attn_meatadata is None, it is in profile_run. num_tokens on all dp ranks
-                # are same.
-                max_tokens_across_dp = hidden_states.shape[0]
-            else:
-                max_tokens_across_dp = attn_metadata.max_num_tokens_across_dp
+
+            max_tokens_across_dp = get_forward_context().max_tokens_across_dp
 
             tp_size = get_tp_group().world_size
             # reduce scatter will split the input tensor into equal sizes and then scatter them on all ranks.
