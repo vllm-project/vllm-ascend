@@ -1437,6 +1437,7 @@ class AscendFusedMoE(FusedMoE):
                 final_hidden_states = e_hidden_states
             if num_tokens < padding_size:
                 final_hidden_states = final_hidden_states[:num_tokens]
+            dispose_tensor(e_hidden_states)
         elif self.dp_size > 1:
             if fused_moe_state == FusedMoEState.NaiveMulticast:
                 start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
