@@ -151,11 +151,12 @@ class TestAscendMLAMetadata(TestBase):
         decode = None
         prefill = None
 
-        metadata = AscendMLAMetadata(
-            num_actual_tokens, slot_mapping, query_start_loc, seq_lens,
-            block_tables, num_decodes, num_decode_tokens, num_prefills,
-            num_input_tokens, max_num_tokens_across_dp, with_prefill_across_dp,
-            query_lens, head_dim, attn_mask, attn_state, decode, prefill)
+        metadata = AscendMLAMetadata(num_actual_tokens, slot_mapping,
+                                     query_start_loc, seq_lens, block_tables,
+                                     num_decodes, num_decode_tokens,
+                                     num_prefills, num_input_tokens,
+                                     query_lens, head_dim, attn_mask,
+                                     attn_state, decode, prefill)
 
         self.assertEqual(metadata.num_actual_tokens, num_actual_tokens)
         self.assertIs(metadata.slot_mapping, slot_mapping)
