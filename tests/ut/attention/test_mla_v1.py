@@ -39,7 +39,7 @@ class TestAscendMLABackend(TestBase):
         self.assertEqual(result, AscendMLAImpl092)
 
     @patch("vllm_ascend.attention.mla_v1.vllm_version_is")
-    def test_get_impl_cls_092(self, mock_version):
+    def test_get_impl_cls(self, mock_version):
         mock_version.return_value = False
         result = AscendMLABackend.get_impl_cls()
         self.assertEqual(result, AscendMLAImpl)
