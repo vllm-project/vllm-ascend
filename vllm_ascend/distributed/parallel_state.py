@@ -44,9 +44,21 @@ def initialize_local_comm_group(backend) -> None:
     if not torch.distributed.is_initialized():
         raise RuntimeError("torch.distributed must be initialized")
     world_size: int = torch.distributed.get_world_size()
-    local_size = len(os.getenv("ASCEND_RT_VISIBLE_DEVICES", "").split(",")) \
-        if os.getenv("ASCEND_RT_VISIBLE_DEVICES") is not None \
-        else torch.npu.device_count()
+    logger.info(f"ASCEND_RT_VISIBLE_DEVICES {os.getenv("ASCEND_RT_VISIBLE_DEVICES")}")
+    logger.info(f"ASCEND_VISIBLE_DEVICES {os.getenv("ASCEND_VISIBLE_DEVICES")}")
+    if os.getenv("ASCEND_RT_VISIBLE_DEVICES") is not None:
+        local_size = len(os.getenv("ASCEND_RT_VISIBLE_DEVICES").split(","))
+        logger.info(f"Using ASCEND_RT_VISIBLE_DEVICES: {local_size} devices")
+    elif os.getenv("ASCEND_VISIBLE_DEVICES") is not None:
+        local_size = len(os.getenv("ASCEND_VISIBLE_DEVICES").split(","))
+        logger.info(f"Using ASCEND_VISIBLE_DEVICES: {local_size} devices")
+    else:
+        local_size = torch.npu.device_count()
+        logger.info(f"Using torch.npu.device_count(): {local_size} devices")
+        
+    # local_size = len(os.getenv("ASCEND_RT_VISIBLE_DEVICES").split(",")) \
+    #     if os.getenv("ASCEND_RT_VISIBLE_DEVICES") is not None \
+    #     else torch.npu.device_count()
     local_size = calculate_effective_local_size(local_size, world_size)
 
     backend = backend or torch.distributed.get_backend(get_world_group().device_group)
