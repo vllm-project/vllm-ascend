@@ -18,9 +18,9 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
     def test_get_pergroup_param(self):
         params = self.method.get_pergroup_param(8, 32, torch.bfloat16)
         self.assertEqual(params["weight_scale"].dtype, torch.bfloat16)
-        self.assertEqual(params["weight_scale"].shape, (1, ))
+        self.assertEqual(params["weight_scale"].shape, (32, 1))
         self.assertEqual(params["weight_offset"].dtype, torch.bfloat16)
-        self.assertEqual(params["weight_offset"].shape, (1, ))
+        self.assertEqual(params["weight_offset"].shape, (32, 1))
         self.assertEqual(params["weight_scale_second"].dtype, torch.bfloat16)
         self.assertEqual(params["weight_scale_second"].shape, (32, 1))
         self.assertEqual(params["weight_offset_second"].dtype, torch.bfloat16)
