@@ -77,13 +77,16 @@ class AscendW4A8DynamicLinearMethod:
             group_num, -1, n) * pergroup_scale.reshape(group_num, 1, n)
         weight_high = weight_high.reshape(k, n)
         bias = 8 * (weight_high.to(torch.float32) * scale).sum(dim=0)
-        scale_second = (scale * pergroup_scale).reshape(group_num, n).to(torch.float16).to(torch.float32)
+        scale_second = (scale * pergroup_scale).reshape(group_num, n).to(
+            torch.float16).to(torch.float32)
         scale_second_uint32 = scale_second.cpu().numpy()
         scale_second_uint32.dtype = np.uint32
         scale_second_uint64 = np.zeros((group_num, n * 2), dtype=np.uint32)
         scale_second_uint64[..., ::2] = scale_second_uint32
-        scale_second_uint64 = np.frombuffer(scale_second_uint64.tobytes(), dtype=np.int64).copy()
-        scale_second_uint64 = torch.from_numpy(scale_second_uint64).reshape(group_num, n)
+        scale_second_uint64 = np.frombuffer(scale_second_uint64.tobytes(),
+                                            dtype=np.int64).copy()
+        scale_second_uint64 = torch.from_numpy(scale_second_uint64).reshape(
+            group_num, n)
         return scale_second_uint64.npu(), bias
 
     def apply(
@@ -101,8 +104,7 @@ class AscendW4A8DynamicLinearMethod:
             pertoken_scale=dynamic_scale.unsqueeze(dim=-1),
             offset=layer.weight_scale_bias,
             group_sizes=[0, 0, self.group_size],
-            output_dtype=x.dtype
-        )
+            output_dtype=x.dtype)
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         if self.transpose_weight:

@@ -198,10 +198,7 @@ class AscendLinearMethod(LinearMethodBase):
             set_weight_attrs(param, extra_weight_attrs)
 
         pergroup_dict = self.quant_method.get_pergroup_param(
-            input_size_per_partition,
-            output_size_per_partition,
-            params_dtype
-        )
+            input_size_per_partition, output_size_per_partition, params_dtype)
         for pergroup_name, pergroup_param in pergroup_dict.items():
             param = torch.nn.Parameter(pergroup_param, requires_grad=False)
             set_weight_attrs(param, {"output_dim": 0})
