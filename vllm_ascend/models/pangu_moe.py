@@ -33,7 +33,7 @@ from vllm.distributed import (divide, get_pp_group,
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
                                              get_tp_group, get_world_group)
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -59,8 +59,6 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p
-
-logger = init_logger(__name__)
 
 _ROUTER_SCALE = None
 

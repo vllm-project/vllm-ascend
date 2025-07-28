@@ -4,13 +4,10 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import vllm.v1.sample.rejection_sampler as rs
-from vllm.logger import init_logger
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (RejectionSampler, compute_probs,
                                               generate_uniform_probs)
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-
-logger = init_logger(__name__)
 
 PLACEHOLDER_TOKEN_ID = -1
 GREEDY_TEMPERATURE = -1

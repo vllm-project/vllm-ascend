@@ -22,12 +22,10 @@ import llm_datadist  # type: ignore
 import torch
 from vllm.distributed.kv_transfer.kv_lookup_buffer.base import \
     KVLookupBufferBase
-from vllm.logger import init_logger
+from vllm.logger import logger
 
 from vllm_ascend.distributed.kv_transfer.simple_pipe import SimplePipe
 from vllm_ascend.distributed.kv_transfer.utils import TORCH_DTYPE_TO_NPU_DTYPE
-
-logger = init_logger(__name__)
 
 
 # Hash a string into a int32 value.
