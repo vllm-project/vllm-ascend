@@ -19,5 +19,6 @@
 # patch files.
 import vllm_ascend.patch.worker.patch_common.patch_utils  # noqa isort:skip
 import vllm_ascend.patch.worker.patch_common.patch_distributed  # noqa
+import vllm_ascend.patch.worker.patch_common.patch_linear  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_minicpm  # noqa
 import vllm_ascend.patch.worker.patch_common.patch_sampler  # noqa

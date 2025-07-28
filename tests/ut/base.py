@@ -19,10 +19,6 @@ import pytest
 
 from vllm_ascend.utils import adapt_patch, register_ascend_customop
 
-# fused moe ops test will hit the infer_schema error, we need add the patch
-# here to make the test pass.
-import vllm_ascend.patch.worker.patch_common.patch_utils  # type: ignore[import]  # isort: skip  # noqa
-
 
 class TestBase(unittest.TestCase):
 
