@@ -84,12 +84,8 @@ class CustomVocabParallelEmbedding(VocabParallelEmbedding):
                          prefix)
 
         # Keep the input dimensions.
-        # tp_rank = get_tensor_model_parallel_rank()
-        # self.tp_size = get_tensor_model_parallel_world_size()
-        # self.lm_tp_size = self.tp_size
         self.lm_tp_size = get_lm_tensor_model_parallel_world_size()
-        lm_tp_rank = get_lm_tensor_model_parallel_rank()
-        print("##########lm_tp_rank",lm_tp_rank)
+        self.lm_tp_rank = get_lm_tensor_model_parallel_rank()
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
         self.org_vocab_size = org_num_embeddings or num_embeddings
@@ -104,7 +100,7 @@ class CustomVocabParallelEmbedding(VocabParallelEmbedding):
         self.shard_indices = self._get_indices(self.num_embeddings_padded,
                                                self.org_vocab_size_padded,
                                                self.num_embeddings,
-                                               self.org_vocab_size, lm_tp_rank,
+                                               self.org_vocab_size, self.lm_tp_rank,
                                                self.lm_tp_size)
         self.embedding_dim = embedding_dim
 
