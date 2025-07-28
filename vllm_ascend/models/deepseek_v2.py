@@ -950,7 +950,7 @@ class CustomDeepseekV2MLP(nn.Module):
                     pad_size = 0
                     # pd mix use
                     if self.parallel_config is not None and \
-                            self.parallel_config.dp_size > 1:
+                            self.parallel_config.data_parallel_size > 1:
                         local_length = x.shape[0]
                         reduce_length = torch.tensor(x.shape[0], dtype=torch.int64, device="npu")
                         dist.all_reduce(reduce_length, op=dist.ReduceOp.MAX, async_op=False)
