@@ -31,15 +31,7 @@ class TestAscendMLABackend(TestBase):
         result = AscendMLABackend.get_kv_cache_shape(2, 4, 8, 128)
         self.assertEqual(result, (2, 4, 8, 128))
 
-    @patch("vllm_ascend.attention.mla_v1.vllm_version_is")
-    def test_get_impl_cls_092(self, mock_version):
-        mock_version.return_value = True
-        result = AscendMLABackend.get_impl_cls()
-        self.assertNotEqual(result, AscendMLAImpl)
-
-    @patch("vllm_ascend.attention.mla_v1.vllm_version_is")
-    def test_get_impl_cls(self, mock_version):
-        mock_version.return_value = False
+    def test_get_impl_cls(self):
         result = AscendMLABackend.get_impl_cls()
         self.assertEqual(result, AscendMLAImpl)
 
@@ -505,7 +497,7 @@ class TestAscendMLAImpl(TestBase):
 
     def test_compute_prefill_context_none(self):
         batch_size = 4
-        kv_cache = torch.randn(1, 1, 1, 192)
+        kv_cache = torch.randn(10, 1, 1, 192)
         query = torch.randn(batch_size, self.impl.num_heads,
                             self.impl.qk_head_dim)
         metadata = MagicMock()
@@ -524,9 +516,12 @@ class TestAscendMLAImpl(TestBase):
     def test_compute_prefill_context(self, mock_ring, mock_load):
         S, N, D, VD = 2, self.impl.num_heads, self.impl.qk_head_dim, self.impl.v_head_dim
         _, AND = self.impl.qk_rope_head_dim, self.impl.qk_nope_head_dim
+        latent_kv_dim = self.impl.kv_lora_rank
         num_blocks, block_size = 100, 20
         query = torch.randn(S, N, D)
-        kv_cache = torch.randn(num_blocks, block_size, N, D)
+        kv_cache_0 = torch.randn(num_blocks, block_size, N, latent_kv_dim)
+        kv_cache_1 = torch.randn(num_blocks, block_size, N, D)
+        kv_cache = [kv_cache_0, kv_cache_1]
         prefix_out = torch.randn(S, N, 128)
         prefix_lse = torch.randn(S, N)
 
