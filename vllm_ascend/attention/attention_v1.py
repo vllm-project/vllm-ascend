@@ -27,11 +27,11 @@ from vllm.attention.backends.utils import CommonAttentionState
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import direct_register_custom_op
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d, nd_to_nz_spec)
+from vllm_ascend.worker.npu_input_batch import InputBatch
 
 
 class AscendAttentionBackend(AttentionBackend):
