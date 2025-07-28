@@ -9,30 +9,17 @@
 namespace vllm_ascend {
 namespace meta {
 
-std::tuple<at::Tensor, at::Tensor> rotary_embedding_meta(at::Tensor &positions, at::Tensor &query, at::Tensor &key,
-  int64_t head_size, at::Tensor &cos_sin_cache,  bool is_neox) {
-    int64_t num_tokens = positions.numel();
-    int positions_ndim = positions.dim();
-    TORCH_CHECK(
-        positions_ndim == 1 || positions_ndim == 2,
-        "positions must have shape [num_tokens] or [batch_size, seq_len]");
-    if (positions_ndim == 1) {
-      TORCH_CHECK(
-          query.size(0) == positions.size(0) && key.size(0) == positions.size(0),
-          "query, key and positions must have the same number of tokens");
-    }
-    if (positions_ndim == 2) {
-      TORCH_CHECK(
-          query.size(0) == positions.size(0) &&
-              key.size(0) == positions.size(0) &&
-              query.size(1) == positions.size(1) &&
-              key.size(1) == positions.size(1),
-          "query, key and positions must have the same batch_size and seq_len");
-    }
-
-    TORCH_CHECK(head_size % 32 == 0, "rotary_embedding: headSize should be divisible by 32");
-    int query_hidden_size = query.numel() / num_tokens;
-    int key_hidden_size = key.numel() / num_tokens;
+// In order to support symbolic tracing, the specific shape format is required here.
+std::tuple<at::Tensor, at::Tensor> rotary_embedding_meta(
+  at::Tensor &positions,  // [num_tokens]
+  at::Tensor &query,      // [num_tokens, hidden_size]
+  at::Tensor &key,        // [num_tokens, hidden_size]
+  int64_t head_size, 
+  at::Tensor &cos_sin_cache,  // we don't care about this shape 
+  bool is_neox) {
+    int64_t num_tokens = query.size(0);
+    int query_hidden_size = query.size(1)
+    int key_hidden_size = key.size(1);
     TORCH_CHECK(query_hidden_size % head_size == 0);
     TORCH_CHECK(key_hidden_size % head_size == 0);
     TORCH_CHECK(is_neox == true, "rotary_embedding: neox=false is not supported as custom kernel in vllm-ascend");
@@ -61,9 +48,6 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask_meta(
     TORCH_CHECK(num_org_vocab_padding >= 0, "num_org_vocab_padding must be non-negative");
     TORCH_CHECK(added_vocab_start_index >= org_vocab_end_index, "added_vocab_start_index must be greater than org_vocab_end_index");
     TORCH_CHECK(added_vocab_end_index >= added_vocab_start_index, "added_vocab_end_index must be greater than added_vocab_start_index");
-
-    // Get total number of elements
-    int64_t size = input.numel();
 
     // Create output tensors
 
