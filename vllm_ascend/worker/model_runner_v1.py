@@ -1004,11 +1004,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             attn_state = AscendAttentionState.ChunkedPrefill
         else:
             attn_state = AscendAttentionState.PrefillCacheHit
-        
+
         # in mla, both PrefillCacheHit and ChunkedPrefill will use _npu_ring_mla
         if self.vllm_config.model_config.use_mla and \
             attn_state in [
-                AscendAttentionState.PrefillCacheHit, 
+                AscendAttentionState.PrefillCacheHit,
                 AscendAttentionState.ChunkedPrefill
             ]:
             attn_state = AscendAttentionState.ChunkedPrefill
