@@ -15,12 +15,11 @@
 # limitations under the License.
 #
 
-from typing import Any, Callable, Dict, Optional, Tuple, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
 import torch_npu
-from vllm.distributed import GroupCoordinator
 from vllm.distributed.parallel_state import get_ep_group
 
 import vllm_ascend.envs as envs
@@ -29,6 +28,9 @@ from vllm_ascend.ops.fused_moe import select_experts
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, FusedMoEState,
                                dispose_tensor, get_fused_moe_state)
+
+if TYPE_CHECKING:
+    from vllm.distributed import GroupCoordinator
 
 
 def apply_mlp(hidden_states: torch.Tensor,

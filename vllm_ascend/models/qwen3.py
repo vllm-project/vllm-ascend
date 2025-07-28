@@ -1,11 +1,10 @@
 from collections.abc import Iterable
-from typing import Optional, Union
+from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 from torch import nn
 from transformers import Qwen3Config
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -19,6 +18,9 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ops.layernorm import AddRMSNormW8A8Quant
+
+if TYPE_CHECKING:
+    from vllm.config import CacheConfig, VllmConfig
 
 
 class CustomQwen3DecoderLayer(Qwen3DecoderLayer):

@@ -34,10 +34,6 @@ from vllm_ascend.utils import (ASCEND_QUATIZATION_METHOD, is_310p,
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
     from vllm.utils import FlexibleArgumentParser
-else:
-    ModelConfig = None
-    VllmConfig = None
-    FlexibleArgumentParser = None
 
 
 class NPUPlatform(Platform):

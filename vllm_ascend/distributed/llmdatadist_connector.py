@@ -15,14 +15,13 @@
 # limitations under the License.
 #
 import os
-import re
 import subprocess
 from typing import TYPE_CHECKING, List, Tuple, Union
 
+import regex as re
 import torch
 import torch_npu
 import torchair  # type: ignore
-from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.logger import logger
 from vllm.sequence import IntermediateTensors
@@ -30,6 +29,7 @@ from vllm.sequence import IntermediateTensors
 import vllm_ascend.envs as envs
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 import llm_datadist  # type: ignore

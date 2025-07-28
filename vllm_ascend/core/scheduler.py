@@ -16,9 +16,8 @@
 #
 import time
 from collections import deque
-from typing import Iterable, Union
+from typing import TYPE_CHECKING, Iterable, Union
 
-from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVEventBatch
 from vllm.logger import logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -30,6 +29,9 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 class AscendScheduler(Scheduler):

@@ -18,7 +18,7 @@
 
 import dataclasses
 from contextlib import ExitStack
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Set
 from unittest.mock import patch
 
 import torch
@@ -27,9 +27,11 @@ import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import end_monitoring_torch_compile
-from vllm.config import VllmConfig
 from vllm.logger import logger
 from vllm.utils import weak_ref_tensors
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 
 
 @dataclasses.dataclass

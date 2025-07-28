@@ -20,7 +20,7 @@
 import vllm_ascend.patch.worker.patch_common.patch_utils  # type: ignore[import]  # isort: skip  # noqa
 
 from types import MappingProxyType
-from typing import Any, Callable, Dict, List, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
 
 import torch
 from vllm.distributed import get_tensor_model_parallel_rank
@@ -31,8 +31,8 @@ from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization import \
     register_quantization_config
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase)
+from vllm.model_executor.layers.quantization.base_config import \
+    QuantizeMethodBase
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
@@ -41,6 +41,10 @@ from vllm_ascend.ops.fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD
 
 from .quantizer import AscendQuantizer
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.base_config import \
+        QuantizationConfig
 
 
 @register_quantization_config(ASCEND_QUATIZATION_METHOD)
