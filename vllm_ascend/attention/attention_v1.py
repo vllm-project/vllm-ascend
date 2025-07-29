@@ -122,6 +122,7 @@ class AscendMetadata:
 
     # **************************** Basic Properties ****************************
     attn_mask: Optional[torch.Tensor] = None
+
     # Current state of this attention run.
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
 
@@ -134,7 +135,9 @@ class AscendMetadata:
     seq_lens: torch.Tensor = None
 
     query_start_loc: torch.Tensor = None
+
     query_lens: torch.Tensor = None
+
     # Maximum query length in the batch (None for decoding).
     max_query_len: Optional[int] = None
 
@@ -325,6 +328,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
     ) -> torch.Tensor:
         assert attn_metadata is not None
         assert attn_metadata.attn_mask is not None
+
         mask = attn_metadata.attn_mask
 
         if is_310p():
@@ -506,16 +510,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
         # V0-Style scheduler situation.
         if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-            output = self._forward_prefill_no_cache(attn_metadata, query, key,
-                                                    value, output, num_tokens)
+            output = self._forward_prefill_no_cache(query, key, value,
+                                                    attn_metadata, output,
+                                                    num_tokens)
         elif attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
-            output = self._forward_prefill_cache_hit(attn_metadata, query,
+            output = self._forward_prefill_cache_hit(query, attn_metadata,
                                                      output)
         elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
-            output = self._forward_decode_only(attn_metadata, query, output)
+            output = self._forward_decode_only(query, attn_metadata, output)
         # Normal V1 situation.
         else:
-            output = self._forward_v1_style(attn_metadata, query, output)
+            output = self._forward_v1_style(query, attn_metadata, output)
 
         # to make in-place change to the output tensor
         ori_output[:, :, :] = output[:num_tokens, :, :]
