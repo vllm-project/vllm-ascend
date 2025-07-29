@@ -596,7 +596,6 @@ def fused_experts_with_all2all(hidden_states: torch.Tensor,
             sorted_local_expert_idx, local_num_experts).to(torch.int64)
 
         hidden_states = hidden_states[sorted_idx]
-        group_list_type = 0
     else:
         row_idx_len = num_tokens * top_k
         row_idx = torch.arange(0,
@@ -613,7 +612,7 @@ def fused_experts_with_all2all(hidden_states: torch.Tensor,
         expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
             expanded_expert_idx, num_experts)
         expert_tokens = expert_tokens.to(torch.int64)
-        group_list_type = 0
+    group_list_type = 0
 
     # `hidden_states` will be disposed in the `apply_mlp` function
     hidden_states = apply_mlp(
@@ -767,7 +766,7 @@ def fused_experts_with_all2all_v2(
         export_for_source_row=None,
         drop_pad_mode=2)
 
-    return final_hidden_states
+    return final_hidden_states, tokens_per_local_expert.to(torch.int64), 1
 
 
 def fused_experts(hidden_states: torch.Tensor,

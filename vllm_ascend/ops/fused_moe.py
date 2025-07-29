@@ -279,14 +279,15 @@ def fused_experts_with_mc2(
         **kwargs_mc2
     ) if enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine(
         **kwargs_mc2)
-
+    
+    group_list_type = 1
     if shared_experts is None:
-        return hidden_states
+        return hidden_states, expert_token_nums, group_list_type
     else:
         with npu_stream_switch("moe_secondary", 0):
             npu_wait_tensor(shared_act, down_out_list)
             shared_hidden_states, _ = shared_experts.down_proj(shared_act)
-        return hidden_states, shared_hidden_states
+        return hidden_states, shared_hidden_states, expert_token_nums, group_list_type
 
 
 def apply_mlp(
@@ -485,7 +486,7 @@ def fused_experts_with_all2all(
         )
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
-    return final_hidden_states
+    return final_hidden_states, expert_tokens, 0
 
 
 # currently expert parallelism implemented with all2all
@@ -626,7 +627,7 @@ def fused_experts_with_all2all_buffer(
 
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
-    return final_hidden_states
+    return final_hidden_states, expert_tokens, group_list_type
 
 
 def fused_experts_with_all2allv(
@@ -644,7 +645,7 @@ def fused_experts_with_all2allv(
 
     expert_output = apply_mlp(dispatched_input, w1, w2, tokens_per_expert)
     output, mlp_bias = token_dispatcher.token_unpermutation(expert_output)
-    return output
+    return output, tokens_per_expert.to(torch.int64), 1
 
 
 def fused_experts(
@@ -1321,8 +1322,9 @@ class AscendFusedMoE(FusedMoE):
                     router_logits, _ = gate(hidden_states.float())
                 else:
                     router_logits, _ = gate(hidden_states)
-                if (isinstance(self.quant_method.quant_method,
-                               AscendW8A8DynamicFusedMoEMethod)
+                if hasattr(self.quant_method, "quant_method") and (
+                        isinstance(self.quant_method.quant_method,
+                                   AscendW8A8DynamicFusedMoEMethod)
                         and fused_moe_state == FusedMoEState.MC2):
                     with npu_stream_switch("moe_secondary", 0):
                         quantized_x_for_share, dynamic_scale_for_share = (
