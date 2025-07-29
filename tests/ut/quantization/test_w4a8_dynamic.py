@@ -29,7 +29,8 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         self.assertEqual(params["weight_offset_second"].shape, (32, 1))
 
     @patch("torch_npu.npu_convert_weight_to_int4pack")
-    def test_process_weights_after_loading(self, mock_npu_convert_weight_to_int4pack):
+    def test_process_weights_after_loading(
+            self, mock_npu_convert_weight_to_int4pack):
         layer = MagicMock()
 
         layer.weight.data = torch.randn(128, 256)
