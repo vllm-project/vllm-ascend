@@ -49,6 +49,8 @@ class AscendConfig:
             "enable_weight_nz_layout", False)
         self.enable_prefill_optimizations = additional_config.get(
             "enable_prefill_optimizations", False)
+        self.enable_cpu_binding = additional_config.get(
+            "enable_cpu_binding", False)
 
 
 class TorchairGraphConfig:

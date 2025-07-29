@@ -24,6 +24,9 @@ def execute_command(cmd_list):
 
 @dataclass
 class DeviceInfo:
+    """
+    Parse a single line of device information into structured data.
+    """
     _info_line: str = ""
     npu_id: int = 0
     chip_id: int = 0
@@ -46,6 +49,10 @@ class NpuHbmInfo:
 
     @classmethod
     def set_visible_devices(cls, world_size):
+        """
+        Determine which NPUs are visible to the current process and cache their
+        logical NPU IDs in `cls.visible_npu_ids`.
+        """
         if cls.visible_npu_ids:
             return
         if ASCEND_RT_VISIBLE_DEVICES is None:
@@ -65,6 +72,10 @@ class NpuHbmInfo:
 
     @classmethod
     def get_hbm_capacity(cls, rank, world_size, need_nz):
+        """
+        Query and cache the HBM (or DDR) capacity in **bytes** for the NPU assigned
+        to the current process.
+        """
         soc_version = torch_npu._C._npu_get_soc_version()
         if cls.hbm_capacity:
             return cls.hbm_capacity
@@ -93,6 +104,10 @@ class NpuHbmInfo:
 
     @classmethod
     def get_hbm_usage(cls, rank, world_size, need_nz):
+        """
+        Return the current HBM or DDR usage 
+        ratio (0-1) for the NPU assigned to the given rank.
+        """
         if cls.hbm_usage:
             return cls.hbm_usage
         if not cls.visible_npu_ids:
@@ -121,6 +136,9 @@ class NpuHbmInfo:
 
 
 def _get_device_map_info() -> Dict[int, DeviceInfo]:
+    """
+    Build and return a mapping from logical chip ID (int) to its DeviceInfo object.
+    """
     device_map_info = {}
     device_map = execute_command(["npu-smi", "info",
                                   "-m"]).strip().split("\n")[1:]
@@ -132,6 +150,10 @@ def _get_device_map_info() -> Dict[int, DeviceInfo]:
 
 
 def _get_pcie_info(devices: List[int], keyword="PCIeBusInfo"):
+    """
+    Query each NPU in the given device list and return a mapping 
+    from logical device ID to its PCIe bus address.
+    """
     device_map_info = _get_device_map_info()
     device_pcie_tbl = {}
     for device in devices:
@@ -153,6 +175,9 @@ def _get_pcie_info(devices: List[int], keyword="PCIeBusInfo"):
 
 
 def _get_numa_info(pcie_tbl, keyword="NUMAnode"):
+    """
+    Build two mappings: device → NUMA node, and NUMA node → [devices].
+    """
     device_numa_tbl: Dict[int, int] = {}  # device id -> numa id
     numa_devices_tbl: Dict[int, List[int]] = {}  # numa id -> device ids
 
@@ -178,6 +203,10 @@ def _get_numa_info(pcie_tbl, keyword="NUMAnode"):
 def _get_numa_info_v2(
         devices: List[int],
         keyword="NUMAnode(s)") -> Tuple[Dict[int, int], Dict[int, List[int]]]:
+    """
+    Evenly distribute the given device list across all NUMA nodes and return
+    both device-to-numa and numa-to-devices mappings.
+    """
     numa_nodes = 1
     numa_info = execute_command(["lscpu"]).split("\n")
     for _ in numa_info:
@@ -202,13 +231,18 @@ def _get_numa_info_v2(
 
     device_numa_tbl = {
         device: numa
-        for numa, _devices in numa_devices_tbl.items() for device in _devices
+        for numa, _devices in numa_devices_tbl.items()
+        for device in _devices
     }
 
     return device_numa_tbl, numa_devices_tbl
 
 
 def _get_cpu_info(numa_ids, keyword1="NUMAnode", keyword2="CPU(s)"):
+    """
+    Parse lscpu output to build a dict that maps each NUMA 
+    node ID to the list of CPU core IDs belonging to it.
+    """
     cpu_idx_tbl = dict()
     numa_keywords = [keyword1 + str(idx) + keyword2 for idx in numa_ids]
     cpu_info = execute_command(["lscpu"]).split("\n")
@@ -237,6 +271,7 @@ def _get_cpu_info(numa_ids, keyword1="NUMAnode", keyword2="CPU(s)"):
 
 
 def bind_cpus(rank_id, ratio=0.5):
+    # get all visible devices
     visible_devices = ASCEND_RT_VISIBLE_DEVICES
 
     if visible_devices is None:
@@ -244,15 +279,21 @@ def bind_cpus(rank_id, ratio=0.5):
     else:
         devices = [int(x) for x in visible_devices.split(",")]
 
+    # Query the NUMA affinity of each NPU via its PCIe address; if this fails,
+    # fall back to evenly distributing the devices across NUMA nodes.
     device_pcie_tbl = _get_pcie_info(devices)
     device_numa_tbl, numa_devices_tbl = _get_numa_info(device_pcie_tbl)
     if not device_numa_tbl or not numa_devices_tbl:
         device_numa_tbl, numa_devices_tbl = _get_numa_info_v2(devices)
+
+    # Obtain the complete list of CPU cores for each NUMA node.
     cpu_idx_tbl = _get_cpu_info(list(numa_devices_tbl.keys()))
 
     cur_device = devices[rank_id]
     numa_id = device_numa_tbl.get(cur_device)
 
+    # Within the NUMA node, evenly partition the CPU cores
+    # among all NPUs (or use the amount specified by CPU_BINDING_NUM)
     shard_devices = numa_devices_tbl.get(numa_id)
     shard_devices.sort()
 
