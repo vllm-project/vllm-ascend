@@ -1847,10 +1847,27 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.in_profile_run = False
 
     def profile_run(self) -> None:
+        # For profile, have maximum num_reqs and that collectively have maximum
+        # num_tokens.
+        num_reqs = self.scheduler_config.max_num_seqs
+        num_tokens = self.max_num_tokens
+
+        max_num_spec_tokens = (
+            self.vllm_config.speculative_config.num_speculative_tokens
+            if self.vllm_config.speculative_config is not None else 0)
+
+        # NOTE: This only applies when decode does not re-execute prefill, which
+        # is guaranteed when using offloading without recomputation. In this
+        # scenario, decoding profiling does not require `max_num_tokens`; only
+        # `max_num_seqs` needs to be set.
+        if has_kv_transfer_group() and \
+            self.vllm_config.kv_transfer_config.is_kv_consumer:
+            num_tokens = num_reqs * (max_num_spec_tokens + 1)
+
         # Trigger compilation for general shape.
         with self.set_in_profile_run():
-            hidden_states = self._dummy_run(self.max_num_tokens,
-                                            with_prefill=True)
+            hidden_states = self._dummy_run(num_tokens, with_prefill=True)
+
         output = None
         if get_pp_group().is_last_rank:
             if self.is_pooling_model:
