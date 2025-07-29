@@ -202,7 +202,7 @@ def test_models_distributed_Qwen3_W4A8DYNAMIC():
             snapshot_download("vllm-ascend/Qwen3-8B-W4A8"),
             max_model_len=8192,
             dtype="auto",
-            tensor_parallel_size=4,
+            tensor_parallel_size=2,
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
