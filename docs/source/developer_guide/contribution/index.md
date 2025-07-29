@@ -58,6 +58,17 @@ cat requirements.txt | grep -Ev '^#|^--|^$|^-r' | while read PACKAGE; do pip ins
 bash format.sh ci
 ```
 
+Note: If you did not create the Python .venv in the "Running lint Locally" section above,
+please export the vllm source directory to your PYTHONPATH.
+
+```{code-block} bash
+   :substitutions:
+
+cd ..
+cd vllm
+export PYTHONPATH="$(pwd):${PYTHONPATH}"
+```
+
 #### Submit the commit
 
 ```bash
