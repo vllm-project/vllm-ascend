@@ -1799,6 +1799,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             attn_metadata.decode.input_positions)
                         torch._dynamo.mark_static(
                             get_forward_context().mc2_mask)
+                        if hasattr(attn_metadata.decode, "sin"):
+                            torch._dynamo.mark_static(attn_metadata.decode.sin)
+                            torch._dynamo.mark_static(attn_metadata.decode.cos)
                         torch._dynamo.mark_static(attn_metadata.slot_mapping)
                         for kv in self.kv_caches:
                             assert isinstance(
