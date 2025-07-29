@@ -347,6 +347,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                                        num_heads=self.num_heads,
                                        num_kv_heads=self.num_kv_heads,
                                        out=output)
+        assert output is not None
         return output[:num_tokens, :, :]
 
     def _forward_prefill_cache_hit(
