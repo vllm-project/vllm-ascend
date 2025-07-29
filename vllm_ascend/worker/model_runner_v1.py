@@ -20,6 +20,7 @@
 import copy
 import gc
 import math
+import math
 import os
 import time
 import types
@@ -228,8 +229,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.use_eagle = False
         self.drafter: Optional[Union[NgramProposer, EagleProposer,
                                      MtpProposer]] = None
+        self.actual_seq_lengths_q = []
+        self.spec_token_num = 0
+        self.decode_token_per_req = 1
         if self.speculative_config:
             self.use_spec_decode = True
+            self.spec_token_num = self.speculative_config.num_speculative_tokens
+            assert self.spec_token_num > 0
+            self.decode_token_per_req = 1 + self.spec_token_num
+            self.actual_seq_lengths_q = [
+                len for len in
+                range(self.decode_token_per_req, self.max_num_tokens +
+                      1, self.decode_token_per_req)
+            ]
             self.spec_attn_mask = torch.triu(torch.ones(2048,
                                                         2048,
                                                         dtype=torch.bool),
@@ -250,6 +262,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                      f"{self.speculative_config.method}")
                 self.rejection_sampler = AscendRejectionSampler()
 
+        # Persistent batch.
         self.input_ids = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int32,
                                      device=self.device)
@@ -558,6 +571,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # Append to the end.
                 req_index = None
             self.input_batch.add_request(req_state, req_index)
+            spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
+                req_id, ())
+            if spec_token_ids:
+                req_index = self.input_batch.num_reqs - 1
+                start_index = len(req_state.prompt_token_ids) + len(
+                    req_state.output_token_ids)
+                end_token_index = start_index + len(spec_token_ids)
+                self.input_batch.token_ids_cpu[
+                    req_index, start_index:end_token_index] = spec_token_ids
+                self.input_batch.num_tokens[req_index] = end_token_index
 
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
@@ -1045,6 +1068,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
             attn_state = AscendAttentionState.DecodeOnly
+            if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
+                # SpecDecoding now supports seq_len=1 and seq_len=2
+                # In Prefilling Decoding Disaggregation scenario, SpecDecoding need to supports seq_len=1
+                attn_state = AscendAttentionState.SpecDecoding
         # Speculative decoding.
         elif np.all(num_valid_tokens == 1):
             if self.use_eagle:
@@ -1747,10 +1774,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # has num_tokens in total.
         assert num_tokens <= self.scheduler_config.max_num_batched_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
+        if not with_prefill:
+            num_reqs = (num_tokens + self.decode_token_per_req -
+                        1) // self.decode_token_per_req
         num_reqs = min(num_tokens, max_num_reqs)
         min_tokens_per_req = num_tokens // num_reqs
         num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
         num_scheduled_tokens_list[-1] += num_tokens % num_reqs
+        assert sum(num_scheduled_tokens_list) == num_tokens
+        assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
 
@@ -1762,7 +1794,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # we can't skip_attn, it will cause graph recompile.
         if self.torchair_graph_enabled and not with_prefill:
             attn_metadata = self.attn_metadata_builder.build_torchair_graph_dummy(
-                num_reqs=num_tokens, num_actual_tokens=1)
+                num_reqs=num_reqs, num_actual_tokens=1)
         elif skip_attn:
             attn_metadata = None
         else:
@@ -1823,6 +1855,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             torch._dynamo.mark_static(attn_metadata.decode.sin)
                             torch._dynamo.mark_static(attn_metadata.decode.cos)
                         torch._dynamo.mark_static(attn_metadata.slot_mapping)
+                        if self.speculative_config:
+                            torch._dynamo.mark_static(
+                                attn_metadata.decode.attn_mask)
                         for kv in self.kv_caches:
                             assert isinstance(
                                 kv, tuple), "kv_cache must be a tuple"
@@ -1859,6 +1894,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     if self.use_spec_decode and isinstance(
                             self.drafter, EagleProposer):
                         self.drafter.dummy_run(num_tokens)
+            if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
+                assert isinstance(self.drafter, MtpProposer)
+                self.drafter.dummy_run(
+                    num_tokens=num_tokens,
+                    with_prefill=with_prefill,
+                    num_reqs=num_reqs)
+
             return hidden_states
 
     @contextmanager
@@ -2447,7 +2489,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         next_token_ids = torch.tensor(next_token_ids,
                                       dtype=torch.int32,
                                       device=self.device)
-
+        token_indices = None
         if spec_decode_metadata is None:
             # input_ids can be None for multimodal models.
             target_token_ids = self.input_ids[:num_scheduled_tokens]
@@ -2470,11 +2512,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             cu_num_tokens, token_indices = self.drafter.prepare_inputs(
                 attn_metadata.query_start_loc,
                 num_rejected_tokens,
-            )
-            target_token_ids = self.input_ids[token_indices]
-            target_positions = positions[token_indices]
-            target_hidden_states = hidden_states[token_indices]
-            target_slot_mapping = attn_metadata.slot_mapping[token_indices]
+                is_torchair_graph=self.torchair_graph_enabled)
+            if self.torchair_graph_enabled:
+                # the seq len of each bath is padded to 2, thus input is same as the main model
+                target_token_ids = self.input_ids[:num_scheduled_tokens]
+                target_positions = positions[:num_scheduled_tokens]
+                target_hidden_states = hidden_states[:num_scheduled_tokens]
+                target_slot_mapping = attn_metadata.slot_mapping[:
+                                                                 num_scheduled_tokens]
+            else:
+                target_token_ids = self.input_ids[token_indices]
+                target_positions = positions[token_indices]
+                target_hidden_states = hidden_states[token_indices]
+                target_slot_mapping = attn_metadata.slot_mapping[token_indices]
 
         draft_token_ids = self.drafter.propose(
             target_token_ids=target_token_ids,
@@ -2485,7 +2535,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             cu_num_tokens=cu_num_tokens,
             block_table=attn_metadata.block_tables,
             sampling_metadata=sampling_metadata,
-        )
+            token_indices=token_indices)
         spec_token_ids = draft_token_ids.tolist()
         return spec_token_ids
 

@@ -1,14 +1,20 @@
 import torch
+import vllm.envs as envs_vllm
 from vllm.attention.layer import Attention
 from vllm.config import (VllmConfig, get_layers_from_vllm_config,
                          set_current_vllm_config)
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading, set_default_torch_dtype)
 from vllm.v1.sample.metadata import SamplingMetadata
 
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
+from vllm_ascend.attention.utils import \
+    AscendCommonAttentionMetadata as CommonAttentionMetadata
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
+from vllm_ascend.utils import ProfileExecuteDuration
 
 
 class MtpProposer:
@@ -23,13 +29,25 @@ class MtpProposer:
             vllm_config.speculative_config.num_speculative_tokens)
         self.block_size = vllm_config.cache_config.block_size
         self.runner = runner
+        # persistent buffers for graph
+        self.input_ids = torch.zeros(self.runner.max_num_tokens,
+                                     dtype=torch.int32,
+                                     device=self.runner.device)
+        self.positions = torch.zeros(self.runner.max_num_tokens,
+                                     dtype=torch.int64,
+                                     device=self.runner.device)
+        self.hidden_states = torch.zeros(
+            (self.runner.max_num_tokens, self.runner.hidden_size),
+            dtype=self.runner.dtype,
+            device=self.runner.device)
 
     @staticmethod
     def prepare_inputs(
-        # [batch_size + 1]
-        cu_target_query_lens: torch.Tensor,
-        # [batch_size]
-        num_rejected_tokens: torch.Tensor,
+            # [batch_size + 1]
+            cu_target_query_lens: torch.Tensor,
+            # [batch_size]
+            num_rejected_tokens: torch.Tensor,
+            is_torchair_graph: bool = False
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # cu_target_query_lens: [0, a, a + b, a + b + c]
         # num_rejected_tokens: [n1, n2, n3]
@@ -38,63 +56,73 @@ class MtpProposer:
         # token_indices: [0, 1, ..., a - n1 - 1,
         #                 a, a + 1, ..., a + b - n2 - 1,
         #                 a + b, a + b + 1, ..., a + b + c - n3 - 1]
-
         # [0, a, a + b, a + b + c] -> [a, b, c]
         query_len_per_req = (cu_target_query_lens[1:] -
                              cu_target_query_lens[:-1])
         # [a, b, c] -> [a - n1, b - n2, c - n3]
         num_tokens_per_req = query_len_per_req - num_rejected_tokens
+        if is_torchair_graph:
+            cu_num_tokens = cu_target_query_lens
+            relative_index = query_len_per_req - num_rejected_tokens - 1
+            token_indices = cu_num_tokens[:-1] + relative_index
+        else:
+            cu_num_tokens = torch.empty_like(cu_target_query_lens)
+            torch.cumsum(num_tokens_per_req, dim=0, out=cu_num_tokens[1:])
+            cu_num_tokens[0] = 0
 
-        cu_num_tokens = torch.empty_like(cu_target_query_lens)
-        torch.cumsum(num_tokens_per_req, dim=0, out=cu_num_tokens[1:])
-        cu_num_tokens[0] = 0
+            # FIXME(woosuk): Avoid synchronization.
+            num_tokens = cu_num_tokens[-1].item()
+            token_indices = torch.empty(
+                num_tokens,
+                dtype=torch.int32,
+                device=cu_num_tokens.device,
+            )
 
-        # FIXME(woosuk): Avoid synchronization.
-        num_tokens = cu_num_tokens[-1].item()
-        token_indices = torch.empty(
-            num_tokens,
-            dtype=torch.int32,
-            device=cu_num_tokens.device,
-        )
-
-        BLOCK_SIZE = 1024
-        prepare_input_kernel(
-            token_indices,
-            cu_target_query_lens,
-            cu_num_tokens,
-            block_size=BLOCK_SIZE,
-        )
+            BLOCK_SIZE = 1024
+            prepare_input_kernel(
+                token_indices,
+                cu_target_query_lens,
+                cu_num_tokens,
+                block_size=BLOCK_SIZE,
+            )
         return cu_num_tokens, token_indices
 
     def propose(
-        self,
-        # [num_tokens]
-        target_token_ids: torch.Tensor,
-        # [num_tokens]
-        target_positions: torch.Tensor,
-        # [num_tokens, hidden_size]
-        target_hidden_states: torch.Tensor,
-        # [num_tokens]
-        target_slot_mapping: torch.Tensor,
-        # [batch_size]
-        next_token_ids: torch.Tensor,
-        # [batch_size + 1] starting with 0
-        cu_num_tokens: torch.Tensor,
-        # [batch_size, max_num_blocks_per_req]
-        block_table: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> torch.Tensor:
+            self,
+            # [num_tokens]
+            target_token_ids: torch.Tensor,
+            # [num_tokens]
+            target_positions: torch.Tensor,
+            # [num_tokens, hidden_size]
+            target_hidden_states: torch.Tensor,
+            # [num_tokens]
+            target_slot_mapping: torch.Tensor,
+            # [batch_size]
+            next_token_ids: torch.Tensor,
+            # [batch_size + 1] starting with 0
+            cu_num_tokens: torch.Tensor,
+            # [batch_size, max_num_blocks_per_req]
+            block_table: torch.Tensor,
+            sampling_metadata: SamplingMetadata,
+            token_indices=None) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = cu_num_tokens[1:] - 1
 
-        input_ids = torch.empty_like(target_token_ids)
         # Shift the input ids by one token.
         # E.g., [a1, b1, b2, c1, c2, c3] -> [b1, b2, c1, c2, c3, c3]
-        input_ids[:-1] = target_token_ids[1:]
+        self.input_ids[:num_tokens - 1] = target_token_ids[1:]
         # Replace the last token with the next token.
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
-        input_ids[last_token_indices] = next_token_ids
+        if token_indices is not None and self.runner.torchair_graph_enabled:
+            last_token_indices = token_indices
+            common_attn_metadata = self.runner.common_attn_metadata
+        else:
+            seq_lens = (target_positions[last_token_indices] + 1)
+            common_attn_metadata = CommonAttentionMetadata(
+                query_start_loc=cu_num_tokens, seq_lens=seq_lens)
+
+        self.input_ids[last_token_indices] = next_token_ids
 
         query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
         max_query_len = query_lens.max().item()
@@ -109,20 +137,64 @@ class MtpProposer:
         #     input_batch=self.runner.input_batch,
         #     scheduler_output=self.runner.scheduler_output,
         # )
+        extra_builder_kwargs = self.runner.extra_builder_kwargs
+
+        is_running_torchair = self.runner.torchair_graph_enabled and \
+            not self.runner.with_prefill
+
+        if is_running_torchair:
+            extra_builder_kwargs[
+                'num_reqs_pad_size'] = self.runner.num_reqs_pad_size
+            extra_builder_kwargs[
+                'num_token_pad_size'] = self.runner.num_token_pad_size
+            num_input_tokens = num_tokens + self.runner.num_token_pad_size
+        else:
+            extra_builder_kwargs['num_token_pad_size'] = -1
+            extra_builder_kwargs['num_reqs_pad_size'] = 0
+            num_input_tokens = num_tokens
 
         attn_metadata = self.runner.attn_metadata_builder.build(
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
-            query_start_loc=cu_num_tokens,
-        )
+            common_prefix_len=0,
+            common_attn_metadata=common_attn_metadata,
+            **extra_builder_kwargs)
 
-        with set_ascend_forward_context(attn_metadata, self.vllm_config):
-            hidden_states = self.model(
-                input_ids=input_ids,
-                positions=target_positions,
-                previous_hidden_states=target_hidden_states,
-            )
+        self.positions[:num_tokens] = target_positions
+        self.hidden_states[:num_tokens] = target_hidden_states
+
+        if attn_metadata.prefill is not None:
+            attn_metadata.prefill.query_lens = query_lens
+
+        with set_ascend_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                num_tokens=num_input_tokens,
+                with_prefill=self.runner.with_prefill,
+                num_tokens_across_dp=self.runner.num_tokens_across_dp,
+                in_profile_run=self.runner.in_profile_run,
+                num_actual_tokens=num_tokens):
+            with ProfileExecuteDuration().capture_async('mtp_forward'):
+                model_kwargs = {}
+                model_kwargs["attn_metadata"] = attn_metadata
+                if self.runner.torchair_graph_enabled:
+                    model_kwargs["kv_caches"] = self.runner.kv_caches[-1:]
+                if is_running_torchair:
+                    hidden_states = self.torchair_compiled_model(
+                        input_ids=self.input_ids[:num_input_tokens],
+                        positions=self.positions[:num_input_tokens],
+                        previous_hidden_states=self.
+                        hidden_states[:num_input_tokens],
+                        inputs_embeds=None,
+                        **model_kwargs)
+                else:
+                    hidden_states = self.model(
+                        input_ids=self.input_ids[:num_input_tokens],
+                        positions=self.positions[:num_input_tokens],
+                        previous_hidden_states=self.
+                        hidden_states[:num_input_tokens],
+                        kv_caches=self.runner.kv_caches[-1:])
         sample_hidden_states = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
         draft_token_ids = logits.argmax(dim=-1)
@@ -158,6 +230,82 @@ class MtpProposer:
                 self.model))
         process_weights_after_loading(self.model, draft_model_config,
                                       target_device)
+        if self.runner.torchair_graph_enabled:
+            import torchair  # type: ignore
+            from torchair import patch_for_hcom  # type: ignore
+
+            patch_for_hcom()
+            config = torchair.CompilerConfig()
+            config.experimental_config.frozen_parameter = True
+            config.experimental_config.tiling_schedule_optimize = True
+            config.experimental_config.enable_view_optimize = \
+            get_ascend_config().torchair_graph_config.enable_view_optimize
+            torch.npu.set_compile_mode(jit_compile=False)
+            if not self.runner.use_cached_npu_graph:
+                npu_backend = torchair.get_npu_backend(compiler_config=config)
+                self.torchair_compiled_model = torch.compile(
+                    self.model,
+                    dynamic=True,
+                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    backend=npu_backend)
+            else:
+                self.torchair_compiled_model = torchair.inference.cache_compile(
+                    self.model.forward,
+                    dynamic=True,
+                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    config=config,
+                    ge_cache=False)
+
+    @torch.inference_mode()
+    def dummy_run(self,
+                  num_tokens: int,
+                  with_prefill: bool = False,
+                  skip_attn: bool = False,
+                  num_reqs: int = 0,
+                  num_tokens_across_dp=None) -> None:
+        if self.runner.torchair_graph_enabled and not with_prefill:
+            skip_attn = False
+        if skip_attn:
+            attn_metadata = None
+        else:
+            attn_metadata = self.runner.attn_metadata_builder.build_torchair_graph_dummy(
+                num_reqs=num_reqs, num_actual_tokens=1)
+        input_ids = self.input_ids[:num_tokens]
+        positions = self.positions[:num_tokens]
+        previous_hidden_states = self.hidden_states[:num_tokens]
+        with set_ascend_forward_context(
+                attn_metadata,
+                self.vllm_config,
+                num_tokens=num_tokens,
+                with_prefill=with_prefill,
+                num_tokens_across_dp=num_tokens_across_dp,
+                in_profile_run=self.runner.in_profile_run,
+                num_actual_tokens=0):
+            model_kwargs = {}
+            model_kwargs["attn_metadata"] = attn_metadata
+            if self.runner.torchair_graph_enabled and not with_prefill:
+                assert attn_metadata is not None
+                model_kwargs["kv_caches"] = self.runner.kv_caches[-1:]
+                torch._dynamo.mark_static(input_ids)
+                torch._dynamo.mark_static(positions)
+                torch._dynamo.mark_static(previous_hidden_states)
+                torch._dynamo.mark_static(attn_metadata.decode.block_table)
+                torch._dynamo.mark_static(attn_metadata.decode.input_positions)
+                torch._dynamo.mark_static(attn_metadata.decode.sin)
+                torch._dynamo.mark_static(attn_metadata.decode.cos)
+                torch._dynamo.mark_static(get_forward_context().mc2_mask)
+                torch._dynamo.mark_static(attn_metadata.slot_mapping)
+                torch._dynamo.mark_static(attn_metadata.decode.attn_mask)
+                self.torchair_compiled_model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    previous_hidden_states=previous_hidden_states,
+                    inputs_embeds=None,
+                    **model_kwargs)
+            else:
+                self.model(input_ids=input_ids,
+                           positions=positions,
+                           previous_hidden_states=previous_hidden_states)
 
 
 # TODO Using torch instead of triton may result in poor performance
