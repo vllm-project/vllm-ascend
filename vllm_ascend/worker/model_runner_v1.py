@@ -44,7 +44,8 @@ from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
-from vllm.distributed.parallel_state import get_dp_group, get_pp_group
+from vllm.distributed.parallel_state import get_pp_group
+from vllm_ascend.patch.platform.patch_common.patch_distributed import get_dp_group
 from vllm.forward_context import get_forward_context
 from vllm.inputs import INPUT_REGISTRY
 from vllm.logger import logger
@@ -608,17 +609,26 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         forward_metadata = torch.tensor(
             [num_tokens, with_prefill, not enable_dbo],
-            device="cpu",
+            device="npu",
             dtype=torch.int32)
         dist.all_reduce(forward_metadata,
                         op=ReduceOp.MAX,
-                        group=get_dp_group().cpu_group)
-        num_tokens_across_dp = torch.tensor([forward_metadata[0]] *
-                                            self.dp_size,
-                                            device="cpu",
-                                            dtype=torch.int32)
-        return forward_metadata[0].item(), num_tokens_across_dp, bool(
-            forward_metadata[1]), not bool(forward_metadata[2])
+                        group=get_dp_group())
+        # Creat a distributed replica array on the NPU
+        num_tokens_across_dp = torch.full(
+            (self.dp_size,),
+            fill_value=forward_metadata[0],
+            device="npu",
+            dtype=torch.int32
+        )
+
+        # return CPU tensor
+        return (
+            forward_metadata[0].item(),
+            num_tokens_across_dp.cpu(),
+            bool(forward_metadata[1].item()),
+            not bool(forward_metadata[2].item())
+        )
 
     def _check_dbo_is_valid(self, query_lens: torch.Tensor,
                             attn_state: AscendAttentionState,

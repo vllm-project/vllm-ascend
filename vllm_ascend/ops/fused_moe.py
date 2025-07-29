@@ -942,6 +942,10 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if enable_force_load_balance:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
+        if int(os.getenv("VLLM_ENABLE_FIX_ROUTE")) == 1:
+            topk_ids = (torch.arange(topk_ids.numel(),
+                device=topk_ids.device) % global_num_experts).to(torch.int32).reshape(topk_ids.shape)
+
         fused_moe_state = get_forward_context().fused_moe_state
         if fused_moe_state == FusedMoEState.MC2:
             return fused_experts_with_mc2(
