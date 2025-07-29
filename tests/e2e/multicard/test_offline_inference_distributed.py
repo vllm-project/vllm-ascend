@@ -176,7 +176,7 @@ def test_models_distributed_topk() -> None:
 
 
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ": "1"})
-def test_models_distributed_topk() -> None:
+def test_models_distributed_alltoallv() -> None:
     example_prompts = [
         "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
         "Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.",
