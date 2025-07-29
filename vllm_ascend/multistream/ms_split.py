@@ -160,6 +160,8 @@ def model_input_split_v1_mla_attn(
         context_len_post = seq_lens_post
         prefill_max_query_len_pre = max(prefill_query_lens_pre)
         prefill_max_query_len_post = max(prefill_query_lens_post)
+        [cos_pre, cos_post] = split_attn_tensor_type(attn_metadata.prefill.cos, token_index - attn_metadata.num_decode_tokens)
+        [sin_pre, sin_post] = split_attn_tensor_type(attn_metadata.prefill.sin, token_index - attn_metadata.num_decode_tokens)
         prefill_pre = AscendMLAPrefillMetadata(
             attn_mask=attn_mask_pre,
             query_lens=prefill_query_lens_pre,
@@ -170,6 +172,8 @@ def model_input_split_v1_mla_attn(
             block_table=block_tables_pre,
             max_query_len=prefill_max_query_len_pre,
             max_seq_lens=context_len_pre.max().item(),
+            cos=cos_pre,
+            sin=sin_pre
         )
         prefill_post = AscendMLAPrefillMetadata(
             attn_mask=attn_mask_post,
@@ -181,6 +185,8 @@ def model_input_split_v1_mla_attn(
             block_table=block_tables_post,
             max_query_len=prefill_max_query_len_post,
             max_seq_lens=context_len_post.max().item(),
+            cos=cos_post,
+            sin=sin_post
         )
         decode_pre = attn_metadata.decode
         decode_post = None
