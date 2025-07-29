@@ -1483,11 +1483,11 @@ class AscendFusedMoE(FusedMoE):
                 dist.all_gather(list(chunk_hidden_states), e_hidden_states,
                                 self.tp_group)
                 final_hidden_states = torch.cat(chunk_hidden_states, dim=0)
+                dispose_tensor(e_hidden_states)
             else:
                 final_hidden_states = e_hidden_states
             if num_tokens < padding_size:
                 final_hidden_states = final_hidden_states[:num_tokens]
-            dispose_tensor(e_hidden_states)
         elif self.dp_size > 1:
             if fused_moe_state == FusedMoEState.NaiveMulticast:
                 start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
