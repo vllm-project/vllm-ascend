@@ -22,6 +22,8 @@ import torch
 import torch.distributed as dist
 import torch_npu
 from torch import nn
+from transformers import PretrainedConfig
+from vllm.attention import AttentionMetadata
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (GroupCoordinator, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -45,6 +47,7 @@ from vllm_ascend.distributed.communication_op import \
     data_parallel_reduce_scatter
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
+from vllm_ascend.ops.moe_dispatcher.token_dispatcher import MoEAlltoAllSeqOverLapDispatcher, MoEDispatcherConfig
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
                                get_all_reduce_merge_state,
