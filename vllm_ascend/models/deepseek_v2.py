@@ -281,6 +281,7 @@ class CustomDeepseekV2MoE(nn.Module):
             ascend_config.torchair_graph_config.enable_super_kernel and \
             self.enable_multistream_moe
         self.params_dtype = torch.get_default_dtype()
+        self.enable_prefill_optimizations = ascend_config.enable_prefill_optimizations and not self.torchair_graph_enabled
 
         self.gate = ReplicatedLinear(
             config.hidden_size,
@@ -323,7 +324,7 @@ class CustomDeepseekV2MoE(nn.Module):
                 quant_config=quant_config,
                 reduce_results=True,
                 force_replicate=self.enable_multistream_moe
-                or ascend_config.enable_prefill_optimizations,
+                or self.enable_prefill_optimizations,
                 prefix=f"{prefix}.shared_experts",
             )
         else:
@@ -456,7 +457,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             prefix=f"{prefix}.kv_b_proj")
 
         ascend_config = get_ascend_config()
-        self.enable_prefill_optimizations = ascend_config.enable_prefill_optimizations
+        self.enable_prefill_optimizations = ascend_config.enable_prefill_optimizations and not ascend_config.torchair_graph_config.enabled
 
         if not self.enable_prefill_optimizations or int(
                 prefix.split(".")[-2]) < 3:
@@ -651,7 +652,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.routed_scaling_factor = config.routed_scaling_factor
         self.tp_group = get_tp_group().device_group
         ascend_config = get_ascend_config()
-        self.enable_prefill_optimizations = ascend_config.enable_prefill_optimizations
+        self.enable_prefill_optimizations = ascend_config.enable_prefill_optimizations and not ascend_config.torchair_graph_config.enabled
 
     def forward(
         self,

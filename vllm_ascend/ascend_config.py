@@ -195,10 +195,6 @@ def check_ascend_config(vllm_config, enforce_eager):
                         raise NotImplementedError(
                             "Torchair graph mode only works with deepseek model."
                         )
-                # prefill optimizations is not supported for torchair graph mode currently.
-                if ascend_config.enable_prefill_optimizations:
-                    raise NotImplementedError(
-                        "Prefill optimizations only works with eager mode.")
             # aclgraph case
             else:
                 # aclgraph doesn't work with deepseek model and only qwen model is well tested.
