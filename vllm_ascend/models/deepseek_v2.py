@@ -393,7 +393,7 @@ class CustomDeepseekV2MoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits = None
-        if not self.rm_router_logits:
+        if not self.rm_router_logits and not self.enable_multistream_moe:
             router_logits, _ = self.gate(hidden_states)
 
         experts_hidden_states = self.experts(
