@@ -1214,7 +1214,8 @@ class AscendFusedMoE(FusedMoE):
         self.enable_super_kernel = (
             ascend_config.torchair_graph_config.enable_super_kernel
             and self.enable_multistream_moe)
-        self.enable_prefill_optimizations = ascend_config.enable_prefill_optimizations
+        self.enable_prefill_optimizations = ascend_config.enable_prefill_optimizations and \
+            not self.torchair_graph_enabled
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
