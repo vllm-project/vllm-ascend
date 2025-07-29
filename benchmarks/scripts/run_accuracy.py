@@ -50,17 +50,17 @@ MODEL_TYPE = {
 # Command templates for running evaluations
 MODEL_RUN_INFO = {
     "Qwen/Qwen3-30B-A3B": (
-        "export MODEL_ARGS='pretrained={model},max_model_len=4096,dtype=auto,tensor_parallel_size=4,gpu_memory_utilization=0.6,enable_expert_parallel=True'\n"
+        "export MODEL_ARGS='pretrained={model},max_model_len=4096,dtype=auto,tensor_parallel_size=2,gpu_memory_utilization=0.6,enable_expert_parallel=True'\n"
         "lm_eval --model vllm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
         "--apply_chat_template --fewshot_as_multiturn --num_fewshot 5 --batch_size 1"
     ),
     "Qwen/Qwen3-8B-Base": (
-        "export MODEL_ARGS='pretrained={model},max_model_len=4096,dtype=auto,tensor_parallel_size=2,gpu_memory_utilization=0.6'\n"
+        "export MODEL_ARGS='pretrained={model},max_model_len=4096,dtype=auto,tensor_parallel_size=1,gpu_memory_utilization=0.6'\n"
         "lm_eval --model vllm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
         "--apply_chat_template --fewshot_as_multiturn --num_fewshot 5 --batch_size 1"
     ),
     "Qwen/Qwen2.5-VL-7B-Instruct": (
-        "export MODEL_ARGS='pretrained={model},max_model_len=8192,dtype=auto,tensor_parallel_size=2,max_images=2'\n"
+        "export MODEL_ARGS='pretrained={model},max_model_len=8192,dtype=auto,tensor_parallel_size=1,max_images=2'\n"
         "lm_eval --model vllm-vlm --model_args $MODEL_ARGS --tasks {datasets} \ \n"
         "--apply_chat_template --fewshot_as_multiturn  --batch_size 1"
     ),
@@ -94,9 +94,9 @@ EXECUTION_MODE = {
 
 # Model arguments for evaluation
 MODEL_ARGS = {
-    "Qwen/Qwen3-8B-Base": "pretrained=Qwen/Qwen3-8B-Base,max_model_len=4096,dtype=auto,tensor_parallel_size=2,gpu_memory_utilization=0.6",
-    "Qwen/Qwen2.5-VL-7B-Instruct": "pretrained=Qwen/Qwen2.5-VL-7B-Instruct,max_model_len=8192,dtype=auto,tensor_parallel_size=2,max_images=2",
-    "Qwen/Qwen3-30B-A3B": "pretrained=Qwen/Qwen3-30B-A3B,max_model_len=4096,dtype=auto,tensor_parallel_size=4,gpu_memory_utilization=0.6,enable_expert_parallel=True",
+    "Qwen/Qwen3-8B-Base": "pretrained=Qwen/Qwen3-8B-Base,max_model_len=4096,dtype=auto,tensor_parallel_size=1,gpu_memory_utilization=0.6",
+    "Qwen/Qwen2.5-VL-7B-Instruct": "pretrained=Qwen/Qwen2.5-VL-7B-Instruct,max_model_len=8192,dtype=auto,tensor_parallel_size=1,max_images=2",
+    "Qwen/Qwen3-30B-A3B": "pretrained=Qwen/Qwen3-30B-A3B,max_model_len=4096,dtype=auto,tensor_parallel_size=2,gpu_memory_utilization=0.6,enable_expert_parallel=True",
 }
 
 # Whether to apply chat template formatting

@@ -136,7 +136,7 @@ jobs:
     strategy:
       max-parallel: 2
       matrix:
-        os: [linux-arm64-npu-1]
+        os: [linux-aarch64-a2-1]
         vllm_version: [main, v0.10.0]
     name: singlecard e2e test
     runs-on: ${{ matrix.os }}
@@ -213,9 +213,9 @@ jobs:
     needs: [e2e]
     if: ${{ needs.e2e.result == 'success' }}
     strategy:
-      max-parallel: 1
+      max-parallel: 2
       matrix:
-        os: [linux-arm64-npu-4]
+        os: [linux-aarch64-a2-2]
         vllm_version: [main, v0.10.0]
     name: multicard e2e test
     runs-on: ${{ matrix.os }}
@@ -275,7 +275,6 @@ jobs:
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_dbo
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeekV3_dbo
           pytest -sv tests/e2e/multicard/test_data_parallel.py

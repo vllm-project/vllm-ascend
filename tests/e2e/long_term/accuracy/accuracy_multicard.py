@@ -91,9 +91,9 @@ MORE_ARGS = {
     "Qwen/Qwen2.5-0.5B-Instruct":
     None,
     "Qwen/Qwen3-30B-A3B":
-    "tensor_parallel_size=4,enable_expert_parallel=True,enforce_eager=True",
+    "tensor_parallel_size=2,enable_expert_parallel=True,enforce_eager=True",
     "deepseek-ai/DeepSeek-V2-Lite":
-    "tensor_parallel_size=4,trust_remote_code=True,enforce_eager=True"
+    "tensor_parallel_size=2,trust_remote_code=True,enforce_eager=True"
 }
 
 multiprocessing.set_start_method("spawn", force=True)
