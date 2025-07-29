@@ -17,9 +17,9 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py
 #
 
+import copy
 from typing import Optional
 
-import copy
 import torch
 import torch.nn as nn
 import torch_npu
@@ -29,7 +29,7 @@ from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
-                                        has_kv_transfer_group)
+                                          has_kv_transfer_group)
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
