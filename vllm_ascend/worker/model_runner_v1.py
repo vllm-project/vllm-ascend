@@ -161,6 +161,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
         self.max_num_reqs = self.scheduler_config.max_num_seqs
 
+        self.dp_size = vllm_config.parallel_config.data_parallel_size
+        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+
         # Model-related.
         self.num_attn_layers = self.model_config.get_num_layers_by_block_type(
             vllm_config.parallel_config, LayerBlockType.attention)
@@ -266,6 +269,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.query_lens = torch.zeros(self.max_num_reqs,
                                       dtype=torch.int32,
                                       device=self.device)
+        self.forward_metadata = torch.tensor([0] * (self.dp_size * 2 + 2), device=self.device, dtype=torch.int32)
         # None in the first PP rank. The rest are set after load_model.
         self.intermediate_tensors: Optional[IntermediateTensors] = None
 
@@ -385,9 +389,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         torch._dynamo.config.capture_dynamic_output_shape_ops = True
         torch._logging.set_logs(
             recompiles=envs_ascend.VLLM_ASCEND_TRACE_RECOMPILES)
-
-        self.dp_size = vllm_config.parallel_config.data_parallel_size
-        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
 
         #EPLB
         self.dynamic_eplb = ascend_config.dynamic_eplb
@@ -623,38 +624,25 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
         if self.dp_size == 1:
             return maybe_padded_num_tokens, None, with_prefill, enable_dbo
-        if self.is_kv_producer and not envs_ascend.VLLM_ASCEND_ENABLE_CHUNK_MC2:
-            num_tokens_across_dp = torch.tensor([num_tokens] * self.dp_size,
-                                                device="cpu",
-                                                dtype=torch.int32)
-            return num_tokens, num_tokens_across_dp, True, enable_dbo
-        if self.is_kv_consumer and self.torchair_graph_enabled and len(
-                self.torchair_graph_batch_sizes
-        ) == 1 and not self.in_profile_run:
-            max_num_decode_tokens = self.torchair_graph_batch_sizes[0]
-            num_tokens_across_dp = torch.tensor([max_num_decode_tokens] *
-                                                self.dp_size,
-                                                device="cpu",
-                                                dtype=torch.int32)
-            return max_num_decode_tokens, num_tokens_across_dp, False, enable_dbo
 
         num_tokens_across_dp = [0] * self.dp_size * 2
         num_tokens_across_dp[self.dp_rank] = maybe_padded_num_tokens
         num_tokens_across_dp[self.dp_size + self.dp_rank] = num_tokens
-        forward_metadata = torch.tensor(num_tokens_across_dp +
-                                        [with_prefill, not enable_dbo],
-                                        device="cpu",
-                                        dtype=torch.int32)
-        dist.all_reduce(forward_metadata, group=get_dp_group().cpu_group)
-        with_prefill = bool(forward_metadata[-2])
+        self.forward_metadata[:self.dp_size * 2] = 0
+        self.forward_metadata[self.dp_rank] = maybe_padded_num_tokens
+        self.forward_metadata[self.dp_size + self.dp_rank] = num_tokens
+        self.forward_metadata[-2] = with_prefill
+        self.forward_metadata[-1] = (not enable_dbo)
+        dist.all_reduce(self.forward_metadata, group=get_dp_group().device_group)
+        with_prefill = bool(self.forward_metadata[-2])
 
         # NOTE: when with_prefill is false before all_reduce and true after all_reduce, we need to revert pad.
         if with_prefill:
-            num_tokens_across_dp = forward_metadata[self.dp_size:self.dp_size *
+            num_tokens_across_dp = self.forward_metadata[self.dp_size:self.dp_size *
                                                     2]
             maybe_padded_num_tokens = num_tokens
         else:
-            num_tokens_across_dp = forward_metadata[:self.dp_size]
+            num_tokens_across_dp = self.forward_metadata[:self.dp_size]
 
         # NOTE: when in torchair_graph_mode, we need to pad local_num_tokens to
         # `max_num_tokens_across_dp`, in other situation it is not necessary.
@@ -666,7 +654,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                 dtype=torch.int32)
 
         return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, not bool(
-            forward_metadata[-1])
+            self.forward_metadata[-1])
 
     def _check_dbo_is_valid(self, query_lens: torch.Tensor,
                             attn_state: AscendAttentionState,
