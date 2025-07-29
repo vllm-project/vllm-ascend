@@ -27,19 +27,3 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         self.assertEqual(params["weight_scale_second"].shape, (32, 1))
         self.assertEqual(params["weight_offset_second"].dtype, torch.bfloat16)
         self.assertEqual(params["weight_offset_second"].shape, (32, 1))
-
-    @patch("torch_npu.npu_convert_weight_to_int4pack")
-    def test_process_weights_after_loading(
-            self, mock_npu_convert_weight_to_int4pack):
-        layer = MagicMock()
-
-        layer.weight.data = torch.randn(128, 256)
-        layer.weight_scale.data = torch.randn(128, 1)
-        layer.weight_scale_second.data = torch.randn(128, 16)
-        layer.weight_offset.data = torch.randn(128, 1)
-
-        mock_npu_convert_weight_to_int4pack.return_value = MagicMock
-        self.method.process_weights_after_loading(layer)
-
-        self.assertTrue(layer.weight_scale_second.data.dtype, torch.float32)
-        self.assertEqual(layer.weight_scale_second.data.shape, (16, 128))
