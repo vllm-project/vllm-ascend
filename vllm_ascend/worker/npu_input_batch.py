@@ -35,8 +35,6 @@ from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 
-from vllm_ascend.utils import vllm_version_is
-
 _SAMPLING_EPS = 1e-5
 
 
@@ -246,11 +244,8 @@ class InputBatch:
 
         # req_index -> bad_words_token_ids
         self.bad_words_token_ids: dict[int, list[list[int]]] = {}
-        if vllm_version_is("0.9.2"):
-            self.logits_processing_needs_token_ids_bool = False
-        else:
-            self.logits_processing_needs_token_ids = np.zeros(max_num_reqs,
-                                                              dtype=bool)
+        self.logits_processing_needs_token_ids = np.zeros(max_num_reqs,
+                                                          dtype=bool)
 
         self.req_output_token_ids: list[Optional[list[int]]] = []
 
@@ -387,9 +382,6 @@ class InputBatch:
             if sampling_params.bad_words_token_ids:
                 self.bad_words_token_ids[
                     req_index] = sampling_params.bad_words_token_ids
-        elif vllm_version_is("0.9.2"):
-            assert request.pooling_params is not None
-            self.pooling_params[req_id] = request.pooling_params
         elif pooling_params := request.pooling_params:
             self.pooling_params[req_id] = pooling_params
             self.logits_processing_needs_token_ids[req_index] = (
@@ -624,15 +616,10 @@ class InputBatch:
                        self.presence_penalties, num_reqs)
             copy_slice(self.repetition_penalties_cpu_tensor,
                        self.repetition_penalties, num_reqs)
-        if vllm_version_is("0.9.2"):
-            needs_prompt_token_ids = (
-                not self.no_penalties
-                or (self.num_reqs > 0
-                    and self.logits_processing_needs_token_ids_bool))
-        else:
-            needs_prompt_token_ids = (
-                not self.no_penalties
-                or self.logits_processing_needs_token_ids[:num_reqs].any())
+
+        needs_prompt_token_ids = (
+            not self.no_penalties
+            or self.logits_processing_needs_token_ids[:num_reqs].any())
         if needs_prompt_token_ids:
             # The prompt tokens are used only for applying penalties or
             # step pooling during the sampling/pooling process.

@@ -3,15 +3,12 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.attention.attention_v1 import \
-    AscendAttentionBackendImpl092  # isort: skip
 from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
                                                 AscendAttentionBackendImpl,
                                                 AscendAttentionMetadataBuilder,
                                                 AscendAttentionState,
                                                 AscendMetadata,
                                                 CommonAttentionState)
-from vllm_ascend.utils import vllm_version_is
 
 
 class TestAscendAttentionBackend(TestBase):
@@ -20,12 +17,8 @@ class TestAscendAttentionBackend(TestBase):
         self.assertEqual(AscendAttentionBackend.get_name(), "ASCEND")
 
     def test_get_impl_cls(self):
-        if vllm_version_is("0.9.2"):
-            self.assertEqual(AscendAttentionBackend.get_impl_cls(),
-                             AscendAttentionBackendImpl092)
-        else:
-            self.assertEqual(AscendAttentionBackend.get_impl_cls(),
-                             AscendAttentionBackendImpl)
+        self.assertEqual(AscendAttentionBackend.get_impl_cls(),
+                         AscendAttentionBackendImpl)
 
     def test_get_metadata_cls(self):
         self.assertEqual(AscendAttentionBackend.get_metadata_cls(),
@@ -258,7 +251,10 @@ class TestAscendAttentionBackendImpl(TestBase):
         query = torch.randn(10, 8 * 64)
         key = torch.randn(10, 8 * 64)
         value = torch.randn(10, 8 * 64)
-        kv_cache = torch.ones(1, 1, 10, 8, 64, dtype=torch.int8)
+        k_cache = torch.ones(1, 10, 8, 64, dtype=torch.int8)
+        v_cache = torch.ones(1, 10, 8, 64, dtype=torch.int8)
+        kv_cache = [k_cache, v_cache]
+        ret_value = torch.ones(1, 1, 10, 8, 64, dtype=torch.int8)
 
         metadata = MagicMock()
         metadata.num_actual_tokens = torch.randn(10, 8 * 64)
@@ -268,7 +264,7 @@ class TestAscendAttentionBackendImpl(TestBase):
         metadata.query_lens = torch.randn(10, 8 * 64)
         layer = self.layer
         layer.quant_method = MagicMock()
-        layer.quant_method.apply.return_value = kv_cache
+        layer.quant_method.apply.return_value = ret_value
 
         output = self.impl.forward(layer,
                                    query,

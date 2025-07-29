@@ -288,6 +288,24 @@ def vllm_version_is(target_vllm_version: str):
             "format of x.y.z.")
 
 
+def get_max_hidden_layers(hf_config) -> int:
+    cfg_dict = hf_config.to_dict()
+    layer_counts = []
+
+    def _rec_find(d):
+        if isinstance(d, dict):
+            for k, v in d.items():
+                if k == "num_hidden_layers" and isinstance(v, int):
+                    layer_counts.append(v)
+                else:
+                    _rec_find(v)
+
+    _rec_find(cfg_dict)
+    if not layer_counts:
+        raise ValueError("Not found num_hidden_layers in model config.")
+    return max(layer_counts)
+
+
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     """Update ACL graph capture sizes based on hardware limitations"""
     # Store original configuration and temporarily clear it
@@ -296,7 +314,11 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         compilation_config.cudagraph_capture_sizes, None
 
     # Calculate parallel configuration factor
-    num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
+    hf_config = vllm_config.model_config.hf_config
+    if hasattr(hf_config, 'num_hidden_layers'):
+        num_hidden_layers = hf_config.num_hidden_layers
+    else:
+        num_hidden_layers = get_max_hidden_layers(hf_config)
     parallel_config = vllm_config.parallel_config
 
     # TODO: Find out whether we need to take into account the pp_size
@@ -407,15 +429,6 @@ def npu_prefetch(input: torch.Tensor,
     torch_npu.npu_prefetch(input, dependency, max_size)
 
 
-# TODO(zzzzwwjj): move this into forward_context
-class FusedMoEState(Enum):
-    AllGather = 0
-    All2All = 1
-    MC2 = 2
-    AllGatherEP = 3
-    NaiveMulticast = 4
-
-
 # TODO(ttanzhiqiang): rm_router_logits
 # dp>1 will trigger
 # In theory, this solution is only applicable to AllGather and AllGatherEP, because in the dp scenario, the previous operation was gate + two communications, and now it is changed to one communication + gate operation, which can save some communication time. In theory, all moe AllGather and AllGatherEP solutions can follow this logic, but now other moe models (qwen3-235b) dp solutions are not adjusted, so use the switch to control it to prevent code errors.
@@ -446,26 +459,6 @@ def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
     return False
 
 
-# TODO(zzzzwwjj): add soc_version to choose branch
-def get_fused_moe_state(ep_size: int, with_prefill: bool,
-                        is_deepseek_v3_r1: bool):
-    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
-    # only supports deepseek v3/r1
-    if (envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
-            and is_deepseek_v3_r1):
-        return FusedMoEState.AllGatherEP
-    elif ep_size == 1:
-        if with_prefill:
-            return FusedMoEState.NaiveMulticast
-        else:
-            return FusedMoEState.AllGather
-    # NOTE: mc2 need ep_size >= 16 & all2all can't use in torchair graph.
-    elif ep_size < 16 or with_prefill:
-        return FusedMoEState.All2All
-    else:
-        return FusedMoEState.MC2
-
-
 def register_ascend_customop():
     """Register Ascend CustomOP
 
@@ -484,3 +477,30 @@ def register_ascend_customop():
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
+
+
+# TODO(zzzzwwjj): It will be judged with _build_info afterwards.
+class AscendSocVersion(Enum):
+    A2 = 0
+    A3 = 1
+    UNDEFINED = 2
+
+
+_ascend_soc_version = None
+
+
+def init_ascend_soc_version():
+    soc_version = torch_npu.npu.get_soc_version()
+    global _ascend_soc_version
+    if 220 <= soc_version <= 225:
+        _ascend_soc_version = AscendSocVersion.A2
+    elif 250 <= soc_version <= 255:
+        _ascend_soc_version = AscendSocVersion.A3
+    else:
+        _ascend_soc_version = AscendSocVersion.UNDEFINED
+
+
+def get_ascend_soc_version():
+    global _ascend_soc_version
+    assert _ascend_soc_version is not None
+    return _ascend_soc_version

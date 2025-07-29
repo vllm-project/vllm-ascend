@@ -17,8 +17,8 @@
 from vllm_ascend.utils import vllm_version_is
 
 # Import specific patches for different versions
-if vllm_version_is("0.9.2"):
-    from vllm_ascend.patch.platform import patch_0_9_2  # noqa: F401
+if vllm_version_is("0.10.0"):
+    from vllm_ascend.patch.platform import patch_0_10_0  # noqa: F401
     from vllm_ascend.patch.platform import patch_common  # noqa: F401
 else:
     from vllm_ascend.patch.platform import patch_common  # noqa: F401
