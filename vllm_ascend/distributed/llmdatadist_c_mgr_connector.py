@@ -183,6 +183,7 @@ class LLMDataDistCMgrConnectorScheduler():
         self.port = dp_rank_local * tp_size + envs.VLLM_LLMDD_RPC_PORT if dp_rank_local is not None else tp_size + envs.VLLM_LLMDD_RPC_PORT
 
         self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
+        self._reqs_need_send: dict[str, float] = {}
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -247,7 +248,12 @@ class LLMDataDistCMgrConnectorScheduler():
             meta.add_new_req(request_id=req_id,
                              local_block_ids=block_ids,
                              kv_transfer_params=req.kv_transfer_params)
+
+        meta.reqs_to_send = self._reqs_need_send
+
+        # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()
+        self._reqs_need_send.clear()
 
         return meta
 
@@ -271,9 +277,14 @@ class LLMDataDistCMgrConnectorScheduler():
         # note: there might be some issue on this, check it if there is any unexpected result
         computed_block_ids = block_ids
         delay_free_blocks = len(computed_block_ids) > 0
+
         if delay_free_blocks:
             logger.info("Delaying free of %d blocks for request %s",
                         len(computed_block_ids), request.request_id)
+            # Prefill request on remote. It will be read from D upon completion
+            self._reqs_need_send[request.request_id] = time.perf_counter(
+            ) + envs.VLLM_LLMDD_ABORT_REQUEST_TIMEOUT
+
         return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
@@ -340,6 +351,7 @@ class LLMDataDistCMgrConnectorWorker():
         os.environ["HCCL_DETERMINISTIC"] = "true"
         self.done_receiving_counts: defaultdict[str,
                                                 set[int]] = defaultdict(set)
+        self._reqs_to_send: dict[str, float] = {}
 
     def listen_for_agent_metadata_req(self, event: threading.Event):
         assert self.local_agent_metadata is not None
@@ -606,6 +618,7 @@ class LLMDataDistCMgrConnectorWorker():
 
         for future in futures:
             future.add_done_callback(handle_exception)
+        self._reqs_to_send.update(metadata._reqs_need_send)
 
     def add_remote_agent(self, metadata: LLMDataDistCMgrAgentMetadata) -> int:
         assert self.local_agent_metadata is not None
@@ -861,7 +874,19 @@ class LLMDataDistCMgrConnectorWorker():
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         """Get the finished recving and sending requuests."""
         import copy
+        now = time.perf_counter()
         with self.thread_lock:
+            while self._reqs_to_send:
+                req_id, expires = next(iter(self._reqs_to_send.items()))
+                if now < expires:
+                    break
+                logger.warning(
+                            "Some requests in prefill node fail to receive KV Cache transfer done signal. "
+                            "If a greater mean TTFT is acceptable, you can 'export VLLM_LLMDD_ABORT_REQUEST_TIMEOUT=600' (10 minutes) to relax the timeout condition. "
+                        )
+                if req_id not in self.finished_reqs:
+                    self.finished_reqs.add(req_id)
+                del self._reqs_to_send[req_id]
             req_ids_to_ret = copy.deepcopy(self.finished_reqs)
             self.finished_reqs.clear()
         if self.llm_datadist_role == LLMRole.PROMPT:
