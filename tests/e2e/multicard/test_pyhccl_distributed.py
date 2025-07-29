@@ -24,8 +24,38 @@ from vllm.distributed.parallel_state import (get_world_group,
                                              init_distributed_environment)
 from vllm.utils import update_environment_variables
 
+from tests.e2e.conftest import cleanup_dist_env_and_memory
 from vllm_ascend.distributed.device_communicators.pyhccl import \
     PyHcclCommunicator
+
+os.environ["TOKENIZERS_PARALLELISM"] = "true"
+
+multiprocessing.set_start_method("spawn", force=True)
+
+
+def _worker_entry(env, fn):
+    # `multiprocessing.Process` cannot accept environment variables directly
+    # so we need to pass the environment variables as arguments
+    # and update the environment variables in the function
+    update_environment_variables(env)
+
+    rank = int(os.environ['RANK'])
+    local_rank = int(os.environ['LOCAL_RANK'])
+    word_size = int(os.environ['WORLD_SIZE'])
+
+    distributed_init_method = "tcp://localhost:12345"
+
+    device = torch.device(f"npu:{local_rank}")
+    torch.npu.set_device(device)
+
+    init_distributed_environment(
+        world_size=word_size,
+        rank=rank,
+        distributed_init_method=distributed_init_method,
+        local_rank=local_rank,
+        backend="hccl")
+    fn()
+    cleanup_dist_env_and_memory()
 
 
 def distributed_run(fn, world_size):
@@ -37,9 +67,7 @@ def distributed_run(fn, world_size):
         env['LOCAL_RANK'] = str(i)
         env['WORLD_SIZE'] = str(number_of_processes)
         env['LOCAL_WORLD_SIZE'] = str(number_of_processes)
-        env['MASTER_ADDR'] = 'localhost'
-        env['MASTER_PORT'] = '12345'
-        p = multiprocessing.Process(target=fn, args=(env, ))
+        p = multiprocessing.Process(target=_worker_entry, args=(env, fn))
         processes.append(p)
         p.start()
 
@@ -50,22 +78,6 @@ def distributed_run(fn, world_size):
         assert p.exitcode == 0
 
 
-def worker_fn_wrapper(fn):
-    # `multiprocessing.Process` cannot accept environment variables directly
-    # so we need to pass the environment variables as arguments
-    # and update the environment variables in the function
-    def wrapped_fn(env):
-        update_environment_variables(env)
-        local_rank = os.environ['LOCAL_RANK']
-        device = torch.device(f"npu:{local_rank}")
-        torch.npu.set_device(device)
-        init_distributed_environment(backend="hccl")
-        fn()
-
-    return wrapped_fn
-
-
-@worker_fn_wrapper
 def worker_fn():
     pynccl_comm = PyHcclCommunicator(get_world_group().cpu_group,
                                      device=get_world_group().device)
@@ -76,11 +88,10 @@ def worker_fn():
     assert torch.all(tensor == pynccl_comm.world_size).cpu().item()
 
 
-# def test_pyhccl():
-#     distributed_run(worker_fn, 2)
+def test_pyhccl():
+    distributed_run(worker_fn, 4)
 
 
-@worker_fn_wrapper
 def broadcast_worker_fn():
     # Test broadcast for every root rank.
     # Essentially this is an all-gather operation.
@@ -106,5 +117,5 @@ def broadcast_worker_fn():
         assert torch.all(recv_tensors[i] == i).cpu().item()
 
 
-# def test_pyhccl_broadcast():
-#     distributed_run(broadcast_worker_fn, 4)
+def test_pyhccl_broadcast():
+    distributed_run(broadcast_worker_fn, 4)
