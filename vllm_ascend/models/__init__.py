@@ -50,9 +50,9 @@ def register_model():
             "DeepseekV3ForCausalLM",
             "vllm_ascend.models.deepseek_v3:CustomDeepseekV3ForCausalLM")
 
-        ModelRegistry.register_model(
-            "Qwen3MoeForCausalLM",
-            "vllm_ascend.models.qwen3_moe:CustomQwen3MoeForCausalLM")
+    ModelRegistry.register_model(
+        "Qwen3MoeForCausalLM",
+        "vllm_ascend.models.qwen3_moe:CustomQwen3MoeForCausalLM")
 
     ModelRegistry.register_model(
         "Qwen3ForCausalLM", "vllm_ascend.models.qwen3:CustomQwen3ForCausalLM")
