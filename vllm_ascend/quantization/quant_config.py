@@ -34,6 +34,8 @@ from vllm.model_executor.layers.quantization import \
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    UnquantizedEmbeddingMethod, VocabParallelEmbedding)
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -107,6 +109,12 @@ class AscendQuantConfig(QuantizationConfig):
                 return AscendUnquantizedFusedMoEMethod()
             return AscendFusedMoEMethod(self, prefix,
                                         self.packed_modules_mapping)
+        elif isinstance(layer, VocabParallelEmbedding):
+            if self.is_layer_skipped_ascend(prefix,
+                                            self.packed_modules_mapping):
+                return UnquantizedEmbeddingMethod()
+            return AscendEmbeddingMethod(self, prefix,
+                                         self.packed_modules_mapping)
         return None
 
     def is_layer_skipped_ascend(
@@ -319,3 +327,18 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
+
+
+class AscendEmbeddingMethod(AscendLinearMethod):
+    """Embedding method for Ascend quantization.
+      This class calls AscendQuantizer to search a specific quantization
+      implementations supported on ascend hardware for Embedding methods.
+      Args:
+          quant_config: The Ascend quantization config.
+    """
+
+    def __init__(self, quant_config: AscendQuantConfig, prefix: str,
+                 packed_modules_mapping: Dict[str, Any]) -> None:
+        self.quantizer = AscendQuantizer.get_quantizer(
+            quant_config.quant_description, prefix, packed_modules_mapping)
+        self.quant_method = self.quantizer.build_linear_method()
