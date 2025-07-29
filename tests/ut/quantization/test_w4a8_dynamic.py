@@ -41,4 +41,5 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         mock_npu_convert_weight_to_int4pack.return_value = MagicMock
         self.method.process_weights_after_loading(layer)
 
+        self.assertTrue(layer.weight_scale_second.data.dtype, torch.float32)
         self.assertEqual(layer.weight_scale_second.data.shape, (16, 128))
