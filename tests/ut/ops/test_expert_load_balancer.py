@@ -12,6 +12,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+
 import json
 import os
 from typing import List, TypedDict
