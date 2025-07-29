@@ -129,7 +129,7 @@ def test_models_distributed_pangu():
             max_model_len=8192,
             enforce_eager=True,
             dtype="auto",
-            tensor_parallel_size=4,
+            tensor_parallel_size=2,
             distributed_executor_backend="mp",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
