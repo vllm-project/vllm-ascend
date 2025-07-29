@@ -62,9 +62,9 @@ def test_mtp_correctness(
     should be the same when using mtp speculative decoding.
     '''
     ref_llm = LLM(model=model_name,
-                    max_model_len=256,
-                    gpu_memory_utilization=0.8,
-                    enforce_eager=True)
+                  max_model_len=256,
+                  gpu_memory_utilization=0.8,
+                  enforce_eager=True)
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
 
