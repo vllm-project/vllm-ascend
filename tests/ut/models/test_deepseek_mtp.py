@@ -1,38 +1,35 @@
 import pytest
-from pytest_mock import MockerFixture
-
 import torch
+from pytest_mock import MockerFixture
 from transformers import PretrainedConfig
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
+
 from tests.ut.base import PytestBase
-from vllm.config import CacheConfig, VllmConfig, ModelConfig
 from vllm_ascend.models.deepseek_mtp import (
-    CustomDeepSeekMTP,
-    CustomDeepSeekMultiTokenPredictor,
+    CustomDeepSeekMTP, CustomDeepSeekMultiTokenPredictor,
     CustomDeepSeekMultiTokenPredictorLayer)
+
 
 class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
 
     @pytest.fixture
     def setup_mtp_layer(self, mocker: MockerFixture):
-        config = PretrainedConfig(vocab_size=1000, hidden_size=768, rms_norm_eps=1e-5)
+        config = PretrainedConfig(vocab_size=1000,
+                                  hidden_size=768,
+                                  rms_norm_eps=1e-5)
         mocker.patch(
             "vllm.model_executor.layers.vocab_parallel_embedding.VocabParallelEmbedding.__init__",
-            return_value=None
-        )
-        mocker.patch(
-            "vllm.model_executor.layers.layernorm.RMSNorm.__init__",
-            return_value=None
-        )
+            return_value=None)
+        mocker.patch("vllm.model_executor.layers.layernorm.RMSNorm.__init__",
+                     return_value=None)
         mocker.patch(
             "vllm.model_executor.models.deepseek_mtp.SharedHead.__init__",
-            return_value=None
-        )
+            return_value=None)
         mocker_deepseek_v2_decode_layer = mocker.patch(
             "vllm_ascend.models.deepseek_v2.CustomDeepseekV2DecoderLayer.__init__",
-            return_value=None
-        )
+            return_value=None)
 
-        mtp_layer=CustomDeepSeekMultiTokenPredictorLayer(config, "", None)
+        mtp_layer = CustomDeepSeekMultiTokenPredictorLayer(config, "", None)
         mocker_deepseek_v2_decode_layer.assert_called_once()
         return mtp_layer
 
@@ -45,9 +42,12 @@ class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
         mocker.patch("torch.nn.Module.__setattr__")
         mocker.patch("torch.nn.Module.__getattr__")
         mocker.patch("torch.nn.Module.__delattr__")
-        mocker.patch.object(mtp_layer, 'eh_proj', return_value=torch.randn(2, 3, 768))
+        mocker.patch.object(mtp_layer,
+                            'eh_proj',
+                            return_value=torch.randn(2, 3, 768))
         mocker.patch("torch.cat", return_value=torch.randn(2, 3, 768))
-        mtp_layer.mtp_block.return_value = (torch.randn(2, 3, 768), torch.randn(2, 3, 768))
+        mtp_layer.mtp_block.return_value = (torch.randn(2, 3, 768),
+                                            torch.randn(2, 3, 768))
 
         input_ids = torch.tensor([[1, 2, 3], [4, 5, 6]])
         positions = torch.tensor([[0, 1, 2], [0, 1, 2]])
@@ -55,15 +55,8 @@ class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
         previous_hidden_states = torch.randn(2, 3, 768)
         inputs_embeds = torch.tensor([[1.0, 2.0, 3.0]])
 
-        output = mtp_layer(
-            input_ids,
-            positions,
-            kv_cache,
-            None,
-            previous_hidden_states,
-            inputs_embeds,
-            0
-        )
+        output = mtp_layer(input_ids, positions, kv_cache, None,
+                           previous_hidden_states, inputs_embeds, 0)
         assert output.shape == (2, 3, 768)
 
 
@@ -83,10 +76,10 @@ class TestCustomDeepSeekMultiTokenPredictor(PytestBase):
         mock_vllm_config.quant_config = mocker.MagicMock()
         mocker.patch(
             "vllm_ascend.models.deepseek_mtp.CustomDeepSeekMultiTokenPredictorLayer.__init__",
-            return_value=None
-        )
+            return_value=None)
 
-        predictor = CustomDeepSeekMultiTokenPredictor(vllm_config=mock_vllm_config)
+        predictor = CustomDeepSeekMultiTokenPredictor(
+            vllm_config=mock_vllm_config)
         return predictor
 
     def test_init(self, mocker: MockerFixture, setup_predictor):
@@ -98,7 +91,8 @@ class TestCustomDeepSeekMultiTokenPredictor(PytestBase):
         (torch.tensor([[[0.1, 0.2, 0.3]]]), torch.tensor([[0.1, 0.2, 0.3]])),
         (None, None),
     ])
-    def test_forward(self, mocker: MockerFixture, setup_predictor, kv_caches, inputs_embeds):
+    def test_forward(self, mocker: MockerFixture, setup_predictor, kv_caches,
+                     inputs_embeds):
         predictor = setup_predictor
         mock_layer = mocker.MagicMock()
         mock_layer.return_value = torch.tensor([1.0, 2.0, 3.0])
@@ -110,20 +104,11 @@ class TestCustomDeepSeekMultiTokenPredictor(PytestBase):
         positions = torch.tensor([[0, 1, 2]])
         mocker.patch(
             "vllm_ascend.models.deepseek_mtp.CustomDeepSeekMultiTokenPredictorLayer.__call__",
-            return_value=torch.tensor([[1.0, 2.0, 3.0]])
-        )
-        output = predictor.forward(
-            input_ids,
-            positions,
-            kv_caches,
-            None,
-            None,
-            inputs_embeds,
-            0
-        )
+            return_value=torch.tensor([[1.0, 2.0, 3.0]]))
+        output = predictor.forward(input_ids, positions, kv_caches, None, None,
+                                   inputs_embeds, 0)
         mock_layer.assert_called_once()
         assert torch.allclose(output, torch.tensor([1.0, 2.0, 3.0]))
-
 
     def test_compute_logits(self, mocker: MockerFixture, setup_predictor):
         hidden_states = torch.tensor([[1, 2, 3], [4, 5, 6]])
@@ -137,11 +122,11 @@ class TestCustomDeepSeekMultiTokenPredictor(PytestBase):
         mocker.patch("torch.nn.Module.__delattr__")
         mocker.patch(
             "vllm.model_executor.layers.logits_processor.LogitsProcessor.__init__",
-            return_value=None
-        )
+            return_value=None)
         predictor.logits_processor.return_value = torch.tensor([1.0, 2.0, 3.0])
 
-        result_logits = predictor.compute_logits(hidden_states=hidden_states, sampling_metadata=None)
+        result_logits = predictor.compute_logits(hidden_states=hidden_states,
+                                                 sampling_metadata=None)
         predictor.logits_processor.assert_called_once()
         assert torch.allclose(result_logits, torch.tensor([1.0, 2.0, 3.0]))
 
@@ -161,12 +146,9 @@ class TestCustomDeepSeekMTP(PytestBase):
         mocker.patch("torch.nn.Module.__delattr__")
         mocker.patch(
             "vllm_ascend.models.deepseek_mtp.CustomDeepSeekMultiTokenPredictorLayer.__call__",
-            return_value=None
-        )
-        mocker.patch(
-            "vllm.model_executor.layers.sampler.get_sampler",
-            return_value=None
-        )
+            return_value=None)
+        mocker.patch("vllm.model_executor.layers.sampler.get_sampler",
+                     return_value=None)
 
         mtp = CustomDeepSeekMTP(vllm_config=vllm_config)
         return mtp
@@ -184,15 +166,7 @@ class TestCustomDeepSeekMTP(PytestBase):
         spec_step_idx = 0
         setup_mtp.model.return_value = torch.tensor([[1.0, 2.0, 3.0]])
 
-        output = setup_mtp.forward(
-            input_ids,
-            positions,
-            kv_caches,
-            None,
-            previous_hidden_states,
-            inputs_embeds,
-            spec_step_idx
-        )
+        output = setup_mtp.forward(input_ids, positions, kv_caches, None,
+                                   previous_hidden_states, inputs_embeds,
+                                   spec_step_idx)
         assert torch.allclose(output, torch.tensor([[1.0, 2.0, 3.0]]))
-
-
