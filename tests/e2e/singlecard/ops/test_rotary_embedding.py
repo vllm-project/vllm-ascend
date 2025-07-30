@@ -201,8 +201,8 @@ def test_rotary_embedding_quant_with_leading_dim(
                                rtol=DEFAULT_RTOL)
 
 
-
 class ModelwithRotaryEmbedding(nn.Module):
+
     def __init__(
         self,
         hidden_size: int,
@@ -212,7 +212,8 @@ class ModelwithRotaryEmbedding(nn.Module):
         max_position_embeddings: int,
         base: int,
         is_neox_style: bool,
-        dtype: torch.dtype,) -> None:
+        dtype: torch.dtype,
+    ) -> None:
         super().__init__()
         self.qkv_proj = nn.Linear(hidden_size, num_heads * head_size * 3)
         self.rope = RotaryEmbedding(
@@ -231,11 +232,12 @@ class ModelwithRotaryEmbedding(nn.Module):
         hidden_states: torch.Tensor,
         offsets: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        # we simulated a simple attention layer to test if it can seamlessly integrated into aclgraph
-        q,k,v = self.qkv_proj(hidden_states).chunk(3, dim=-1)
+        # we simulated a simple attention layer to test if it can be seamlessly captured into aclgraph
+        q, k, v = self.qkv_proj(hidden_states).chunk(3, dim=-1)
         query, key = self.rope.forward_native(positions, q, k, offsets)
         o = self.o_proj(query)
         return o
+
 
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("num_tokens", BATCH_SIZES)
@@ -272,17 +274,21 @@ def test_capture_rotary_embedding_in_aclgraph(
         dtype=dtype,
     )
 
-    static_positions = torch.randint(0, max_position_embeddings, (num_tokens, ))
-    static_hidden_states = torch.randn(num_tokens, num_heads * head_size,
-                                       dtype=dtype, device="npu")
+    static_positions = torch.randint(0, max_position_embeddings,
+                                     (num_tokens, ))
+    static_hidden_states = torch.randn(num_tokens,
+                                       num_heads * head_size,
+                                       dtype=dtype,
+                                       device="npu")
     compiled_model = torch.compile(model)
     stream = torch.npu.Stream()
     stream.wait_stream(torch.npu.current_stream())
     with torch.npu.stream(stream):
         # warmup the fx graph before capture
         for i in range(3):
-            static_output = compiled_model(
-                static_positions, static_hidden_states, offsets=None)
+            static_output = compiled_model(static_positions,
+                                           static_hidden_states,
+                                           offsets=None)
     stream.wait_stream(torch.npu.current_stream())
 
     aclgraph = torch.npu.NPUGraph()
@@ -291,9 +297,14 @@ def test_capture_rotary_embedding_in_aclgraph(
         # Capture the model in aclgraph.
         static_output = compiled_model(static_positions, static_hidden_states)
     # Capture the model in aclgraph.
-    random_filled_positions = torch.randint(
-        0, max_position_embeddings, (num_tokens, ), device="npu")
-    random_filled_hidden_states = torch.randn(num_tokens, num_heads * head_size, dtype=dtype, device="npu")
+    random_filled_positions = torch.randint(0,
+                                            max_position_embeddings,
+                                            (num_tokens, ),
+                                            device="npu")
+    random_filled_hidden_states = torch.randn(num_tokens,
+                                              num_heads * head_size,
+                                              dtype=dtype,
+                                              device="npu")
     static_positions.copy_(random_filled_positions)
     static_hidden_states.copy_(random_filled_hidden_states)
 
@@ -303,4 +314,3 @@ def test_capture_rotary_embedding_in_aclgraph(
                                output_reference,
                                atol=DEFAULT_ATOL,
                                rtol=DEFAULT_RTOL)
-
