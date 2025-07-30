@@ -41,7 +41,7 @@ class AscendConfig:
 
         self.expert_map_path = additional_config.get(
             "expert_map_path", None
-        )  # When using expert load balancing for the MOE model, an expert map path needs to be passed in.
+        )  # When using expert load balancing for the MOE model, an expert map path needs to be passed in
         self.dynamic_eplb = additional_config.get(
             "dynamic_eplb",
             False)  # Whether to enable dynamic expert load balancing
@@ -50,7 +50,7 @@ class AscendConfig:
         )  # Frenquency (in iterations) at which EPLB recalculates and redistributes expert loads
         self.gate_eplb = additional_config.get(
             "gate_eplb", False
-        )  # Identifier of the gate instance responsible for gathering statistics and initiating EPLB updates
+        )  # If set to True, the EPLB process will run only once; If False, it will execute periodically
         self.num_wait_worker_iterations = additional_config.get(
             "num_wait_worker_iterations", 30
         )  # Number of iterations to wait before applying a redistribution plan
@@ -59,11 +59,11 @@ class AscendConfig:
             False)  # Whether to enable the fused operator-like chunked_prefill
         self.enable_weight_nz_layout = additional_config.get(
             "enable_weight_nz_layout", False
-        )  # Whether to convert quantized weights to NZ format to accelerate matrix multiplication.
+        )  # Whether to convert quantized weights to NZ format to accelerate matrix multiplication
         self.enable_prefill_optimizations = additional_config.get(
             "enable_prefill_optimizations",
             False)  # Whether to enable DeepSeek models' prefill optimizations
-        self.enable_cpu_binding = additional_config.get(  # Whether to enable the cpu binding.
+        self.enable_cpu_binding = additional_config.get(  # Whether to enable the cpu binding
             "enable_cpu_binding", False)
 
 
