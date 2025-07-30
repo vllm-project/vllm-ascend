@@ -219,11 +219,8 @@ class TestNativeRopeDeepseekForward(TestBase):
 
         mock_rope_forward_oot.return_value = (query, key)
 
-        q_pe, k_pe = native_rope_deepseek_forward(module,
-                                                  positions,
-                                                  query,
-                                                  key,
-                                                  max_seq_len=2048)
+        q_pe, k_pe = native_rope_deepseek_forward(module, positions, query,
+                                                  key)
 
         assert q_pe.shape == query.shape
         assert k_pe.shape == key.shape
