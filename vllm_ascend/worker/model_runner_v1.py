@@ -79,6 +79,7 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
 from vllm_ascend.attention.attention_v1_torchair import AscendTorchairMetadata
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
+from vllm_ascend.distributed.utils import is_lmhead_tp
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
@@ -1271,6 +1272,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = hidden_states
 
+        if is_lmhead_tp():
+            if not with_prefill:
+                max_num_reqs_across_dp = padded_num_tokens_across_dp
+            else:
+                max_num_reqs_across_dp = self.max_num_reqs
+            sample_indices = nn.functional.pad(
+                sample_indices,
+                (0, max_num_reqs_across_dp - sample_indices.shape[0]))
+
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
                 total_num_scheduled_tokens, logits_indices, aux_hidden_states,
                 num_scheduled_tokens, finished_sending, finished_recving)
@@ -1570,11 +1580,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Sample the next token and get logprobs if needed.
             sampling_metadata = self.input_batch.sampling_metadata
             if spec_decode_metadata is None:
+                if is_lmhead_tp():
+                    logits = logits[:self.input_batch.num_reqs]
+
                 sampler_output = self.sampler(
                     logits=logits,
                     sampling_metadata=sampling_metadata,
                 )
             else:
+                if is_lmhead_tp():
+                    logits = logits[:len(spec_decode_metadata.logits_indices)]
+
                 # When indexing with a tensor (bonus_logits_indices), PyTorch
                 # creates a new tensor with separate storage from the original
                 # logits tensor. This means any in-place operations on bonus_logits
@@ -1887,6 +1903,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     if self.use_spec_decode and isinstance(
                             self.drafter, EagleProposer):
                         self.drafter.dummy_run(num_tokens)
+                
+                if not self.in_profile_run and is_lmhead_tp():
+                    # lmhead_tp introduces additional communication across
+                    # dp when computing logits. Hence we need to add it
+                    # in profile_run.
+                    if not with_prefill:
+                        max_num_reqs_across_dp = num_reqs
+                    else:
+                        max_num_reqs_across_dp = max_num_reqs
+                    dummy_indices = torch.zeros(max_num_reqs_across_dp,
+                                                device=hidden_states.device,
+                                                dtype=torch.int32)
+                    model.compute_logits(hidden_states[dummy_indices], None)
             return hidden_states
 
     @contextmanager
