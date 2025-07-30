@@ -50,21 +50,6 @@ def init_ascend_model_parallel(
                                      backend,
                                      group_name="mc2")
     
-    global _LM_HEAD_TP
-    assert _LM_HEAD_TP is None, ("lm head tensor model parallel group is already initialized")
-    lm_tp  = 4
-    
-    all_ranks_lm_head = torch.arange(world_size).reshape(
-        -1, lm_tp, pipeline_parallel_size, 1)  # noqa
-    group_ranks = all_ranks_lm_head.view(-1, lm_tp).unbind(0)
-    group_ranks = [x.tolist() for x in group_ranks]
-    
-    # message queue broadcaster is only used in tensor model parallel group
-    _LM_HEAD_TP = init_model_parallel_group(group_ranks,
-                                            get_world_group().local_rank,
-                                            backend,
-                                            group_name="lm_head_tp")
-    
     global _MLP_TP
     assert _MLP_TP is None, ("mlp tensor model parallel group is already initialized")
     mlp_tp  = 4
