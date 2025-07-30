@@ -15,8 +15,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
-import unittest
-
 import pytest
 from pytest_mock import MockerFixture
 from tests.ut.base import PytestBase
