@@ -79,6 +79,10 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
 from vllm_ascend.attention.attention_v1_torchair import AscendTorchairMetadata
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
+from vllm_ascend.distributed.moe_comm_method import (AllGatherCommImpl,
+                                                     AllReduceCommImpl,
+                                                     DummyCommImpl,
+                                                     MoECommMethod)
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
@@ -352,6 +356,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.is_kv_producer = False
         if vllm_config.kv_transfer_config is not None:
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
+
+        self.reserved_mc2_mask = torch.zeros(
+            512,
+            dtype=torch.bool,
+            device=self.device,
+        )
+
+        if self.parallel_config.enable_expert_parallel:
+            self.moe_comm_method = AllGatherCommImpl
+        else:
+            self.moe_comm_method = AllReduceCommImpl
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -1174,13 +1189,22 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 for k, v in self.intermediate_tensors.items()
             })
 
+        moe_comm_method = self.moe_comm_method
+
         # Run forward pass
         with set_ascend_forward_context(
                 attn_metadata,
                 self.vllm_config,
-                num_tokens=padded_num_tokens_across_dp,
+                # NOTE: This will break some function
+                # num_tokens=padded_num_tokens_across_dp,
+                num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
                 with_prefill=with_prefill,
+                reserved_mc2_mask=self.reserved_mc2_mask,
+                moe_comm_method=moe_comm_method(
+                    self.device, self.dtype,
+                    self.model_config.hf_config.num_experts_per_tok,
+                    self.model_config.hf_config.num_experts),
                 num_actual_tokens=total_num_scheduled_tokens):
             with ProfileExecuteDuration().capture_async("forward"):
                 self.maybe_setup_kv_connector(scheduler_output)
@@ -1719,6 +1743,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         skip_attn: bool = True,
         with_prefill: bool = False,
         is_torchair_compile: bool = False,
+        moe_comm_method: MoECommMethod = DummyCommImpl,
     ) -> torch.Tensor:
         maybe_padded_num_tokens = num_tokens
         if self.torchair_graph_enabled and not with_prefill:
@@ -1793,6 +1818,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_tokens_across_dp=num_tokens_across_dp,
                     with_prefill=with_prefill,
                     in_profile_run=self.in_profile_run,
+                    reserved_mc2_mask=self.reserved_mc2_mask,
+                    moe_comm_method=moe_comm_method(
+                        self.device, self.dtype,
+                        self.model_config.hf_config.num_experts_per_tok,
+                        self.model_config.hf_config.num_experts),
                     num_actual_tokens=0,
             ):
                 model_kwargs = {}
@@ -2277,11 +2307,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # can reuse the memory pool allocated for the large shapes.
             # TODO(zzzzwwjj): Check dummy_run with ACL Graph and full graph mode
             with graph_capture(device=self.device):
+                skip_attn = not self.vllm_config.compilation_config.full_cuda_graph
                 for num_tokens in reversed(self.aclgraph_batch_sizes):
                     for _ in range(self.vllm_config.compilation_config.
                                    cudagraph_num_of_warmups):
-                        self._dummy_run(num_tokens)
-                    self._dummy_run(num_tokens)
+                        self._dummy_run(
+                            num_tokens,
+                            skip_attn=skip_attn,
+                            moe_comm_method=self.moe_comm_method,
+                        )
+                    self._dummy_run(
+                        num_tokens,
+                        skip_attn=skip_attn,
+                        moe_comm_method=self.moe_comm_method,
+                    )
         else:
             logger.info("Skipping NPU graph capture for eager mode.")
             return
