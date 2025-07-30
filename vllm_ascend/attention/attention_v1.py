@@ -151,18 +151,6 @@ class AscendMetadata:
     # (num_tokens,)
     slot_mapping: torch.Tensor = None
 
-    def split_metadata_for_multistream(
-        self,
-        ms_split_config: MSAttentionMetadataSplitConfig,
-    ) -> list["AscendMetadata"]:
-        """Split metadata for multi-stream with AscendMetadata"""
-        from vllm_ascend.multistream.ms_split import model_input_split_v1_attn
-        return model_input_split_v1_attn(
-            ms_split_config=ms_split_config,
-            attn_metadata=self,
-            _metadata_cls=AscendMetadata,
-        )
-
 
 class AscendAttentionMetadataBuilder:
 

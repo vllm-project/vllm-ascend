@@ -4,8 +4,7 @@ from typing import Any, List, Optional
 import numpy as np
 import torch
 
-from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
-                                                AscendMetadata)
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
 from .base import MSAttentionMetadataSplitConfig
 
