@@ -22,6 +22,7 @@ ROTARY_DIMS = [None, 32]  # None means rotary dim == head size
 NUM_HEADS = [17]  # Arbitrary values for testing
 BATCH_SIZES = [5]  # Arbitrary values for testing
 SEQ_LENS = [11, 4096]  # Arbitrary values for testing
+NUM_TOKENS = [10, 21]
 SEEDS = [0]
 DEVICES = [f"npu:{0}"]
 # Set tolerance to 1 for quant ops
@@ -236,4 +237,70 @@ class ModelwithRotaryEmbedding(nn.Module):
         o = self.o_proj(query)
         return o
 
+@pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
+@pytest.mark.parametrize("num_tokens", BATCH_SIZES)
+@pytest.mark.parametrize("num_heads", NUM_HEADS)
+@pytest.mark.parametrize("head_size", HEAD_SIZES)
+@pytest.mark.parametrize("rotary_dim", ROTARY_DIMS)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("seed", SEEDS)
+@pytest.mark.parametrize("device", DEVICES)
+@torch.inference_mode()
+def test_capture_rotary_embedding_in_aclgraph(
+    is_neox_style: bool,
+    num_tokens: int,
+    num_heads: int,
+    head_size: int,
+    rotary_dim: int,
+    dtype: torch.dtype,
+    seed: int,
+    device: str,
+    max_position_embeddings: int,
+    base: int,
+):
+    """Test if the rotary embedding can be captured in aclgraph."""
+    torch.manual_seed(seed)
+    torch.set_default_device(device)
+    model = ModelwithRotaryEmbedding(
+        hidden_size=num_tokens,
+        num_heads=num_heads,
+        head_size=head_size,
+        rotary_dim=rotary_dim,
+        max_position_embeddings=max_position_embeddings,
+        base=base,
+        is_neox_style=is_neox_style,
+        dtype=dtype,
+    )
+
+    static_positions = torch.randint(0, max_position_embeddings, (num_tokens, ))
+    static_hidden_states = torch.randn(num_tokens, num_heads * head_size,
+                                       dtype=dtype, device="npu")
+    compiled_model = torch.compile(model)
+    stream = torch.npu.Stream()
+    stream.wait_stream(torch.npu.current_stream())
+    with torch.npu.stream(stream):
+        # warmup the fx graph before capture
+        for i in range(3):
+            static_output = compiled_model(
+                static_positions, static_hidden_states, offsets=None)
+    stream.wait_stream(torch.npu.current_stream())
+
+    aclgraph = torch.npu.NPUGraph()
+
+    with torch.npu.graph(aclgraph):
+        # Capture the model in aclgraph.
+        static_output = compiled_model(static_positions, static_hidden_states)
+    # Capture the model in aclgraph.
+    random_filled_positions = torch.randint(
+        0, max_position_embeddings, (num_tokens, ), device="npu")
+    random_filled_hidden_states = torch.randn(num_tokens, num_heads * head_size, dtype=dtype, device="npu")
+    static_positions.copy_(random_filled_positions)
+    static_hidden_states.copy_(random_filled_hidden_states)
+
+    aclgraph.replay()
+    output_reference = model(static_positions, static_hidden_states)
+    torch.testing.assert_close(static_output,
+                               output_reference,
+                               atol=DEFAULT_ATOL,
+                               rtol=DEFAULT_RTOL)
 
