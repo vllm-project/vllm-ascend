@@ -9,27 +9,22 @@
 namespace vllm_ascend {
 namespace meta {
 
-// In order to support symbolic tracing, the specific shape format is required here.
 std::tuple<at::Tensor, at::Tensor> rotary_embedding_meta(
-  at::Tensor &positions,  // [num_tokens]
-  at::Tensor &query,      // [num_tokens, hidden_size]
-  at::Tensor &key,        // [num_tokens, hidden_size]
+  at::Tensor &positions,
+  at::Tensor &query,
+  at::Tensor &key,
   int64_t head_size, 
-  at::Tensor &cos_sin_cache,  // we don't care about this shape 
+  at::Tensor &cos_sin_cache,
   bool is_neox) {
-    int64_t num_tokens = query.size(0);
-    int query_hidden_size = query.size(1)
-    int key_hidden_size = key.size(1);
-    TORCH_CHECK(query_hidden_size % head_size == 0);
-    TORCH_CHECK(key_hidden_size % head_size == 0);
-    TORCH_CHECK(is_neox == true, "rotary_embedding: neox=false is not supported as custom kernel in vllm-ascend");
+    auto num_tokens = positions.sym_numel();
+    auto query_hidden_size = query.sym_numel() / num_tokens;
+    auto key_hidden_size = key.sym_numel() / num_tokens;
 
     // Make sure query and key have consistent number of heads
-    int num_heads = query_hidden_size / head_size;
-    int num_kv_heads = key_hidden_size / head_size;
-    TORCH_CHECK(num_heads % num_kv_heads == 0);
-    at::Tensor query_dst = at::empty({num_tokens, num_heads, head_size}, query.options().device(at::kMeta));
-    at::Tensor key_dst = at::empty({num_tokens, num_kv_heads, head_size}, key.options().device(at::kMeta));
+    auto num_heads = query_hidden_size / head_size;
+    auto num_kv_heads = key_hidden_size / head_size;
+    at::Tensor query_dst = at::empty_symint({num_tokens, num_heads, head_size}, query.options());
+    at::Tensor key_dst = at::empty_symint({num_tokens, num_kv_heads, head_size}, key.options());
 
     return {query_dst, key_dst};
 }
@@ -41,29 +36,20 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask_meta(
     const int64_t num_org_vocab_padding,
     const int64_t added_vocab_start_index,
     const int64_t added_vocab_end_index) {
-    // Input validation
-    TORCH_CHECK(input.dim() >= 1, "input must have at least 1 dimension");
-    TORCH_CHECK(org_vocab_start_index >= 0, "org_vocab_start_index must be non-negative");
-    TORCH_CHECK(org_vocab_end_index >= org_vocab_start_index, "org_vocab_end_index must be greater than org_vocab_start_index");
-    TORCH_CHECK(num_org_vocab_padding >= 0, "num_org_vocab_padding must be non-negative");
-    TORCH_CHECK(added_vocab_start_index >= org_vocab_end_index, "added_vocab_start_index must be greater than org_vocab_end_index");
-    TORCH_CHECK(added_vocab_end_index >= added_vocab_start_index, "added_vocab_end_index must be greater than added_vocab_start_index");
 
-    // Create output tensors
-
-    at::Tensor masked_input = at::empty(input.sizes(), input.options().device(at::kMeta));
-    at::Tensor mask = at::empty(input.sizes(), input.options().device(at::kMeta).dtype(at::kBool));
+    at::Tensor masked_input = at::empty_like(input);
+    at::Tensor mask = at::empty_like(input, input.options().dtype(at::kBool));
 
     return {masked_input, mask};
 }
-
 
 
 } // namespace meta
 } // namespace vllm_ascend
 
 namespace {
-  // Register the meta implementations of the custom kernels for symbolic tracing
+  // Register the meta implementations of the custom kernels for symbolic tracing, this will also 
+  // the custom kernel been captured into aclgraph
   TORCH_LIBRARY_IMPL_EXPAND(_C, Meta, ops) {
     // Rotary embedding meta implementation
     ops.impl("rotary_embedding", &vllm_ascend::meta::rotary_embedding_meta);
