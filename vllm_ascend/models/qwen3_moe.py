@@ -58,23 +58,12 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
         self.quant_config = quant_config
         self.model = Qwen3MoeModel(vllm_config=vllm_config,
                                    prefix=maybe_prefix(prefix, "model"))
-        self.lm_head = CustomParallelLMHead(config.vocab_size,
+        self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config,
                                       prefix=maybe_prefix(prefix, "lm_head"))
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
-        self.logits_processor2 = CustomLogitsProcessor(config.vocab_size)
+        self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
-    
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        cu_tokens_across_dp_cpu: torch.Tensor,
-        num_tokens_across_dp: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor2(self.lm_head, hidden_states, cu_tokens_across_dp_cpu, num_tokens_across_dp,
-                                       sampling_metadata)
-        return logits
