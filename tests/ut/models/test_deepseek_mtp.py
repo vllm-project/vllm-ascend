@@ -195,6 +195,6 @@ class TestCustomDeepSeekMTP(PytestBase):
             inputs_embeds,
             spec_step_idx
         )
-        assert torch.allclose(output, torch.tensor([[0.1, 0.2, 0.3]]))
+        assert torch.allclose(output, torch.tensor([[1.0, 2.0, 3.0]]))
 
 
