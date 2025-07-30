@@ -22,8 +22,7 @@ from typing import Any, Dict, List, Optional
 
 from vllm.logger import logger
 
-from .func_wrapper import (wrapper_rmsnorm_forward_oot,
-                           wrapper_rmsnorm_init,
+from .func_wrapper import (wrapper_rmsnorm_forward_oot, wrapper_rmsnorm_init,
                            wrapper_vocab_parallel_embedding_init)
 from .w8a8 import (AscendC8KVCacheMethod, AscendW8A8FusedMoEMethod,
                    AscendW8A8LinearMethod)
