@@ -10,8 +10,7 @@ from vllm.config import QuantizationConfig
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
+    QuantizationConfig)
 # yapf: disable
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            BlockQuantScaleParameter,
@@ -19,11 +18,8 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
                                            PackedvLLMParameter,
                                            PerTensorScaleParameter,
                                            RowvLLMParameter)
-from vllm.distributed import (divide, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              split_tensor_along_last_dim,
-                              tensor_model_parallel_all_gather,
-                              tensor_model_parallel_all_reduce)
+from vllm.distributed import (divide,
+                              split_tensor_along_last_dim,)
 
 
 
@@ -68,7 +64,6 @@ class AttnColumnParallelLinear(LinearBase):
         return_bias: bool = True,
     ):
         # Divide the weight matrix along the last dimension.
-        # self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_size = get_mlp_tensor_model_parallel_world_size()
         self.input_size_per_partition = input_size
         self.output_size_per_partition = divide(output_size, self.tp_size)
@@ -172,25 +167,14 @@ class AttnColumnParallelLinear(LinearBase):
         # Matrix multiply.
         assert self.quant_method is not None
         forward_context = get_forward_context()
-        num_reqs_across_dp = forward_context.num_reqs_across_dp
-        print("###########AttnColumnParallelLinear input_",input_.shape, input_.device, input_)
-        # input2_ = tensor_model_parallel_all_gather_lm(input_, 0)
+        num_tokens_across_dp = forward_context.num_tokens_across_dp
         
         gathered_input = [torch.empty(batch_size, input_.size(
-            1), dtype=input_.dtype, device=input_.device) for batch_size in num_reqs_across_dp]
+            1), dtype=input_.dtype, device=input_.device) for batch_size in num_tokens_across_dp]
         torch.distributed.all_gather(
                 gathered_input, input_, group=get_mlp_tp_group().device_group)
         input2_ = torch.cat(gathered_input, dim=0)
-        
-        print("###########AttnColumnParallelLinear qafter input_",input2_.shape, input2_.device, input2_)
-        # print("###########AttnColumnParallelLinear input2_",input2_.shape)
         output = self.quant_method.apply(self, input2_, bias)
-        # if self.gather_output:
-        #     # All-gather across the partitions.
-        #     output = tensor_model_parallel_all_gather(output_parallel)
-        # else:
-        #     output = output_parallel
-        # print("###########AttnColumnParallelLinear output",output.shape)
         output_bias = self.bias if self.skip_bias_add else None
         if not self.return_bias:
             return output
@@ -348,6 +332,7 @@ class AttnRowParallelLinear(LinearBase):
     def forward(
         self, input_
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        tp_rank = get_mlp_tensor_model_parallel_rank()
         if self.input_is_parallel:
             input_parallel = input_
         else:
@@ -356,7 +341,6 @@ class AttnRowParallelLinear(LinearBase):
             splitted_input = split_tensor_along_last_dim(
                 input_, num_partitions=self.tp_size)
             input_parallel = splitted_input[tp_rank].contiguous()
-
         # Matrix multiply.
         assert self.quant_method is not None
         # Only fuse bias add into GEMM for rank 0 (this ensures that
@@ -365,11 +349,12 @@ class AttnRowParallelLinear(LinearBase):
         output_parallel = self.quant_method.apply(self,
                                                   input_parallel,
                                                   bias=bias_)
-        # if self.reduce_results and self.tp_size > 1:
-        #     output = tensor_model_parallel_all_reduce(output_parallel)
-        # else:
-        #     output = output_parallel
-        output = tensor_model_parallel_reduce_scatter_lm(output_parallel, dim=0)
+        num_tokens_across_dp = get_forward_context().num_tokens_across_dp
+        num_tokens_across_dp = tuple(num_tokens_across_dp.numpy())
+        # input2_ = tensor_model_parallel_all_gather_lm(input_, 0)
+        split_tensor = list(torch.split(output_parallel, num_tokens_across_dp, dim=0))
+        output = torch.empty_like(split_tensor[tp_rank])
+        torch.distributed.reduce_scatter(output, split_tensor, op=torch.distributed.ReduceOp.SUM, group=get_mlp_tp_group().device_group)
 
         output_bias = self.bias if self.skip_bias_add else None
 
