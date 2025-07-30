@@ -157,14 +157,16 @@ def test_models_distributed_topk() -> None:
         vllm_model.generate(example_prompts, sampling_params)
 
 
-def test_models_distributed_Qwen3_W8A8():
+@pytest.mark.parametrize(
+    "model_path", ["vllm-ascend/Qwen3-8B-W8A8", "vllm-ascend/QwQ-32B-W8A8"])
+def test_models_distributed_Qwen_W8A8(model_path: str):
     example_prompts = [
         "Hello, my name is",
     ]
     max_tokens = 5
 
     with VllmRunner(
-            snapshot_download("vllm-ascend/Qwen3-8B-W8A8"),
+            snapshot_download(model_path),
             max_model_len=8192,
             enforce_eager=True,
             dtype="auto",
