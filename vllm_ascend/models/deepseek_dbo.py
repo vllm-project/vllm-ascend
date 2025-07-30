@@ -156,6 +156,7 @@ class CustomDeepseekDBOMoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=True,
+                is_shared_experts=True,
                 prefix=f"{prefix}.shared_experts",
             )
         CustomDeepseekDBOMoE.top_k = config.num_experts_per_tok
