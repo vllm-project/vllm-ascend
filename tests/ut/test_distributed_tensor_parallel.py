@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 
 import importlib
+from unittest import mock
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -53,6 +54,7 @@ def mock_dist():
 
 class TestDistributedCommunication(PytestBase):
 
+    @mock.patch("torch.npu.current_device", return_value="cpu")
     @pytest.mark.parametrize("world_size", [1, 4])
     def test_gather_along_first_dim(self, test_tensor, mock_group, mock_dist,
                                     world_size):
@@ -66,6 +68,7 @@ class TestDistributedCommunication(PytestBase):
         else:
             assert result.shape == (32, 16)  # 8*4=32
 
+    @mock.patch("torch.npu.current_device", return_value="cpu")
     def test_gather_along_first_dim_unequal_split(self, test_tensor,
                                                   mock_group):
         """test unequal split"""
@@ -74,6 +77,7 @@ class TestDistributedCommunication(PytestBase):
                                          output_split_sizes)
         assert result.shape == (32, 16)  # 5+10+15+2=32
 
+    @mock.patch("torch.npu.current_device", return_value="cpu")
     @pytest.mark.parametrize("world_size", [1, 4])
     def test_gather_along_last_dim(self, test_tensor_last_dim, mock_group,
                                    mock_dist, world_size):
@@ -84,6 +88,7 @@ class TestDistributedCommunication(PytestBase):
 
         assert result.shape == (8, 16, 32 * world_size)
 
+    @mock.patch("torch.npu.current_device", return_value="cpu")
     @pytest.mark.parametrize("input_shape,expected_shape", [
         ((32, 16), (8, 16)),
         ((40, 10), (10, 10)),
@@ -94,11 +99,13 @@ class TestDistributedCommunication(PytestBase):
         result = _reduce_scatter_along_first_dim(input_tensor, mock_group)
         assert result.shape == expected_shape
 
+    @mock.patch("torch.npu.current_device", return_value="cpu")
     def test_reduce_scatter_along_last_dim(self, mock_group):
         input_tensor = torch.randn(8, 16, 32)
         result = _reduce_scatter_along_last_dim(input_tensor, mock_group)
         assert result.shape == (8, 16, 8)
 
+    @mock.patch("torch.npu.current_device", return_value="cpu")
     @pytest.mark.parametrize("func,input_shape,expected_shape", [
         ("all_gather_last_dim_from_tensor_parallel_region", (8, 16, 32),
          (8, 16, 128)),
@@ -118,6 +125,7 @@ class TestDistributedCommunication(PytestBase):
         result = test_func(input_tensor, mock_group)
         assert result.shape == expected_shape
 
+    @mock.patch("torch.npu.current_device", return_value="cpu")
     @pytest.mark.parametrize(
         "input_shape,output_shape",
         [
@@ -128,6 +136,7 @@ class TestDistributedCommunication(PytestBase):
         result = all_to_all_sp2hp(input_tensor, mock_group)
         assert result.shape == output_shape
 
+    @mock.patch("torch.npu.current_device", return_value="cpu")
     @pytest.mark.parametrize(
         "input_shape,output_shape",
         [
