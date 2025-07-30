@@ -1486,7 +1486,7 @@ class AscendFusedMoE(FusedMoE):
             mc2_mask=mc2_mask,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
-            token_dispatcher=self.token_dispatcher,
+            token_dispatcher=self.token_dispatcher
         )
 
         if shared_experts:

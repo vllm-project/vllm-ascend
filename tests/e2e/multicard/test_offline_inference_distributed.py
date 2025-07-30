@@ -149,8 +149,10 @@ def test_models_distributed_topk() -> None:
                                      top_p=0.9)
 
     with VllmRunner(
-            "deepseek-ai/DeepSeek-V2-Lite",
-            dtype=dtype,
+            snapshot_download("vllm-ascend/pangu-pro-moe-pruing"),
+            max_model_len=8192,
+            enforce_eager=True,
+            dtype="auto",
             tensor_parallel_size=2,
             distributed_executor_backend="mp",
     ) as vllm_model:
