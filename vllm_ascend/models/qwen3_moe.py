@@ -247,7 +247,7 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
                                       prefix=maybe_prefix(prefix, "lm_head"))
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
-        self.logits_processor2 = CustomLogitsProcessor(config.vocab_size)
+        self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
         self.enable_sequence_parallelism = vllm_config.compilation_config.pass_config.enable_sequence_parallelism
