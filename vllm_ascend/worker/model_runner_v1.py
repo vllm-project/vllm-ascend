@@ -271,8 +271,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.query_lens = torch.zeros(self.max_num_reqs,
                                       dtype=torch.int32,
                                       device=self.device)
-        # None in the first PP rank. The rest are set after load_model.
-        self.intermediate_tensors: Optional[IntermediateTensors] = None
 
         self.uses_mrope = self.model_config.uses_mrope
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)

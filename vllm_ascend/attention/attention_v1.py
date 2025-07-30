@@ -32,8 +32,9 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm_ascend.attention.utils import \
     AscendCommonAttentionMetadata as CommonAttentionMetadata
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, get_graph_params, is_310p,
-                               nd_to_nz_2d, nd_to_nz_spec)
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16,
+                               get_graph_params, is_310p, nd_to_nz_2d,
+                               nd_to_nz_spec)
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 
@@ -135,7 +136,7 @@ class AscendMetadata:
     # tokens + new tokens (is None if it is a decoding).
     # (batch_size,)
     seq_lens: torch.Tensor = None
-    seq_lens_list: Optional[list[int]]
+    seq_lens_list: Optional[list[int]] = None
     query_start_loc: torch.Tensor = None
     query_lens: torch.Tensor = None
     # Maximum query length in the batch (None for decoding).
@@ -165,10 +166,7 @@ class AscendAttentionMetadataBuilder:
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
 
-    def build(self,
-              num_reqs,
-              num_actual_tokens,
-              max_query_len,
+    def build(self, num_reqs, num_actual_tokens, max_query_len,
               common_attn_metadata: CommonAttentionMetadata,
               enable_dbo_across_dp: bool = False):
 
@@ -230,7 +228,6 @@ class AscendAttentionMetadataBuilder:
                 num_reqs=num_reqs,
                 num_actual_tokens=num_actual_tokens,
                 max_query_len=num_scheduled_tokens.max(),
-                common_prefix_len=0,
                 common_attn_metadata=common_attn_metadata,
             )
         else:

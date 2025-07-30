@@ -53,11 +53,10 @@ def test_models_with_aclgraph(
     # while running pytest
     if full_graph:
         vllm_model = LLM(model,
-                            compilation_config={
-                                "full_cuda_graph": True,
-                                "cudagraph_capture_sizes":
-                                [1, 4, 16, 64, 256]
-                            })
+                         compilation_config={
+                             "full_cuda_graph": True,
+                             "cudagraph_capture_sizes": [1, 4, 16, 64, 256]
+                         })
     else:
         vllm_model = LLM(model, max_model_len=1024)
     vllm_aclgraph_outputs = vllm_model.generate(prompts, sampling_params)
