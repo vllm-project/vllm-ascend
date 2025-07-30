@@ -220,6 +220,7 @@ class AscendQwen3MoeModel(Qwen3MoeModel):
 from vllm_ascend.ops.vocab_parallel_embedding import (CustomParallelLMHead)
 from vllm_ascend.ops.logits_processor import CustomLogitsProcessor
 
+
 class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
             "k_proj",
             "v_proj",
