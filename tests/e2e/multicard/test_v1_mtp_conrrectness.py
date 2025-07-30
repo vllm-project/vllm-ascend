@@ -4,7 +4,7 @@ import random
 from typing import Any
 
 import pytest
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 
 
 @pytest.fixture
