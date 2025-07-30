@@ -129,6 +129,8 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         self.attn_factor = attn_factor
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
+        self.cos_cached = None
+        self.sin_cached = None
         # Get n-d magnitude scaling corrected for interpolation.
         self.mscale = float(
             self._yarn_get_mscale(self.scaling_factor, float(mscale)) /
@@ -214,8 +216,8 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         freqs = torch.outer(t, inv_freq)
         cos_cached = torch.cat([freqs, freqs], dim=-1).cos() * self.mscale
         sin_cached = torch.cat([freqs, freqs], dim=-1).sin() * self.mscale
-        cos_cached = cos_cached.to(dtype)
-        sin_cached = sin_cached.to(dtype)
+        self.cos_cached = cos_cached.to(dtype)
+        self.sin_cached = sin_cached.to(dtype)
         cache = torch.cat(
             [freqs.cos() * self.mscale,
              freqs.sin() * self.mscale], dim=-1).to(dtype)
