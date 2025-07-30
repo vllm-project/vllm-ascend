@@ -135,7 +135,7 @@ def test_models_distributed_pangu():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-@ patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION": "1"})
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION": "1"})
 def test_models_distributed_topk() -> None:
     example_prompts = [
         "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
