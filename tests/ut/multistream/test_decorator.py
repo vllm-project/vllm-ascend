@@ -31,3 +31,5 @@ class TestDecorator(PytestBase):
 
         context = set_multistream_support()(func)()
         assert context.attn_metadata == expected_metadata
+
+

@@ -2,7 +2,7 @@ import pytest
 from pytest_mock import MockerFixture
 
 import torch
-from transformers import PreTrainedConfig
+from transformers import PretrainedConfig
 from tests.ut.base import PytestBase
 from vllm.config import CacheConfig, VllmConfig, ModelConfig
 from vllm_ascend.models.deepseek_mtp import (
@@ -14,9 +14,9 @@ class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
 
     @pytest.fixture
     def setup_mtp_layer(self, mocker: MockerFixture):
-        config = PreTrainedConfig(vocab_size=1000, hidden_size=768, rms_norm_eps=1e-5)
+        config = PretrainedConfig(vocab_size=1000, hidden_size=768, rms_norm_eps=1e-5)
         mocker.patch(
-            "vllm.model_executor.layers.vocab_parallel_embedding_layer.VocabParallelEmbedding.__init__",
+            "vllm.model_executor.layers.vocab_parallel_embedding.VocabParallelEmbedding.__init__",
             return_value=None
         )
         mocker.patch(
@@ -28,7 +28,7 @@ class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
             return_value=None
         )
         mocker_deepseek_v2_decode_layer = mocker.patch(
-            "vllm_ascend.models.deepseek_mtp.CustomDeepSeekV2DecoderLayer.__init__",
+            "vllm_ascend.models.deepseek_v2.CustomDeepSeekV2DecoderLayer.__init__",
             return_value=None
         )
 
@@ -45,7 +45,7 @@ class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
         mocker.patch("torch.nn.Module.__setattr__")
         mocker.patch("torch.nn.Module.__getattr__")
         mocker.patch("torch.nn.Module.__delattr__")
-        mocker.patch.object(mtp_layer, "eh_proj", return_value=torch.randn(2, 3, 768))
+        mocker.patch.object(mtp_layer, 'eh_proj', return_value=torch.randn(2, 3, 768))
         mocker.patch("torch.cat", return_value=torch.randn(2, 3, 768))
         mtp_layer.mtp_block.return_value = (torch.randn(2, 3, 768), torch.randn(2, 3, 768))
 
@@ -53,7 +53,7 @@ class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
         positions = torch.tensor([[0, 1, 2], [0, 1, 2]])
         kv_cache = torch.randn(2, 3, 768)
         previous_hidden_states = torch.randn(2, 3, 768)
-        inputs_embeds = torch.tensor([[1.0, 2.0, 3.0] ])
+        inputs_embeds = torch.tensor([[1.0, 2.0, 3.0]])
 
         output = mtp_layer(
             input_ids,
@@ -71,8 +71,8 @@ class TestCustomDeepSeekMultiTokenPredictor(PytestBase):
 
     @pytest.fixture
     def setup_predictor(self, mocker: MockerFixture):
-        mock_vllm_config = mocker.MagicMock()
-        mock_model_config = mocker.MagicMock()
+        mock_vllm_config = mocker.MagicMock(spec=VllmConfig)
+        mock_model_config = mocker.MagicMock(spec=ModelConfig)
         mock_hf_config = mocker.MagicMock()
         mock_hf_config.num_hidden_layers = 12
         mock_hf_config.num_nextn_predict_layers = 3
@@ -92,6 +92,7 @@ class TestCustomDeepSeekMultiTokenPredictor(PytestBase):
 
     def test_init(self, mocker: MockerFixture, setup_predictor):
         predictor = setup_predictor
+        assert predictor.num_mtp_layers == 3
         assert isinstance(predictor, CustomDeepSeekMultiTokenPredictor)
 
     @pytest.mark.parametrize('kv_caches, inputs_embeds', [
@@ -106,11 +107,11 @@ class TestCustomDeepSeekMultiTokenPredictor(PytestBase):
 
         # todo: need or not?
         # predictor.num_mtp_layers = 1
-        input_ids = torch.tensor([[1, 2, 3], [4, 5, 6]])
-        positions = torch.tensor([[0, 1, 2], [0, 1, 2]])
+        input_ids = torch.tensor([[1, 2, 3]])
+        positions = torch.tensor([[0, 1, 2]])
         mocker.patch(
             "vllm_ascend.models.deepseek_mtp.CustomDeepSeekMultiTokenPredictorLayer.__call__",
-            return_value=None
+            return_value=torch.tensor([[1.0, 2.0, 3.0]])
         )
         output = predictor.forward(
             input_ids,
@@ -151,8 +152,8 @@ class TestCustomDeepSeekMTP(PytestBase):
     @pytest.fixture
     def setup_mtp(self, mocker: MockerFixture):
         vllm_config = mocker.MagicMock()
-        vllm_config.model_config.hf_config.num_hidden_layers = 3
-        vllm_config.model_config.hf_config.num_nextn_predict_layers = 12
+        vllm_config.model_config.hf_config.num_hidden_layers = 12
+        vllm_config.model_config.hf_config.num_nextn_predict_layers = 3
         vllm_config.cache_config = mocker.MagicMock()
         vllm_config.quant_config = mocker.MagicMock()
 
@@ -183,7 +184,7 @@ class TestCustomDeepSeekMTP(PytestBase):
         previous_hidden_states = torch.tensor([[0.1, 0.2, 0.3]])
         inputs_embeds = torch.tensor([[0.1, 0.2, 0.3]])
         spec_step_idx = 0
-        setup_mtp.model.return_value = torch.tensor([1.0, 2.0, 3.0])
+        setup_mtp.model.return_value = torch.tensor([[1.0, 2.0, 3.0]])
 
         output = setup_mtp.forward(
             input_ids,
@@ -194,4 +195,6 @@ class TestCustomDeepSeekMTP(PytestBase):
             inputs_embeds,
             spec_step_idx
         )
-        assert torch.allclose(output, torch.tensor([0.1, 0.2, 0.3]))
+        assert torch.allclose(output, torch.tensor([[0.1, 0.2, 0.3]]))
+
+
