@@ -16,7 +16,7 @@
 # Adapted from vllm/tests/kernels/test_moe.py
 
 import os
-from typing import Any, Callable, List, Optional, Tuple, Union
+from typing import Any, Callable, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -48,7 +48,8 @@ from vllm_ascend.distributed.communication_op import \
     data_parallel_reduce_scatter
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
-from vllm_ascend.ops.moe_dispatcher.token_dispatcher import MoEAlltoAllSeqOverLapDispatcher, MoEDispatcherConfig
+from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
+    MoEAlltoAllSeqOverLapDispatcher, MoEDispatcherConfig)
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
                                get_all_reduce_merge_state,
