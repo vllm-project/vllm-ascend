@@ -18,9 +18,10 @@
 import importlib
 from unittest.mock import MagicMock, patch
 
-from tests.ut.base import PytestBase
+import pytest
 import torch
 
+from tests.ut.base import PytestBase
 from vllm_ascend.distributed.tensor_parallel import (
     _gather_along_first_dim, _gather_along_last_dim,
     _reduce_scatter_along_first_dim, _reduce_scatter_along_last_dim,
