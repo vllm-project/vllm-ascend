@@ -47,7 +47,7 @@ def sampling_config():
 
 @pytest.fixture
 def model_name():
-    return "vllm-ascend/DeepSeek-R1-W8A8/"
+    return "vllm-ascend/DeepSeek-R1-W8A8"
 
 
 def test_mtp_correctness(
@@ -59,25 +59,29 @@ def test_mtp_correctness(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using mtp speculative decoding.
     '''
-    ref_llm = LLM(model=model_name,
-                  tensor_parallel_size=16,
-                  max_model_len=256,
-                  gpu_memory_utilization=0.8,
-                  enforce_eager=True)
-    ref_outputs = ref_llm.chat(test_prompts, sampling_config)
-    del ref_llm
 
-    spec_llm = LLM(model=model_name,
-                   tensor_parallel_size=16,
-                   trust_remote_code=True,
-                   gpu_memory_utilization=0.8,
-                   speculative_config={
-                       "method": "deepseek_mtp",
-                       "num_speculative_tokens": 1,
-                   },
-                   max_model_len=256,
-                   enforce_eager=True)
-    spec_outputs = spec_llm.chat(test_prompts, sampling_config)
+    with VllmRunner(
+            model_name,
+            tensor_parallel_size=16,
+            trust_remote_code=True,
+            max_model_len=256,
+            gpu_memory_utilization=0.8,
+            enforce_eager=False) as ref_llm:
+        ref_outputs = ref_llm.chat(test_prompts, sampling_config)
+
+    with VllmRunner(
+            model_name,
+            tensor_parallel_size=16,
+            trust_remote_code=True,
+            max_model_len=256,
+            gpu_memory_utilization=0.8,
+            speculative_config={
+                "method": "deepseek_mtp",
+                "num_speculative_tokens": 1,
+            },
+            enforce_eager=False) as spec_llm:
+        spec_outputs = spec_llm.chat(test_prompts, sampling_config)
+
     matches = 0
     misses = 0
     for ref_output, spec_output in zip(ref_outputs, spec_outputs):
