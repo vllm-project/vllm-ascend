@@ -184,7 +184,6 @@ def test_models_distributed_Qwen3_W8A8():
     with VllmRunner(
             snapshot_download("vllm-ascend/Qwen3-8B-W8A8"),
             max_model_len=8192,
-            enforce_eager=True,
             dtype="auto",
             tensor_parallel_size=4,
             quantization="ascend",
