@@ -5,7 +5,8 @@ from typing import Any, Optional
 
 import torch
 from vllm.config import VllmConfig
-from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
+from vllm.distributed import (get_dp_group, get_ep_group,
+                              get_tensor_model_parallel_world_size)
 from vllm.forward_context import get_forward_context, set_forward_context
 
 import vllm_ascend.envs as envs
@@ -101,7 +102,7 @@ def set_ascend_forward_context(
         if num_tokens is not None:
             if num_actual_tokens is None:
                 num_actual_tokens = num_tokens
-            tp_world_size = get_tp_group().world_size
+            tp_world_size = get_tensor_model_parallel_world_size()
             # NOTE: token num which need to pad to when mc2
             forward_context.padded_num_tokens = math.ceil(
                 max_tokens_across_dp / tp_world_size) * tp_world_size
