@@ -74,6 +74,16 @@ class NPUWorker(WorkerBase):
                          rank=rank,
                          distributed_init_method=distributed_init_method,
                          is_driver_worker=is_driver_worker)
+        # Bind cpu
+        if get_ascend_config().enable_cpu_binding:
+            try:
+                bind_cpus(self.local_rank, ratio=1.0)
+            except RuntimeError as e:
+                logger.error(f"{e} in {self.local_rank}")
+            except ValueError as e:
+                logger.error(f"{e} in {self.local_rank}")
+            except Exception:
+                logger.info("Skip binding cpu.")
 
         # Try to import mindie_turbo to accelerate vLLM inference.
         local_dp_rank = self.vllm_config.parallel_config.data_parallel_rank_local
@@ -132,16 +142,6 @@ class NPUWorker(WorkerBase):
         init_ascend_soc_version()
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
-        # Bind cpu
-        if get_ascend_config().enable_cpu_binding:
-            try:
-                bind_cpus(self.local_rank, ratio=1.0)
-            except RuntimeError as e:
-                logger.error(f"{e} in {self.local_rank}")
-            except ValueError as e:
-                logger.error(f"{e} in {self.local_rank}")
-            except Exception:
-                logger.info("Skip binding cpu.")
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
