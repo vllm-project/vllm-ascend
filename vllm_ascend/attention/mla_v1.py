@@ -396,6 +396,8 @@ class AscendMLAMetadataBuilder:
         num_token_pad_size: int = -1,
         num_reqs_pad_size: int = 0,
         enable_dbo_across_dp: bool = False,
+        *args,
+        **kwargs,
     ) -> AscendMLAMetadata:
         assert self._num_decodes + self._num_prefills == num_reqs
 
