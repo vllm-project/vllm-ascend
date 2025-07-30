@@ -4,6 +4,7 @@ import random
 from typing import Any
 
 import pytest
+from tests.e2e.conftest import VllmRunner
 from vllm import SamplingParams
 
 
