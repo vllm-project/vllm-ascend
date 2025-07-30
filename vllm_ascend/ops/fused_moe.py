@@ -1254,6 +1254,8 @@ class AscendFusedMoE(FusedMoE):
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_multistream_moe = \
             ascend_config.torchair_graph_config.enable_multistream_moe
+        self.enable_prefill_optimizations = \
+            ascend_config.enable_prefill_optimizations and not self.torchair_graph_enabled
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
@@ -1349,22 +1351,24 @@ class AscendFusedMoE(FusedMoE):
             else:
                 # TODO: Determine if we can remove the padding
                 padding_size = tp_size
-            if num_tokens < padding_size:
+            if num_tokens < padding_size and not self.enable_prefill_optimizations:
                 hidden_states = nn.functional.pad(
                     hidden_states, (0, 0, 0, padding_size - num_tokens))
                 router_logits = nn.functional.pad(
                     router_logits, (0, 0, 0, padding_size - num_tokens))
             if tp_size > 1:
-                chunk_hidden_states = torch.tensor_split(hidden_states,
-                                                         tp_size,
-                                                         dim=0)
-                chunk_router_logits = torch.tensor_split(router_logits,
-                                                         tp_size,
-                                                         dim=0)
-                chunk_mc2_mask = torch.tensor_split(mc2_mask, tp_size, dim=0)
                 tp_rank = get_tensor_model_parallel_rank()
-                hidden_states = chunk_hidden_states[tp_rank]
-                router_logits = chunk_router_logits[tp_rank]
+                if not self.enable_prefill_optimizations:
+                    chunk_hidden_states = torch.tensor_split(hidden_states,
+                                                             tp_size,
+                                                             dim=0)
+                    chunk_router_logits = torch.tensor_split(router_logits,
+                                                             tp_size,
+                                                             dim=0)
+                    hidden_states = chunk_hidden_states[tp_rank]
+                    router_logits = chunk_router_logits[tp_rank]
+
+                chunk_mc2_mask = torch.tensor_split(mc2_mask, tp_size, dim=0)
                 mc2_mask = chunk_mc2_mask[tp_rank]
 
         if self.dp_size > 1:
@@ -1425,10 +1429,11 @@ class AscendFusedMoE(FusedMoE):
             if isinstance(e_hidden_states, tuple):
                 e_hidden_states, shared_hidden_states = e_hidden_states
 
-        if (fused_moe_state not in [
-                FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
-                FusedMoEState.NaiveMulticast
-        ] and not replace_allreduce):
+        if (fused_moe_state not in {
+                FusedMoEState.AllGather,
+                FusedMoEState.AllGatherEP,
+                FusedMoEState.NaiveMulticast,
+        } and not replace_allreduce and not self.enable_prefill_optimizations):
             if tp_size > 1:
                 dist.all_gather(list(chunk_hidden_states), e_hidden_states,
                                 self.tp_group)
@@ -1438,7 +1443,7 @@ class AscendFusedMoE(FusedMoE):
             if num_tokens < padding_size:
                 final_hidden_states = final_hidden_states[:num_tokens]
             dispose_tensor(e_hidden_states)
-        elif self.dp_size > 1:
+        elif self.dp_size > 1 and not self.enable_prefill_optimizations:
             if fused_moe_state == FusedMoEState.NaiveMulticast:
                 start = 0 if self.dp_rank == 0 else cu_tokens_across_dp_cpu[
                     self.dp_rank - 1]
