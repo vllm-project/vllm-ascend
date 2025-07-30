@@ -82,6 +82,7 @@ from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
 from vllm_ascend.distributed.moe_comm_method import (AllGatherCommImpl,
                                                      AllReduceCommImpl,
                                                      DummyCommImpl,
+                                                     MC2CommImpl,
                                                      MoECommMethod)
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
@@ -408,7 +409,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         )
 
         if self.parallel_config.enable_expert_parallel:
-            self.moe_comm_method = AllGatherCommImpl
+            # self.moe_comm_method = AllGatherCommImpl
+            self.moe_comm_method = MC2CommImpl
         else:
             self.moe_comm_method = AllReduceCommImpl
 
@@ -1267,12 +1269,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         moe_comm_method = self.moe_comm_method
 
+        # NOTE: Currently this padding logic is really messy,
+        # MC2 may not be available in eager mode
+        if not self.use_aclgraph or self.torchair_graph_enabled:
+            num_input_tokens = padded_num_tokens_across_dp
+
         # Run forward pass
         with set_ascend_forward_context(
                 attn_metadata,
                 self.vllm_config,
-                # NOTE: This will break some function
-                # num_tokens=padded_num_tokens_across_dp,
                 num_tokens=num_input_tokens,
                 num_tokens_across_dp=num_tokens_across_dp,
                 with_prefill=with_prefill,
