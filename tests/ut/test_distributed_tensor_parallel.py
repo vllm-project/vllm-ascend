@@ -16,10 +16,9 @@
 # This file is a part of the vllm-ascend project.
 
 import importlib
-import unittest
 from unittest.mock import MagicMock, patch
 
-import pytest
+from tests.ut.base import PytestBase
 import torch
 
 from vllm_ascend.distributed.tensor_parallel import (
@@ -51,7 +50,7 @@ def mock_dist():
         yield mock
 
 
-class TestDistributedCommunication(unittest.TestCase):
+class TestDistributedCommunication(PytestBase):
 
     @pytest.mark.parametrize("world_size", [1, 4])
     def test_gather_along_first_dim(self, test_tensor, mock_group, mock_dist,
@@ -62,9 +61,9 @@ class TestDistributedCommunication(unittest.TestCase):
         result = _gather_along_first_dim(test_tensor, mock_group)
 
         if world_size == 1:
-            self.assertEqual(result.shape, (8, 16))
+            assert result.shape == (8, 16)
         else:
-            self.assertEqual(result.shape, (32, 16))  # 8*4=32
+            assert result.shape == (32, 16)  # 8*4=32
 
     def test_gather_along_first_dim_unequal_split(self, test_tensor,
                                                   mock_group):
@@ -72,7 +71,7 @@ class TestDistributedCommunication(unittest.TestCase):
         output_split_sizes = [5, 10, 15, 2]
         result = _gather_along_first_dim(test_tensor, mock_group,
                                          output_split_sizes)
-        self.assertEqual(result.shape, (32, 16))  # 5+10+15+2=32
+        assert result.shape == (32, 16)  # 5+10+15+2=32
 
     @pytest.mark.parametrize("world_size", [1, 4])
     def test_gather_along_last_dim(self, test_tensor_last_dim, mock_group,
@@ -82,7 +81,7 @@ class TestDistributedCommunication(unittest.TestCase):
 
         result = _gather_along_last_dim(test_tensor_last_dim, mock_group)
 
-        self.assertEqual(result.shape, (8, 16, 32 * world_size))
+        assert result.shape == (8, 16, 32 * world_size)
 
     @pytest.mark.parametrize("input_shape,expected_shape", [
         ((32, 16), (8, 16)),
@@ -92,12 +91,12 @@ class TestDistributedCommunication(unittest.TestCase):
                                             expected_shape):
         input_tensor = torch.randn(*input_shape)
         result = _reduce_scatter_along_first_dim(input_tensor, mock_group)
-        self.assertEqual(result.shape, expected_shape)
+        assert result.shape == expected_shape
 
     def test_reduce_scatter_along_last_dim(self, mock_group):
         input_tensor = torch.randn(8, 16, 32)
         result = _reduce_scatter_along_last_dim(input_tensor, mock_group)
-        self.assertEqual(result.shape, (8, 16, 8))
+        assert result.shape == (8, 16, 8)
 
     @pytest.mark.parametrize("func,input_shape,expected_shape", [
         ("all_gather_last_dim_from_tensor_parallel_region", (8, 16, 32),
@@ -116,7 +115,7 @@ class TestDistributedCommunication(unittest.TestCase):
         test_func = globals[func]
         input_tensor = torch.randn(*input_shape)
         result = test_func(input_tensor, mock_group)
-        self.assertEqual(result.shape, expected_shape)
+        assert result.shape == expected_shape
 
     @pytest.mark.parametrize(
         "input_shape,output_shape",
@@ -126,7 +125,7 @@ class TestDistributedCommunication(unittest.TestCase):
     def test_all_to_all_sp2hp(self, mock_group, input_shape, output_shape):
         input_tensor = torch.randn(*input_shape)
         result = all_to_all_sp2hp(input_tensor, mock_group)
-        self.assertEqual(result.shape, output_shape)
+        assert result.shape == output_shape
 
     @pytest.mark.parametrize(
         "input_shape,output_shape",
@@ -136,4 +135,4 @@ class TestDistributedCommunication(unittest.TestCase):
     def test_all_to_all_hp2sp(self, mock_group, input_shape, output_shape):
         input_tensor = torch.randn(*input_shape)
         result = all_to_all_hp2sp(input_tensor, mock_group)
-        self.assertEqual(result.shape, output_shape)
+        assert result.shape == output_shape
