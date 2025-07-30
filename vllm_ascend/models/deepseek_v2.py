@@ -393,7 +393,7 @@ class CustomDeepseekV2MoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits = None
-        if not self.rm_router_logits:
+        if not self.rm_router_logits and not self.enable_multistream_moe:
             router_logits, _ = self.gate(hidden_states)
 
         experts_hidden_states = self.experts(
@@ -868,7 +868,9 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(config.vocab_size,
                                           config.hidden_size,
-                                          quant_config=quant_config)
+                                          quant_config=quant_config,
+                                          prefix=maybe_prefix(
+                                              prefix, "lm_head"))
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)

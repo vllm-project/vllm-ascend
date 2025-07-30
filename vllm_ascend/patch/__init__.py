@@ -88,21 +88,7 @@
 #    Future Plan:
 #       Remove this patch once pytorch 2.7.0 is supported for vllm ascend.
 #
-# ** File: worker/patch_common/patch_sampler.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.sample.sampler.Sampler.apply_top_k_top_p`
-#    Why:
-#       We need to use the patched `apply_top_k_top_p` in `sample`.
-#       The mainly reason to overwrite `apply_top_k_top_p` is
-#       to improve performance.
-#    How：
-#       Re-implementation the `apply_top_k_top_p` function by pytorch
-#    Related PR (if no, explain why):
-#       - https://github.com/vllm-project/vllm-ascend/pull/1732
-#    Future Plan:
-#       Revert it when the ascend scatter performance improves.
-#
-# ** File: worker/patch_common/patch_sampler.py **
+# ** File: worker/patch_0_10_0/patch_sampler_gather_logprobs.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.sample.sampler.Sampler.gather_logprobs`
 #    Why:

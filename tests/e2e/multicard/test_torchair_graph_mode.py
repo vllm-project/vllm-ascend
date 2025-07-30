@@ -30,7 +30,7 @@ os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 def _deepseek_torchair_test_fixture(
     additional_config: Dict,
     *,
-    tensor_parallel_size=4,
+    tensor_parallel_size=2,
 ):
     example_prompts = [
         "Hello, my name is",
@@ -98,7 +98,7 @@ def test_e2e_deepseekv3_with_torchair_ms_mla():
 def _pangu_torchair_test_fixture(
     additional_config: Dict,
     *,
-    tensor_parallel_size=4,
+    tensor_parallel_size=2,
 ):
     example_prompts = [
         "Hello, my name is",
