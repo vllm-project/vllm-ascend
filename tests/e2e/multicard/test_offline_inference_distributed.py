@@ -142,7 +142,6 @@ def test_models_distributed_topk() -> None:
         "Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.",
         "Compare and contrast artificial intelligence with human intelligence in terms of processing information.",
     ]
-    dtype = "half"
     sampling_params = SamplingParams(max_tokens=5,
                                      temperature=0.0,
                                      top_k=50,
