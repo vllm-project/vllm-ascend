@@ -28,7 +28,7 @@ class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
             return_value=None
         )
         mocker_deepseek_v2_decode_layer = mocker.patch(
-            "vllm_ascend.models.deepseek_v2.CustomDeepSeekV2DecoderLayer.__init__",
+            "vllm_ascend.models.deepseek_v2.CustomDeepseekV2DecoderLayer.__init__",
             return_value=None
         )
 
@@ -133,16 +133,16 @@ class TestCustomDeepSeekMultiTokenPredictor(PytestBase):
         mock_layer = mocker.MagicMock()
         mock_layer.return_value = torch.tensor([1.0, 2.0, 3.0])
         predictor.layers_list = [mock_layer]
-        mocker.patch("torch.nn.Module.__setattr__", return_value=None)
-        mocker.patch("torch.nn.Module.__getattr__", return_value=None)
-        mocker.patch("torch.nn.Module.__delattr__", return_value=None)
+        mocker.patch("torch.nn.Module.__setattr__")
+        mocker.patch("torch.nn.Module.__getattr__")
+        mocker.patch("torch.nn.Module.__delattr__")
         mocker.patch(
             "vllm.model_executor.layers.logits_processor.LogitsProcessor.__init__",
             return_value=None
         )
         predictor.logits_processor.return_value = torch.tensor([1.0, 2.0, 3.0])
 
-        result_logits = predictor.compute_logits(hidden_states, None)
+        result_logits = predictor.compute_logits(hidden_states=hidden_states, sampling_metadata=None)
         predictor.logits_processor.assert_called_once()
         assert torch.allclose(result_logits, torch.tensor([1.0, 2.0, 3.0]))
 
