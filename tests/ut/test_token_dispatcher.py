@@ -19,17 +19,14 @@ import unittest
 
 import pytest
 from pytest_mock import MockerFixture
+from tests.ut.base import PytestBase
 
 from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
     MoEAlltoAllSeqOverLapDispatcher, MoEDispatcherConfig)
 from vllm_ascend.utils import adapt_patch  # noqa E402
 
-import vllm_ascend.patch.worker.patch_common.patch_utils  # type: ignore[import]  # isort: skip  # noqa
 
-adapt_patch(True)
-
-
-class TestMoEAlltoAllSeqOverLapDispatcher(unittest.TestCase):
+class TestMoEAlltoAllSeqOverLapDispatcher(PytestBase):
 
     @pytest.fixture
     def config(self):
@@ -60,10 +57,9 @@ class TestMoEAlltoAllSeqOverLapDispatcher(unittest.TestCase):
         return MoEAlltoAllSeqOverLapDispatcher(config)
 
     def test_initialization(self, dispatcher, config):
-        self.assertEqual(dispatcher.num_local_experts,
-                         config.num_local_experts)
-        self.assertEqual(dispatcher.num_experts, config.num_moe_experts)
-        self.assertEqual(dispatcher.local_expert_indices, [0, 1])
-        self.assertEqual(dispatcher.ep_rank, 0)
-        self.assertEqual(dispatcher.ep_size, 2)
-        self.assertIsNotNone(dispatcher.overlap_stream)
+        assert dispatcher.num_local_experts == config.num_local_experts
+        assert dispatcher.num_experts == config.num_moe_experts
+        assert dispatcher.local_expert_indices == [0, 1]
+        assert dispatcher.ep_rank == 0
+        assert dispatcher.ep_size == 2
+        assert dispatcher.overlap_stream is not None
