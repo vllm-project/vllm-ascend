@@ -15,6 +15,7 @@
 # limitations under the License.
 # Adapted from vllm/model_executor/models/qwen3_moe.py
 # This file is a part of the vllm-ascend project.
+
 import vllm.model_executor.models.qwen3_moe as qwen3
 from torch import nn
 from vllm.config import VllmConfig
@@ -26,6 +27,7 @@ from vllm.model_executor.models.qwen3_moe import (Qwen3MoeForCausalLM,
 from vllm.model_executor.models.utils import maybe_prefix
 
 from vllm_ascend.ops.fused_moe import AscendSparseMoeBlock
+
 
 class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
     packed_modules_mapping = {
