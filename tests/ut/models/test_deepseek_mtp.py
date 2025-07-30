@@ -4,15 +4,16 @@ from pytest_mock import MockFixture
 
 from transformers import PreTrainedConfig
 
-from docs.source.conf import release
-from examples.disaggregated_prefill_v1.gen_ranktable import local_device_list
 from tests.ut.base import PytestBase
 from vllm.config import CacheConfig, VllmConfig, ModelConfig
-from vllm_ascend.models.deepseek_mtp import (CustomDeepSeekMTP, CustomDeepSeekMultiTokenPredictor, CustomDeepSeekMultiTokenPredictorLayer)
+from vllm_ascend.models.deepseek_mtp import (
+    CustomDeepSeekMTP,
+    CustomDeepSeekMultiTokenPredictor,
+    CustomDeepSeekMultiTokenPredictorLayer)
 
 class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
 
-    @pytest.fixture()
+    @pytest.fixture
     def setup_mtp_layer(self, mocker: MockFixture):
         config = PreTrainedConfig(vocab_size=1000, hidden_size=768, rms_norm_eps=1e-5)
         mocker.patch(
@@ -67,7 +68,7 @@ class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
 
 class TestCustomDeepSeekMultiTokenPredictor(PytestBase):
 
-    @pytest.fixture()
+    @pytest.fixture
     def setup_predictor(self, mocker: MockFixture):
         mock_vllm_config = mocker.MagicMock()
         mock_model_config = mocker.MagicMock()
