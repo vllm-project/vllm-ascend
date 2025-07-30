@@ -128,11 +128,11 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE":
     lambda: int(
         os.getenv("VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE", 64)),
-    # Whether to enable the topk optimization. It's disabled by default for experimental support
-    # We'll make it enabled by default in the future.
+    # Whether to enable the topk optimization. It's enabled by default. Please set to False if you hit any issue.
+    # We'll remove this flag in the future once it's stable enough.
     "VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION":
     lambda: bool(
-        int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION", '0'))),
+        int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION", '1'))),
 
     # `LLMDataDistCMgrConnector` required variable. `DISAGGREGATED_PREFILL_RANK_TABLE_PATH` is
     # used for llmdatadist to build the communication topology for kv cache transfer, it is
