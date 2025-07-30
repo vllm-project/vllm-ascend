@@ -1484,9 +1484,9 @@ class AscendFusedMoE(FusedMoE):
             shared_experts=shared_experts if self.torchair_graph_enabled
             and self.enable_multistream_moe and not is_prefill else None,
             mc2_mask=mc2_mask,
+            token_dispatcher=self.token_dispatcher,
             quantized_x_for_share=quantized_x_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
-            token_dispatcher=self.token_dispatcher
         )
 
         if shared_experts:
