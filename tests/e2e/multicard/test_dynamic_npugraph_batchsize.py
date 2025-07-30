@@ -16,7 +16,9 @@
 #
 import pytest
 import torch
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
+
+from tests.e2e.conftest import VllmRunner
 
 MODELS = [
     "Qwen/Qwen2.5-0.5B-Instruct",
@@ -38,20 +40,20 @@ prompts = [
 def test_models(model: str, tp_size: int, max_tokens: int, temperature: int,
                 ignore_eos: bool) -> None:
     # Create an LLM.
-    llm = LLM(
-        model=model,
-        tensor_parallel_size=tp_size,
-    )
-    # Prepare sampling_parames
-    sampling_params = SamplingParams(
-        max_tokens=max_tokens,
-        temperature=temperature,
-        ignore_eos=ignore_eos,
-    )
+    with VllmRunner(
+            model_name=model,
+            tensor_parallel_size=tp_size,
+    ) as vllm_model:
+        # Prepare sampling_parames
+        sampling_params = SamplingParams(
+            max_tokens=max_tokens,
+            temperature=temperature,
+            ignore_eos=ignore_eos,
+        )
 
-    # Generate texts from the prompts.
-    # The output is a list of RequestOutput objects
-    outputs = llm.generate(prompts, sampling_params)
-    torch.npu.synchronize()
-    # The output length should be equal to prompts length.
-    assert len(outputs) == len(prompts)
+        # Generate texts from the prompts.
+        # The output is a list of RequestOutput objects
+        outputs = vllm_model.generate(prompts, sampling_params)
+        torch.npu.synchronize()
+        # The output length should be equal to prompts length.
+        assert len(outputs) == len(prompts)
