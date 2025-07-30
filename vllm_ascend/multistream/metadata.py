@@ -170,6 +170,8 @@ def make_multistream_metadata_ds(
         MSEventKey.MOE_SE_COMM_FINISH,
         MSEventKey.MOE_SE_COMP_FINISH,
         MSEventKey.MOE_GATE_FINISH,
+        MSEventKey.MOE_ALL_TO_ALL,
+        MSEventKey.MOE_ALL_TO_ALL_FINISH,
     ]
     return MultiStreamMetadata(
         calculate_stream=torch.npu.current_stream(),

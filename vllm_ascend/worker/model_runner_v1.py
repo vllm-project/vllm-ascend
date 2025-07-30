@@ -221,6 +221,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.drafter: Optional[Union[NgramProposer, EagleProposer,
                                      MtpProposer]] = None
         if self.speculative_config:
+            if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+                raise NotImplementedError(
+                    "DBO and mtp can't work at the same currently")
             self.use_spec_decode = True
             self.spec_attn_mask = torch.triu(torch.ones(2048,
                                                         2048,
@@ -597,6 +600,27 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, not bool(
             forward_metadata[-1])
+
+    def _check_dbo_is_valid(self, query_lens: torch.Tensor,
+                            attn_state: AscendAttentionState,
+                            num_tokens: int) -> bool:
+        # do the checks for dp + dbo
+        if attn_state in [
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding
+        ]:
+            return False
+        # considering the case that one dp rank may enable dbo while others may not
+        if not envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+            return False
+        # TODO: remove it if token-level microbatch is enabled
+        [token_index,
+         seq_index] = compute_split_seq_index(query_lens, attn_state,
+                                              num_tokens)
+        if token_index == 0 or seq_index == 0 or seq_index == len(
+                query_lens) or num_tokens < 256:
+            return False
+        return True
 
     def get_eagle_atten_dict(
         self,
@@ -1069,10 +1093,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.seq_lens[num_reqs:].fill_(0)
         self.query_start_loc[num_reqs + 1:].fill_(-1)
 
+        enable_dbo = self._check_dbo_is_valid(self.query_lens.tolist(),
+                                              attn_state,
+                                              total_num_scheduled_tokens)
+
         with_prefill = attn_state not in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
-
+        
         maybe_padded_num_tokens = total_num_scheduled_tokens
         if self.torchair_graph_enabled and not with_prefill:
             maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
@@ -1080,6 +1108,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         (padded_num_tokens_across_dp, num_tokens_across_dp, with_prefill,
          enable_dbo) = self._get_forward_metadata_across_dp(
              maybe_padded_num_tokens, total_num_scheduled_tokens, with_prefill)
+        extra_builder_kwargs['enable_dbo_across_dp'] = enable_dbo
 
         if self.torchair_graph_enabled and not with_prefill:
             graph_pad_size = padded_num_tokens_across_dp - total_num_scheduled_tokens
@@ -1180,6 +1209,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if self.torchair_graph_enabled:
                     model_kwargs["kv_caches"] = self.kv_caches
                     model_kwargs["attn_metadata"] = attn_metadata
+                if envs_ascend.VLLM_ASCEND_ENABLE_DBO and self.model_config.is_deepseek_mla and with_prefill:
+                    model_kwargs["graph_enable"] = False  # type: ignore
                 if self.torchair_graph_enabled and not with_prefill:
                     maybe_converting_weight_acl_format(self.model,
                                                        ACL_FORMAT_FRACTAL_NZ)
@@ -1816,6 +1847,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         num_tokens)
                     model_kwargs["kv_caches"] = self.kv_caches
                     model_kwargs["attn_metadata"] = attn_metadata
+                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO and self.model_config.is_deepseek_mla:
+                        model_kwargs["graph_enable"] = True  # type: ignore
                     hidden_states = compiled_model(
                         input_ids=input_ids,
                         positions=positions,
@@ -1826,7 +1859,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 else:
                     maybe_converting_weight_acl_format(self.model,
                                                        ACL_FORMAT_FRACTAL_ND)
-
+                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO and self.model_config.is_deepseek_mla:
+                        model_kwargs["graph_enable"] = False  # type: ignore
                     hidden_states = model(
                         input_ids=input_ids,
                         positions=positions,

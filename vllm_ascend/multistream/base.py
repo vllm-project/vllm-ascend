@@ -14,6 +14,8 @@ class MSEventKey(Enum):
     MOE_SE_COMM_FINISH = 6
     MOE_SE_COMP_FINISH = 7
     MOE_GATE_FINISH = 8
+    MOE_ALL_TO_ALL = 9
+    MOE_ALL_TO_ALL_FINISH = 10
 
 
 @dataclass
