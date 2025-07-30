@@ -60,3 +60,7 @@ def register_model():
     ModelRegistry.register_model(
         "PanguProMoEForCausalLM",
         "vllm_ascend.models.pangu_moe:PanguProMoEForCausalLM")
+    
+    ModelRegistry.register_model(
+        "PanguEmbeddedForCausalLM",
+        "vllm_ascend.models.openpangu_dense:PanguEmbeddedForCausalLM")
