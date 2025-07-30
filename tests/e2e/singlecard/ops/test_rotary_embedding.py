@@ -198,3 +198,42 @@ def test_rotary_embedding_quant_with_leading_dim(
                                ref_key,
                                atol=DEFAULT_ATOL,
                                rtol=DEFAULT_RTOL)
+
+
+
+class ModelwithRotaryEmbedding(nn.Module):
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        head_size: int,
+        rotary_dim: int,
+        max_position_embeddings: int,
+        base: int,
+        is_neox_style: bool,
+        dtype: torch.dtype,) -> None:
+        super().__init__()
+        self.qkv_proj = nn.Linear(hidden_size, num_heads * head_size * 3)
+        self.rope = RotaryEmbedding(
+            head_size=head_size,
+            rotary_dim=rotary_dim,
+            max_position_embeddings=max_position_embeddings,
+            base=base,
+            is_neox_style=is_neox_style,
+            dtype=dtype,
+        )
+        self.o_proj = nn.Linear(num_heads * head_size, hidden_size)
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        offsets: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        # we simulated a simple attention layer to test if it can seamlessly integrated into aclgraph
+        q,k,v = self.qkv_proj(hidden_states).chunk(3, dim=-1)
+        query, key = self.rope.forward_native(positions, q, k, offsets)
+        o = self.o_proj(query)
+        return o
+
+
