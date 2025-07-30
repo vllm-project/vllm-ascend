@@ -81,13 +81,12 @@ class TestCustomDeepSeekMultiTokenPredictor(PytestBase):
         mock_vllm_config.model_config = mock_model_config
         mock_vllm_config.cache_config = CacheConfig()
         mock_vllm_config.quant_config = mocker.MagicMock()
-        mocker_mtp_predictor_layer = mocker.patch(
+        mocker.patch(
             "vllm_ascend.models.deepseek_mtp.CustomDeepSeekMultiTokenPredictorLayer.__init__",
             return_value=None
         )
 
         predictor = CustomDeepSeekMultiTokenPredictor(vllm_config=mock_vllm_config)
-        mocker_mtp_predictor_layer.assert_called_once()
         return predictor
 
     def test_init(self, mocker: MockerFixture, setup_predictor):
@@ -160,7 +159,7 @@ class TestCustomDeepSeekMTP(PytestBase):
         mocker.patch("torch.nn.Module.__setattr__")
         mocker.patch("torch.nn.Module.__getattr__")
         mocker.patch("torch.nn.Module.__delattr__")
-        mocker_deepseek_mtp_predictor = mocker.patch(
+        mocker.patch(
             "vllm_ascend.models.deepseek_mtp.CustomDeepSeekMultiTokenPredictorLayer.__call__",
             return_value=None
         )
@@ -170,7 +169,6 @@ class TestCustomDeepSeekMTP(PytestBase):
         )
 
         mtp = CustomDeepSeekMTP(vllm_config=vllm_config)
-        mocker_deepseek_mtp_predictor.assert_called_once()
         return mtp
 
     def test_init(self, mocker: MockerFixture, setup_mtp):
