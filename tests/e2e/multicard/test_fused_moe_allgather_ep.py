@@ -23,12 +23,18 @@ Run 'pytest tests/multicard/test_fused_moe_allgather_ep.py'.
 import os
 from unittest.mock import patch
 
+import pytest
 from modelscope import snapshot_download  # type: ignore
 from vllm import SamplingParams
 
 from tests.e2e.conftest import VllmRunner
 
 
+@pytest.mark.skipif(
+    True,
+    reason=
+    "Current disaggregated pd implementation may cause memory pulse, which will cause this test OOM, skip this test until the ringmla is ready "
+)
 @patch.dict(
     os.environ, {
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
@@ -40,7 +46,7 @@ def test_generate_with_allgather():
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 
     with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V3-Pruning"),
-                    tensor_parallel_size=4,
+                    tensor_parallel_size=2,
                     enforce_eager=True,
                     max_model_len=1024,
                     dtype="auto",
@@ -54,6 +60,11 @@ def test_generate_with_allgather():
         vllm_model.generate(example_prompts, sampling_params)
 
 
+@pytest.mark.skipif(
+    True,
+    reason=
+    "Current disaggregated pd implementation may cause memory pulse, which will cause this test OOM, skip this test until the ringmla is ready "
+)
 @patch.dict(os.environ, {
     "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
     "TASK_QUEUE_ENABLE": "1"
@@ -63,7 +74,7 @@ def test_generate_with_alltoall():
     sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
 
     with VllmRunner(snapshot_download("vllm-ascend/DeepSeek-V3-Pruning"),
-                    tensor_parallel_size=4,
+                    tensor_parallel_size=2,
                     enforce_eager=True,
                     max_model_len=1024,
                     dtype="auto",

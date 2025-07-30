@@ -33,7 +33,7 @@ from vllm.distributed import (divide, get_pp_group,
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
                                              get_tp_group, get_world_group)
 from vllm.forward_context import get_forward_context
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -59,8 +59,6 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.utils import ACL_FORMAT_FRACTAL_NZ, is_310p
-
-logger = init_logger(__name__)
 
 _ROUTER_SCALE = None
 
@@ -837,12 +835,8 @@ class PanguProMoEModel(nn.Module):
             # if attn_meatadata is not passed, we try to get it from forward_context.
             if attn_metadata is None:
                 attn_metadata = get_forward_context().attn_metadata
-            if attn_metadata is None:
-                # when attn_meatadata is None, it is in profile_run. num_tokens on all dp ranks
-                # are same.
-                max_tokens_across_dp = hidden_states.shape[0]
-            else:
-                max_tokens_across_dp = attn_metadata.max_num_tokens_across_dp
+
+            max_tokens_across_dp = get_forward_context().max_tokens_across_dp
 
             tp_size = get_tp_group().world_size
             # reduce scatter will split the input tensor into equal sizes and then scatter them on all ranks.

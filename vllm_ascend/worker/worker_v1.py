@@ -40,10 +40,15 @@ from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.device_allocator.camem import CaMemAllocator
+from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import sleep_mode_enabled, try_register_lib
+from vllm_ascend.utils import (init_ascend_soc_version, sleep_mode_enabled,
+                               try_register_lib, vllm_version_is)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
+
+if not vllm_version_is("0.10.0"):
+    from vllm.tasks import SupportedTask
 
 
 class NPUWorker(WorkerBase):
@@ -75,6 +80,9 @@ class NPUWorker(WorkerBase):
                          is_driver_worker=is_driver_worker)
 
         # Try to import mindie_turbo to accelerate vLLM inference.
+        local_dp_rank = self.vllm_config.parallel_config.data_parallel_rank_local
+        world_size = self.vllm_config.parallel_config.world_size
+        self.local_rank_across_dp = local_dp_rank * world_size + self.local_rank
         try_register_lib(
             "mindie_turbo",
             "MindIE Turbo is installed. vLLM inference will be accelerated with MindIE Turbo."
@@ -128,6 +136,7 @@ class NPUWorker(WorkerBase):
         NPUPlatform.empty_cache()
         self.init_npu_memory = NPUPlatform.mem_get_info()[0]
 
+        init_ascend_soc_version()
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
         # Set random seed.
@@ -266,20 +275,8 @@ class NPUWorker(WorkerBase):
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_runner.pin_lora(lora_id)
 
-    def _get_max_num_tokens_and_with_prefill(self):
-        max_num_tokens = 1
-        with_prefill = False
-        if self.model_runner.dp_size > 1:
-            max_num_tokens, with_prefill = self.model_runner._get_forward_metadata_across_dp(
-                max_num_tokens, with_prefill)
-        return max_num_tokens, with_prefill
-
     def execute_dummy_batch(self) -> None:
-        max_num_tokens, with_prefill = self._get_max_num_tokens_and_with_prefill(
-        )
-        self.model_runner._dummy_run(max_num_tokens,
-                                     is_compile=False,
-                                     with_prefill=with_prefill)
+        self.model_runner._dummy_run(1)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
@@ -290,12 +287,13 @@ class NPUWorker(WorkerBase):
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
-        ensure_kv_transfer_initialized(self.vllm_config)
         enable_node_mlp = False
         addtional_config = self.vllm_config.additional_config
         if addtional_config is not None and "enable_node_mlp" in addtional_config:
             enable_node_mlp = bool(addtional_config["enable_node_mlp"])
-        init_ascend_model_parallel(enable_node_mlp=enable_node_mlp, backend=backend)
+        init_ascend_model_parallel(parallel_config= self.parallel_config, 
+                                   enable_node_mlp=enable_node_mlp, backend=backend)
+        ensure_kv_transfer_initialized(self.vllm_config)
 
     def _init_profiler(self):
         # Torch profiler. Enabled and configured through env vars:
@@ -333,3 +331,6 @@ class NPUWorker(WorkerBase):
 
     def get_supported_pooling_tasks(self):
         return self.model_runner.get_supported_pooling_tasks()
+
+    def get_supported_tasks(self) -> "tuple[SupportedTask, ...]":
+        return self.model_runner.get_supported_tasks()

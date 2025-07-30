@@ -16,7 +16,7 @@
 #
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import List, Optional, Tuple, Type
 
 import numpy as np
 import torch
@@ -25,11 +25,11 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import PAD_SLOT_ID, CommonAttentionState
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.worker.gpu_input_batch import InputBatch
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
-                               nd_to_nz_2d, vllm_version_is)
+                               nd_to_nz_2d)
+from vllm_ascend.worker.npu_input_batch import InputBatch
 
 
 class AscendAttentionTorchairBackend(AttentionBackend):
@@ -41,8 +41,6 @@ class AscendAttentionTorchairBackend(AttentionBackend):
 
     @staticmethod
     def get_impl_cls() -> Type["AscendAttentionTorchairBackendImpl"]:
-        if vllm_version_is("0.9.2"):
-            return AscendAttentionTorchairBackendImpl092
         return AscendAttentionTorchairBackendImpl
 
     @staticmethod
@@ -64,7 +62,7 @@ class AscendAttentionTorchairBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return (num_blocks, block_size, num_kv_heads * head_size)
+        return (2, num_blocks, block_size, num_kv_heads * head_size)
 
     @staticmethod
     def get_bsh_kv_cache_shape(
@@ -73,7 +71,7 @@ class AscendAttentionTorchairBackend(AttentionBackend):
         num_kv_heads: int,
         head_size: int,
     ) -> Tuple[int, ...]:
-        return (num_blocks, block_size, num_kv_heads * head_size)
+        return (2, num_blocks, block_size, num_kv_heads * head_size)
 
     @staticmethod
     def swap_blocks(
@@ -129,8 +127,6 @@ class AscendTorchairMetadata:
     query_start_loc: torch.Tensor
     query_lens: torch.Tensor
     seq_lens: torch.Tensor
-    # max value of number of tokens across dp group
-    max_num_tokens_across_dp: int = 0
     # Maximum query length in the batch. None for decoding.
     max_query_len: Optional[int] = None
     # (num_tokens,). The indices of the token slots that input tokens will be
@@ -141,7 +137,7 @@ class AscendTorchairMetadata:
     # Current state of this attention run.
     attn_state: AscendAttentionState = AscendAttentionState.ChunkedPrefill
     attn_mask: Optional[torch.Tensor] = None
-    with_prefill_across_dp: bool = False
+
     decode: Optional[AscendDecodeMetadata] = None
 
 
@@ -180,8 +176,9 @@ class AscendAttentionTorchairMetadataBuilder:
 
         return graph_block_tables[:num_seqs, :max_blocks]
 
-    def build_dummy(self, num_reqs: int,
-                    num_actual_tokens: int) -> AscendTorchairMetadata:
+    def build_torchair_graph_dummy(
+            self, num_reqs: int,
+            num_actual_tokens: int) -> AscendTorchairMetadata:
         device = self.runner.device
         _, max_blocks = self.runner.graph_block_tables.shape
         block_table = torch.zeros((num_reqs, max_blocks),
@@ -216,7 +213,6 @@ class AscendAttentionTorchairMetadataBuilder:
             seq_lens=seq_lens,
             slot_mapping=slot_mapping,
             attn_state=AscendAttentionState.DecodeOnly,
-            max_num_tokens_across_dp=num_reqs,
             decode=decode_metadata)
         return attn_metadata
 
@@ -224,9 +220,7 @@ class AscendAttentionTorchairMetadataBuilder:
               num_reqs,
               num_actual_tokens,
               max_query_len,
-              graph_pad_size: int = -1,
-              max_num_tokens_across_dp: int = 0,
-              with_prefill_across_dp: bool = False):
+              graph_pad_size: int = -1):
 
         device = self.runner.device
 
@@ -265,7 +259,6 @@ class AscendAttentionTorchairMetadataBuilder:
                 pad_value = 1
                 padded_seq_lens = seq_lens.tolist() + [pad_value
                                                        ] * graph_pad_size
-                max_num_tokens_across_dp = len(padded_seq_lens)
 
                 seq_lens = torch.from_numpy(
                     np.array(padded_seq_lens).astype(np.int32))
@@ -305,9 +298,7 @@ class AscendAttentionTorchairMetadataBuilder:
             max_query_len=max_query_len,
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
-            attn_state=attn_state,
-            max_num_tokens_across_dp=max_num_tokens_across_dp,
-            with_prefill_across_dp=with_prefill_across_dp)
+            attn_state=attn_state)
         return attn_metadata
 
 
@@ -489,36 +480,3 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
                 "to use ascend scheduler.")
 
         return output.view(num_tokens, self.hidden_size)
-
-
-class AscendAttentionTorchairBackendImpl092(AscendAttentionTorchairBackendImpl
-                                            ):
-
-    def __init__(
-        self,
-        num_heads: int,
-        head_size: int,
-        scale: float,
-        num_kv_heads: int,
-        alibi_slopes: Optional[List[float]],
-        sliding_window: Optional[int],
-        kv_cache_dtype: str,
-        blocksparse_params: Optional[Dict[str, Any]] = None,
-        logits_soft_cap: Optional[float] = None,
-        attn_type: str = AttentionType.DECODER,
-        kv_sharing_target_layer_name: Optional[str] = None,
-        use_irope: bool = False,
-    ) -> None:
-        super().__init__(
-            num_heads=num_heads,
-            head_size=head_size,
-            scale=scale,
-            num_kv_heads=num_kv_heads,
-            alibi_slopes=alibi_slopes,
-            sliding_window=sliding_window,
-            kv_cache_dtype=kv_cache_dtype,
-            logits_soft_cap=logits_soft_cap,
-            attn_type=attn_type,
-            kv_sharing_target_layer_name=kv_sharing_target_layer_name,
-            use_irope=use_irope,
-        )

@@ -24,9 +24,9 @@
 #           each worker's `__init__` function.
 #
 # Then in each kind of patch, there are three folders:
-# - patch_0_9_2: contains the patches applied when vllm version is 0.9.2.
+# - patch_0_10_0: contains the patches applied when vllm version is 0.10.0.
 # - patch_main: contains the patches applied when vllm version is main branch.
-# - patch_common: contains the patches applied in both 0.9.2 and main branch.
+# - patch_common: contains the patches applied in both 0.10.0 and main branch.
 #
 # Once a new patch is added in vllm-ascend, please add the patch description into this file as well.
 # ----------------------------------------------------------------------------------
@@ -88,16 +88,31 @@
 #    Future Plan:
 #       Remove this patch once pytorch 2.7.0 is supported for vllm ascend.
 #
-# ** File: worker/patch_common/patch_sampler.py **
+# ** File: worker/patch_0_10_0/patch_sampler_gather_logprobs.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.v1.sample.sampler.Sampler.apply_top_k_top_p`
+#   1. `vllm.v1.sample.sampler.Sampler.gather_logprobs`
 #    Why:
-#       We need to use the patched `apply_top_k_top_p` in `sample`.
-#       The mainly reason to overwrite `apply_top_k_top_p` is
+#       We need to patch gather_logprobs to make sure call batched_count_greater_than
+#       with backend=current_platform.simple_compile_backend
+#    How：
+#       Patch gather_logprobs call new batched_count_greater_than
+#    Related PR (if no, explain why):
+#       - https://github.com/vllm-project/vllm/pull/21591
+#    Future Plan:
+#       Revert it when vLLM merge #21591 and release new version
+# ** File: worker/patch_common/patch_linear.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.model_executor.layers.linear.RowParallelLinear`
+#    Why:
+#       We need to fuse matmul and allreuce in `RowParallelLinear`
 #       to improve performance.
 #    How：
-#       Re-implementation the `apply_top_k_top_p` function by pytorch
+#       Create a new class `AscendRowParallelLinear` that inherits from `RowParallelLinear`.
+#       In this class, we override the `forward` method to use
+#       torch_npu.npu_mm_all_reduce_base to replace matmul and allreduce.
 #    Related PR (if no, explain why):
-#       - https://github.com/vllm-project/vllm-ascend/pull/1732
+#       - https://github.com/vllm-project/vllm-ascend/pull/1926
 #    Future Plan:
-#       Revert it when the ascend scatter performance improves.
+#       Validate more models in all kinds of scenario,
+#       if performance is always improved, we can enable this patch by default and remove the env
+#       variable `VLLM_ASCEND_ENABLE_FUSE_MATMUL_ALLREDUCE` in the future.
