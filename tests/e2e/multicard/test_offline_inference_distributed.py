@@ -120,6 +120,24 @@ def test_models_distributed_DeepSeekV3_dbo():
 
 def test_models_distributed_pangu():
     example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+
+    with VllmRunner(
+            snapshot_download("vllm-ascend/pangu-pro-moe-pruing"),
+            max_model_len=8192,
+            enforce_eager=True,
+            dtype="auto",
+            tensor_parallel_size=2,
+            distributed_executor_backend="mp",
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@ patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION": "1"})
+def test_models_distributed_topk() -> None:
+    example_prompts = [
         "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
         "Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.",
         "Compare and contrast artificial intelligence with human intelligence in terms of processing information.",
