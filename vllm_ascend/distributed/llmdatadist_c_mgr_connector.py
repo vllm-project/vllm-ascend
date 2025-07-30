@@ -330,9 +330,7 @@ class LLMDataDistCMgrConnectorWorker():
         self.prefill_device_list: list[tuple[int, int]] = []
         self.decode_device_list: list[tuple[int, int]] = []
         global_rank_table = self.read_offline_rank_table()
-        self.local_agent_metadata = self.read_agent_metadata(
-            global_rank_table, self.local_ip, self.local_rank_on_node,
-            self.llm_datadist_role)
+        self.local_agent_metadata = self.read_agent_metadata(global_rank_table)
         self.llm_datadist = LLMDataDist(self.llm_datadist_role,
                                         self.local_agent_metadata.cluster_id)
         self.init_llm_datadist()
@@ -447,8 +445,22 @@ class LLMDataDistCMgrConnectorWorker():
         # global_rank_table = json.dumps(global_rank_table)
         return global_rank_table
 
-    def read_agent_metadata(self, global_rank_table, server_id, device_rank,
-                            agent_role):
+    @staticmethod
+    def _get_visible_devices() -> list[int]:
+        """
+        Get the visible NPU devices in the current environment.
+        Returns: a list of physical device IDs that are visible to the process.
+        """
+        visible_devices = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
+        if not visible_devices:
+            return list(range(torch.npu.device_count()))
+        return [int(device_id) for device_id in visible_devices.split(",")]
+
+    def read_agent_metadata(self, global_rank_table):
+        visible_devices = [
+            str(x)
+            for x in LLMDataDistCMgrConnectorWorker._get_visible_devices()
+        ]
         devices_type_list = []
         agent_metadata = None
         if self.llm_datadist_role == LLMRole.PROMPT:
@@ -461,11 +473,12 @@ class LLMDataDistCMgrConnectorWorker():
         for device_type in devices_type_list:
             device_list = global_rank_table[device_type]
             device_list = [
-                d for d in device_list if d.get("server_id") == server_id
+                d for d in device_list if d.get("server_id") == self.local_ip
+                and d.get("device_id") in visible_devices
             ]
-            if len(device_list) <= device_rank:
+            if len(device_list) <= self.tp_rank:
                 continue
-            device_info = device_list[device_rank]
+            device_info = device_list[self.tp_rank]
             super_pod_id_ = device_info.get("super_pod_id", None)
             server_id_ = device_info["server_id"]
             device_id_ = device_info["device_id"]
@@ -480,7 +493,7 @@ class LLMDataDistCMgrConnectorWorker():
                 super_device_id=super_device_id_,
                 cluster_id=cluster_id_,
             )
-        assert agent_metadata is not None, f"Can't read the target server_id {server_id} and device_rank {device_rank} from rank table"
+        assert agent_metadata is not None, f"Can't read the target server_id {self.local_ip} and device_id {visible_devices[self.tp_rank]} from rank table"
         return agent_metadata
 
     def register_kv_caches(self, kv_caches: dict[str, Tuple[torch.Tensor]]):
