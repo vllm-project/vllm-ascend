@@ -4,8 +4,8 @@ import random
 from typing import Any
 
 import pytest
-from tests.e2e.conftest import VllmRunner
 from vllm import SamplingParams
+from tests.e2e.conftest import VllmRunner
 
 
 @pytest.fixture
@@ -63,22 +63,20 @@ def test_mtp_correctness(
 
     with VllmRunner(model_name,
                     tensor_parallel_size=16,
-                    trust_remote_code=True,
                     max_model_len=256,
                     gpu_memory_utilization=0.8,
-                    enforce_eager=False) as ref_llm:
+                    enforce_eager=True) as ref_llm:
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
 
     with VllmRunner(model_name,
                     tensor_parallel_size=16,
-                    trust_remote_code=True,
                     max_model_len=256,
                     gpu_memory_utilization=0.8,
                     speculative_config={
                         "method": "deepseek_mtp",
                         "num_speculative_tokens": 1,
                     },
-                    enforce_eager=False) as spec_llm:
+                    enforce_eager=True) as spec_llm:
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
 
     matches = 0
