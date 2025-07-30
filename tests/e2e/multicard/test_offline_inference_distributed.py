@@ -157,7 +157,7 @@ def test_models_distributed_alltoallv() -> None:
     with VllmRunner(
             "deepseek-ai/DeepSeek-V2-Lite",
             dtype=dtype,
-            tensor_parallel_size=4,
+            tensor_parallel_size=2,
             distributed_executor_backend="mp",
     ) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
