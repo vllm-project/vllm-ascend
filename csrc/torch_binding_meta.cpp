@@ -20,7 +20,6 @@ std::tuple<at::Tensor, at::Tensor> rotary_embedding_meta(
     auto query_hidden_size = query.sym_numel() / num_tokens;
     auto key_hidden_size = key.sym_numel() / num_tokens;
 
-    // Make sure query and key have consistent number of heads
     auto num_heads = query_hidden_size / head_size;
     auto num_kv_heads = key_hidden_size / head_size;
     at::Tensor query_dst = at::empty_symint({num_tokens, num_heads, head_size}, query.options());
