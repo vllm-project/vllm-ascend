@@ -308,8 +308,9 @@ class LLMDataDistCMgrConnectorWorker():
         logger.info("Initialize the LLMDataDistCMgrConnectorWorker")
         # we assume the local node only contains dp and tp, and tp will not communicate inter-node.
         # for any scenario beyond this scope, the functionality of this connector is not guaranteed.
+        dp_size_local = vllm_config.parallel_config.data_parallel_size_local if not envs.VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED else envs.VLLM_DP_SIZE_LOCAL
         self.local_rank_on_node = get_world_group().rank % (
-            vllm_config.parallel_config.data_parallel_size_local *
+            dp_size_local *
             vllm_config.parallel_config.tensor_parallel_size)
         self.local_rank = get_world_group().local_rank
         self.local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local

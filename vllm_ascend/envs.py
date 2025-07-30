@@ -163,6 +163,12 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE":
     lambda: int(
         os.getenv("VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE", '0')),
+    # VLLM_DP_SIZE_LOCAL: used for external data parallelism in vllm-ascend to specify the local parallel size of current node, 0.9.1 specific.
+    "VLLM_DP_SIZE_LOCAL":
+    lambda: int(os.getenv("VLLM_DP_SIZE_LOCAL", '0')),
+    # VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED: used for external distributed data parallelism in vllm-ascend, 0.9.1 specific.
+    "VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED", '0'))),
 }
 
 # end-env-vars-definition
