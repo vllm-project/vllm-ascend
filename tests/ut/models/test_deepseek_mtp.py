@@ -25,6 +25,9 @@ class TestCustomDeepSeekMultiTokenPredictorLayer(PytestBase):
         mocker.patch(
             "vllm.model_executor.models.deepseek_mtp.SharedHead.__init__",
             return_value=None)
+        mocker.patch(
+            "vllm_ascend.models.deepseek_mtp.CustomDeepSeekShareHead.__init__",
+            return_value=None)
         mocker_deepseek_v2_decode_layer = mocker.patch(
             "vllm_ascend.models.deepseek_v2.CustomDeepseekV2DecoderLayer.__init__",
             return_value=None)
