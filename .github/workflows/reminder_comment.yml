@@ -1,0 +1,26 @@
+name: PR Reminder Comment Bot
+permissions:
+  pull-requests: write
+on:
+  pull_request_target:
+    types: [opened]
+jobs:
+  pr_reminder:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Remind to run full CI on PR
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: '👋 Hi! Thank you for contributing to the vLLM Ascend project. The following points will speed up your PR merge:‌‌\n\n' +
+                '- A PR should do only one thing, smaller PRs enable faster reviews.\n' +
+                '- Every PR should include unit tests and end-to-end tests ‌to ensure it works and is not broken by other future PRs.\n' +
+                '- Write the commit message by fulfilling the PR description to help reviewer and future developers understand.\n\n' +
+                'If CI fails, you can run linting and testing checks locally according [Contributing](https://vllm-ascend.readthedocs.io/zh-cn/latest/developer_guide/contribution/index.html) and [Testing](https://vllm-ascend.readthedocs.io/zh-cn/latest/developer_guide/contribution/testing.html).'
+            })
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
