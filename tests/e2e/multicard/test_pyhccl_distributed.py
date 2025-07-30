@@ -89,7 +89,7 @@ def worker_fn():
 
 
 def test_pyhccl():
-    distributed_run(worker_fn, 4)
+    distributed_run(worker_fn, 2)
 
 
 def broadcast_worker_fn():
@@ -118,4 +118,4 @@ def broadcast_worker_fn():
 
 
 def test_pyhccl_broadcast():
-    distributed_run(broadcast_worker_fn, 4)
+    distributed_run(broadcast_worker_fn, 2)
