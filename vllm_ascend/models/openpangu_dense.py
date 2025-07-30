@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright (c) Huawei Technologies Co., Ltd. 2025. All rights reserved.
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All rights reserved.
 # Copyright 2023 The vLLM team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
