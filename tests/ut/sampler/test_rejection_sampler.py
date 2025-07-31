@@ -5,13 +5,14 @@ from typing import Any, Optional
 import pytest
 import torch
 import torch.nn.functional as F
-
 from vllm.platforms import current_platform
 from vllm.v1.sample.logits_processor import LogitsProcessorManager
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm_ascend.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
-from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler as RejectionSampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+
+from vllm_ascend.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
+from vllm_ascend.sample.rejection_sampler import \
+    AscendRejectionSampler as RejectionSampler
 
 DEVICE = current_platform.device_type
 
