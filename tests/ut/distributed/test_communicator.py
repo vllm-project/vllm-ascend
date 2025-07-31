@@ -1,5 +1,3 @@
-import multiprocessing
-import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -19,11 +17,7 @@ class TestNPUCommunicator(unittest.TestCase):
                0: 0,
                1: 1
            })
-    @patch("torch.distributed.get_group_rank",
-           return_value={
-               0: 0,
-               1: 1
-           })
+    @patch("torch.distributed.get_group_rank", return_value={0: 0, 1: 1})
     @patch("torch.distributed.is_initialized", return_value=True)
     @patch("torch.distributed.get_rank", return_value=1)
     @patch("torch.distributed.is_initialized", return_value=True)
@@ -38,9 +32,10 @@ class TestNPUCommunicator(unittest.TestCase):
                                input_tensor_list,
                                group=None,
                                async_op=False):
-            output_tensor_list[:] = (
-                [torch.tensor([10, 20]),
-                 torch.tensor([50, 60])])
+            output_tensor_list[:] = ([
+                torch.tensor([10, 20]),
+                torch.tensor([50, 60])
+            ])
 
         torch.distributed.all_to_all = patched_all_to_all
 
@@ -65,11 +60,7 @@ class TestNPUCommunicator(unittest.TestCase):
                0: 0,
                1: 1
            })
-    @patch("torch.distributed.get_group_rank",
-           return_value={
-               0: 0,
-               1: 1
-           })
+    @patch("torch.distributed.get_group_rank", return_value={0: 0, 1: 1})
     @patch("torch.distributed.is_initialized", return_value=True)
     @patch("torch.distributed.get_rank", return_value=1)
     @patch("torch.distributed.is_initialized", return_value=True)
@@ -84,9 +75,10 @@ class TestNPUCommunicator(unittest.TestCase):
                                input_tensor_list,
                                group=None,
                                async_op=False):
-            output_tensor_list[:] = (
-                [torch.tensor([[10, 20]]),
-                 torch.tensor([[50, 60]])])
+            output_tensor_list[:] = ([
+                torch.tensor([[10, 20]]),
+                torch.tensor([[50, 60]])
+            ])
 
         torch.distributed.all_to_all = patched_all_to_all
 
