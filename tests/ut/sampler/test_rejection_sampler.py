@@ -14,7 +14,6 @@ from vllm_ascend.sample.rejection_sampler import \
     AscendRejectionSampler as RejectionSampler
 
 
-
 @pytest.fixture
 def rejection_sampler():
     return RejectionSampler()
