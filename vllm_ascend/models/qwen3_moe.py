@@ -17,21 +17,24 @@
 # This file is a part of the vllm-ascend project.
 from typing import Optional
 
-import vllm.model_executor.models.qwen3_moe as qwen3
-from compressed_tensors import QuantizationConfig
 from torch import nn
-from transformers import PretrainedConfig, CacheConfig
+from transformers import PretrainedConfig
+
+from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
-from vllm.model_executor.models.utils import make_layers, maybe_prefix, make_empty_intermediate_tensors_factory, \
-    extract_layer_index
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP, Qwen3MoeModel, Qwen3MoeForCausalLM, Qwen3MoeDecoderLayer
+from vllm.model_executor.models.utils import extract_layer_index, make_empty_intermediate_tensors_factory, maybe_prefix, \
+    make_layers
 
 from vllm_ascend.ops.fused_moe import AscendSparseMoeBlock
 from vllm_ascend.platform import VllmConfig
 
 
-class CustomQwen3MoeDecoderLayer(qwen3.Qwen3MoeDecoderLayer):
+class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
     def __init__(
         self,
         config: PretrainedConfig,
@@ -46,7 +49,7 @@ class CustomQwen3MoeDecoderLayer(qwen3.Qwen3MoeDecoderLayer):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
-        self.self_attn = qwen3.Qwen3MoeAttention(
+        self.self_attn = Qwen3MoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
@@ -72,7 +75,7 @@ class CustomQwen3MoeDecoderLayer(qwen3.Qwen3MoeDecoderLayer):
                                               quant_config=quant_config,
                                               prefix=f"{prefix}.mlp")
         else:
-            self.mlp = qwen3.Qwen3MoeMLP(hidden_size=config.hidden_size,
+            self.mlp = Qwen3MoeMLP(hidden_size=config.hidden_size,
                                          intermediate_size=config.intermediate_size,
                                          hidden_act=config.hidden_act,
                                          quant_config=quant_config,
@@ -83,7 +86,7 @@ class CustomQwen3MoeDecoderLayer(qwen3.Qwen3MoeDecoderLayer):
                                                 eps=config.rms_norm_eps)
 
 
-class CustomQwen3MoeModel(qwen3.Qwen3MoeModel):
+class CustomQwen3MoeModel(Qwen3MoeModel):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
@@ -127,6 +130,18 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        self.config = config
+        self.quant_config = quant_config
         self.model = CustomQwen3MoeModel(vllm_config=vllm_config,
                                    prefix=maybe_prefix(prefix, "model"))
+        self.lm_head = ParallelLMHead(config.vocab_size,
+                                      config.hidden_size,
+                                      quant_config=quant_config)
+        if self.config.tie_word_embeddings:
+            self.lm_head.weight = self.model.embed_tokens.weight
+        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
