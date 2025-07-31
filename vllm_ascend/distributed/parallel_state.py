@@ -47,9 +47,10 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     assert _MLP_TP is None, ("mlp tensor model parallel group is already initialized")
     mlp_tp  = 4
 
-    all_ranks_mlp_head = torch.arange(world_size).reshape(
-        -1, mlp_tp, pipeline_parallel_size, 1)  # noqa
-    group_ranks = all_ranks_mlp_head.view(-1, mlp_tp).unbind(0)
+    all_ranks = torch.arange(world_size).reshape(
+        -1, parallel_config.data_parallel_size, parallel_config.pipeline_parallel_size,
+        parallel_config.tensor_parallel_size)  # noqa
+    group_ranks = all_ranks.transpose(1, 3).reshape(-1, parallel_config.data_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
 
     # message queue broadcaster is only used in tensor model parallel group

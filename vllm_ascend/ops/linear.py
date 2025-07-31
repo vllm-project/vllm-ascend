@@ -351,7 +351,6 @@ class AttnRowParallelLinear(LinearBase):
                                                   bias=bias_)
         num_tokens_across_dp = get_forward_context().num_tokens_across_dp
         num_tokens_across_dp = tuple(num_tokens_across_dp.numpy())
-        # input2_ = tensor_model_parallel_all_gather_lm(input_, 0)
         split_tensor = list(torch.split(output_parallel, num_tokens_across_dp, dim=0))
         output = torch.empty_like(split_tensor[tp_rank])
         torch.distributed.reduce_scatter(output, split_tensor, op=torch.distributed.ReduceOp.SUM, group=get_mlp_tp_group().device_group)

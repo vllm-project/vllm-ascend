@@ -29,32 +29,9 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.model_executor.layers.activation import SiluAndMul
 
-import vllm_ascend.envs as ascend_envs
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
-
 
 from vllm_ascend.ops.linear import (AttnRowParallelLinear,
                                     ATTNMergedColumnParallelLinear)
-
-
-def all_gather_and_maybe_unpad(
-    hidden_states: torch.Tensor,
-    pad_size: int,
-) -> torch.Tensor:
-    hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
-    if pad_size > 0:
-        return hidden_states[:-pad_size, :]
-    return hidden_states
-
-
-def maybe_pad_and_reduce_scatter(
-    hidden_states: torch.Tensor,
-    pad_size: int,
-) -> torch.Tensor:
-    if pad_size > 0:
-        hidden_states = F.pad(hidden_states, (0, 0, 0, pad_size))
-    hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
-    return hidden_states
 
 class CustomQwen2MLP(nn.Module):
 
@@ -81,23 +58,6 @@ class CustomQwen2MLP(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.down_proj",
         )
-        # self.gate_up_proj = MergedColumnParallelLinear(
-        #     hidden_size,
-        #     [intermediate_size] * 2,
-        #     bias=False,
-        #     quant_config=quant_config,
-        #     prefix=f"{prefix}.gate_up_proj",
-        # )
-        # self.down_proj = RowParallelLinear(
-        #     intermediate_size,
-        #     hidden_size,
-        #     bias=False,
-        #     quant_config=quant_config,
-        #     prefix=f"{prefix}.down_proj",
-        # )
-        # if hidden_act != "silu":
-        #     raise ValueError(f"Unsupported activation: {hidden_act}. "
-        #                      "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
@@ -105,58 +65,6 @@ class CustomQwen2MLP(nn.Module):
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
-
-class CustomQwen2Attention(Qwen2Attention):
-
-    def __init__(
-        self,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        max_position: int = 4096 * 32,
-        rope_theta: float = 10000,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        rope_scaling: Optional[tuple] = None,
-        prefix: str = "",
-        attn_type: str = AttentionType.DECODER,
-        dual_chunk_attention_config: Optional[dict[str, Any]] = None,
-    ) -> None:
-        super().__init__(
-            hidden_size=hidden_size,
-            num_heads=num_heads,
-            num_kv_heads=num_kv_heads,
-            max_position=max_position,
-            rope_theta=rope_theta,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            rope_scaling=rope_scaling,
-            prefix=prefix,
-            attn_type=attn_type,
-            dual_chunk_attention_config=dual_chunk_attention_config)
-
-    def forward(self,
-                positions: torch.Tensor,
-                hidden_states: torch.Tensor,
-                cos: Optional[torch.Tensor] = None,
-                sin: Optional[torch.Tensor] = None) -> torch.Tensor:
-        qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        if type(self.rotary_emb) is RotaryEmbedding:
-            # We optimized RotaryEmbedding by moving index_select of cos & sin outside.
-            # if cos & sin are provided, set is_cos_sin_cached to True to skip index_select.
-            q, k = self.rotary_emb(positions,
-                                   q,
-                                   k,
-                                   cos=cos,
-                                   sin=sin,
-                                   is_cos_sin_cached=True)
-        else:
-            q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
-        return output
-
 
 class CustomQwen2DecoderLayer(nn.Module):
 
@@ -185,7 +93,7 @@ class CustomQwen2DecoderLayer(nn.Module):
         else:
             attn_type = AttentionType.ENCODER_ONLY
 
-        self.self_attn = CustomQwen2Attention(
+        self.self_attn = Qwen2Attention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
@@ -210,58 +118,29 @@ class CustomQwen2DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
 
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.self_attn.o_proj.reduce_results = False
-        self.mlp.down_proj.reduce_results = False
-
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
-        flashcomm_v1_enabled: bool,
-        pad_size: int,
-        cos: Optional[torch.Tensor] = None,
-        sin: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
-            if flashcomm_v1_enabled:
-                if pad_size > 0:
-                    residual = F.pad(residual, (0, 0, 0, pad_size))
-                residual = torch.chunk(residual, self.tp_size,
-                                       dim=0)[self.tp_rank]
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-            if flashcomm_v1_enabled:
-                hidden_states = all_gather_and_maybe_unpad(
-                    hidden_states, pad_size)
-        hidden_states = self.self_attn(positions=positions,
-                                       hidden_states=hidden_states,
-                                       cos=cos,
-                                       sin=sin)
-        if flashcomm_v1_enabled:
-            hidden_states = maybe_pad_and_reduce_scatter(
-                hidden_states, pad_size)
-        else:
-            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+        )
+
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
-        if flashcomm_v1_enabled:
-            hidden_states = all_gather_and_maybe_unpad(hidden_states, pad_size)
         hidden_states = self.mlp(hidden_states)
-        if flashcomm_v1_enabled:
-            hidden_states = maybe_pad_and_reduce_scatter(
-                hidden_states, pad_size)
-        else:
-            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         return hidden_states, residual
-
 
 @support_torch_compile(
     dynamic_arg_dims={
@@ -283,70 +162,6 @@ class CustomQwen2Model(Qwen2Model):
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,
                          decoder_layer_type=decoder_layer_type)
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.cos_sin_cache = self.layers[0].self_attn.rotary_emb.cos_sin_cache
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        positions: torch.Tensor,
-        intermediate_tensors: Optional[IntermediateTensors] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
-        if get_pp_group().is_first_rank:
-            if inputs_embeds is not None:
-                hidden_states = inputs_embeds
-            else:
-                hidden_states = self.get_input_embeddings(input_ids)
-            residual = None
-        else:
-            assert intermediate_tensors is not None
-            hidden_states = intermediate_tensors["hidden_states"]
-            residual = intermediate_tensors["residual"]
-        pad_size = 0
-        flashcomm_v1_enabled = False
-        attn_metadata = get_forward_context().attn_metadata
-        if ascend_envs.VLLM_ASCEND_ENABLE_FLASHCOMM == 1 and \
-            envs.VLLM_USE_V1 and \
-            attn_metadata is not None and \
-            attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
-            flashcomm_v1_enabled = True
-        if flashcomm_v1_enabled:
-            num_tokens = hidden_states.size(0)
-            pad_size = (self.tp_size -
-                        (num_tokens % self.tp_size)) % self.tp_size
-
-        # Generate cos and sin outside layers to avoid repeated calculation.
-        cos, sin = None, None
-        if type(self.layers[0].self_attn.rotary_emb) is RotaryEmbedding:
-            cos_sin = self.cos_sin_cache.index_select(0, positions)
-            last_dim = cos_sin.size()[-1]
-            cos, sin = cos_sin.reshape(-1, 2,
-                                       last_dim // 2).repeat(1, 1,
-                                                             2).chunk(2,
-                                                                      dim=-2)
-            cos, sin = cos.view(1, -1, 1, last_dim).contiguous(), sin.view(
-                1, -1, 1, last_dim).contiguous()
-
-        for layer in self.layers[self.start_layer:self.end_layer]:
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
-                flashcomm_v1_enabled,
-                pad_size,
-                cos=cos,
-                sin=sin,
-            )
-        if not get_pp_group().is_last_rank:
-            return IntermediateTensors({
-                "hidden_states": hidden_states,
-                "residual": residual
-            })
-        hidden_states, _ = self.norm(hidden_states, residual)
-        if flashcomm_v1_enabled:
-            hidden_states = all_gather_and_maybe_unpad(hidden_states, pad_size)
-        return hidden_states
 
 
 class CustomQwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
