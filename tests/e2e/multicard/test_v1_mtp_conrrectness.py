@@ -66,7 +66,7 @@ def test_mtp_correctness(
                     tensor_parallel_size=16,
                     max_model_len=256,
                     gpu_memory_utilization=0.8,
-                    enforce_eager=True) as ref_llm:
+                    enforce_eager=False) as ref_llm:
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
 
     with VllmRunner(model_name,
@@ -77,7 +77,7 @@ def test_mtp_correctness(
                         "method": "deepseek_mtp",
                         "num_speculative_tokens": 1,
                     },
-                    enforce_eager=True) as spec_llm:
+                    enforce_eager=False) as spec_llm:
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
 
     matches = 0
