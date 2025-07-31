@@ -64,7 +64,6 @@ from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
@@ -72,6 +71,7 @@ from vllm.v1.worker.utils import (bind_kv_cache, gather_mm_placeholders,
                                   sanity_check_mm_encoder_outputs,
                                   scatter_mm_placeholders)
 
+from vllm_ascend import envs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
@@ -165,7 +165,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.device = device
         self.dtype = self.model_config.dtype
-        self.sampler = Sampler()
+        if envs.VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION:
+            # TODO: drop the env config to use ascend sampler by default
+            from vllm_ascend.sample.sampler import AscendSampler
+
+            self.sampler = AscendSampler()
+        else:
+            from vllm.v1.sample.sampler import Sampler
+
+            self.sampler = Sampler()
 
         # Lazy initialization, these will be set after __init__
         self.kv_caches: List[torch.Tensor] = []
@@ -1340,40 +1348,52 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         logits: torch.Tensor,
     ) -> torch.Tensor:
-        # Serialization of np.ndarray is much more efficient than a tensor,
-        # so we receive it in that format.
         grammar_bitmask = scheduler_output.grammar_bitmask
 
-        # We receive the structured output bitmask from the scheduler, but the
-        # indices of the requests in the batch may not match the indices of
-        # the bitmask since the scheduler doesn't know how the gpu runner is
-        # ordering the requests in the batch. We need to sort the bitmask to
-        # match the order of the requests used here.
+        # We receive the structured output bitmask from the scheduler,
+        # compacted to contain bitmasks only for structured output requests.
+        # The order of the requests in the bitmask is not guaranteed to be the
+        # same as the order of the requests in the gpu runner's batch. We need
+        # to sort the bitmask to match the order of the requests used here.
+
+        # Get the batch indices of the structured output requests.
+        # Keep track of the number of speculative tokens scheduled for every
+        # request in the batch, as the logit indices are offset by this amount.
         struct_out_req_batch_indices: dict[str, int] = {}
-        indices_match = True
-        for req_id in self.input_batch.req_ids:
-            mask_index = scheduler_output.structured_output_request_ids.get(
-                req_id)
-            if mask_index is None:
-                # not a structured output request
-                continue
-            batch_index = self.input_batch.req_id_to_index[req_id]
-            if batch_index != mask_index:
-                indices_match = False
-            struct_out_req_batch_indices[req_id] = batch_index
+        cumulative_offset = 0
+        seq = sorted(self.input_batch.req_id_to_index.items(),
+                     key=lambda x: x[1])
+        for req_id, batch_index in seq:
+            logit_index = batch_index + cumulative_offset
+            cumulative_offset += len(
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
+            if req_id in scheduler_output.structured_output_request_ids:
+                struct_out_req_batch_indices[req_id] = logit_index
 
-        if not indices_match:
-            # Sort the bitmask to match the order of the requests
-            sorted_bitmask = np.zeros_like(grammar_bitmask)
-            for req_id, batch_index in struct_out_req_batch_indices.items():
-                orig_index = scheduler_output.structured_output_request_ids[
-                    req_id]
-                sorted_bitmask[batch_index] = grammar_bitmask[orig_index]
-            grammar_bitmask = sorted_bitmask
+        out_indices = []
 
+        # Reorder the bitmask to match the order of the requests in the batch.
+        sorted_bitmask = np.zeros_like(grammar_bitmask,
+                                       shape=(logits.shape[0],
+                                              grammar_bitmask.shape[1]))
+        cumulative_index = 0
+        seq = sorted(scheduler_output.structured_output_request_ids.items(),
+                     key=lambda x: x[1])
+        for req_id, _ in seq:
+            logit_index = struct_out_req_batch_indices[req_id]
+            num_spec_tokens = len(
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
+            for i in range(1 + num_spec_tokens):
+                sorted_bitmask[logit_index + i] = \
+                    grammar_bitmask[cumulative_index + i]
+                out_indices.append(logit_index + i)
+            cumulative_index += 1 + num_spec_tokens
+        grammar_bitmask = sorted_bitmask
+
+        # Serialization of np.ndarray is much more efficient than a tensor,
+        # so we receive it in that format.
         grammar_bitmask = torch.from_numpy(grammar_bitmask)
 
-        # TODO: compatibility with spec decode.
         # NOTE:
         # 1. XGrammar bitmask applying only supports CPU and GPU.
         # 2. The logits and bitmask should be on the same device.
@@ -1383,7 +1403,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         xgr.apply_token_bitmask_inplace(
             logits,
             grammar_bitmask,
-            indices=list(struct_out_req_batch_indices.values()),
+            indices=out_indices,
         )
         return logits.to(self.device).to(logits_dtype)
 
@@ -1799,6 +1819,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             attn_metadata.decode.input_positions)
                         torch._dynamo.mark_static(
                             get_forward_context().mc2_mask)
+                        if hasattr(attn_metadata.decode, "sin"):
+                            torch._dynamo.mark_static(attn_metadata.decode.sin)
+                            torch._dynamo.mark_static(attn_metadata.decode.cos)
                         torch._dynamo.mark_static(attn_metadata.slot_mapping)
                         for kv in self.kv_caches:
                             assert isinstance(
