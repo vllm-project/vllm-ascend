@@ -49,7 +49,7 @@ def sampling_config():
 
 @pytest.fixture
 def model_name():
-    return "'vllm-ascend/DeepSeek-R1-w4a8-pruning'"
+    return "vllm-ascend/DeepSeek-R1-w4a8-pruning"
 
 
 def test_mtp_correctness(
