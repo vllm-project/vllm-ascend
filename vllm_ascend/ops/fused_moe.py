@@ -1469,6 +1469,8 @@ class AscendFusedMoE(FusedMoE):
                     e_hidden_states, dim=0)
                 final_hidden_states = final_hidden_states[:num_tokens]
                 dispose_tensor(e_hidden_states)
+            else:
+                final_hidden_states = e_hidden_states
         else:
             final_hidden_states = e_hidden_states
 
