@@ -96,9 +96,13 @@ if not vllm_version_is("0.10.0"):
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
+    import xgrammar.kernels.apply_token_bitmask_inplace_torch_compile as xgr_torch_compile  # noqa: E501
     from vllm.v1.core.sched.output import SchedulerOutput
 else:
     xgr = LazyLoader("xgr", globals(), "xgrammar")
+    xgr_torch_compile = LazyLoader(
+        "xgr_torch_compile", globals(),
+        "xgrammar.kernels.apply_token_bitmask_inplace_torch_compile")
 
 import torch_npu
 import vllm.envs as envs_vllm
@@ -1400,7 +1404,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # 3. XGrammar logits on CPU only supports float32 dtype.
         logits_dtype = logits.dtype
         logits = logits.to("cpu").float()
-        xgr.apply_token_bitmask_inplace(
+        xgr_torch_compile.apply_token_bitmask_inplace_torch_compile(
             logits,
             grammar_bitmask,
             indices=out_indices,
