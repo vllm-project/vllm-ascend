@@ -472,11 +472,8 @@ def init_routing_quant(hidden_states, top_k, topk_ids, global_num_experts):
         expert_idx=topk_ids,
         active_num=num_tokens)
 
-    expanded_row_idx = (expanded_row_idx.view(top_k, -1).permute(
-        1, 0).contiguous().view(-1))
-
-    global_expert_tokens = torch.bincount(expanded_expert_idx,
-                                            minlength=global_num_experts)
+    expanded_row_idx = (expanded_row_idx.view(top_k, -1).permute(1, 0).contiguous().view(-1))
+    global_expert_tokens = torch.bincount(expanded_expert_idx, minlength=global_num_experts)
     global_expert_tokens = global_expert_tokens.to(torch.int32)
     quantized_tokens, token_scales = torch_npu.npu_dynamic_quant(hidden_states)
     return quantized_tokens, expanded_row_idx, global_expert_tokens, token_scales
@@ -518,6 +515,18 @@ def fused_experts_with_all2all(hidden_states: torch.Tensor,
                 expert_num=global_num_experts,
                 drop_pad_mode=0,
                 expert_tokens_num_mode=2,
+                expert_tokens_before_capacity_flag=False,
+                quant_mode=1,
+            )
+        elif hasattr(torch_npu, "npu_moe_init_routing_quantv2"):  # TODO: Remove it
+            quantized_tokens, expanded_row_idx, global_expert_tokens, _, token_scales = torch_npu.npu_moe_init_routing_quantv2(
+                hidden_states,
+                expert_idx=topk_ids.to(torch.int32),
+                active_num=0,
+                expert_capacity=0,
+                expert_num=global_num_experts,
+                drop_pad_mode=0,
+                expert_tokens_count_or_cumsum_flag=2,
                 expert_tokens_before_capacity_flag=False,
                 quant_mode=1,
             )
