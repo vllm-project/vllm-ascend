@@ -19,9 +19,12 @@ from typing import Optional
 
 import vllm.model_executor.models.qwen3_moe as qwen3
 from compressed_tensors import QuantizationConfig
+from torch import nn
 from transformers import PretrainedConfig, CacheConfig
+from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
-from vllm.model_executor.models.utils import make_layers, maybe_prefix
+from vllm.model_executor.models.utils import make_layers, maybe_prefix, make_empty_intermediate_tensors_factory
 
 from vllm_ascend.ops.fused_moe import AscendSparseMoeBlock
 from vllm_ascend.platform import VllmConfig
@@ -42,13 +45,20 @@ class CustomQwen3MoeDecoderLayer(qwen3.Qwen3MoeDecoderLayer):
                                               prefix=f"{prefix}.mlp")
 
 
-class CustomQwen3MoeModel(qwen3.Qwen3MoeModel):
+class CustomQwen3MoeModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
+        self.padding_idx = config.pad_token_id
+        self.vocab_size = config.vocab_size
+        self.config = config
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+            prefix=f"{prefix}.embed_tokens")
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: CustomQwen3MoeDecoderLayer(config=config,
@@ -57,6 +67,10 @@ class CustomQwen3MoeModel(qwen3.Qwen3MoeModel):
                                                 prefix=prefix),
             prefix=f"{prefix}.layers",
         )
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
 
 
 class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
