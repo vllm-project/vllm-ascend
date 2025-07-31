@@ -49,7 +49,7 @@ def sampling_config():
 
 @pytest.fixture
 def model_name():
-    return "vllm-ascend/DeepSeek-R1-W8A8"
+    return "'vllm-ascend/DeepSeek-R1-w4a8-pruning'"
 
 
 def test_mtp_correctness(
@@ -63,14 +63,14 @@ def test_mtp_correctness(
     '''
 
     with VllmRunner(model_name,
-                    tensor_parallel_size=16,
+                    tensor_parallel_size=2,
                     max_model_len=256,
                     gpu_memory_utilization=0.8,
                     enforce_eager=False) as ref_llm:
         ref_outputs = ref_llm.chat(test_prompts, sampling_config)
 
     with VllmRunner(model_name,
-                    tensor_parallel_size=16,
+                    tensor_parallel_size=2,
                     max_model_len=256,
                     gpu_memory_utilization=0.8,
                     speculative_config={
