@@ -22,7 +22,6 @@ from typing import Any, Dict, List, Optional
 
 from vllm.logger import logger
 
-
 from .func_wrapper import (wrapper_rmsnorm_forward_oot, wrapper_rmsnorm_init,
                            wrapper_vocab_parallel_embedding_init)
 from .w4a8_dynamic import AscendW4A8DynamicLinearMethod
