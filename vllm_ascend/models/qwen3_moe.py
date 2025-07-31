@@ -15,11 +15,48 @@
 # limitations under the License.
 # Adapted from vllm/model_executor/models/qwen3_moe.py
 # This file is a part of the vllm-ascend project.
+from typing import Optional
 
 import vllm.model_executor.models.qwen3_moe as qwen3
+from compressed_tensors import QuantizationConfig
+from transformers import PretrainedConfig, CacheConfig
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
+from vllm.model_executor.models.utils import make_layers, maybe_prefix
 
 from vllm_ascend.ops.fused_moe import AscendSparseMoeBlock
+from vllm_ascend.platform import VllmConfig
+
+
+class CustomQwen3MoeDecoderLayer(qwen3.Qwen3MoeDecoderLayer):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(config, cache_config, quant_config, prefix)
+
+        self.mlp = AscendSparseMoeBlock(config=config,
+                                              quant_config=quant_config,
+                                              prefix=f"{prefix}.mlp")
+
+
+class CustomQwen3MoeModel(qwen3.Qwen3MoeModel):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: CustomQwen3MoeDecoderLayer(config=config,
+                                                cache_config=cache_config,
+                                                quant_config=quant_config,
+                                                prefix=prefix),
+            prefix=f"{prefix}.layers",
+        )
 
 
 class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
@@ -36,4 +73,8 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
         "experts":
         ["experts.0.gate_proj", "experts.0.up_proj", "experts.0.down_proj"],
     }
-    qwen3.Qwen3MoeSparseMoeBlock = AscendSparseMoeBlock
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        self.model = CustomQwen3MoeModel(vllm_config=vllm_config,
+                                   prefix=maybe_prefix(prefix, "model"))

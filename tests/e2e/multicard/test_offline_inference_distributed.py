@@ -142,16 +142,15 @@ def test_models_distributed_topk() -> None:
         "Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.",
         "Compare and contrast artificial intelligence with human intelligence in terms of processing information.",
     ]
+    dtype = "half"
     sampling_params = SamplingParams(max_tokens=5,
                                      temperature=0.0,
                                      top_k=50,
                                      top_p=0.9)
 
     with VllmRunner(
-            snapshot_download("vllm-ascend/pangu-pro-moe-pruing"),
-            max_model_len=8192,
-            enforce_eager=True,
-            dtype="auto",
+            "deepseek-ai/DeepSeek-V2-Lite",
+            dtype=dtype,
             tensor_parallel_size=2,
             distributed_executor_backend="mp",
     ) as vllm_model:
