@@ -22,13 +22,9 @@ import torch
 
 from tests.ut.base import PytestBase
 from vllm_ascend.distributed.tensor_parallel import (
-_gather_along_first_dim, _gather_along_last_dim,
-_reduce_scatter_along_first_dim, _reduce_scatter_along_last_dim,
-all_to_all_hp2sp, all_to_all_sp2hp)
-
-@pytest.fixture
-def test_tensor_last_dim():
-    return torch.randn(8, 16, 32)
+    _gather_along_first_dim, _gather_along_last_dim,
+    _reduce_scatter_along_first_dim, _reduce_scatter_along_last_dim,
+    all_to_all_hp2sp, all_to_all_sp2hp)
 
 
 class TestDistributedCommunication(PytestBase):
@@ -61,14 +57,14 @@ class TestDistributedCommunication(PytestBase):
 
         assert result.shape == expected
 
-    @pytest.mark.parametrize("output_split_sizes, expected", [
-        ([5, 10, 15, 2], (32, 16)),
+    @pytest.mark.parametrize("test_tensor, output_split_sizes, expected", [
+        (torch.randn(8, 16), [5, 10, 15, 2], (32, 16)),
     ])
     def test_gather_along_first_dim_unequal_split(self, test_tensor, expected,
-                                    world_size, mocker: MockerFixture):
+                                                  output_split_sizes):
         """test _gather_along_first_dim"""
 
-        result = _gather_along_first_dim(test_tensor, None)
+        result = _gather_along_first_dim(test_tensor, None, output_split_sizes)
 
         assert result.shape == expected
 
@@ -77,7 +73,7 @@ class TestDistributedCommunication(PytestBase):
         (4, torch.randn(8, 16, 32), (8, 16, 32 * 4))
     ])
     def test_gather_along_last_dim(self, test_tensor, expected,
-                                    world_size, mocker: MockerFixture):
+                                   world_size, mocker: MockerFixture):
         """test _gather_along_last_dim"""
         mocker.patch(
             "torch.distributed.get_world_size",
