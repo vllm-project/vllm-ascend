@@ -14,30 +14,22 @@ class Context:
 class TestDecorator(PytestBase):
 
     @pytest.mark.parametrize(
-        'layer_context, microbatch_context, expected_metadata',
-        [
-            (
-                (-1, None, None),
-                -1,
-                {"original": True}
-            ),
-            (
-                (-1, None, None),
-                0,
-                {"original": True}
-            ),
-            (
-                (0, None, None),
-                -1,
-                {"original": True}
-            ),
-            (
-                (0, None, [{"new": True}]),
-                0,
-                {"original": True}
-            ),
-        ]
-    )
+        'layer_context, microbatch_context, expected_metadata', [
+            ((-1, None, None), -1, {
+                "original": True
+            }),
+            ((-1, None, None), 0, {
+                "original": True
+            }),
+            ((0, None, None), -1, {
+                "original": True
+            }),
+            ((0, None, [{
+                "new": True
+            }]), 0, {
+                "original": True
+            }),
+        ])
     def test_decorator(self, mocker: MockFixture, layer_context,
                        microbatch_context, expected_metadata):
 
