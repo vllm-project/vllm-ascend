@@ -1,447 +1,344 @@
-# SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any, Optional
+# test_rejection_sample.py
 
-import pytest
 import torch
-import torch.nn.functional as F
-from vllm.v1.sample.logits_processor import LogitsProcessorManager
-from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
+import pytest
+from unittest.mock import patch, MagicMock
 
-from vllm_ascend.sample.rejection_sampler import PLACEHOLDER_TOKEN_ID
-from vllm_ascend.sample.rejection_sampler import \
-    AscendRejectionSampler as RejectionSampler
+# 假设这些函数定义在 spec_decode.py 中
+from your_module.spec_decode import (
+    rejection_sample,
+    rejection_greedy_sample_pytorch,
+    rejection_random_sample_pytorch,
+    sample_recovered_tokens_pytorch,
+    expand_pytorch,
+    expand_batch_to_tokens,
+    sample_recovered_tokens,
+)
+
+# 全局常量
+PLACEHOLDER_TOKEN_ID = -1
+GREEDY_TEMPERATURE = 0.0
+MAX_SPEC_LEN = 8  # 用于 expand_batch_to_tokens 的 MAX_NUM_TOKENS
+
+
+# 模拟 SamplingMetadata
+class MockSamplingMetadata:
+    def __init__(self, all_greedy=False, all_random=False, temperature=None, generators=None):
+        self.all_greedy = all_greedy
+        self.all_random = all_random
+        self.temperature = temperature or (GREEDY_TEMPERATURE if all_greedy else 1.0)
+        self.generators = generators or {}
+
+
+def test_rejection_greedy_sample_pytorch():
+    """测试贪婪拒绝采样：草稿不匹配时停止，否则追加 bonus token"""
+    batch_size = 2
+    max_spec_len = 3
+    output_token_ids = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
+
+    cu_num_draft_tokens = torch.tensor([2, 4])  # 请求0: 2个草稿；请求1: 2个草稿
+    draft_token_ids = torch.tensor([10, 11, 20, 21])
+    target_argmax = torch.tensor([10, 99, 20, 22])  # 第二个位置不匹配
+    bonus_token_ids = torch.tensor([[100], [200]])
+
+    is_greedy = torch.tensor([True, True])
+
+    rejection_greedy_sample_pytorch(
+        output_token_ids,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        target_argmax,
+        bonus_token_ids,
+        is_greedy,
+        max_spec_len,
+    )
+
+    # 请求0: [10, 99] + bonus 100 → [10, 99, 100, _]
+    # 请求1: [20] 匹配，[21]!=22 → 拒绝，不再继续，bonus 不加
+    assert output_token_ids[0, 0].item() == 10
+    assert output_token_ids[0, 1].item() == 99
+    assert output_token_ids[0, 2].item() == 100  # bonus
+    assert output_token_ids[1, 0].item() == 20
+    assert output_token_ids[1, 1].item() == PLACEHOLDER_TOKEN_ID  # 被拒绝
+    assert output_token_ids[1, 2].item() == PLACEHOLDER_TOKEN_ID  # no bonus
+
+
+def test_rejection_random_sample_pytorch():
+    """测试随机拒绝采样：基于 uniform prob 决定是否接受"""
+    batch_size = 2
+    max_spec_len = 3
+    output_token_ids = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
+
+    cu_num_draft_tokens = torch.tensor([2, 1])
+    draft_token_ids = torch.tensor([10, 11, 20])
+    draft_probs = torch.tensor([
+        [0.0, 0.6, 0.0, 0.4],  # vocab_size=4
+        [0.1, 0.2, 0.3, 0.4],
+        [0.5, 0.5, 0.0, 0.0],
+    ])
+    target_probs = torch.tensor([
+        [0.0, 0.8, 0.0, 0.2],
+        [0.2, 0.1, 0.3, 0.4],
+        [0.9, 0.1, 0.0, 0.0],
+    ])
+    bonus_token_ids = torch.tensor([[100], [200]])
+    recovered_token_ids = torch.tensor([1, 2, 3])  # 替代 token
+    uniform_probs = torch.tensor([0.7, 0.6, 0.5])
+    is_greedy = torch.tensor([False, False])
+    vocab_size = 4
+
+    rejection_random_sample_pytorch(
+        output_token_ids,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        bonus_token_ids,
+        recovered_token_ids,
+        uniform_probs,
+        is_greedy,
+        max_spec_len,
+        vocab_size,
+        IS_NGRAM=False,
+    )
+
+    # 请求0:
+    #   pos0: p=0.6, q=0.8 → ratio=1.33 > 0.7 → 接受 → 10
+    #   pos1: p=0.4, q=0.4 → ratio=1.0 > 0.6 → 接受 → 11
+    #   bonus: 100
+    assert output_token_ids[0, 0].item() == 10
+    assert output_token_ids[0, 1].item() == 11
+    assert output_token_ids[0, 2].item() == 100
+
+    # 请求1:
+    #   pos0: p=0.5, q=0.9 → ratio=1.8 > 0.5 → 接受 → 20
+    #   bonus: 200
+    assert output_token_ids[1, 0].item() == 20
+    assert output_token_ids[1, 1].item() == 200
+
+
+def test_expand_pytorch():
+    """测试 expand_pytorch 功能"""
+    input_ptr = torch.tensor([10, 20, 30])
+    cu_num_tokens_ptr = torch.tensor([2, 5, 7])  # 累计
+    output_ptr = torch.empty(7, dtype=torch.int32)
+
+    expand_pytorch(
+        output_ptr,
+        input_ptr,
+        cu_num_tokens_ptr,
+        replace_from=0,
+        replace_to=0,
+        MAX_NUM_TOKENS=MAX_SPEC_LEN,
+    )
+
+    expected = torch.tensor([10, 10, 20, 20, 20, 30, 30])
+    assert torch.equal(output_ptr, expected)
+
+
+def test_expand_batch_to_tokens():
+    """测试 expand_batch_to_tokens 封装"""
+    x = torch.tensor([10, 20, 30])
+    cu_num_tokens = torch.tensor([2, 5, 7])
+    num_tokens = 7
+
+    with patch("your_module.spec_decode.expand_pytorch") as mock_kernel:
+        expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
+        mock_kernel.assert_called_once()
+        args = mock_kernel.call_args[0]
+        assert (args[1] == x).all()
+        assert (args[2] == cu_num_tokens).all()
+
+    # 实际运行
+    result = expand_batch_to_tokens(x, cu_num_tokens, num_tokens)
+    expected = torch.tensor([10, 10, 20, 20, 20, 30, 30])
+    assert torch.equal(result, expected)
+
+
+def test_sample_recovered_tokens_pytorch_ngram():
+    """测试 n-gram 模式下的 recovered token 采样"""
+    output_token_ids = torch.empty(2, dtype=torch.int32)
+    cu_num_draft_tokens = torch.tensor([1, 2])
+    draft_token_ids = torch.tensor([1, 2])
+    draft_probs = None
+    target_probs = torch.tensor([
+        [0.1, 0.2, 0.7],  # draft=1 → 排除后最大是2
+        [0.3, 0.3, 0.4],  # draft=2 → 排除后最大是0或1，q 决定
+    ])
+    q = torch.tensor([
+        [0.1, 0.2, 0.7],  # req0
+        [0.5, 0.4, 0.1],  # req1
+    ])
+    vocab_size = 3
+
+    sample_recovered_tokens_pytorch(
+        output_token_ids,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        q,
+        vocab_size,
+        IS_NGRAM=True,
+    )
+
+    # req0: pos0: 排除 token1 → [0.1, 0, 0.7] → prob/q = [1, 0, 1] → argmax=2
+    # req1: pos0: 排除 token2 → [0.3, 0.3, 0] → prob/q = [0.6, 0.75, 0] → argmax=1
+    #      pos1: same q → [0.6, 0.75] → still 1
+    assert output_token_ids[0].item() == 2
+    assert output_token_ids[1].item() == 1
+
+
+def test_sample_recovered_tokens_pytorch_autoregressive():
+    """测试自回归模型 recovered token 采样"""
+    output_token_ids = torch.empty(2, dtype=torch.int32)
+    cu_num_draft_tokens = torch.tensor([1, 1])
+    draft_token_ids = torch.tensor([0, 1])
+    draft_probs = torch.tensor([
+        [0.6, 0.1, 0.3],
+        [0.2, 0.7, 0.1],
+    ])
+    target_probs = torch.tensor([
+        [0.8, 0.1, 0.1],
+        [0.3, 0.6, 0.1],
+    ])
+    q = torch.tensor([
+        [0.5, 0.3, 0.2],
+        [0.1, 0.8, 0.1],
+    ])
+    vocab_size = 3
+
+    sample_recovered_tokens_pytorch(
+        output_token_ids,
+        cu_num_draft_tokens,
+        draft_token_ids,
+        draft_probs,
+        target_probs,
+        q,
+        vocab_size,
+        IS_NGRAM=False,
+    )
+
+    # req0: prob = max(0.8-0.6, 0), (0.1-0.1), (0.1-0.3) → [0.2, 0, 0]
+    #       prob/q = [0.4, 0, 0] → argmax=0
+    # req1: prob = [0.1, -0.1→0, 0] → [0.1, 0, 0] → prob/q = [1.0, 0, 0] → argmax=0
+    assert output_token_ids[0].item() == 0
+    assert output_token_ids[1].item() == 0
 
 
 @pytest.fixture
-def rejection_sampler():
-    return RejectionSampler()
-
-
-def create_logits_tensor(output_token_ids: list[list[int]],
-                         vocab_size: int = 100) -> torch.Tensor:
-    """Helper function to create logits tensor that
-       will produce desired token ids on argmax"""
-    token_ids = [tokens[:-1] for tokens in output_token_ids]
-    num_total_tokens = sum(len(tokens) for tokens in token_ids)
-    logits = torch.full((num_total_tokens, vocab_size), -100.0).npu()
-    start_loc = 0
-    for tokens in token_ids:
-        for j, token_id in enumerate(tokens):
-            logits[start_loc + j, token_id] = 100.0
-        start_loc += len(tokens)
-    return logits
-
-
-def create_sampling_metadata(
-    all_greedy: bool,
-    temperature: Optional[torch.Tensor] = None,
-    top_k: Optional[torch.Tensor] = None,
-    top_p: Optional[torch.Tensor] = None,
-    generators: Optional[dict[int, Any]] = None,
-) -> SamplingMetadata:
-    """Create a v1 sampling metadata object with all_greedy set
-        to the given value. Either all greedy or all random sampling
-        is used.
-    """
-    generators = generators or {}
-    if all_greedy:
-        temperature = None
-    else:
-        assert temperature is not None
-
-    return SamplingMetadata(
-        temperature=temperature,
-        all_greedy=all_greedy,
-        all_random=not all_greedy,
-        top_p=top_p,
-        top_k=top_k,
-        generators=generators,
-        max_num_logprobs=0,
-        no_penalties=False,
-        prompt_token_ids=None,
-        frequency_penalties=torch.tensor([]),
-        presence_penalties=torch.tensor([]),
-        repetition_penalties=torch.tensor([]),
-        output_token_ids=[],
-        allowed_token_ids_mask=None,
-        bad_words_token_ids={},
-        logitsprocs=LogitsProcessorManager(),
-    )
-
-
-########################### Tests for Greedy Sampling ###################
-def test_perfect_match(rejection_sampler):
-    """Test when output tokens perfectly match speculated tokens"""
-    spec_tokens = [[1, 2, 3]]
-    output_tokens = [[1, 2, 3, 4]]  # 4 is the bonus token
-
-    metadata = create_sampling_metadata(all_greedy=True)
-    logits = create_logits_tensor(output_tokens)
-    bonus_token_tensor = torch.tensor([output_tokens[0][-1]],
-                                      device=logits.device)
-    spec_decode_metadata = SpecDecodeMetadata.make_dummy(spec_tokens,
-                                                         device=logits.device)
-
-    output = rejection_sampler(
-        spec_decode_metadata,
-        draft_probs=None,
-        target_logits=logits,
-        bonus_token_ids=bonus_token_tensor,
-        sampling_metadata=metadata,
-    )
-    expected = torch.tensor([[1, 2, 3, 4]],
-                            dtype=torch.int,
-                            device=logits.device)
-    assert torch.equal(output, expected)
-
-
-def test_early_mismatch(rejection_sampler):
-    """Test when there's an early mismatch in tokens"""
-    spec_tokens = [[1, 2, 3]]
-    output_tokens = [[1, 5, 3, 4]]  # Mismatch at position 1
-
-    metadata = create_sampling_metadata(all_greedy=True)
-    logits = create_logits_tensor(output_tokens)
-    bonus_token_tensor = torch.tensor([output_tokens[0][-1]],
-                                      device=logits.device)
-    spec_decode_metadata = SpecDecodeMetadata.make_dummy(spec_tokens,
-                                                         device=logits.device)
-
-    output = rejection_sampler(
-        spec_decode_metadata,
-        draft_probs=None,
-        target_logits=logits,
-        bonus_token_ids=bonus_token_tensor,
-        sampling_metadata=metadata,
-    )
-    expected = torch.tensor(
-        [[1, 5, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID]],
-        dtype=torch.int,
-        device=logits.device,
-    )
-    assert torch.equal(output, expected)
-
-
-def test_multiple_sequences(rejection_sampler):
-    """Test handling multiple sequences of speculated tokens"""
-    spec_tokens = [[1, 2], [3]]
-    output_tokens = [[1, 2, 5], [3,
-                                 4]]  # Two sequences with bonus tokens 5 and 4
-
-    metadata = create_sampling_metadata(all_greedy=True)
-    logits = create_logits_tensor(output_tokens)
-    bonus_token_tensor = torch.tensor(
-        [output_tokens[0][-1], output_tokens[1][-1]], device=logits.device)
-    spec_decode_metadata = SpecDecodeMetadata.make_dummy(spec_tokens,
-                                                         device=logits.device)
-
-    output = rejection_sampler(
-        spec_decode_metadata,
-        draft_probs=None,
-        target_logits=logits,
-        bonus_token_ids=bonus_token_tensor,
-        sampling_metadata=metadata,
-    )
-    expected = torch.tensor([[1, 2, 5], [3, 4, PLACEHOLDER_TOKEN_ID]],
-                            dtype=torch.int,
-                            device=logits.device)
-    assert torch.equal(output, expected)
-
-
-def test_single_token_sequence(rejection_sampler):
-    """Test handling sequences with single token"""
-    spec_tokens = [[1]]
-    output_tokens = [[1, 2]]  # Single token with bonus token 2
-
-    metadata = create_sampling_metadata(all_greedy=True)
-    logits = create_logits_tensor(output_tokens)
-    bonus_token_tensor = torch.tensor([output_tokens[0][-1]],
-                                      device=logits.device)
-    spec_decode_metadata = SpecDecodeMetadata.make_dummy(spec_tokens,
-                                                         device=logits.device)
-
-    output = rejection_sampler(
-        spec_decode_metadata,
-        draft_probs=None,
-        target_logits=logits,
-        bonus_token_ids=bonus_token_tensor,
-        sampling_metadata=metadata,
-    )
-    expected = torch.tensor([[1, 2]], dtype=torch.int, device=logits.device)
-    assert torch.equal(output, expected)
-
-
-def test_empty_sequence(rejection_sampler):
-    """Test handling empty sequence of speculated tokens"""
-    spec_tokens: list[list[int]] = [[]]
-    output_tokens = [[5]]  # Just the bonus token
-
-    metadata = create_sampling_metadata(all_greedy=True)
-    logits = create_logits_tensor(output_tokens)
-    bonus_token_tensor = torch.tensor([output_tokens[0][-1]],
-                                      device=logits.device)
-    spec_decode_metadata = SpecDecodeMetadata.make_dummy(spec_tokens,
-                                                         device=logits.device)
-
-    output = rejection_sampler(
-        spec_decode_metadata,
-        draft_probs=None,
-        target_logits=logits,
-        bonus_token_ids=bonus_token_tensor,
-        sampling_metadata=metadata,
-    )
-    expected = torch.tensor([[5]], dtype=torch.int, device=logits.device)
-    assert torch.equal(output, expected)
-
-
-def test_multiple_mismatches(rejection_sampler):
-    """Test handling multiple sequences with mismatches"""
-    spec_tokens = [[1, 2, 3], [4, 5, 6]]
-    output_tokens = [[1, 2, 7, 6], [4, 8, 6,
-                                    9]]  # Mismatches in both sequences
-
-    metadata = create_sampling_metadata(all_greedy=True)
-    logits = create_logits_tensor(output_tokens)
-    bonus_token_tensor = torch.tensor(
-        [output_tokens[0][-1], output_tokens[1][-1]], device=logits.device)
-    spec_decode_metadata = SpecDecodeMetadata.make_dummy(spec_tokens,
-                                                         device=logits.device)
-
-    output = rejection_sampler(
-        spec_decode_metadata,
-        draft_probs=None,
-        target_logits=logits,
-        bonus_token_ids=bonus_token_tensor,
-        sampling_metadata=metadata,
-    )
-    expected = torch.tensor(
-        [[1, 2, 7, PLACEHOLDER_TOKEN_ID],
-         [4, 8, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID]],
-        dtype=torch.int,
-        device=logits.device,
-    )
-    assert torch.equal(output, expected)
-
-
-@pytest.mark.parametrize(
-    "spec_tokens,output_tokens,expected",
-    [
-        ([[1, 2]], [[1, 2, 3]], [[1, 2, 3]]),  # Perfect match with bonus
-        ([[1]], [[2, 3]], [[2, PLACEHOLDER_TOKEN_ID]]),  # First mismatch
-        ([[1, 2], [3, 4]], [[1, 5, 6], [3, 4, 7]],
-         [[1, 5, PLACEHOLDER_TOKEN_ID], [3, 4, 7]]),  # Mixed matches
-    ])
-def test_parametrized_cases(rejection_sampler, spec_tokens, output_tokens,
-                            expected):
-    """Parametrized test for various matching scenarios"""
-    metadata = create_sampling_metadata(all_greedy=True)
-    logits = create_logits_tensor(output_tokens)
-    bonus_token_tensor = torch.tensor([tokens[-1] for tokens in output_tokens],
-                                      device=logits.device)
-    spec_decode_metadata = SpecDecodeMetadata.make_dummy(spec_tokens,
-                                                         device=logits.device)
-
-    output = rejection_sampler(
-        spec_decode_metadata,
-        draft_probs=None,
-        target_logits=logits,
-        bonus_token_ids=bonus_token_tensor,
-        sampling_metadata=metadata,
-    )
-    expected_tensor = torch.tensor(expected,
-                                   dtype=torch.int,
-                                   device=logits.device)
-    assert torch.equal(output, expected_tensor)
-
-
-def test_rejection_sampling_approximates_target_distribution():
-    """Verify rejection sampling approximates target distribution,
-    despite sampling from a potentially distinct draft distribution.
-
-    This is done by first creating a random target probability
-    distribution and a random draft probability distribution. We then
-    sample token ids from the rejection sampler using these draft
-    and target distributions. The samples are used to estimate
-    the output probability distribution, which we expect to approximate
-    the target distribution.
-
-    A basic distance metric is used to determine similarity between
-    distributions.
-
-    We expect that as we increase the number of samples,
-    the distance between the observed distribution and the target
-    distribution decreases. To measure this, we compare the distance
-    of the observed distribution against both the target distribution
-    and a uniform random distribution. We expect the distance between
-    the observed distribution and the target distribution to improve
-    much more than the distance improvement between the observed
-    distribution and the random distribution.
-    """
-    vocab_size = 10
-    k = 2
-    num_reference_probs = 100
-
-    # Prepare draft, target, and reference probability distributions
-    draft_probs = F.softmax(torch.rand(vocab_size, dtype=torch.float32),
-                            dim=-1)
-    target_logits = torch.rand(vocab_size, dtype=torch.float32)
-    target_probs = F.softmax(target_logits, dim=-1)
-    reference_probs = F.softmax(
-        torch.rand(num_reference_probs, vocab_size, dtype=torch.float32),
-        dim=-1,
-    )
-
-    sample_sizes = [10, 100, 1_000, 10_000, 100_000]
-    distance_wrt_reference: list[float] = []
-    distance_wrt_target: list[float] = []
-
-    for num_samples in sample_sizes:
-        # Sample using rejection sampling.
-        rej_sample_probs = estimate_rejection_sampling_pdf(
-            draft_probs, target_logits, k, vocab_size, num_samples)
-        rej_sample_probs = rej_sample_probs.npu()
-
-        # Average distance from reference probs.
-        reference_vs_rejsample_dist = torch.dist(
-            reference_probs,
-            rej_sample_probs).item() / reference_probs.shape[0]
-        target_vs_rejsample_dist = torch.dist(target_probs,
-                                              rej_sample_probs).item()
-
-        distance_wrt_reference.append(reference_vs_rejsample_dist)
-        distance_wrt_target.append(target_vs_rejsample_dist)
-
-        relative_change_in_distance_wrt_target = get_ratio_first_to_last(
-            distance_wrt_target)
-        relative_change_in_distance_wrt_reference = get_ratio_first_to_last(
-            distance_wrt_reference)
-
-        print(f"{num_samples=} {target_vs_rejsample_dist=:.05f} "
-              f"{reference_vs_rejsample_dist=:.05f}")
-        print(f"{num_samples=} {relative_change_in_distance_wrt_target=:.02f} "
-              f"{relative_change_in_distance_wrt_reference=:.02f}")
-
-    relative_change_in_distance_wrt_target = get_ratio_first_to_last(
-        distance_wrt_target)
-    relative_change_in_distance_wrt_reference = get_ratio_first_to_last(
-        distance_wrt_reference)
-
-    expected_improvement_multiplier = 20
-    assert (relative_change_in_distance_wrt_target
-            > relative_change_in_distance_wrt_reference *
-            expected_improvement_multiplier)
-
-
-def get_ratio_first_to_last(elements: list[float]) -> float:
-    return elements[0] / elements[-1]
-
-
-def estimate_rejection_sampling_pdf(
-    draft_probs: torch.Tensor,
-    target_logits: torch.Tensor,
-    k: int,
-    vocab_size: int,
-    num_samples: int,
-) -> torch.Tensor:
-    """Estimate the probability distribution of the output tokens
-    using rejection sampling.
-
-    Args:
-        draft_probs: Draft probability distribution.
-        target_logits: Target logits.
-        num_samples: Number of samples to draw.
-
-    Returns:
-        Estimated probability distribution of the output tokens.
-    """
-    rejection_sampler = RejectionSampler()
-    num_tokens = num_samples * k
-    # Repeat draft probs num_samples * k times.
-    draft_probs = draft_probs.reshape(1, 1,
-                                      vocab_size).repeat(num_samples, k, 1)
-
-    # Repeat target probs num_tokens times.
-    target_logits = target_logits.reshape(1, vocab_size).repeat(num_tokens, 1)
-
-    # Randomly sample draft token ids from draft probs.
-    draft_token_ids = torch.multinomial(draft_probs[:, 0, :],
-                                        num_samples=k,
-                                        replacement=True).reshape(
-                                            num_samples, k)
-    draft_probs = draft_probs.view(num_tokens, vocab_size)
-
-    # Bonus tokens not used but required.
-    bonus_token_ids = torch.zeros(
-        (1, 1), dtype=torch.int64).npu().repeat(num_samples, 1)
-
-    temperature = torch.ones(num_samples, dtype=torch.float32).npu()
-    sampling_metadata = create_sampling_metadata(all_greedy=False,
-                                                 temperature=temperature)
-    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
-        draft_token_ids.tolist(), device=bonus_token_ids.device)
-    output_token_ids = rejection_sampler(
-        spec_decode_metadata,
-        draft_probs=draft_probs,
-        target_logits=target_logits,
-        bonus_token_ids=bonus_token_ids,
-        sampling_metadata=sampling_metadata,
-    )
-    output_token_ids = output_token_ids[:, :-1].flatten()
-
-    hist = torch.histogram(output_token_ids.to(dtype=torch.float,
-                                               device="cpu"),
-                           bins=vocab_size,
-                           range=(0, vocab_size),
-                           density=True)
-
-    return hist.hist
-
-
-def _test_masked_logits(
-    rejection_sampler,
-    batch_size: int,
-    num_draft_tokens: int,
-    vocab_size: int,
-    target_logits: torch.Tensor,
-    unmasked_indices: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
-):
-    # Set up test parameters
-    num_tokens = batch_size * num_draft_tokens
-
-    # Create random draft probabilities.
-    draft_probs = torch.rand((num_tokens, vocab_size),
-                             dtype=torch.float32).npu()
-    draft_probs = F.softmax(draft_probs, dim=-1)
-
-    # Randomly sample draft token ids from draft probs
-    draft_token_ids = torch.multinomial(draft_probs, num_samples=1)
-    draft_token_ids = draft_token_ids.reshape(batch_size, num_draft_tokens)
-    draft_token_ids = draft_token_ids.tolist()
-
-    # Bonus tokens not used but required
-    bonus_token_ids = torch.zeros((batch_size, 1), dtype=torch.int64).npu()
-
-    # Create spec decode metadata
-    spec_decode_metadata = SpecDecodeMetadata.make_dummy(draft_token_ids).npu()
-
-    # Run rejection sampling
-    output_token_ids = rejection_sampler(
-        spec_decode_metadata,
-        draft_probs=draft_probs,
-        target_logits=target_logits,
-        bonus_token_ids=bonus_token_ids,
-        sampling_metadata=sampling_metadata,
-    )
-
-    # Remove bonus tokens and reshape
-    output_token_ids = output_token_ids[:, :-1].flatten().tolist()
-
-    # Check that all sampled tokens are within the unmasked indices.
-    for i in range(num_tokens):
-        token_id = output_token_ids[i]
-        if token_id == PLACEHOLDER_TOKEN_ID:
-            continue
-        assert token_id in unmasked_indices[i]
+def setup_inputs():
+    """构建标准输入"""
+    batch_size = 2
+    vocab_size = 4
+    device = torch.device("cpu")
+
+    num_draft_tokens = [2, 1]
+    cu_num_draft_tokens = torch.tensor([0, 2, 3], dtype=torch.int32, device=device)  # 前缀和
+    num_tokens = 3
+
+    draft_token_ids = torch.tensor([1, 2, 3], dtype=torch.int32, device=device)
+    draft_probs = torch.tensor([
+        [0.5, 0.5, 0.0, 0.0],
+        [0.0, 0.9, 0.1, 0.0],
+        [0.8, 0.2, 0.0, 0.0],
+    ], device=device)
+    target_probs = torch.tensor([
+        [0.7, 0.3, 0.0, 0.0],
+        [0.0, 0.95, 0.05, 0.0],
+        [0.4, 0.6, 0.0, 0.0],
+    ], device=device)
+    bonus_token_ids = torch.tensor([[10], [20]], dtype=torch.int32, device=device)
+
+    return {
+        "draft_token_ids": draft_token_ids,
+        "num_draft_tokens": num_draft_tokens,
+        "max_spec_len": 4,
+        "cu_num_draft_tokens": cu_num_draft_tokens,
+        "draft_probs": draft_probs,
+        "target_probs": target_probs,
+        "bonus_token_ids": bonus_token_ids,
+        "device": device,
+        "vocab_size": vocab_size,
+        "num_tokens": num_tokens,
+        "batch_size": batch_size,
+    }
+
+
+def test_rejection_sample_greedy_all(setup_inputs):
+    """全贪婪模式：只运行 greedy 分支"""
+    inputs = setup_inputs
+    metadata = MockSamplingMetadata(all_greedy=True)
+    inputs["sampling_metadata"] = metadata
+
+    with patch("torch.Generator") as mock_gen:
+        output = rejection_sample(**inputs, sampling_metadata=metadata)
+
+    assert output.shape == (2, 5)  # [batch, max_spec_len+1]
+    assert output.dtype == torch.int32
+
+    # 请求0: draft=[1,2], target_argmax=[0,1] → 第一个就不匹配 → 只写 target_argmax[0]=0
+    #        但因为不匹配，bonus 不加
+    assert output[0, 0].item() == 0
+    assert output[0, 1].item() == PLACEHOLDER_TOKEN_ID
+
+    # 请求1: draft=[3], target_argmax=[3] → 匹配 → 写3，加 bonus=20
+    assert output[1, 0].item() == 3
+    assert output[1, 1].item() == 20
+
+
+def test_rejection_sample_random(setup_inputs):
+    """随机采样模式：运行完整流程"""
+    inputs = setup_inputs
+    gen1, gen2 = torch.Generator(), torch.Generator()
+    metadata = MockSamplingMetadata(all_greedy=False, all_random=False, generators={0: gen1, 1: gen2})
+    inputs["sampling_metadata"] = metadata
+
+    # Mock 生成 uniform 随机数
+    with patch("torch.empty") as mock_empty, \
+         patch("torch.Tensor.exponential_") as mock_exp, \
+         patch("your_module.spec_decode.generate_uniform_probs") as mock_unif:
+
+        unif_probs = torch.tensor([0.6, 0.96, 0.5])
+        mock_unif.return_value = unif_probs
+
+        output = rejection_sample(**inputs, sampling_metadata=metadata)
+
+    # 请求0:
+    #   pos0: draft=1, p=0.5, q=0.7 → ratio=1.4 > 0.6 → accept → 1
+    #   pos1: draft=2, p=0.9, q=0.95 → ratio≈1.055 > 0.96 → accept → 2
+    #   bonus: 10
+    assert output[0, 0].item() == 1
+    assert output[0, 1].item() == 2
+    assert output[0, 2].item() == 10
+
+    # 请求1:
+    #   pos0: draft=3, p=0.8, q=0.4 → ratio=0.5 < 0.5? → no (>=) → accept → 3
+    #   bonus: 20
+    assert output[1, 0].item() == 3
+    assert output[1, 1].item() == 20
+
+
+def test_rejection_sample_with_recovered_token_rejection(setup_inputs):
+    """测试拒绝后使用 recovered token"""
+    inputs = setup_inputs
+    metadata = MockSamplingMetadata(all_greedy=False)
+
+    # 修改 uniform prob 使第一次拒绝
+    with patch("your_module.spec_decode.generate_uniform_probs") as mock_unif:
+        mock_unif.return_value = torch.tensor([0.8, 0.96, 0.5])  # 第一个 0.7 > 0.6 → 被拒绝
+
+        # Mock sample_recovered_tokens
+        with patch("your_module.spec_decode.sample_recovered_tokens") as mock_rec:
+            mock_rec.return_value = torch.tensor([99, 88, 77])  # recovered tokens
+
+            output = rejection_sample(**inputs, sampling_metadata=metadata)
+
+    # 请求0: 第一个就被拒绝 → 使用 recovered=99
+    assert output[0, 0].item() == 99
+    assert output[0, 1].item() == PLACEHOLDER_TOKEN_ID  # 后续不继续
+    # bonus 不加
+
+    # 请求1: 仍然接受
+    assert output[1, 0].item() == 3
+    assert output[1, 1].item() == 20
