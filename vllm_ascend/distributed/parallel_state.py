@@ -7,12 +7,16 @@ from vllm.distributed.parallel_state import (GroupCoordinator, get_world_group,
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: Optional[GroupCoordinator] = None
+_MLP_TP: Optional[GroupCoordinator] = None
 
 
 def get_mc2_group() -> GroupCoordinator:
     assert _MC2 is not None, ("mc2 group is not initialized")
     return _MC2
 
+def get_mlp_tp_group() -> GroupCoordinator:
+    assert _MLP_TP is not None, ("mlp group is not initialized")
+    return _MLP_TP
 
 def model_parallel_initialized():
     return (_MC2 is not None)
@@ -39,6 +43,28 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                      get_world_group().local_rank,
                                      backend,
                                      group_name="mc2")
+    global _MLP_TP
+    assert _MLP_TP is None, ("mlp tensor model parallel group is already initialized")
+
+    all_ranks = torch.arange(world_size).reshape(
+        -1, parallel_config.data_parallel_size, parallel_config.pipeline_parallel_size,
+        parallel_config.tensor_parallel_size)  # noqa
+    group_ranks = all_ranks.transpose(1, 3).reshape(-1, parallel_config.data_parallel_size).unbind(0)
+    group_ranks = [x.tolist() for x in group_ranks]
+
+    # message queue broadcaster is only used in tensor model parallel group
+    _MLP_TP = init_model_parallel_group(group_ranks,
+                                            get_world_group().local_rank,
+                                            backend,
+                                            group_name="mlp_tp")
+
+def get_mlp_tensor_model_parallel_world_size():
+    """Return world size for the tensor model parallel group."""
+    return get_mlp_tp_group().world_size
+
+def get_mlp_tensor_model_parallel_rank():
+    """Return world size for the tensor model parallel group."""
+    return get_mlp_tp_group().rank_in_group
 
 
 def destroy_ascend_model_parallel():
@@ -46,3 +72,8 @@ def destroy_ascend_model_parallel():
     if _MC2:
         _MC2.destroy()
     _MC2 = None
+
+    global _MLP_TP
+    if _MLP_TP:
+        _MLP_TP.destroy()
+    _MLP_TP = None
