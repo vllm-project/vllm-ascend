@@ -1353,18 +1353,18 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.routed_scaling_factor = config.routed_scaling_factor
         self.first_k_dense_replace = config.first_k_dense_replace
 
-    def is_prefill(attn_metadata: Optional[AttentionMetadata] = None) -> bool:
-            if attn_metadata is None:
-                attn_metadata = get_forward_context().attn_metadata
-            # TODO: need a better flag to indicate whether in profile run or not.
-            if attn_metadata is None:
-                # for profile run
-                is_prefill = True
-            else:
-                is_prefill = attn_metadata.num_prefills > 0
-                if hasattr(attn_metadata, 'with_prefill_across_dp'):
-                    is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
-            return is_prefill
+    def is_prefill(self, attn_metadata: Optional[AttentionMetadata] = None) -> bool:
+        if attn_metadata is None:
+            attn_metadata = get_forward_context().attn_metadata
+        # TODO: need a better flag to indicate whether in profile run or not.
+        if attn_metadata is None:
+            # for profile run
+            is_prefill = True
+        else:
+            is_prefill = attn_metadata.num_prefills > 0
+            if hasattr(attn_metadata, "with_prefill_across_dp"):
+                is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
+        return is_prefill
 
     def forward(
         self,
@@ -1428,7 +1428,9 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                                      attn_metadata,
                                      replace_allreduce=mla_moe_communication)
         else:
-            hidden_states = self.mlp(hidden_states, is_prefill=self.is_prefill(attn_metadata))
+            hidden_states = self.mlp(
+                hidden_states, is_prefill=self.is_prefill(attn_metadata)
+            )
 
         if isinstance(
                 self.mlp,
