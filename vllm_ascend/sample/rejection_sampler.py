@@ -147,16 +147,26 @@ def rejection_sample(
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.
         target_argmax = target_probs.argmax(dim=-1)
-        rejection_greedy_sample_pytorch(
-            output_token_ids,
-            cu_num_draft_tokens,
-            draft_token_ids,
-            target_argmax,
-            bonus_token_ids,
-            is_greedy,
-            max_spec_len,
-            # num_warps=1,
-        )
+        if min(num_draft_tokens) == 1 and max(
+                num_draft_tokens) == 1 and sampling_metadata.all_greedy:
+            rejection_greedy_sample_spec_len_1_pytorch(
+                output_token_ids,
+                draft_token_ids,
+                target_argmax,
+                bonus_token_ids,
+            )
+        else:
+            num_draft_tokens_tensor = torch.tensor(num_draft_tokens,
+                                                   device=device)
+            rejection_greedy_sample_pytorch(
+                output_token_ids,
+                num_draft_tokens_tensor,
+                draft_token_ids,
+                target_argmax,
+                bonus_token_ids,
+                max_spec_len,
+                is_greedy,
+            )
         if sampling_metadata.all_greedy:
             return output_token_ids
 
@@ -284,47 +294,57 @@ def sample_recovered_tokens(
     return recovered_token_ids
 
 
+def rejection_greedy_sample_spec_len_1_pytorch(
+        output_token_ids,  # [batch_size, 2]
+        draft_token_ids,  # [num_tokens]
+        target_argmax,  # [num_tokens]
+        bonus_token_ids,  # [batch_size]
+):
+    batch_size = output_token_ids.size(0)
+    num_tokens = draft_token_ids.size(0)
+    assert batch_size == num_tokens
+    accept_req_mask = draft_token_ids == target_argmax
+    output_token_ids[:, 0] = target_argmax
+    bonus_token_ids = bonus_token_ids.squeeze(1)
+    output_token_ids[accept_req_mask, 1] = bonus_token_ids[accept_req_mask]
+
+
 def rejection_greedy_sample_pytorch(
-    output_token_ids,  # [batch_size, max_spec_len + 1]
-    cu_num_draft_tokens,  # [batch_size]
-    draft_token_ids,  # [num_tokens]
-    target_argmax,  # [num_tokens]
-    bonus_token_ids,  # [batch_size]
-    is_greedy=None,  # [batch_size] or None
-    max_spec_len=None,
+        output_token_ids,  # [batch_size, max_spec_len + 1]
+        num_draft_tokens,  # [batch_size]
+        draft_token_ids,  # [num_tokens]
+        target_argmax,  # [num_tokens]
+        bonus_token_ids,  # [batch_size, 1]
+        max_spec_len,  # int
+        is_greedy=None,  # [batch_size] or None
 ):
     batch_size = output_token_ids.shape[0]
-
+    device = output_token_ids.device
     if is_greedy is None:
-        is_greedy = torch.ones(batch_size,
-                               dtype=torch.bool,
-                               device=output_token_ids.device)
-
-    for req_idx in range(batch_size):
-        if not is_greedy[req_idx]:
-            continue
-
-        if req_idx == 0:
-            start_idx = 0
-        else:
-            start_idx = cu_num_draft_tokens[req_idx - 1].item()
-        end_idx = cu_num_draft_tokens[req_idx].item()
-        num_draft_tokens = end_idx - start_idx
-
-        rejected = False
-        for pos in range(num_draft_tokens):
-            if not rejected:
-                draft_token_id = draft_token_ids[start_idx + pos].item()
-                target_argmax_id = target_argmax[start_idx + pos].item()
-
-                output_token_ids[req_idx, pos] = target_argmax_id
-
-                if draft_token_id != target_argmax_id:
-                    rejected = True
-
-        if not rejected:
-            bonus_token_id = bonus_token_ids[req_idx].item()
-            output_token_ids[req_idx, num_draft_tokens] = bonus_token_id
+        is_greedy = torch.ones(batch_size, dtype=torch.bool, device=device)
+    draft_token_mask = draft_token_ids == target_argmax
+    pos_ids = torch.arange(0, max_spec_len + 1,
+                           device=device).view(1, -1).expand(batch_size, -1)
+    pos_mask = pos_ids < num_draft_tokens.view(-1, 1)
+    output_token_mask = torch.zeros([batch_size, max_spec_len + 1],
+                                    dtype=torch.int,
+                                    device=device)
+    output_token_mask[pos_mask] = draft_token_mask.to(torch.int)
+    output_token_mask = torch.cumprod(output_token_mask,
+                                      dim=1)  # [batch_size, max_spec_len + 1]
+    extra_accept_pos = torch.max(
+        pos_ids * output_token_mask, dim=1, keepdim=True)[1] + 1
+    output_token_mask[:, extra_accept_pos] = True
+    output_token_mask *= is_greedy.view(-1, 1)
+    output_token_ids[pos_mask] = target_argmax.to(output_token_ids.dtype)
+    extra_accept_ids = output_token_ids[:, extra_accept_pos]
+    output_token_ids[pos_mask] = draft_token_ids.to(output_token_ids.dtype)
+    output_token_ids[:, extra_accept_pos] = extra_accept_ids.to(
+        output_token_ids.dtype)
+    output_token_ids[:, -1] = bonus_token_ids.squeeze(1).to(
+        output_token_ids.dtype)
+    output_token_ids[~output_token_mask.bool()] = -1
+    return output_token_ids
 
 
 def rejection_random_sample_pytorch(
