@@ -45,6 +45,8 @@ from vllm_ascend.distributed.communication_op import \
     data_parallel_reduce_scatter
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
+from vllm_ascend.ops.moe_layer.select_experts import UnquantizedSelectExperts
+from vllm_ascend.ops.moe_layer.config import  SelectExpertConfig
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
                                get_all_reduce_merge_state,
@@ -1034,6 +1036,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         except AttributeError:
             self.moe_all_to_all_group_name = None
 
+        self.select_experts = UnquantizedSelectExperts()
+
     def process_weights_after_loading(self, layer):
         super(UnquantizedFusedMoEMethod,
               self).process_weights_after_loading(layer)
@@ -1065,41 +1069,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         **kwargs,
     ) -> torch.Tensor:
 
-        is_deepseek_v3_r1 = global_num_experts == 256
-        # NOTE: now npu_moe_gating_top_k can only support `group_count=256` pattern
-        if is_deepseek_v3_r1:
-            topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
-                router_logits,
-                k=top_k,  # topk当前写8
-                bias=e_score_correction_bias,
-                k_group=topk_group,  # fix: 4
-                group_count=num_expert_group,  # fix 8
-                group_select_mode=1,  # 0: group中的最大; 1: topk2.sum(fix)
-                renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
-                norm_type=1,  # 0: softmax; 1: sigmoid(fix)
-                # out_flag=False, # todo new api; 第三个输出是否输出
-                # y2_flag=False, # old api; 第三个输出是否输出
-                routed_scaling_factor=1,
-                eps=float(1e-20))
-        elif SELECT_GATING_TOPK_SOTFMAX_EXPERTS:
-            topk_weights, topk_ids = select_gating_top_k_softmax_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                top_k=top_k,
-                renormalize=renormalize)
-        else:
-            topk_weights, topk_ids = select_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                top_k=top_k,
-                use_grouped_topk=use_grouped_topk,
-                renormalize=renormalize,
-                topk_group=topk_group,
-                num_expert_group=num_expert_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                e_score_correction_bias=e_score_correction_bias,
-            )
+        topk_weights, topk_ids = self.select_experts(router_logits, x)
 
         topk_weights = topk_weights.to(x.dtype)
         # this is a naive implementation for experts load balance so as
@@ -1267,6 +1237,20 @@ class AscendFusedMoE(FusedMoE):
             # TODO (bnell): this needs to be fixed for quantized types.
             in_dtype=params_dtype,
             quant_config=quant_config)
+
+        select_experts_dict = {
+            'top_k' : top_k,
+            'e_score_correction_bias' : e_score_correction_bias,
+            'topk_group' : topk_group,
+            'num_expert_group' : num_expert_group,
+            'custom_routing_function' : custom_routing_function,
+            'scoring_func' : scoring_func,
+            'global_num_experts' : self.global_num_experts,
+            'use_grouped_topk' : use_grouped_topk,
+            'renormalize' : renormalize,
+        }
+
+        SelectExpertConfig(select_experts_dict)
 
         if quant_config is None:
             self.quant_method = AscendUnquantizedFusedMoEMethod(moe)
