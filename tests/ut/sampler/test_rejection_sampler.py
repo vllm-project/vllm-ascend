@@ -346,7 +346,7 @@ def test_rejection_sample_with_recovered_token_rejection(setup_inputs):
         # Mock sample_recovered_tokens
         with patch(
                 "your_module.spec_decode.sample_recovered_tokens") as mock_rec:
-            mock_rec.return_value = torch.tensor([99, 88, 77]) 
+            mock_rec.return_value = torch.tensor([99, 88, 77])
 
             output = rejection_sample(**inputs, sampling_metadata=metadata)
 
