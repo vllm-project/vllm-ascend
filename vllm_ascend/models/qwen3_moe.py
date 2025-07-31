@@ -19,6 +19,7 @@ from typing import Optional
 
 from torch import nn
 from transformers import PretrainedConfig
+from vllm.compilation.decorators import support_torch_compile
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -86,7 +87,7 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
 
-
+@support_torch_compile
 class CustomQwen3MoeModel(Qwen3MoeModel):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
