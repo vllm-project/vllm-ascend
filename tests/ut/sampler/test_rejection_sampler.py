@@ -281,7 +281,7 @@ def test_rejection_sample_greedy_all(setup_inputs):
     metadata = MockSamplingMetadata(all_greedy=True)
     inputs["sampling_metadata"] = metadata
 
-    with patch("torch.Generator") as mock_gen:
+    with patch("torch.Generator"):
         output = rejection_sample(**inputs, sampling_metadata=metadata)
 
     assert output.shape == (2, 5)  # [batch, max_spec_len+1]
@@ -310,8 +310,8 @@ def test_rejection_sample_random(setup_inputs):
     inputs["sampling_metadata"] = metadata
 
     # Mock 生成 uniform 随机数
-    with patch("torch.empty") as mock_empty, \
-         patch("torch.Tensor.exponential_") as mock_exp, \
+    with patch("torch.empty"), \
+         patch("torch.Tensor.exponential_"), \
          patch("your_module.spec_decode.generate_uniform_probs") as mock_unif:
 
         unif_probs = torch.tensor([0.6, 0.96, 0.5])
