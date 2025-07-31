@@ -231,12 +231,18 @@ class TestAscendQwen2_5_VisionTransformer_Without_Padding(PytestBase):
         vision_config.in_channels = 3
         vision_config.hidden_act = "gelu"
         vision_config.depth = 0
+        vision_config.hidden_size = 1280
+        vision_config.num_heads = 16
 
         mocker.patch("torch.nn.Module.__setattr__")
         mocker.patch("torch.nn.Module.__getattr__")
         mocker.patch("torch.nn.Module.__delattr__")
         mocker_vit = mocker.patch(
             "vllm.model_executor.models.qwen2_5_vl.Qwen2_5_VisionTransformer.__init__",
+            return_value=None,
+        )
+        mocker_vision_rotary_embedding = mocker.patch(
+            "vllm_ascend.models.qwen2_5_vl.AscendQwen2_5_VisionRotaryEmbedding.__init__",
             return_value=None,
         )
         mocker.patch(
@@ -264,7 +270,7 @@ class TestAscendQwen2_5_VisionTransformer_Without_Padding(PytestBase):
         args, kwargs = mocker_vit.call_args
         assert args == (vision_config, norm_eps, None, "")
         assert not kwargs
-
+        mocker_vision_rotary_embedding.assert_called_once()
         return vision_transformer
 
     def test_init_vision_transformer(self, mocker: MockerFixture):
