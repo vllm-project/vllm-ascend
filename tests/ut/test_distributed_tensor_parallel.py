@@ -18,8 +18,8 @@
 import importlib
 
 import pytest
-from pytest_mock import MockerFixture
 import torch
+from pytest_mock import MockerFixture
 
 from tests.ut.base import PytestBase
 from vllm_ascend.distributed.tensor_parallel import (
