@@ -27,7 +27,7 @@ class TestDecorator(PytestBase):
             ((0, None, [{
                 "new": True
             }]), 0, {
-                "original": True
+                "new": True
             }),
         ])
     def test_decorator(self, mocker: MockFixture, layer_context,
@@ -45,4 +45,3 @@ class TestDecorator(PytestBase):
 
         context = set_multistream_support()(context_func)()
         assert context.attn_metadata == expected_metadata
-

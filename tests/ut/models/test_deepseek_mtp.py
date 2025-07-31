@@ -173,4 +173,3 @@ class TestCustomDeepSeekMTP(PytestBase):
                                    previous_hidden_states, inputs_embeds,
                                    spec_step_idx)
         assert torch.allclose(output, torch.tensor([[1.0, 2.0, 3.0]]))
-
