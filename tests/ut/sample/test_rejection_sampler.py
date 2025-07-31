@@ -32,11 +32,11 @@ class TestAscendRejectionSampler(TestBase):
     def test_rejection_greedy_sample_pytorch(self):
         """Test greedy rejection sampling: stop when draft doesn't match, otherwise append bonus token"""
         batch_size = 2
-        max_spec_len = 3
+        max_spec_len = 2
         output_token_ids = torch.full((batch_size, max_spec_len + 1),
                                       PLACEHOLDER_TOKEN_ID)
 
-        cu_num_draft_tokens = torch.tensor([2, 4])
+        num_draft_tokens = torch.tensor([2, 2])
         draft_token_ids = torch.tensor([10, 11, 20, 21])
         target_argmax = torch.tensor([10, 99, 20, 22])
         bonus_token_ids = torch.tensor([[100], [200]])
@@ -45,12 +45,12 @@ class TestAscendRejectionSampler(TestBase):
 
         rejection_greedy_sample_pytorch(
             output_token_ids,
-            cu_num_draft_tokens,
+            num_draft_tokens,
             draft_token_ids,
             target_argmax,
             bonus_token_ids,
-            is_greedy,
             max_spec_len,
+            is_greedy,
         )
 
         assert output_token_ids[0, 0].item() == 10
