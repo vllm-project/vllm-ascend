@@ -114,12 +114,12 @@ jobs:
     strategy:
       max-parallel: 2
       matrix:
-        os: [linux-arm64-npu-1, linux-arm64-npu-4]
+        os: [linux-aarch64-a2-1, linux-aarch64-a2-4]
         vllm_version: [v0.9.1]
     concurrency:
       group: >
         ${{
-        matrix.os == 'linux-arm64-npu-4'
+        matrix.os == 'linux-aarch64-a2-4'
           && github.event.pull_request.number
           && format('pr-{0}-limit-npu-4', github.event.pull_request.number)
         || format('job-{0}-{1}-{2}', matrix.os, matrix.vllm_version, github.event.pull_request.number)
@@ -177,7 +177,7 @@ jobs:
           VLLM_USE_V1: 1
           VLLM_WORKER_MULTIPROC_METHOD: spawn
         run: |
-          if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
+          if [[ "${{ matrix.os }}" == "linux-aarch64-a2-1" ]]; then
             VLLM_USE_MODELSCOPE=True pytest -sv tests/singlecard/test_offline_inference.py
             pytest -sv tests/singlecard/test_guided_decoding.py
             # test_ascend_config.py should be ran separately because it will regenerate the global config many times.
@@ -213,7 +213,7 @@ jobs:
         env:
           VLLM_USE_V1: 0
         run: |
-          if [[ "${{ matrix.os }}" == "linux-arm64-npu-1" ]]; then
+          if [[ "${{ matrix.os }}" == "linux-aarch64-a2-1" ]]; then
             VLLM_USE_MODELSCOPE=True  pytest -sv tests/singlecard/test_offline_inference.py
             pytest -sv tests/singlecard/test_guided_decoding.py
             pytest -sv tests/singlecard/test_camem.py
