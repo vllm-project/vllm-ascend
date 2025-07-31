@@ -107,11 +107,11 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE", '0'))
                  ),
-    # VLLM_ASCEND_MOE_ALL2ALL_BUFFER:
+    # MOE_ALL2ALL_BUFFER:
     #   0: default, normal init.
     #   1: enable moe_all2all_buffer.
-    "VLLM_ASCEND_MOE_ALL2ALL_BUFFER":
-    lambda: bool(int(os.getenv("VLLM_ASCEND_MOE_ALL2ALL_BUFFER", '0'))),
+    "MOE_ALL2ALL_BUFFER":
+    lambda: bool(int(os.getenv("MOE_ALL2ALL_BUFFER", '0'))),
     # Some models are optimized by vllm ascend. While in some case, e.g. rlhf
     # training, the optimized model may not be suitable. In this case, set this
     # value to False to disable the optimized model.
