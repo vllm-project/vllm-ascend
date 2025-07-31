@@ -144,13 +144,10 @@ class MtpProposer:
 
         if is_running_torchair:
             extra_builder_kwargs[
-                'num_reqs_pad_size'] = self.runner.num_reqs_pad_size
-            extra_builder_kwargs[
-                'num_token_pad_size'] = self.runner.num_token_pad_size
-            num_input_tokens = num_tokens + self.runner.num_token_pad_size
+                'graph_pad_size'] = self.runner.graph_pad_size
+            num_input_tokens = self.runner.graph_pad_size
         else:
-            extra_builder_kwargs['num_token_pad_size'] = -1
-            extra_builder_kwargs['num_reqs_pad_size'] = 0
+            extra_builder_kwargs['graph_pad_size'] = -1
             num_input_tokens = num_tokens
 
         attn_metadata = self.runner.attn_metadata_builder.build(

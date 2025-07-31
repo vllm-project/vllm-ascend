@@ -1123,6 +1123,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             graph_pad_size = padded_num_tokens_across_dp - total_num_scheduled_tokens
 
             extra_builder_kwargs['graph_pad_size'] = graph_pad_size
+        self.graph_pad_size = graph_pad_size
 
         if self.vllm_config.model_config.use_mla:
             extra_builder_kwargs[
