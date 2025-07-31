@@ -83,9 +83,9 @@ from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
 from vllm_ascend.distributed.moe_comm_method import (AllGatherCommImpl,
                                                      DummyCommImpl,
                                                      MoECommMethod)
-from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.attention.utils import \
     AscendCommonAttentionMetadata as CommonAttentionMetadata
+from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
@@ -1956,10 +1956,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             with_prefill = True
 
         attn_metadata = self._build_attention_metadata(with_prefill,
-                                                       num_tokens,
+                                                       num_tokens, num_reqs,
                                                        num_scheduled_tokens,
-                                                       num_reqs, skip_attn,
-                                                       attn_state)
+                                                       skip_attn, attn_state)
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
