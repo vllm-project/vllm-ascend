@@ -20,23 +20,26 @@ from typing import Optional
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
-
 from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP, Qwen3MoeModel, Qwen3MoeForCausalLM, Qwen3MoeDecoderLayer, \
-    Qwen3MoeAttention
-from vllm.model_executor.models.utils import extract_layer_index, make_empty_intermediate_tensors_factory, maybe_prefix, \
-    make_layers
+from vllm.model_executor.models.qwen3_moe import (Qwen3MoeAttention,
+                                                  Qwen3MoeDecoderLayer,
+                                                  Qwen3MoeForCausalLM,
+                                                  Qwen3MoeMLP, Qwen3MoeModel)
+from vllm.model_executor.models.utils import (
+    extract_layer_index, make_empty_intermediate_tensors_factory, make_layers,
+    maybe_prefix)
 
 from vllm_ascend.ops.fused_moe import AscendSparseMoeBlock
 from vllm_ascend.platform import VllmConfig
 
 
 class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -72,23 +75,25 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
                            config.mlp_only_layers)
         if (layer_idx not in mlp_only_layers) and (
                 config.num_experts > 0 and
-                (layer_idx + 1) % config.decoder_sparse_step == 0):
+            (layer_idx + 1) % config.decoder_sparse_step == 0):
             self.mlp = AscendSparseMoeBlock(config=config,
-                                              quant_config=quant_config,
-                                              prefix=f"{prefix}.mlp")
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.mlp")
         else:
             self.mlp = Qwen3MoeMLP(hidden_size=config.hidden_size,
-                                         intermediate_size=config.intermediate_size,
-                                         hidden_act=config.hidden_act,
-                                         quant_config=quant_config,
-                                         prefix=f"{prefix}.mlp")
+                                   intermediate_size=config.intermediate_size,
+                                   hidden_act=config.hidden_act,
+                                   quant_config=quant_config,
+                                   prefix=f"{prefix}.mlp")
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
 
+
 @support_torch_compile
 class CustomQwen3MoeModel(Qwen3MoeModel):
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
@@ -104,10 +109,11 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
             prefix=f"{prefix}.embed_tokens")
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: CustomQwen3MoeDecoderLayer(config=config,
-                                                cache_config=cache_config,
-                                                quant_config=quant_config,
-                                                prefix=prefix),
+            lambda prefix: CustomQwen3MoeDecoderLayer(
+                config=config,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -138,7 +144,7 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
         self.config = config
         self.quant_config = quant_config
         self.model = CustomQwen3MoeModel(vllm_config=vllm_config,
-                                   prefix=maybe_prefix(prefix, "model"))
+                                         prefix=maybe_prefix(prefix, "model"))
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config)
