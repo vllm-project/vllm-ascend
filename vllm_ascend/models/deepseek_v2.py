@@ -660,48 +660,51 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tp_group().rank_in_group
         ascend_config = get_ascend_config()
-        # TODO: enable mla in vllm-ascend
-        if model_config.use_mla:
-            attn_cls = CustomDeepseekV2MLAAttention
-        else:
-            attn_cls = DeepseekV2Attention
-        self.self_attn = attn_cls(
-            config=config,
-            hidden_size=self.hidden_size,
-            num_heads=config.num_attention_heads,
-            qk_nope_head_dim=config.qk_nope_head_dim,
-            qk_rope_head_dim=config.qk_rope_head_dim,
-            v_head_dim=config.v_head_dim,
-            q_lora_rank=config.q_lora_rank
-            if hasattr(config, "q_lora_rank") else None,
-            kv_lora_rank=config.kv_lora_rank,
-            rope_theta=rope_theta,
-            rope_scaling=rope_scaling,
-            max_position_embeddings=max_position_embeddings,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
-        )
-
-        if (config.n_routed_experts is not None
-                and layer_idx >= config.first_k_dense_replace
-                and layer_idx % config.moe_layer_freq == 0):
-            self.mlp = CustomDeepseekV2MoE(
+        rank = get_world_group().rank_in_group
+        if rank < 4:
+            # TODO: enable mla in vllm-ascend
+            if model_config.use_mla:
+                attn_cls = CustomDeepseekV2MLAAttention
+            else:
+                attn_cls = DeepseekV2Attention
+            self.self_attn = attn_cls(
                 config=config,
+                hidden_size=self.hidden_size,
+                num_heads=config.num_attention_heads,
+                qk_nope_head_dim=config.qk_nope_head_dim,
+                qk_rope_head_dim=config.qk_rope_head_dim,
+                v_head_dim=config.v_head_dim,
+                q_lora_rank=config.q_lora_rank
+                if hasattr(config, "q_lora_rank") else None,
+                kv_lora_rank=config.kv_lora_rank,
+                rope_theta=rope_theta,
+                rope_scaling=rope_scaling,
+                max_position_embeddings=max_position_embeddings,
+                cache_config=cache_config,
                 quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
+                prefix=f"{prefix}.self_attn",
             )
-            self.mla_moe_communication = ascend_config.torchair_graph_config.enable_multistream_moe \
-                and model_config.use_mla and self.tp_size > 1
+            
         else:
-            self.mlp = CustomDeepseekV2MLP(
-                hidden_size=config.hidden_size,
-                intermediate_size=config.intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
-            )
-            self.mla_moe_communication = False
+            if (config.n_routed_experts is not None
+                    and layer_idx >= config.first_k_dense_replace
+                    and layer_idx % config.moe_layer_freq == 0):
+                self.mlp = CustomDeepseekV2MoE(
+                    config=config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.mlp",
+                )
+                self.mla_moe_communication = ascend_config.torchair_graph_config.enable_multistream_moe \
+                    and model_config.use_mla and self.tp_size > 1
+            else:
+                self.mlp = CustomDeepseekV2MLP(
+                    hidden_size=config.hidden_size,
+                    intermediate_size=config.intermediate_size,
+                    hidden_act=config.hidden_act,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.mlp",
+                )
+                self.mla_moe_communication = False
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
@@ -740,6 +743,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             hidden_states = tensor_model_parallel_all_gather(hidden_states,
                                                              dim=0)
         rank = get_world_group().rank_in_group
+
         if self.enable_attn_export_split:
             # 如果是Attn就计算一次Attn，否则就不计算
             if rank < 4:
@@ -895,7 +899,8 @@ class CustomDeepseekV2Model(nn.Module):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.tp_size = get_tensor_model_parallel_world_size()
-        self.enable_attn_export_split = vllm_config.parallel_config.enable_attn_export_split
+        self.enable_attn_export_split = vllm_config.additional_config.get(
+            "enable_attn_export_split", False)
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -1009,12 +1014,13 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         """"""
+        rank = get_world_group().rank_in_group
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
-
+        
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
         expert_params_mapping = AscendFusedMoE.make_expert_params_mapping(
@@ -1035,7 +1041,11 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
 
+            if rank < 4 and self.is_moe(name):
+                continue
+
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
+                
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:
                     continue
@@ -1058,12 +1068,14 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                # load share expert gate\up
                 break
             else:
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
                         continue
+                    # 示例：把experts.0.down_proj 替换成 experts.w2_，把专家号给去除了
                     name = name.replace(weight_name, param_name)
 
                     if is_pp_missing_parameter(name, self):
@@ -1077,8 +1089,11 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                                   shard_id=shard_id,
                                   expert_id=expert_id,
                                   return_success=False)
+                    # load expert gate up down ,without share expert
                     break
                 else:
+                    if rank > 3 and not self.is_moe(name) and not self.is_moe_other(name):
+                        continue
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
                         continue
@@ -1095,8 +1110,24 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
+                    # load share expert down,attn q\k\v\o\layernorm
             loaded_params.add(name)
         return loaded_params
+
+    def is_moe(self,name):
+        if "shared_experts" in name or "experts" in name or "gate" in name \
+            or "up" in name or "down" in name:
+            return True
+        return False
+    # MoE 和 attn 都要加载
+    def is_moe_other(self,name):
+        if "lm_head" in name or "model.norm.weight" in name or "embed_tokens" in name \
+            or "input_layernorm" in name or "post_attention_layernorm" in name:
+            # or "model.layers.0.self_attn.o_proj.weight" in name:# for init kv cache
+            return True
+        return False
+    
+
 
     def forward(
         self,

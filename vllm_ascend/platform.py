@@ -128,6 +128,8 @@ class NPUPlatform(Platform):
         cache_config = vllm_config.cache_config
         kv_cache_dtype = vllm_config.additional_config.get(
             "kv_cache_dtype", None)
+        enable_attn_export_split = vllm_config.additional_config.get(
+            "enable_attn_export_split", False)
         if kv_cache_dtype is not None:
             vllm_config.cache_config.cache_dtype = kv_cache_dtype
 
@@ -148,8 +150,9 @@ class NPUPlatform(Platform):
             parallel_config.expert_parallel_size = (
                 parallel_config.world_size_across_dp //
                 parallel_config.expert_tensor_parallel_size)
-            if parallel_config.enable_attn_export_split:
-                parallel_config.expert_parallel_size = parallel_config.expert_parallel_size // 2
+            if enable_attn_export_split:
+                # vllm_config.scheduler_config.disable_hybrid_kv_cache_manager = False
+                vllm_config.parallel_config.world_size = 8
 
         if model_config is None:
             logger.warning("Model config is missing. This may indicate "
