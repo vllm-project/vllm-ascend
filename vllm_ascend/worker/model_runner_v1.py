@@ -79,9 +79,9 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
 from vllm_ascend.attention.attention_v1_torchair import AscendTorchairMetadata
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
-from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.attention.utils import \
     AscendCommonAttentionMetadata as CommonAttentionMetadata
+from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
@@ -2339,7 +2339,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Trigger ACL graph capture for specific shapes.
             # Capture the large shapes first so that the smaller shapes
             # can reuse the memory pool allocated for the large shapes.
-            # TODO(zzzzwwjj): Check dummy_run with ACL Graph and full graph mode
             with graph_capture(device=self.device):
                 skip_attn = not self.vllm_config.compilation_config.full_cuda_graph
                 # TODO: Make sure passing attn_state to _dummy_run in the future

@@ -166,7 +166,10 @@ class AscendAttentionMetadataBuilder:
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
 
-    def build(self, num_reqs, num_actual_tokens, max_query_len,
+    def build(self,
+              num_reqs,
+              num_actual_tokens,
+              max_query_len,
               common_attn_metadata: CommonAttentionMetadata,
               enable_dbo_across_dp: bool = False):
 
@@ -177,9 +180,9 @@ class AscendAttentionMetadataBuilder:
 
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
-        # TODO: Refactor these two param to common metadata in runners,
+        # TODO: Refactor this param to common metadata in runners,
         # preparing for the hybrid KV groups feature
-        query_lens = common_attn_metadata.query_lens or self.runner.query_lens
+        query_lens = self.runner.query_lens
         # Since FIA for GQA is not active now, we temporarily silence it
         seq_lens_list = common_attn_metadata.seq_lens_list
 
@@ -404,6 +407,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
             elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 graph_params = get_graph_params()
 
+                # TODO(Yizhou): Find another way to handle the
+                # graph capturing mode. Say, GraphCaptureContext?
                 forward_context = get_forward_context()
                 if not forward_context.capturing:
                     if is_310p():
