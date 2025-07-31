@@ -600,7 +600,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         x = torch.bmm(x, self.W_UV)
         # Convert from (N, B, V) to (B, N * V)
         x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
-        if not self.running_in_graph:
+        if hasattr(self, "running_in_graph") and not self.running_in_graph:
             return x
         MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024  # 16MB
         npu_prefetch(self.o_proj.weight,
