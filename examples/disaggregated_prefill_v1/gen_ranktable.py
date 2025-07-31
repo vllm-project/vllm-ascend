@@ -24,10 +24,15 @@ decode_device_cnt = args.decode_device_cnt
 
 print("enter py")
 
-hccn_tool_path = os.environ.get("HCCN_TOOL_PATH",
-                                "/usr/local/Ascend/driver/tools/hccn_tool")
-if not os.path.exists("/usr/local/Ascend/driver/tools/hccn_tool"):
-    hccn_tool_path = "/usr/bin/hccn_tool"
+DEFAULT_PATHS = ["/usr/local/Ascend/driver/tools/hccn_tool", "/usr/bin/hccn_tool"]
+hccn_tool_path = os.environ.get("HCCN_TOOL_PATH")
+if not hccn_tool_path:
+    for default_path in  DEFAULT_PATHS:
+        if os.path.exists(default_path):
+            hccn_tool_path = default_path
+            break
+    else:
+        raise Exception("can't get correct hccn_tool_path")
 
 master_addr = os.environ.get("MASTER_ADDR")
 master_port = os.environ.get("MASTER_PORT")
