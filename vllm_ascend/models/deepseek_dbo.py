@@ -871,9 +871,6 @@ class CustomDeepseekDBOModel(nn.Module):
 
     def can_run_ms(self):
         attn_metadata = get_forward_context().attn_metadata
-        # support mla attention and V1 engine at present
-        if not self.use_mla:
-            return False
         # enable prefill overlap
         return not (attn_metadata is None or attn_metadata.num_prefills == 0
                     or not attn_metadata.enable_dbo_across_dp)
