@@ -1791,7 +1791,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # dp when computing logits. Hence we need to add it
                 # in profile_run.
                 if not with_prefill:
-                    max_num_reqs_across_dp = num_reqs
+                    max_num_reqs_across_dp = num_tokens
                 else:
                     max_num_reqs_across_dp = max_num_reqs
                 dummy_indices = torch.zeros(max_num_reqs_across_dp,
@@ -1810,7 +1810,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
                 if not self.in_profile_run and is_lmhead_tp():
                     if not with_prefill:
-                        max_num_reqs_across_dp = num_reqs
+                        max_num_reqs_across_dp = num_tokens
                     else:
                         max_num_reqs_across_dp = max_num_reqs
                     dummy_indices = torch.zeros(max_num_reqs_across_dp,
