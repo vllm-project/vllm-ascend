@@ -80,6 +80,8 @@ def set_ascend_forward_context(
         fused_moe_state = _get_fused_moe_state(ep_size, with_prefill,
                                                is_deepseek_v3_r1)
         forward_context.fused_moe_state = fused_moe_state
+        forward_context.num_tokens_across_dp = num_tokens_across_dp
+
         forward_context.in_profile_run = in_profile_run
 
         # NOTE: This cannot be set using set_forward_context
