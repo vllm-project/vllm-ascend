@@ -875,7 +875,8 @@ class PanguProMoEModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        self.enable_attn_export_split = vllm_config.parallel_config.enable_attn_export_split
+        self.enable_attn_export_split = vllm_config.additional_config.get(
+            "enable_attn_export_split", False)
 
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
