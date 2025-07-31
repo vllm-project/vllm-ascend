@@ -156,7 +156,6 @@ cd ..
 # Install vLLM Ascend
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
-export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 pip install -v -e .
 cd ..
 ```

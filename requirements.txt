@@ -22,8 +22,6 @@ quart
 numba
 
 # Install torch_npu
---pre
---extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 torch-npu==2.5.1.post1
 
 # Remove after https://github.com/vllm-project/vllm-ascend/issues/1470
