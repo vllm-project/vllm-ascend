@@ -34,8 +34,7 @@ from torch import nn
 from torch.nn.parameter import Parameter
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import (CacheConfig, ModelConfig, VllmConfig,
-                         get_current_vllm_config)
+from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import (get_dp_group, get_pp_group,
                               get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -335,10 +334,6 @@ class CustomDeepseekV2MoE(nn.Module):
 
         self.tp_group = get_tp_group().device_group
         self.tp_rank = get_tp_group().rank_in_group
-        self.kv_consumer = None
-        transfer_config = get_current_vllm_config().kv_transfer_config
-        if transfer_config is not None:
-            self.kv_consumer = transfer_config.kv_role == "kv_consumer"
 
     def forward(
             self,
@@ -353,10 +348,6 @@ class CustomDeepseekV2MoE(nn.Module):
         enable_force_load_balance = forward_context.in_profile_run
 
         is_prefill = forward_context.with_prefill
-        # If this node is kv_consumer, we force the moe always runs in decode path to make sure
-        # the behaviour aligned between dummy_run and normal model_execute.
-        if self.kv_consumer:
-            is_prefill = False
 
         # router_logits: (num_tokens, n_experts)
         if self.enable_multistream_moe:
