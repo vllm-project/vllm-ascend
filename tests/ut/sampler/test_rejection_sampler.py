@@ -1,16 +1,15 @@
 # test_rejection_sample.py
 
 from unittest.mock import patch
- 
+
 import pytest
 import torch
 
 # 假设这些函数定义在 spec_decode.py 中
-from vllm_ascend.sample.rejection_sampler import (expand_batch_to_tokens, expand_pytorch,
-                                     rejection_greedy_sample_pytorch,
-                                     rejection_random_sample_pytorch,
-                                     rejection_sample,
-                                     sample_recovered_tokens_pytorch)
+from vllm_ascend.sample.rejection_sampler import (
+    expand_batch_to_tokens, expand_pytorch, rejection_greedy_sample_pytorch,
+    rejection_random_sample_pytorch, rejection_sample,
+    sample_recovered_tokens_pytorch)
 
 # 全局常量
 PLACEHOLDER_TOKEN_ID = -1
@@ -28,7 +27,8 @@ class MockSamplingMetadata:
                  generators=None):
         self.all_greedy = all_greedy
         self.all_random = all_random
-        self.temperature = temperature or (GREEDY_TEMPERATURE if all_greedy else 1.0)
+        self.temperature = temperature or (GREEDY_TEMPERATURE
+                                           if all_greedy else 1.0)
         self.generators = generators or {}
 
 
@@ -341,14 +341,12 @@ def test_rejection_sample_with_recovered_token_rejection(setup_inputs):
 
     # 修改 uniform prob 使第一次拒绝
     with patch("your_module.spec_decode.generate_uniform_probs") as mock_unif:
-        mock_unif.return_value = torch.tensor([0.8, 0.96,
-                                               0.5])
+        mock_unif.return_value = torch.tensor([0.8, 0.96, 0.5])
 
         # Mock sample_recovered_tokens
         with patch(
                 "your_module.spec_decode.sample_recovered_tokens") as mock_rec:
-            mock_rec.return_value = torch.tensor([99, 88,
-                                                  77]) 
+            mock_rec.return_value = torch.tensor([99, 88, 77]) 
 
             output = rejection_sample(**inputs, sampling_metadata=metadata)
 
