@@ -24,6 +24,7 @@ from vllm.logger import logger
 
 from .func_wrapper import (wrapper_rmsnorm_forward_oot, wrapper_rmsnorm_init,
                            wrapper_vocab_parallel_embedding_init)
+from .w4a8_dynamic import AscendW4A8DynamicLinearMethod
 from .w8a8 import (AscendC8KVCacheMethod, AscendW8A8FusedMoEMethod,
                    AscendW8A8LinearMethod)
 from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
