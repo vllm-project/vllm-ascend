@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 from vllm import SamplingParams
+
 from tests.e2e.conftest import VllmRunner
 
 
