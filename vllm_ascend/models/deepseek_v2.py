@@ -281,6 +281,7 @@ class CustomDeepseekV2MoE(nn.Module):
             ascend_config.torchair_graph_config.enable_super_kernel and \
             self.enable_multistream_moe
         self.params_dtype = torch.get_default_dtype()
+        self.enable_prefill_optimizations = ascend_config.enable_prefill_optimizations and not self.torchair_graph_enabled
 
         self.gate = ReplicatedLinear(
             config.hidden_size,
@@ -324,7 +325,8 @@ class CustomDeepseekV2MoE(nn.Module):
                 hidden_act=config.hidden_act,
                 quant_config=quant_config,
                 reduce_results=True,
-                force_replicate=force_replicate,
+                force_replicate=self.enable_multistream_moe
+                or self.enable_prefill_optimizations,
                 prefix=f"{prefix}.shared_experts",
             )
         else:
@@ -457,8 +459,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             prefix=f"{prefix}.kv_b_proj")
 
         ascend_config = get_ascend_config()
-        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
-        self.enable_prefill_optimizations = ascend_config.enable_prefill_optimizations and not self.torchair_graph_enabled
+        self.enable_prefill_optimizations = ascend_config.enable_prefill_optimizations and not ascend_config.torchair_graph_config.enabled
 
         if not self.enable_prefill_optimizations or int(
                 prefix.split(".")[-2]) < 3:
@@ -522,6 +523,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         self.prefix = prefix
         self.debug_layer_idx = int(self.prefix.split(".")[-2])
 
+        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_multistream_mla = \
             ascend_config.torchair_graph_config.enable_multistream_mla and \
             self.torchair_graph_enabled
@@ -568,15 +570,6 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 hidden_states_or_q_c = get_tp_group().all_gather(
                     hidden_states_or_q_c, 0)
                 kv_no_split = get_tp_group().all_gather(kv_no_split, 0)
-
-                attn_metadata = forward_context.attn_metadata
-                if attn_metadata is not None:
-                    num_tokens = attn_metadata.num_actual_tokens
-                else:
-                    num_tokens = hidden_states_or_q_c.shape[0]
-                if num_tokens < hidden_states_or_q_c.shape[0]:
-                    hidden_states_or_q_c = hidden_states_or_q_c[:num_tokens]
-                    kv_no_split = kv_no_split[:num_tokens]
 
             kv_c, k_pe = kv_no_split.split(
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
@@ -661,8 +654,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.routed_scaling_factor = config.routed_scaling_factor
         self.tp_group = get_tp_group().device_group
         ascend_config = get_ascend_config()
-        self.enable_prefill_optimizations = ascend_config.enable_prefill_optimizations and \
-            not ascend_config.torchair_graph_config.enabled
+        self.enable_prefill_optimizations = ascend_config.enable_prefill_optimizations and not ascend_config.torchair_graph_config.enabled
 
     def forward(
         self,

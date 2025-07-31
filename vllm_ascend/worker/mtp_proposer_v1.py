@@ -1,5 +1,10 @@
+import types
+
 import torch
+import torch.nn as nn
+import torchair
 import vllm.envs as envs_vllm
+from torchair import patch_for_hcom
 from vllm.attention.layer import Attention
 from vllm.config import (VllmConfig, get_layers_from_vllm_config,
                          set_current_vllm_config)
@@ -77,6 +82,8 @@ class MtpProposer:
             (self.runner.max_num_tokens, self.runner.hidden_size),
             dtype=self.runner.dtype,
             device=self.runner.device)
+        self.torchair_compiled_model = None  # type: ignore
+        self.torchair_compiled_models = {}  # type: ignore
 
     @staticmethod
     def prepare_inputs(
@@ -238,12 +245,16 @@ class MtpProposer:
                 if self.runner.torchair_graph_enabled:
                     model_kwargs["kv_caches"] = self.runner.kv_caches[-1:]
                 if is_running_torchair:
-                    hidden_states = self.torchair_compiled_model(
+                    torchair_compiled_model = self._get_torchair_lazy_compiled_model(
+                        num_input_tokens)
+                    hidden_states = torchair_compiled_model(
                         input_ids=self.input_ids[:num_input_tokens],
                         positions=self.positions[:num_input_tokens],
                         previous_hidden_states=self.
                         hidden_states[:num_input_tokens],
                         inputs_embeds=None,
+                        intermediate_tensors=None,
+                        spec_step_idx=0,
                         **model_kwargs)
                 else:
                     hidden_states = self.model(
@@ -287,31 +298,6 @@ class MtpProposer:
                 self.model))
         process_weights_after_loading(self.model, draft_model_config,
                                       target_device)
-        if self.runner.torchair_graph_enabled:
-            import torchair  # type: ignore
-            from torchair import patch_for_hcom  # type: ignore
-
-            patch_for_hcom()
-            config = torchair.CompilerConfig()
-            config.experimental_config.frozen_parameter = True
-            config.experimental_config.tiling_schedule_optimize = True
-            config.experimental_config.enable_view_optimize = \
-            get_ascend_config().torchair_graph_config.enable_view_optimize
-            torch.npu.set_compile_mode(jit_compile=False)
-            if not self.runner.use_cached_npu_graph:
-                npu_backend = torchair.get_npu_backend(compiler_config=config)
-                self.torchair_compiled_model = torch.compile(
-                    self.model,
-                    dynamic=True,
-                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                    backend=npu_backend)
-            else:
-                self.torchair_compiled_model = torchair.inference.cache_compile(
-                    self.model.forward,
-                    dynamic=True,
-                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
-                    config=config,
-                    ge_cache=False)
 
     @torch.inference_mode()
     def dummy_run(self,
@@ -347,11 +333,8 @@ class MtpProposer:
                 num_tokens_across_dp=num_tokens_across_dp,
                 in_profile_run=self.runner.in_profile_run,
                 num_actual_tokens=0):
-            model_kwargs = {}
-            model_kwargs["attn_metadata"] = attn_metadata
             if is_running_torchair:
                 assert attn_metadata is not None
-                model_kwargs["kv_caches"] = self.runner.kv_caches[-1:]
                 torch._dynamo.mark_static(input_ids)
                 torch._dynamo.mark_static(positions)
                 torch._dynamo.mark_static(previous_hidden_states)
@@ -362,16 +345,75 @@ class MtpProposer:
                 torch._dynamo.mark_static(get_forward_context().mc2_mask)
                 torch._dynamo.mark_static(attn_metadata.slot_mapping)
                 torch._dynamo.mark_static(attn_metadata.decode.attn_mask)
-                self.torchair_compiled_model(
+                torchair_compiled_model = self._get_torchair_lazy_compiled_model(
+                    num_tokens)
+                torchair_compiled_model(
                     input_ids=input_ids,
                     positions=positions,
                     previous_hidden_states=previous_hidden_states,
                     inputs_embeds=None,
-                    **model_kwargs)
+                    intermediate_tensors=None,
+                    attn_metadata=attn_metadata,
+                    kv_caches=self.runner.kv_caches[-1:],
+                    spec_step_idx=0)
             else:
                 self.model(input_ids=input_ids,
                            positions=positions,
                            previous_hidden_states=previous_hidden_states)
+
+    def _get_torchair_lazy_compiled_model(self, batch_size: int):
+        if batch_size < 0 or batch_size > self.runner.torchair_graph_batch_sizes[
+                -1]:
+            raise ValueError(
+                f"Bad graph batch size:{batch_size}! max_graph_batch_sizes:{self.runner.torchair_graph_batch_sizes[-1]}"
+            )
+
+        compiled_model = self.torchair_compiled_models.get(
+            batch_size
+        ) if self.runner.use_cached_npu_graph else self.torchair_compiled_model
+
+        if compiled_model:
+            return compiled_model
+
+        patch_for_hcom()
+        config = torchair.CompilerConfig()
+        config.experimental_config.frozen_parameter = True
+        config.experimental_config.tiling_schedule_optimize = True
+        config.experimental_config.enable_view_optimize = \
+        get_ascend_config().torchair_graph_config.enable_view_optimize
+        torch.npu.set_compile_mode(jit_compile=False)
+        if not self.runner.use_cached_npu_graph:
+            npu_backend = torchair.get_npu_backend(compiler_config=config)
+            self.torchair_compiled_model = torch.compile(
+                self.model,
+                dynamic=True,
+                fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                backend=npu_backend)
+            return self.torchair_compiled_model
+        else:
+            # Generate a new forward proxy code object to prevent the invalidation of
+            # compilation cache caused by dynamo retracing
+            forward_proxy_name = f"{self.model.__class__.__name__}_forward_with_batch_size_{batch_size}"
+            forward_fn = self.model.forward
+            code = forward_fn.__code__
+            # Mark code object with a new proxy name
+            modified_code = code.replace(co_name=forward_proxy_name, )
+
+            modified_func = types.FunctionType(modified_code,
+                                               forward_fn.__globals__,
+                                               name=forward_proxy_name,
+                                               argdefs=forward_fn.__defaults__)
+
+            self.model.__dict__[forward_proxy_name] = modified_func.__get__(
+                self.model, nn.Module)
+            self.torchair_compiled_models[
+                batch_size] = torchair.inference.cache_compile(
+                    self.model.__dict__[forward_proxy_name],
+                    dynamic=True,
+                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    config=config,
+                    ge_cache=False)
+            return self.torchair_compiled_models[batch_size]
 
 
 # TODO Using torch instead of triton may result in poor performance

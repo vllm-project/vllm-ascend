@@ -139,6 +139,7 @@ def fused_experts_with_mc2(
     moe_all_to_all_group_name: Optional[str] = None,
     shared_experts: Optional[Any] = None,
     is_torchair: bool = False,
+    hidden_states_for_share: Optional[Any] = None,
     mc2_mask: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     quant_mode = 0
@@ -202,8 +203,9 @@ def fused_experts_with_mc2(
 
     if shared_experts is not None:
         with npu_stream_switch("moe_secondary", 0):
-            npu_wait_tensor(hidden_states, topk_weights)
-            shared_gate_up, _ = shared_experts.gate_up_proj(hidden_states)
+            npu_wait_tensor(hidden_states_for_share, topk_weights)
+            shared_gate_up, _ = shared_experts.gate_up_proj(
+                hidden_states_for_share)
             npu_wait_tensor(shared_gate_up, expand_x)
             shared_act = shared_experts.act_fn(shared_gate_up)
 
@@ -280,13 +282,14 @@ def fused_experts_with_mc2(
     ) if enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine(
         **kwargs_mc2)
 
+    group_list_type = 1
     if shared_experts is None:
-        return hidden_states
+        return hidden_states, expert_token_nums, group_list_type
     else:
         with npu_stream_switch("moe_secondary", 0):
             npu_wait_tensor(shared_act, down_out_list)
             shared_hidden_states, _ = shared_experts.down_proj(shared_act)
-        return hidden_states, shared_hidden_states
+        return hidden_states, shared_hidden_states, expert_token_nums, group_list_type
 
 
 def apply_mlp(
@@ -485,7 +488,7 @@ def fused_experts_with_all2all(
         )
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
-    return final_hidden_states
+    return final_hidden_states, expert_tokens, 0
 
 
 # currently expert parallelism implemented with all2all
@@ -626,7 +629,7 @@ def fused_experts_with_all2all_buffer(
 
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
-    return final_hidden_states
+    return final_hidden_states, expert_tokens, group_list_type
 
 
 def fused_experts_with_all2allv(
@@ -644,7 +647,7 @@ def fused_experts_with_all2allv(
 
     expert_output = apply_mlp(dispatched_input, w1, w2, tokens_per_expert)
     output, mlp_bias = token_dispatcher.token_unpermutation(expert_output)
-    return output
+    return output, tokens_per_expert.to(torch.int64), 1
 
 
 def fused_experts(
@@ -1010,6 +1013,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         is_prefill: bool = False,
         enable_force_load_balance: bool = False,
+        hidden_states_for_share: Optional[Any] = None,
         shared_experts: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
@@ -1065,6 +1069,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name,
                 shared_experts=shared_experts,
                 is_torchair=self.torchair_graph_enabled,
+                hidden_states_for_share=hidden_states_for_share,
                 mc2_mask=mc2_mask,
             )
         elif fused_moe_state == FusedMoEState.AllGather:
@@ -1215,8 +1220,7 @@ class AscendFusedMoE(FusedMoE):
         self.enable_super_kernel = (
             ascend_config.torchair_graph_config.enable_super_kernel
             and self.enable_multistream_moe)
-        self.enable_prefill_optimizations = ascend_config.enable_prefill_optimizations and \
-            not self.torchair_graph_enabled
+        self.enable_prefill_optimizations = ascend_config.enable_prefill_optimizations and not self.torchair_graph_enabled
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
@@ -1308,7 +1312,7 @@ class AscendFusedMoE(FusedMoE):
         forward_context = get_forward_context()
         fused_moe_state = get_forward_context().fused_moe_state
         # For w8a8 dynamic we can do npu_dynamic_quant and gate in parallel.
-        quantized_x_for_share, dynamic_scale_for_share = None, None
+        hidden_states_for_share, dynamic_scale_for_share = None, None
         from vllm_ascend.quantization.w8a8_dynamic import \
             AscendW8A8DynamicFusedMoEMethod
 
@@ -1322,11 +1326,13 @@ class AscendFusedMoE(FusedMoE):
                     router_logits, _ = gate(hidden_states.float())
                 else:
                     router_logits, _ = gate(hidden_states)
-                if (isinstance(self.quant_method.quant_method,
-                               AscendW8A8DynamicFusedMoEMethod)
+                hidden_states_for_share = hidden_states
+                if hasattr(self.quant_method, "quant_method") and (
+                        isinstance(self.quant_method.quant_method,
+                                   AscendW8A8DynamicFusedMoEMethod)
                         and fused_moe_state == FusedMoEState.MC2):
                     with npu_stream_switch("moe_secondary", 0):
-                        quantized_x_for_share, dynamic_scale_for_share = (
+                        hidden_states_for_share, dynamic_scale_for_share = (
                             torch_npu.npu_dynamic_quant(hidden_states))
 
         if shared_experts:
@@ -1410,7 +1416,7 @@ class AscendFusedMoE(FusedMoE):
             shared_experts=(shared_experts if self.torchair_graph_enabled
                             and self.enable_multistream_moe and not is_prefill
                             else None),
-            quantized_x_for_share=quantized_x_for_share,
+            hidden_states_for_share=hidden_states_for_share,
             dynamic_scale_for_share=dynamic_scale_for_share,
             mc2_mask=mc2_mask,
             token_dispatcher=self.token_dispatcher,
