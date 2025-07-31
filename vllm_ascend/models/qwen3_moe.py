@@ -24,7 +24,8 @@ from transformers import PretrainedConfig, CacheConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
-from vllm.model_executor.models.utils import make_layers, maybe_prefix, make_empty_intermediate_tensors_factory
+from vllm.model_executor.models.utils import make_layers, maybe_prefix, make_empty_intermediate_tensors_factory, \
+    extract_layer_index
 
 from vllm_ascend.ops.fused_moe import AscendSparseMoeBlock
 from vllm_ascend.platform import VllmConfig
@@ -38,11 +39,48 @@ class CustomQwen3MoeDecoderLayer(qwen3.Qwen3MoeDecoderLayer):
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(config, cache_config, quant_config, prefix)
 
-        self.mlp = AscendSparseMoeBlock(config=config,
+        nn.Module.__init__(self)
+        self.hidden_size = config.hidden_size
+        rope_theta = getattr(config, "rope_theta", 10000)
+        rope_scaling = getattr(config, "rope_scaling", None)
+        max_position_embeddings = getattr(config, "max_position_embeddings",
+                                          8192)
+        self.self_attn = qwen3.Qwen3MoeAttention(
+            hidden_size=self.hidden_size,
+            num_heads=config.num_attention_heads,
+            num_kv_heads=config.num_key_value_heads,
+            rope_theta=rope_theta,
+            rope_scaling=rope_scaling,
+            max_position_embeddings=max_position_embeddings,
+            rms_norm_eps=config.rms_norm_eps,
+            qkv_bias=getattr(config, 'attention_bias', False),
+            head_dim=getattr(config, 'head_dim', None),
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
+        )
+
+        # `mlp_only_layers` in the config.
+        layer_idx = extract_layer_index(prefix)
+        mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
+                           config.mlp_only_layers)
+        if (layer_idx not in mlp_only_layers) and (
+                config.num_experts > 0 and
+                (layer_idx + 1) % config.decoder_sparse_step == 0):
+            self.mlp = AscendSparseMoeBlock(config=config,
                                               quant_config=quant_config,
                                               prefix=f"{prefix}.mlp")
+        else:
+            self.mlp = qwen3.Qwen3MoeMLP(hidden_size=config.hidden_size,
+                                         intermediate_size=config.intermediate_size,
+                                         hidden_act=config.hidden_act,
+                                         quant_config=quant_config,
+                                         prefix=f"{prefix}.mlp")
+        self.input_layernorm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size,
+                                                eps=config.rms_norm_eps)
 
 
 class CustomQwen3MoeModel(qwen3.Qwen3MoeModel):
