@@ -46,7 +46,9 @@ class CustomQwen3MoeDecoderLayer(qwen3.Qwen3MoeDecoderLayer):
 
 
 class CustomQwen3MoeModel(nn.Module):
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super.__init__()
 
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
