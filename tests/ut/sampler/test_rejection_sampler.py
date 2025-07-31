@@ -1,19 +1,16 @@
 # test_rejection_sample.py
 
-import torch
+from unittest.mock import patch
+ 
 import pytest
-from unittest.mock import patch, MagicMock
+import torch
 
 # 假设这些函数定义在 spec_decode.py 中
-from your_module.spec_decode import (
-    rejection_sample,
-    rejection_greedy_sample_pytorch,
-    rejection_random_sample_pytorch,
-    sample_recovered_tokens_pytorch,
-    expand_pytorch,
-    expand_batch_to_tokens,
-    sample_recovered_tokens,
-)
+from vllm_ascend.sample.rejection_sampler import (expand_batch_to_tokens, expand_pytorch,
+                                     rejection_greedy_sample_pytorch,
+                                     rejection_random_sample_pytorch,
+                                     rejection_sample,
+                                     sample_recovered_tokens_pytorch)
 
 # 全局常量
 PLACEHOLDER_TOKEN_ID = -1
@@ -23,7 +20,12 @@ MAX_SPEC_LEN = 8  # 用于 expand_batch_to_tokens 的 MAX_NUM_TOKENS
 
 # 模拟 SamplingMetadata
 class MockSamplingMetadata:
-    def __init__(self, all_greedy=False, all_random=False, temperature=None, generators=None):
+
+    def __init__(self,
+                 all_greedy=False,
+                 all_random=False,
+                 temperature=None,
+                 generators=None):
         self.all_greedy = all_greedy
         self.all_random = all_random
         self.temperature = temperature or (GREEDY_TEMPERATURE if all_greedy else 1.0)
@@ -34,7 +36,8 @@ def test_rejection_greedy_sample_pytorch():
     """测试贪婪拒绝采样：草稿不匹配时停止，否则追加 bonus token"""
     batch_size = 2
     max_spec_len = 3
-    output_token_ids = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
+    output_token_ids = torch.full((batch_size, max_spec_len + 1),
+                                  PLACEHOLDER_TOKEN_ID)
 
     cu_num_draft_tokens = torch.tensor([2, 4])  # 请求0: 2个草稿；请求1: 2个草稿
     draft_token_ids = torch.tensor([10, 11, 20, 21])
@@ -67,7 +70,8 @@ def test_rejection_random_sample_pytorch():
     """测试随机拒绝采样：基于 uniform prob 决定是否接受"""
     batch_size = 2
     max_spec_len = 3
-    output_token_ids = torch.full((batch_size, max_spec_len + 1), PLACEHOLDER_TOKEN_ID)
+    output_token_ids = torch.full((batch_size, max_spec_len + 1),
+                                  PLACEHOLDER_TOKEN_ID)
 
     cu_num_draft_tokens = torch.tensor([2, 1])
     draft_token_ids = torch.tensor([10, 11, 20])
@@ -234,7 +238,9 @@ def setup_inputs():
     device = torch.device("cpu")
 
     num_draft_tokens = [2, 1]
-    cu_num_draft_tokens = torch.tensor([0, 2, 3], dtype=torch.int32, device=device)  # 前缀和
+    cu_num_draft_tokens = torch.tensor([0, 2, 3],
+                                       dtype=torch.int32,
+                                       device=device)  # 前缀和
     num_tokens = 3
 
     draft_token_ids = torch.tensor([1, 2, 3], dtype=torch.int32, device=device)
@@ -242,13 +248,17 @@ def setup_inputs():
         [0.5, 0.5, 0.0, 0.0],
         [0.0, 0.9, 0.1, 0.0],
         [0.8, 0.2, 0.0, 0.0],
-    ], device=device)
+    ],
+                               device=device)
     target_probs = torch.tensor([
         [0.7, 0.3, 0.0, 0.0],
         [0.0, 0.95, 0.05, 0.0],
         [0.4, 0.6, 0.0, 0.0],
-    ], device=device)
-    bonus_token_ids = torch.tensor([[10], [20]], dtype=torch.int32, device=device)
+    ],
+                                device=device)
+    bonus_token_ids = torch.tensor([[10], [20]],
+                                   dtype=torch.int32,
+                                   device=device)
 
     return {
         "draft_token_ids": draft_token_ids,
@@ -291,7 +301,12 @@ def test_rejection_sample_random(setup_inputs):
     """随机采样模式：运行完整流程"""
     inputs = setup_inputs
     gen1, gen2 = torch.Generator(), torch.Generator()
-    metadata = MockSamplingMetadata(all_greedy=False, all_random=False, generators={0: gen1, 1: gen2})
+    metadata = MockSamplingMetadata(all_greedy=False,
+                                    all_random=False,
+                                    generators={
+                                        0: gen1,
+                                        1: gen2
+                                    })
     inputs["sampling_metadata"] = metadata
 
     # Mock 生成 uniform 随机数
@@ -326,11 +341,14 @@ def test_rejection_sample_with_recovered_token_rejection(setup_inputs):
 
     # 修改 uniform prob 使第一次拒绝
     with patch("your_module.spec_decode.generate_uniform_probs") as mock_unif:
-        mock_unif.return_value = torch.tensor([0.8, 0.96, 0.5])  # 第一个 0.7 > 0.6 → 被拒绝
+        mock_unif.return_value = torch.tensor([0.8, 0.96,
+                                               0.5])
 
         # Mock sample_recovered_tokens
-        with patch("your_module.spec_decode.sample_recovered_tokens") as mock_rec:
-            mock_rec.return_value = torch.tensor([99, 88, 77])  # recovered tokens
+        with patch(
+                "your_module.spec_decode.sample_recovered_tokens") as mock_rec:
+            mock_rec.return_value = torch.tensor([99, 88,
+                                                  77]) 
 
             output = rejection_sample(**inputs, sampling_metadata=metadata)
 
