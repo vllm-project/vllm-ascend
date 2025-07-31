@@ -52,6 +52,8 @@ class TestMoEAlltoAllSeqOverLapDispatcher(PytestBase):
         mocker.patch(
             "vllm_ascend.ops.moe_dispatcher.token_dispatcher.get_ep_group",
             return_value=self.mock_ep_group(mocker))
+        mocker.patch("torch.npu.current_device", return_value="cpu")
+        mocker.patch("torch.npu.Stream", return_value=mocker.MagicMock)
         return MoEAlltoAllSeqOverLapDispatcher(config)
 
     def test_initialization(self, dispatcher, config):
