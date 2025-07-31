@@ -5,7 +5,6 @@ from typing import Any, Optional
 import pytest
 import torch
 import torch.nn.functional as F
-from vllm.platforms import current_platform
 from vllm.v1.sample.logits_processor import LogitsProcessorManager
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -375,7 +374,8 @@ def estimate_rejection_sampling_pdf(
     draft_probs = draft_probs.view(num_tokens, vocab_size)
 
     # Bonus tokens not used but required.
-    bonus_token_ids = torch.zeros((1, 1), dtype=torch.int64).npu().repeat(num_samples, 1)
+    bonus_token_ids = torch.zeros(
+        (1, 1), dtype=torch.int64).npu().repeat(num_samples, 1)
 
     temperature = torch.ones(num_samples, dtype=torch.float32).npu()
     sampling_metadata = create_sampling_metadata(all_greedy=False,
@@ -423,13 +423,10 @@ def _test_masked_logits(
     draft_token_ids = draft_token_ids.tolist()
 
     # Bonus tokens not used but required
-    bonus_token_ids = torch.zeros((batch_size, 1),
-                                  dtype=torch.int64).npu()
+    bonus_token_ids = torch.zeros((batch_size, 1), dtype=torch.int64).npu()
 
     # Create spec decode metadata
-    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
-        draft_token_ids
-    ).npu()
+    spec_decode_metadata = SpecDecodeMetadata.make_dummy(draft_token_ids).npu()
 
     # Run rejection sampling
     output_token_ids = rejection_sampler(
