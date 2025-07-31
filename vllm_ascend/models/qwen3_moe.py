@@ -45,11 +45,9 @@ class CustomQwen3MoeDecoderLayer(qwen3.Qwen3MoeDecoderLayer):
                                               prefix=f"{prefix}.mlp")
 
 
-class CustomQwen3MoeModel(nn.Module):
-
+class CustomQwen3MoeModel(qwen3.Qwen3MoeModel):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super.__init__()
-
+        nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
