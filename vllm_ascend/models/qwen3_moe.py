@@ -26,7 +26,8 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP, Qwen3MoeModel, Qwen3MoeForCausalLM, Qwen3MoeDecoderLayer
+from vllm.model_executor.models.qwen3_moe import Qwen3MoeMLP, Qwen3MoeModel, Qwen3MoeForCausalLM, Qwen3MoeDecoderLayer, \
+    Qwen3MoeAttention
 from vllm.model_executor.models.utils import extract_layer_index, make_empty_intermediate_tensors_factory, maybe_prefix, \
     make_layers
 
@@ -130,7 +131,7 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__()
+        nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
