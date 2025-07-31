@@ -317,8 +317,6 @@ class CustomDeepseekV2MoE(nn.Module):
         if config.n_shared_experts is not None:
             intermediate_size = (config.moe_intermediate_size *
                                  config.n_shared_experts)
-            enable_prefill_optimizations = ascend_config.enable_prefill_optimizations and not self.torchair_graph_enabled
-            force_replicate = self.enable_multistream_moe or enable_prefill_optimizations
             self.shared_experts = CustomDeepseekV2MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
