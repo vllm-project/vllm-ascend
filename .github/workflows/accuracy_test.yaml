@@ -79,8 +79,8 @@ jobs:
       }}
     runs-on: >-
       ${{
-          (matrix.model_name == 'Qwen/Qwen2.5-VL-7B-Instruct' && 'linux-arm64-npu-4') ||
-          'linux-arm64-npu-2'
+          (matrix.model_name == 'Qwen/Qwen2.5-VL-7B-Instruct' && 'linux-aarch64-a2-4') ||
+          'linux-aarch64-a2-2'
       }}
     strategy:
       matrix:
