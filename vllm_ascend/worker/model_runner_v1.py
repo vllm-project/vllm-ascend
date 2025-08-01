@@ -992,6 +992,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # Speculative decoding.
         elif np.all(num_valid_tokens == 1):
             attn_state = AscendAttentionState.SpecDecoding
+        # pd scheduler patch，now chunked prefill just in P batch
+        elif os.getenv("VLLM_ASCEND_ENABLE_PD_CHUNK_SCHEDULE") == '1':
+            attn_state = AscendAttentionState.PChunkedPrefill
         # splitfuse
         elif not ascend_config.ascend_scheduler_config.enabled or self.chunked_prefill_enabled:
             attn_state = AscendAttentionState.ChunkedPrefill
