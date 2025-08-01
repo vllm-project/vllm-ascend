@@ -46,7 +46,6 @@ from vllm_ascend.ops.sequence_parallel import (MetadataForPadding,
 class AscendQwen3MoeDecoderLayer(nn.Module):
 
     def __init__(
-        self,
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -218,11 +217,11 @@ class AscendQwen3MoeModel(Qwen3MoeModel):
 
         return hidden_states
 
+from vllm_ascend.ops.vocab_parallel_embedding import (CustomParallelLMHead)
+from vllm_ascend.ops.logits_processor import CustomLogitsProcessor
+
 
 class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
-    packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
             "k_proj",
             "v_proj",
         ],
