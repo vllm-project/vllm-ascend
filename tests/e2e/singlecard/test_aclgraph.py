@@ -84,3 +84,11 @@ def test_deepseek_raises_error(monkeypatch: pytest.MonkeyPatch) -> None:
                        max_model_len=1024,
                        enforce_eager=False)
         assert "ACL Graph does not support deepseek" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_ray_backend_sets_no_compilation(model: str) -> None:
+    runner = VllmRunner(model,
+                        enforce_eager=False,
+                        distributed_executor_backend="ray")
+    assert runner.model.llm_engine.vllm_config.compilation_config.level == 0

@@ -153,6 +153,11 @@ class NPUPlatform(Platform):
                 "Torchair compilation enabled on NPU. Setting level to NO_COMPILATION"
             )
             compilation_config.level = CompilationLevel.NO_COMPILATION
+        elif parallel_config.distributed_executor_backend == "ray":
+            logger.warning(
+                "Ray distributed executor backend is not compatible with ACL Graph mode "
+                "right now. Setting level to NO_COMPILATION")
+            compilation_config.level = CompilationLevel.NO_COMPILATION
         else:
             logger.info(
                 "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
