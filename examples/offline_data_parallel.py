@@ -54,17 +54,16 @@ Multi-node:
                     --master-port=13345
 """
 
-import os
-from time import sleep
 import contextlib
 import gc
+import os
+from time import sleep
 
 import torch
-
 from vllm import LLM, SamplingParams
-from vllm.utils import get_open_port
 from vllm.distributed.parallel_state import (  # noqa E402
     destroy_distributed_environment, destroy_model_parallel)
+from vllm.utils import get_open_port
 
 os.environ["VLLM_USE_MODELSCOPE"] = "True"
 os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
