@@ -6,12 +6,8 @@ from vllm.distributed.parallel_state import (GroupCoordinator, get_world_group,
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: Optional[GroupCoordinator] = None
-_LM_HEAD_TP: Optional[GroupCoordinator] = None
 _MLP_TP: Optional[GroupCoordinator] = None
 
-def get_lm_tp_group() -> GroupCoordinator:
-    assert _LM_HEAD_TP is not None, ("lm tensor model parallel group is not initialized")
-    return _LM_HEAD_TP
 
 def get_mc2_group() -> GroupCoordinator:
     assert _MC2 is not None, ("mc2 group is not initialized")
@@ -55,7 +51,7 @@ def init_ascend_model_parallel(
     mlp_tp  = 4
     
     all_ranks_mlp_head = torch.arange(world_size).reshape(
-        -1, lm_tp, pipeline_parallel_size, 1)  # noqa
+        -1, mlp_tp, pipeline_parallel_size, 1)  # noqa
     group_ranks = all_ranks_mlp_head.view(-1, mlp_tp).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     
