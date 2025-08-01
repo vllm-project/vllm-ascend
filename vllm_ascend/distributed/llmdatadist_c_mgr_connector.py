@@ -405,6 +405,7 @@ class LLMDataDistCMgrConnectorWorker():
                                 f"LLMDataDistCMgrConnectorWorker: Receiving request {finished_req_id} finished"
                             )
                             self.finished_reqs.add(finished_req_id)
+                            del self.reqs_to_send[finished_req_id]
                     sock.send_multipart(
                         (identity, b"", b"receiving decode finished"))
                 else:
@@ -913,9 +914,6 @@ class LLMDataDistCMgrConnectorWorker():
         with self.thread_lock:
             while self.reqs_to_send:
                 req_id, expires = next(iter(self.reqs_to_send.items()))
-                if req_id in self.finished_reqs:
-                    del self.reqs_to_send[req_id]
-                    continue
                 if now < expires:
                     break
                 logger.warning(
