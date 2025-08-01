@@ -79,6 +79,7 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
 from vllm_ascend.attention.attention_v1_torchair import AscendTorchairMetadata
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
+from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
@@ -606,6 +607,27 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, not bool(
             forward_metadata[-1])
 
+    def _check_dbo_is_valid(self, query_lens: torch.Tensor,
+                            attn_state: AscendAttentionState,
+                            num_tokens: int) -> bool:
+        # do the checks for dp + dbo
+        if attn_state in [
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding
+        ]:
+            return False
+        # considering the case that one dp rank may enable dbo while others may not
+        if not self.vllm_config.model_config.use_mla or not envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+            return False
+        # TODO: remove it if token-level microbatch is enabled
+        [token_index,
+         seq_index] = compute_split_seq_index(query_lens, attn_state,
+                                              num_tokens)
+        if token_index == 0 or seq_index == 0 or seq_index == len(
+                query_lens) or num_tokens < 256:
+            return False
+        return True
+
     def get_eagle_atten_dict(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1080,6 +1102,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         with_prefill = attn_state not in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
+        enable_dbo = self._check_dbo_is_valid(self.query_lens.tolist(),
+                                              attn_state,
+                                              total_num_scheduled_tokens)
 
         maybe_padded_num_tokens = total_num_scheduled_tokens
         if self.torchair_graph_enabled and not with_prefill:
@@ -1087,7 +1112,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 total_num_scheduled_tokens)
         (padded_num_tokens_across_dp, num_tokens_across_dp, with_prefill,
          enable_dbo) = self._get_forward_metadata_across_dp(
-             maybe_padded_num_tokens, total_num_scheduled_tokens, with_prefill)
+             maybe_padded_num_tokens, total_num_scheduled_tokens, with_prefill,
+             enable_dbo)
+        extra_builder_kwargs['enable_dbo_across_dp'] = enable_dbo
 
         if self.torchair_graph_enabled and not with_prefill:
             graph_pad_size = padded_num_tokens_across_dp - total_num_scheduled_tokens
@@ -1739,8 +1766,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # Padding for DP
         (num_tokens, num_tokens_across_dp, with_prefill,
-         enable_dbo) = self._get_forward_metadata_across_dp(
-             maybe_padded_num_tokens, num_tokens, with_prefill, False)
+         _) = self._get_forward_metadata_across_dp(maybe_padded_num_tokens,
+                                                   num_tokens, with_prefill,
+                                                   False)
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
