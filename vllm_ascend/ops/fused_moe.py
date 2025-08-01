@@ -1426,11 +1426,10 @@ class AscendFusedMoE(FusedMoE):
             if isinstance(e_hidden_states, tuple):
                 e_hidden_states, shared_hidden_states = e_hidden_states
 
-        if (fused_moe_state not in {
-                FusedMoEState.AllGather,
-                FusedMoEState.AllGatherEP,
-                FusedMoEState.NaiveMulticast,
-        } and not replace_allreduce and not self.enable_prefill_optimizations):
+        if (fused_moe_state not in [
+                FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
+                FusedMoEState.NaiveMulticast
+        ] and not replace_allreduce and not self.enable_prefill_optimizations):
             if tp_size > 1:
                 dist.all_gather(list(chunk_hidden_states), e_hidden_states,
                                 self.tp_group)
