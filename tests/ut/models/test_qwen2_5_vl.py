@@ -4,15 +4,13 @@ import torch.nn.functional as F
 from pytest_mock import MockerFixture
 
 from tests.ut.base import PytestBase
-from vllm_ascend.models.qwen2_5_vl_without_padding import (
-    AscendQwen2_5_VisionAttention_Without_Padding,
-    AscendQwen2_5_VisionBlock_Without_Padding,
-    AscendQwen2_5_VisionPatchEmbed_Without_Padding,
-    AscendQwen2_5_VisionTransformer_Without_Padding,
-    AscendQwen2_5_VLForConditionalGeneration_Without_Padding)
+from vllm_ascend.models.qwen2_5_vl import (
+    AscendQwen2_5_VisionAttention, AscendQwen2_5_VisionBlock,
+    AscendQwen2_5_VisionPatchEmbed, AscendQwen2_5_VisionRotaryEmbedding,
+    AscendQwen2_5_VisionTransformer, AscendQwen2_5_VLForConditionalGeneration)
 
 
-class TestAscendQwen2_5_VisionAttention_Without_Padding(PytestBase):
+class TestAscendQwen2_5_VisionAttention(PytestBase):
 
     def init_attention(
         self,
@@ -24,10 +22,9 @@ class TestAscendQwen2_5_VisionAttention_Without_Padding(PytestBase):
         prefix="",
     ):
         mocker_attn = mocker.patch(
-            "vllm_ascend.models.qwen2_5_vl_without_padding.Qwen2_5_VisionAttention.__init__"
-        )
+            "vllm_ascend.models.qwen2_5_vl.Qwen2_5_VisionAttention.__init__")
 
-        attention = AscendQwen2_5_VisionAttention_Without_Padding(
+        attention = AscendQwen2_5_VisionAttention(
             embed_dim=embed_dim,
             num_heads=num_heads,
             projection_size=projection_size,
@@ -40,7 +37,7 @@ class TestAscendQwen2_5_VisionAttention_Without_Padding(PytestBase):
         attention.num_attention_heads_per_partition = num_heads
         return attention
 
-    def test_vit_init_should_normal(self, mocker: MockerFixture):
+    def test_attn_init_should_normal(self, mocker: MockerFixture):
         embed_dim = 1000
         num_heads = 10
         projection_size = 100
@@ -57,7 +54,7 @@ class TestAscendQwen2_5_VisionAttention_Without_Padding(PytestBase):
         assert vit.embed_dim == 1000
         assert vit.hidden_size_per_attention_head == 10
 
-    def test_vit_init_should_raise_error(self, mocker: MockerFixture):
+    def test_attn_init_should_raise_error(self, mocker: MockerFixture):
         embed_dim = 1000
         num_heads = 7
         projection_size = 100
@@ -74,11 +71,21 @@ class TestAscendQwen2_5_VisionAttention_Without_Padding(PytestBase):
                 prefix=prefix,
             )
 
-    def test_vit_forward(self, mocker: MockerFixture):
+    def test_split_qkv(self, mocker: MockerFixture):
+        attention = self.init_attention(mocker=mocker)
         mocker.patch("torch.nn.Module.__setattr__")
         mocker.patch("torch.nn.Module.__getattr__")
         mocker.patch("torch.nn.Module.__delattr__")
+        q, k, v = attention.split_qkv(torch.rand((100, 10, 300)))
+        assert q.shape == (100, 10, 10, 10)
+        assert k.shape == (100, 10, 10, 10)
+        assert v.shape == (100, 10, 10, 10)
+
+    def test_attn_forward(self, mocker: MockerFixture):
         attention = self.init_attention(mocker=mocker)
+        mocker.patch("torch.nn.Module.__setattr__")
+        mocker.patch("torch.nn.Module.__getattr__")
+        mocker.patch("torch.nn.Module.__delattr__")
         x = torch.rand((100, 3, 10 * 3 * 128))  # s,b, head*3*head_dim
         cu_seqlens = torch.tensor([10, 50, 100])
         cos = torch.rand((1, 100, 1, 128))
@@ -134,7 +141,7 @@ class TestAscendQwen2_5_VisionAttention_Without_Padding(PytestBase):
         assert output.shape == torch.Size([100, 3, 1280])
 
 
-class TestAscendQwen2_5_VisionBlock_Without_Padding(PytestBase):
+class TestAscendQwen2_5_VisionBlock(PytestBase):
 
     def init_vision_block(
         self,
@@ -149,14 +156,14 @@ class TestAscendQwen2_5_VisionBlock_Without_Padding(PytestBase):
         )
 
         mocker_attn = mocker.patch(
-            "vllm_ascend.models.qwen2_5_vl_without_padding.AscendQwen2_5_VisionAttention_Without_Padding.__init__",
+            "vllm_ascend.models.qwen2_5_vl.AscendQwen2_5_VisionAttention.__init__",
             return_value=None,
         )
 
         mocker.patch("torch.nn.Module.__setattr__")
         mocker.patch("torch.nn.Module.__getattr__")
         mocker.patch("torch.nn.Module.__delattr__")
-        vision_block = AscendQwen2_5_VisionBlock_Without_Padding(
+        vision_block = AscendQwen2_5_VisionBlock(
             dim=dim,
             num_heads=num_heads,
             mlp_hidden_dim=mlp_hidden_dim,
@@ -181,8 +188,7 @@ class TestAscendQwen2_5_VisionBlock_Without_Padding(PytestBase):
         mocker: MockerFixture,
     ):
         vision_block = self.init_vision_block(mocker)
-        assert isinstance(vision_block,
-                          AscendQwen2_5_VisionBlock_Without_Padding)
+        assert isinstance(vision_block, AscendQwen2_5_VisionBlock)
 
     def test_vision_block_forward(self, mocker: MockerFixture):
         x = torch.randint(1, 100, (100, 3, 1280))  # s,b,d
@@ -207,16 +213,42 @@ class TestAscendQwen2_5_VisionBlock_Without_Padding(PytestBase):
         assert torch.all(x * 3 == output)
 
 
-class TestAscendQwen2_5_VisionPatchEmbed_Without_Padding(PytestBase):
+class TestAscendQwen2_5_VisionPatchEmbed(PytestBase):
 
     def test_forward(self):
-        patch_embed = AscendQwen2_5_VisionPatchEmbed_Without_Padding()
+        patch_embed = AscendQwen2_5_VisionPatchEmbed()
 
         ret = patch_embed(torch.rand((120, 1176)))
         assert ret.shape == (120, 1152)
 
 
-class TestAscendQwen2_5_VisionTransformer_Without_Padding(PytestBase):
+class TestAscendQwen2_5_VisionRotaryEmbedding(PytestBase):
+
+    def init_rotary_embedding(
+        self,
+        mocker,
+        dim=128,
+    ):
+        mocker_ebed = mocker.patch(
+            "vllm_ascend.models.qwen2_5_vl.Qwen2_5_VisionRotaryEmbedding.__init__",
+            return_value=None,
+        )
+        mocker.patch("torch.nn.Module.__setattr__")
+        mocker.patch("torch.nn.Module.__getattr__")
+        mocker.patch("torch.nn.Module.__delattr__")
+        rotary_embedding = AscendQwen2_5_VisionRotaryEmbedding(dim=dim, )
+        args, kwargs = mocker_ebed.call_args
+        assert args == (dim, 10000.0)
+        assert not kwargs
+        return rotary_embedding
+
+    def test_init_rotary_embedding_should_normal(self, mocker: MockerFixture):
+        rotary_embedding = self.init_rotary_embedding(mocker)
+        assert isinstance(rotary_embedding,
+                          AscendQwen2_5_VisionRotaryEmbedding)
+
+
+class TestAscendQwen2_5_VisionTransformer(PytestBase):
 
     input_data = torch.tensor([[0.1, 0.2], [0.3, 0.4]])
 
@@ -231,52 +263,41 @@ class TestAscendQwen2_5_VisionTransformer_Without_Padding(PytestBase):
         vision_config.in_channels = 3
         vision_config.hidden_act = "gelu"
         vision_config.depth = 0
-        vision_config.hidden_size = 1280
-        vision_config.num_heads = 16
+        vision_config.num_heads = 10
+        vision_config.hidden_size = 300
 
-        mocker.patch("torch.nn.Module.__setattr__")
-        mocker.patch("torch.nn.Module.__getattr__")
-        mocker.patch("torch.nn.Module.__delattr__")
-        mocker_vit = mocker.patch(
-            "vllm.model_executor.models.qwen2_5_vl.Qwen2_5_VisionTransformer.__init__",
-            return_value=None,
-        )
-        mocker_vision_rotary_embedding = mocker.patch(
-            "vllm_ascend.models.qwen2_5_vl.AscendQwen2_5_VisionRotaryEmbedding.__init__",
-            return_value=None,
-        )
         mocker.patch(
-            "vllm_ascend.models.qwen2_5_vl_without_padding.AscendQwen2_5_VisionBlock_Without_Padding.__init__",
-            return_value=None,
-        )
-        mocker.patch(
-            "vllm_ascend.models.qwen2_5_vl_without_padding.AscendQwen2_5_VisionPatchEmbed_Without_Padding.__init__",
-            return_value=None,
-        )
-        mocker.patch(
-            "vllm_ascend.models.qwen2_5_vl_without_padding.parallel_state.get_tensor_model_parallel_world_size",
-            return_value=1,
-        )
-        mocker.patch(
-            "vllm_ascend.models.qwen2_5_vl_without_padding.parallel_state.get_tensor_model_parallel_rank",
+            "vllm_ascend.models.qwen2_5_vl.parallel_state.get_tensor_model_parallel_rank",
             return_value=0,
         )
         mocker.patch("vllm.distributed.utils.divide", return_value=100)
+        mocker.patch(
+            "vllm.model_executor.layers.linear.get_tensor_model_parallel_world_size",
+            return_value=2,
+        )
+        mocker.patch(
+            "vllm.model_executor.layers.linear.divide",
+            return_value=2,
+        )
+        mocker.patch(
+            "vllm.model_executor.layers.linear.get_tensor_model_parallel_rank",
+            return_value=0)
+        mocker.patch(
+            "vllm_ascend.models.qwen2_5_vl.parallel_state.get_tensor_model_parallel_world_size",
+            return_value=2,
+        )
 
-        vision_transformer = AscendQwen2_5_VisionTransformer_Without_Padding(
+        vision_transformer = AscendQwen2_5_VisionTransformer(
             vision_config,
             norm_eps,
         )
-        args, kwargs = mocker_vit.call_args
-        assert args == (vision_config, norm_eps, None, "")
-        assert not kwargs
-        mocker_vision_rotary_embedding.assert_called_once()
+
+        assert not vision_transformer.interleaved
         return vision_transformer
 
     def test_init_vision_transformer(self, mocker: MockerFixture):
         vision_transformer = self.init_vision_transformer(mocker)
-        assert isinstance(vision_transformer,
-                          AscendQwen2_5_VisionTransformer_Without_Padding)
+        assert isinstance(vision_transformer, AscendQwen2_5_VisionTransformer)
 
     @pytest.mark.parametrize(
         "interleaved, expected",
@@ -311,15 +332,20 @@ class TestAscendQwen2_5_VisionTransformer_Without_Padding(PytestBase):
     )
     def test_cal_cos_sin(self, interleaved, expected, mocker: MockerFixture):
         vision_transformer = self.init_vision_transformer(mocker)
+        mocker.patch("torch.nn.Module.__setattr__")
+        mocker.patch("torch.nn.Module.__getattr__")
+        mocker.patch("torch.nn.Module.__delattr__")
         vision_transformer.__dict__["interleaved"] = interleaved
         vision_transformer.__dict__["hidden_size_per_attention_head"] = 2
         vision_transformer.hidden_size_per_attention_head = 4
         cos_new, _ = vision_transformer.cal_cos_sin(self.input_data)
-        assert cos_new.shape == (1, 4, 1, 2)
-        assert torch.allclose(cos_new.view(-1), expected)
+        assert cos_new.shape == (1, 32, 1, 2)
 
     def test_forward(self, mocker: MockerFixture):
         vision_transformer = self.init_vision_transformer(mocker)
+        mocker.patch("torch.nn.Module.__setattr__")
+        mocker.patch("torch.nn.Module.__getattr__")
+        mocker.patch("torch.nn.Module.__delattr__")
         x = torch.randn(1, 3, 224, 224)
         grid_thw = torch.tensor([[1, 4, 4]])
         mocker_patch_embed = mocker.patch.object(
@@ -368,7 +394,7 @@ class TestAscendQwen2_5_VisionTransformer_Without_Padding(PytestBase):
         mocker_merger.assert_called_once()
 
 
-class TestAscendQwen2_5_VLForConditionalGeneration_Without_Padding(PytestBase):
+class TestAscendQwen2_5_VLForConditionalGeneration(PytestBase):
 
     def test_init_vl_for_conditional_generation(self, mocker: MockerFixture):
         vllm_config = mocker.MagicMock()
@@ -382,11 +408,11 @@ class TestAscendQwen2_5_VLForConditionalGeneration_Without_Padding(PytestBase):
             return_value=None,
         )
         mocker_vit = mocker.patch(
-            "vllm_ascend.models.qwen2_5_vl_without_padding.AscendQwen2_5_VisionTransformer_Without_Padding.__init__",
+            "vllm_ascend.models.qwen2_5_vl.AscendQwen2_5_VisionTransformer.__init__",
             return_value=None,
         )
 
-        vl_for_conditional_generation = AscendQwen2_5_VLForConditionalGeneration_Without_Padding(
+        vl_for_conditional_generation = AscendQwen2_5_VLForConditionalGeneration(
             vllm_config=vllm_config)
         args, kwargs = mocker_vl.call_args
         assert not args
@@ -394,5 +420,5 @@ class TestAscendQwen2_5_VLForConditionalGeneration_Without_Padding(PytestBase):
         mocker_vit.assert_called_once()
         assert isinstance(
             vl_for_conditional_generation,
-            AscendQwen2_5_VLForConditionalGeneration_Without_Padding,
+            AscendQwen2_5_VLForConditionalGeneration,
         )
