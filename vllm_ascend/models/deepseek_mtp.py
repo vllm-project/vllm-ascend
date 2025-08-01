@@ -199,3 +199,27 @@ class CustomDeepSeekMTP(DeepSeekMTP):
                                    attn_metadata, previous_hidden_states,
                                    inputs_embeds, spec_step_idx)
         return hidden_states
+
+    def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
+        """
+        Rewrite the weight name to match the format of the original model.
+        Add .mtp_block for modules in transformer layer block for spec layer
+        and rename shared layer weights to be top level.
+        """
+        spec_layer_weight_names = [
+            "embed_tokens", "enorm", "hnorm", "eh_proj", "shared_head"
+        ]
+        shared_weight_names = ["embed_tokens"]
+        spec_layer_weight = False
+        shared_weight = False
+        for weight_name in spec_layer_weight_names:
+            if weight_name in name:
+                spec_layer_weight = True
+                if weight_name in shared_weight_names:
+                    shared_weight = True
+                break
+        if not spec_layer_weight:
+            # treat rest weights as weights for transformer layer block
+            name = name.replace(f"model.layers.{spec_layer}.",
+                                f"model.layers.{spec_layer}.mtp_block.")
+        return name
