@@ -218,7 +218,7 @@ class MtpProposer:
         self.hidden_states[:num_tokens] = target_hidden_states
 
         if attn_metadata.prefill is not None:
-            attn_metadata.prefill.query_lens = query_lens
+            attn_metadata.prefill.query_lens = query_lens.cpu()
             attn_metadata.prefill.input_positions = target_positions
 
         if not self.runner.torchair_graph_enabled:
