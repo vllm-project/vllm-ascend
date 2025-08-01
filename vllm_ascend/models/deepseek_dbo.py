@@ -75,7 +75,6 @@ from vllm_ascend.multistream.layers import (MultiStreamPostTransformerLayer,
 from vllm_ascend.multistream.metadata import (MultiStreamConfig,
                                               MultiStreamStepMetadata,
                                               make_multistream_metadata_ds)
-from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.utils import dispose_tensor
 
@@ -872,24 +871,9 @@ class CustomDeepseekDBOModel(nn.Module):
 
     def can_run_ms(self):
         attn_metadata = get_forward_context().attn_metadata
-        # support mla attention and V1 engine at present
-        if not self.use_mla:
-            return False
         # enable prefill overlap
-        if attn_metadata is None or attn_metadata.num_prefills == 0:
-            return False
-        else:
-            [token_index, seq_index
-             ] = compute_split_seq_index(attn_metadata.query_lens,
-                                         attn_metadata.attn_state,
-                                         attn_metadata.num_decode_tokens)
-            if token_index == 0 or seq_index == 0 or seq_index == len(
-                    attn_metadata.query_lens):
-                return False
-        # check whether the total tokens exceed the threshold
-        if self.multistream_config is None or attn_metadata.num_actual_tokens < self.multistream_config.min_total_tokens_to_split:
-            return False
-        return True
+        return not (attn_metadata is None or attn_metadata.num_prefills == 0
+                    or not attn_metadata.enable_dbo_across_dp)
 
     def _forward_ms_layers(
         self,
