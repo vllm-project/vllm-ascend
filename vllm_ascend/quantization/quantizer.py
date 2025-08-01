@@ -23,7 +23,8 @@ from typing import Any, Dict, List, Optional
 from vllm.logger import logger
 
 from .func_wrapper import wrapper_rmsnorm_forward_oot, wrapper_rmsnorm_init
-from .w4a8_dynamic import AscendW4A8DynamicLinearMethod
+from .w4a8_dynamic import (AscendW4A8DynamicFusedMoEMethod,
+                           AscendW4A8DynamicLinearMethod)
 from .w8a8 import (AscendC8KVCacheMethod, AscendW8A8FusedMoEMethod,
                    AscendW8A8LinearMethod)
 from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
@@ -263,6 +264,10 @@ class W4A8DYNAMICQuantizer(VLLMAscendQuantizer):
     @staticmethod
     def build_linear_method():
         return AscendW4A8DynamicLinearMethod()
+
+    @staticmethod
+    def build_moe_method():
+        return AscendW4A8DynamicFusedMoEMethod()
 
 
 class W8A8Quantizer(VLLMAscendQuantizer):
