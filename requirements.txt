@@ -27,5 +27,3 @@ numba
 --pre
 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
 torch-npu==2.5.1.post1.dev20250619
-
-pytest_mock

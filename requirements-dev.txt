@@ -17,3 +17,4 @@ ray>=2.47.1
 protobuf==4.25.6
 librosa 
 soundfile
+pytest_mock
