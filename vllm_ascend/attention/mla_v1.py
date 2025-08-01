@@ -129,6 +129,7 @@ class AscendMLAMetadata:
     num_input_tokens: int = 0  # Number of tokens including padding.
 
     query_lens: Optional[list[int]] = None
+    enable_dbo_across_dp: bool = False
     # The dimension of the attention heads
     head_dim: Optional[int] = None
     attn_mask: torch.Tensor = None
@@ -370,6 +371,7 @@ class AscendMLAMetadataBuilder:
         max_query_len: int,
         graph_pad_size: int = -1,
         query_start_loc: torch.Tensor = None,
+        enable_dbo_across_dp: bool = False,
     ) -> AscendMLAMetadata:
         assert self._num_decodes + self._num_prefills == num_reqs
 
@@ -536,6 +538,7 @@ class AscendMLAMetadataBuilder:
             query_start_loc=query_start_loc,
             block_tables=block_table,
             seq_lens=seq_lens,
+            enable_dbo_across_dp=enable_dbo_across_dp
         )
 
 
