@@ -71,6 +71,7 @@ def set_ascend_forward_context(
         forward_context.fused_moe_state = fused_moe_state
 
         forward_context.in_profile_run = in_profile_run
+        forward_context.num_tokens_across_dp = num_tokens_across_dp
 
         # NOTE: This cannot be set using set_forward_context
         # due to multiple warmups before actual capturing
