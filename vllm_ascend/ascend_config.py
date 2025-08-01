@@ -65,6 +65,7 @@ class AscendConfig:
             False)  # Whether to enable DeepSeek models' prefill optimizations
         self.enable_cpu_binding = additional_config.get(  # Whether to enable the cpu binding
             "enable_cpu_binding", False)
+        self.lmhead_tp_size = additional_config.get("lmhead_tp_size", -1)
 
 
 class TorchairGraphConfig:
