@@ -96,10 +96,12 @@ def model_input_split_v1_mla_attn(
     seq_lens = attn_metadata.prefill.seq_lens if attn_metadata.num_prefills > 0 else attn_metadata.decode.seq_lens
     [seq_lens_pre, seq_lens_post] = split_attn_tensor_type(seq_lens, seq_index)
 
-    query_start_loc_pre = attn_metadata.query_start_loc[:seq_index + 1]
-    query_start_loc_post = deepcopy(
-        attn_metadata.query_start_loc[seq_index:]
-    ) - attn_metadata.query_start_loc[seq_index]
+    query_start_loc_pre = query_start_loc_post = None
+    if attn_metadata.query_start_loc is not None:
+        query_start_loc_pre = attn_metadata.query_start_loc[:seq_index + 1]
+        query_start_loc_post = deepcopy(
+            attn_metadata.query_start_loc[seq_index:]
+        ) - attn_metadata.query_start_loc[seq_index]
     [block_table_pre,
      block_table_post] = split_attn_tensor_type(attn_metadata.block_tables,
                                                 seq_index)
@@ -223,6 +225,7 @@ def model_input_split_v1_mla_attn(
         attn_mask=attn_mask_pre,
         prefill=prefill_pre,
         decode=decode_pre,
+        enable_dbo_across_dp=attn_metadata.enable_dbo_across_dp,
     )
     attention_metadata_post = _metadata_cls(
         num_actual_tokens=attn_metadata.num_actual_tokens - token_index,
@@ -239,5 +242,6 @@ def model_input_split_v1_mla_attn(
         attn_state=attn_state_post,
         prefill=prefill_post,
         decode=decode_post,
+        enable_dbo_across_dp=attn_metadata.enable_dbo_across_dp,
     )
     return [attention_metadata_pre, attention_metadata_post]
