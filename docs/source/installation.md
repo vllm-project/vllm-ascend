@@ -12,7 +12,7 @@ This document describes how to install vllm-ascend manually.
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
     | CANN          | >= 8.2.RC1                       | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | >= 2.5.1.post1.dev20250619       | Required for vllm-ascend                  |
+    | torch-npu     | >= 2.5.1.post1                   | Required for vllm-ascend                  |
     | torch         | >= 2.5.1                         | Required for torch-npu and vllm           |
 
 You have 2 way to install:
@@ -156,7 +156,6 @@ cd ..
 # Install vLLM Ascend
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
-export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 pip install -v -e .
 cd ..
 ```

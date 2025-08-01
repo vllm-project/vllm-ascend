@@ -220,6 +220,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.spec_token_num = 0
         self.decode_token_per_req = 1
         if self.speculative_config:
+            if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+                raise NotImplementedError(
+                    "DBO and mtp can't work at the same currently")
             self.use_spec_decode = True
             self.spec_token_num = self.speculative_config.num_speculative_tokens
             assert self.spec_token_num > 0
@@ -1144,7 +1147,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if self.torchair_graph_enabled:
                     model_kwargs["kv_caches"] = self.kv_caches
                     model_kwargs["attn_metadata"] = attn_metadata
-                if envs_ascend.VLLM_ASCEND_ENABLE_DBO and with_prefill:
+                if envs_ascend.VLLM_ASCEND_ENABLE_DBO and self.model_config.is_deepseek_mla and with_prefill:
                     model_kwargs["graph_enable"] = False  # type: ignore
                 if self.torchair_graph_enabled and not with_prefill:
                     compiled_model = self._get_torchair_lazy_compiled_model(
@@ -1751,7 +1754,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         num_tokens)
                     model_kwargs["kv_caches"] = self.kv_caches
                     model_kwargs["attn_metadata"] = attn_metadata
-                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO and self.model_config.is_deepseek_mla:
                         model_kwargs["graph_enable"] = True  # type: ignore
                     hidden_states = compiled_model(
                         input_ids=input_ids,
@@ -1761,7 +1764,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         **model_kwargs,
                     )
                 else:
-                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO and self.model_config.is_deepseek_mla:
                         model_kwargs["graph_enable"] = False  # type: ignore
                     hidden_states = model(
                         input_ids=input_ids,
