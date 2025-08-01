@@ -1810,7 +1810,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
                 if not self.in_profile_run and is_lmhead_tp():
                     if not with_prefill:
-                        max_num_reqs_across_dp = num_tokens
+                        max_num_reqs_across_dp = num_reqs
                     else:
                         max_num_reqs_across_dp = max_num_reqs
                     dummy_indices = torch.zeros(max_num_reqs_across_dp,
