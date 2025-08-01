@@ -110,73 +110,6 @@ def apply_mlp_decode(hidden_states_wrapper: List[torch.Tensor],
     return hidden_states
 
 
-def gmm_expert(hidden_states: torch.Tensor,
-               expert_tokens: List[int],
-               w1: torch.Tensor,
-               w2: torch.Tensor,
-               w1_scale: torch.Tensor,
-               w2_scale: torch.Tensor,
-               dynamic_scale: Optional[torch.Tensor] = None,
-               avg_tokens_per_expert: Optional[List[int]] = None,
-               local_num_experts: int = 16) -> torch.Tensor:
-    hidden_size = hidden_states.size(-1)
-
-    # Flatten input and dynamic_scale if needed
-    if dynamic_scale is not None and dynamic_scale.dim() > 1:
-        dynamic_scale = dynamic_scale.reshape(-1)
-        hidden_states = hidden_states.view(-1, hidden_size)
-
-    # First grouped matmul (up-projection)
-    mm1_output = torch_npu.npu_grouped_matmul(
-        [hidden_states], [w1],
-        group_list=expert_tokens,
-        split_item=3,
-        output_dtype=torch.int32,
-        group_type=0,
-        group_list_type=1,
-        tuning_config=avg_tokens_per_expert)[0]
-
-    # Prepare quantization scale for dequant + activation
-    quant_scale = torch.ones((local_num_experts, w1_scale.shape[-1] // 2),
-                             dtype=torch.float32,
-                             device=hidden_states.device)
-    w1_scale = w1_scale.to(torch.float32)
-
-    # Apply dequant + swiglu activation
-    intermediate_states, dynamic_scale = torch_npu.npu_dequant_swiglu_quant(
-        x=mm1_output,
-        weight_scale=w1_scale,
-        activation_scale=dynamic_scale.squeeze(0)
-        if dynamic_scale is not None else None,
-        bias=None,
-        quant_scale=quant_scale,
-        quant_offset=None,
-        group_index=expert_tokens,
-        activate_left=True,
-        quant_mode=1)
-
-    # Flatten again if necessary
-    if dynamic_scale is not None and dynamic_scale.dim() > 1:
-        intermediate_states = intermediate_states.view(
-            -1, intermediate_states.size(-1))
-        dynamic_scale = dynamic_scale.reshape(-1)
-
-    # Final grouped matmul (down-projection)
-    output = torch_npu.npu_grouped_matmul(
-        [intermediate_states], [w2],
-        bias=None,
-        scale=[w2_scale.to(torch.bfloat16)],
-        per_token_scale=[dynamic_scale],
-        group_list=expert_tokens,
-        split_item=3,
-        output_dtype=torch.bfloat16,
-        group_type=0,
-        group_list_type=1,
-        tuning_config=avg_tokens_per_expert)[0]
-
-    return output
-
-
 def apply_mlp(hidden_states: torch.Tensor,
               w1: torch.Tensor,
               w1_scale: torch.Tensor,
@@ -525,6 +458,29 @@ def fused_prefill_experts_with_mc2(
         return hidden_states_outputs, shared_outputs, expert_token_nums, group_list_type
 
 
+def init_routing_quant(hidden_states, top_k, topk_ids, global_num_experts):
+    num_tokens, _ = hidden_states.shape
+    row_idx_len = num_tokens * top_k
+    row_idx = (torch.arange(0,
+                            row_idx_len,
+                            dtype=torch.int32,
+                            device=hidden_states.device).view(
+                                top_k, -1).permute(1, 0).contiguous())
+    hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
+        hidden_states,
+        row_idx=row_idx,
+        expert_idx=topk_ids,
+        active_num=num_tokens)
+
+    expanded_row_idx = (expanded_row_idx.view(top_k, -1).permute(
+        1, 0).contiguous().view(-1))
+    global_expert_tokens = torch.bincount(expanded_expert_idx,
+                                          minlength=global_num_experts)
+    global_expert_tokens = global_expert_tokens.to(torch.int32)
+    quantized_tokens, token_scales = torch_npu.npu_dynamic_quant(hidden_states)
+    return quantized_tokens, expanded_row_idx, global_expert_tokens, token_scales
+
+
 # currently expert parallelism implemented with all2all
 # is under-optimized.
 def fused_experts_with_all2all(hidden_states: torch.Tensor,
@@ -549,53 +505,54 @@ def fused_experts_with_all2all(hidden_states: torch.Tensor,
 
     num_tokens, _ = hidden_states.shape
     num_experts = w1.shape[0]
-    device = hidden_states.device
 
     if expert_map is not None:
         global_num_experts = len(expert_map) + global_redundant_expert_num
-        local_num_experts = global_num_experts // ep_group.world_size
-        row_idx_len = num_tokens * top_k
-        row_idx = (torch.arange(0,
-                                row_idx_len,
-                                dtype=torch.int32,
-                                device=device).view(top_k, -1).permute(
-                                    1, 0).contiguous())
-        hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
-            hidden_states,
-            row_idx=row_idx,
-            expert_idx=topk_ids,
-            active_num=num_tokens)
+        if hasattr(torch_npu, "npu_moe_init_routing_quant"):
+            quantized_tokens, expanded_row_idx, global_expert_tokens, _, token_scales = torch_npu.npu_moe_init_routing_quant(
+                hidden_states,
+                expert_idx=topk_ids.to(torch.int32),
+                active_num=0,
+                expert_capacity=0,
+                expert_num=global_num_experts,
+                drop_pad_mode=0,
+                expert_tokens_num_mode=2,
+                expert_tokens_before_capacity_flag=False,
+                quant_mode=1,
+            )
+        else:
+            quantized_tokens, expanded_row_idx, global_expert_tokens, token_scales = init_routing_quant(
+                hidden_states, top_k, topk_ids, global_num_experts)
 
-        global_expert_tokens = torch.bincount(expanded_expert_idx,
-                                              minlength=global_num_experts)
-        scatter_sizes = global_expert_tokens.view(ep_group.world_size,
-                                                  -1).sum(-1)
+        gather_sizes = global_expert_tokens.new_empty(
+            global_expert_tokens.shape[0])
+        dist.all_to_all_single(gather_sizes, global_expert_tokens)
 
-        gather_sizes = torch.empty_like(scatter_sizes)
-        dist.all_to_all_single(gather_sizes,
-                               scatter_sizes,
-                               group=ep_group.device_group)
-        scatter_size_list = scatter_sizes.cpu().tolist()
-        gather_size_list = gather_sizes.cpu().tolist()
+        token_counts_combined = torch.stack(
+            [gather_sizes, global_expert_tokens], dim=0)
+        token_counts_combined = token_counts_combined.view(
+            2, ep_group.world_size, -1).sum(dim=2)
+        token_counts_combined_cpu = token_counts_combined.to(
+            torch.device("cpu"), non_blocking=True).numpy()
+        all_tokens = gather_sizes.sum()
 
-        expanded_expert_idx = expanded_expert_idx % local_num_experts
-        hidden_states = ep_group.all_to_all(hidden_states, 0, 0,
-                                            scatter_size_list,
-                                            gather_size_list)
-        local_expert_idx = ep_group.all_to_all(expanded_expert_idx, 0, 0,
-                                               scatter_size_list,
-                                               gather_size_list)
+        gathered_tokens = quantized_tokens.new_empty(all_tokens.item(),
+                                                     quantized_tokens.shape[1])
+        dynamic_scale = token_scales.new_empty(gathered_tokens.shape[0])
+        gather_size_list = token_counts_combined_cpu[1]
+        scatter_size_list = token_counts_combined_cpu[0]
 
-        # Workaround: Convert to float so that sort runs on AI Core instead of slower AICPU
-        sorted_local_expert_idx, sorted_idx = torch.sort(
-            local_expert_idx.float())
-        sorted_local_expert_idx = sorted_local_expert_idx.to(
-            local_expert_idx.dtype)
+        dist.all_to_all_single(gathered_tokens, quantized_tokens,
+                               scatter_size_list, gather_size_list)
+        dist.all_to_all_single(dynamic_scale, token_scales, scatter_size_list,
+                               gather_size_list)
 
-        expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
-            sorted_local_expert_idx, local_num_experts).to(torch.int64)
-
-        hidden_states = hidden_states[sorted_idx]
+        hidden_states, dynamic_scale, inverse_indices, expert_tokens = torch_npu.npu_moe_re_routing(
+            gathered_tokens,
+            gather_sizes.view(ep_group.world_size, -1),
+            per_token_scales=dynamic_scale)
+        expert_tokens = expert_tokens.to(torch.int64)
+        group_list_type = 1
     else:
         row_idx_len = num_tokens * top_k
         row_idx = torch.arange(0,
@@ -612,7 +569,8 @@ def fused_experts_with_all2all(hidden_states: torch.Tensor,
         expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
             expanded_expert_idx, num_experts)
         expert_tokens = expert_tokens.to(torch.int64)
-    group_list_type = 0
+        group_list_type = 0
+        dynamic_scale = None
 
     # `hidden_states` will be disposed in the `apply_mlp` function
     hidden_states = apply_mlp(
@@ -622,17 +580,21 @@ def fused_experts_with_all2all(hidden_states: torch.Tensor,
         w2,
         w2_scale,
         expert_tokens,  #16
+        dynamic_scale=dynamic_scale,
         group_list_type=group_list_type,
         w1_scale_bias=w1_scale_bias,
         w2_scale_bias=w2_scale_bias)
 
     if expert_map is not None:
-        # Workaround: Convert to float so that argsort runs on AI Core instead of slower AICPU
-        resorted_idx = torch.argsort(sorted_idx.float()).to(sorted_idx.dtype)
-        hidden_states = hidden_states[resorted_idx]
-        hidden_states = ep_group.all_to_all(hidden_states, 0, 0,
-                                            gather_size_list,
-                                            scatter_size_list)
+        reordered_outputs = torch.index_select(
+            hidden_states,
+            dim=0,
+            # Workaround: Convert to float so that argsort runs on AI Core instead of slower AICPU
+            index=inverse_indices.to(torch.float32).argsort().to(torch.int32))
+
+        hidden_states = reordered_outputs.new_empty(*quantized_tokens.shape)
+        dist.all_to_all_single(hidden_states, reordered_outputs,
+                               gather_size_list, scatter_size_list)
 
         final_hidden_states = torch_npu.npu_moe_finalize_routing(
             hidden_states,
@@ -641,8 +603,8 @@ def fused_experts_with_all2all(hidden_states: torch.Tensor,
             bias=None,
             scales=topk_weights,
             expanded_src_to_dst_row=expanded_row_idx,
-            export_for_source_row=topk_ids,
-        )
+            export_for_source_row=None,
+            drop_pad_mode=2)
     else:
         # TODO: Reorder device memory 2 times here, replace the current
         # implementation here when suitable operators become available.
@@ -658,130 +620,6 @@ def fused_experts_with_all2all(hidden_states: torch.Tensor,
     if len(original_shape) == 3:
         final_hidden_states = final_hidden_states.view(original_shape)
     return final_hidden_states, expert_tokens, group_list_type
-
-
-def init_routing_quant(hidden_states, top_k, topk_ids, global_num_experts):
-    num_tokens, _ = hidden_states.shape
-    # Step 1: Routing initialization
-    row_idx = (torch.arange(0,
-                            num_tokens * top_k,
-                            dtype=torch.int32,
-                            device=hidden_states.device).view(
-                                top_k, -1).permute(1, 0).contiguous())
-
-    routed_tokens, expanded_row_idx, expert_indices = torch_npu.npu_moe_init_routing(
-        hidden_states,
-        row_idx=row_idx,
-        expert_idx=topk_ids,
-        active_num=num_tokens)
-
-    expanded_row_idx = (expanded_row_idx.view(top_k, -1).permute(
-        1, 0).contiguous().view(-1))
-
-    tokens_per_expert = torch.bincount(expert_indices,
-                                       minlength=global_num_experts).to(
-                                           torch.int32)
-
-    # Step 2: Quantize
-    quantized_tokens, token_scales = torch_npu.npu_dynamic_quant(routed_tokens)
-    return quantized_tokens, expanded_row_idx, tokens_per_expert, token_scales
-
-
-def fused_experts_with_all2all_v2(
-        hidden_states: torch.Tensor,
-        top_k: int,
-        topk_ids: torch.Tensor,
-        topk_weight: torch.Tensor,
-        w1: torch.Tensor,
-        w2: torch.Tensor,
-        w1_scale: torch.Tensor,
-        w2_scale: torch.Tensor,
-        expert_map: torch.Tensor = None,
-        ep_group: GroupCoordinator = None,
-        log2phy: Optional[torch.Tensor] = None,
-        global_redundant_expert_num: int = 0) -> torch.Tensor:
-    if log2phy is not None:
-        topk_ids = log2phy[topk_ids]
-
-    topk_weight = topk_weight.to(hidden_states.dtype)
-    global_num_experts = len(expert_map) + global_redundant_expert_num
-    local_num_experts = global_num_experts // ep_group.world_size
-
-    enable_init_routing_quant = hasattr(torch_npu,
-                                        "npu_moe_init_routing_quant")
-    if enable_init_routing_quant:
-        quantized_tokens, expanded_row_idx, tokens_per_expert, _, token_scales = torch_npu.npu_moe_init_routing_quant(
-            hidden_states,
-            expert_idx=topk_ids.to(torch.int32),
-            active_num=0,
-            expert_capacity=0,
-            expert_num=global_num_experts,
-            drop_pad_mode=0,
-            expert_tokens_num_mode=2,
-            expert_tokens_before_capacity_flag=False,
-            quant_mode=1,
-        )
-    else:
-        quantized_tokens, expanded_row_idx, tokens_per_expert, token_scales = init_routing_quant(
-            hidden_states, top_k, topk_ids, global_num_experts)
-
-    tokens_per_expert_recv = tokens_per_expert.new_empty(
-        tokens_per_expert.shape[0])
-    dist.all_to_all_single(tokens_per_expert_recv, tokens_per_expert)
-
-    token_counts_combined = torch.stack(
-        [tokens_per_expert_recv, tokens_per_expert], dim=0)
-    token_counts_combined = token_counts_combined.view(2, ep_group.world_size,
-                                                       -1).sum(2)
-    token_counts_combined_cpu = token_counts_combined.to(
-        torch.device("cpu"), non_blocking=True).numpy()
-    all_tokens = tokens_per_expert_recv.sum()
-    gathered_tokens = quantized_tokens.new_empty(all_tokens.item(),
-                                                 quantized_tokens.shape[1])
-    gathered_scales = token_scales.new_empty(gathered_tokens.shape[0])
-
-    input_splits = token_counts_combined_cpu[1]
-    output_splits = token_counts_combined_cpu[0]
-
-    dist.all_to_all_single(gathered_tokens, quantized_tokens, output_splits,
-                           input_splits)
-    dist.all_to_all_single(gathered_scales, token_scales, output_splits,
-                           input_splits)
-    routed_tokens_by_expert, gathered_scales, inverse_indices, tokens_per_local_expert = torch_npu.npu_moe_re_routing(
-        gathered_tokens,
-        tokens_per_expert_recv.view(ep_group.world_size, -1),
-        per_token_scales=gathered_scales)
-
-    expert_outputs = gmm_expert(routed_tokens_by_expert,
-                                expert_tokens=tokens_per_local_expert.to(
-                                    torch.int64),
-                                w1=w1,
-                                w2=w2,
-                                w1_scale=w1_scale,
-                                w2_scale=w2_scale,
-                                dynamic_scale=gathered_scales,
-                                local_num_experts=local_num_experts)
-
-    reordered_outputs = torch.index_select(
-        expert_outputs,
-        dim=0,
-        index=inverse_indices.to(torch.float32).argsort().to(torch.int32))
-
-    gathered_tokens = reordered_outputs.new_empty(*quantized_tokens.shape)
-    dist.all_to_all_single(gathered_tokens, reordered_outputs, input_splits,
-                           output_splits)
-
-    final_hidden_states = torch_npu.npu_moe_finalize_routing(
-        gathered_tokens,
-        skip1=None,
-        skip2=None,
-        bias=None,
-        scales=topk_weight.to(gathered_tokens.dtype),
-        expanded_src_to_dst_row=expanded_row_idx,
-        export_for_source_row=None,
-        drop_pad_mode=2)
-
-    return final_hidden_states, tokens_per_local_expert.to(torch.int64), 1
 
 
 def fused_experts(hidden_states: torch.Tensor,
@@ -992,7 +830,6 @@ class AscendW8A8DynamicFusedMoEMethod:
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_weight_nz_layout = ascend_config.enable_weight_nz_layout
-        self.enable_prefill_optimizations = ascend_config.enable_prefill_optimizations
 
         try:
             device_group = get_mc2_group().device_group
@@ -1174,21 +1011,6 @@ class AscendW8A8DynamicFusedMoEMethod:
                                  topk_ids=topk_ids,
                                  top_k=top_k,
                                  expert_map=expert_map)
-        elif self.enable_prefill_optimizations:
-            return fused_experts_with_all2all_v2(
-                hidden_states=x,
-                top_k=top_k,
-                topk_ids=topk_ids,
-                topk_weight=topk_weights,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                w1_scale=layer.w13_weight_scale,
-                w2_scale=layer.w2_weight_scale,
-                expert_map=expert_map,
-                ep_group=self.ep_group,
-                log2phy=log2phy,
-                global_redundant_expert_num=global_redundant_expert_num,
-            )
         else:
             # The current implementation of deepseek moe splits hidden_states
             # according to tp_size before they are feed into fused_moe module.
