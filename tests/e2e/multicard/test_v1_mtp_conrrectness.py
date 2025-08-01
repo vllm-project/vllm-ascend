@@ -4,9 +4,7 @@ import random
 from typing import Any
 
 import pytest
-from vllm import SamplingParams
-
-from tests.e2e.conftest import VllmRunner
+from vllm import LLM, SamplingParams
 
 
 @pytest.fixture
@@ -49,7 +47,7 @@ def sampling_config():
 
 @pytest.fixture
 def model_name():
-    return "vllm-ascend/DeepSeek-R1-w4a8-pruning"
+    return "wemaster/deepseek_mtp_main_random_bf16"
 
 
 @pytest.mark.skipif(
@@ -64,23 +62,23 @@ def test_mtp_correctness(
     should be the same when using mtp speculative decoding.
     '''
 
-    with VllmRunner(model_name,
-                    tensor_parallel_size=2,
-                    max_model_len=256,
-                    gpu_memory_utilization=0.8,
-                    enforce_eager=False) as ref_llm:
-        ref_outputs = ref_llm.chat(test_prompts, sampling_config)
+    ref_llm = LLM(model=model_name,
+                  tensor_parallel_size=2,
+                  max_model_len=256,
+                  enforce_eager=True)
+    ref_outputs = ref_llm.chat(test_prompts, sampling_config)
+    del ref_llm
 
-    with VllmRunner(model_name,
-                    tensor_parallel_size=2,
-                    max_model_len=256,
-                    gpu_memory_utilization=0.8,
-                    speculative_config={
-                        "method": "deepseek_mtp",
-                        "num_speculative_tokens": 1,
-                    },
-                    enforce_eager=False) as spec_llm:
-        spec_outputs = spec_llm.chat(test_prompts, sampling_config)
+    spec_llm = LLM(model=model_name,
+                   tensor_parallel_size=2,
+                   trust_remote_code=True,
+                   speculative_config={
+                       "method": "deepseek_mtp",
+                       "num_speculative_tokens": 1,
+                   },
+                   max_model_len=256,
+                   enforce_eager=True)
+    spec_outputs = spec_llm.chat(test_prompts, sampling_config)
 
     matches = 0
     misses = 0
