@@ -49,6 +49,7 @@ def wrapper_vocab_parallel_embedding_init(func):
             quant_config,
             prefix,
         )
+        # TODO: Contact vLLM maintainers to add a `params_dtype` attribute to the `VocabParallelEmbedding` class.
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         self.params_dtype = params_dtype
