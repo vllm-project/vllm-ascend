@@ -53,7 +53,7 @@ RUN source /usr/local/Ascend/ascend-toolkit/set_env.sh && \
     python3 -m pip cache purge
 
 # Install modelscope (for fast download) and ray (for multinode)
-RUN python3 -m pip install modelscope ray && \
+RUN python3 -m pip install modelscope 'ray>=2.47.1' 'protobuf>3.20.0' && \
     python3 -m pip cache purge
 
 CMD ["/bin/bash"]
