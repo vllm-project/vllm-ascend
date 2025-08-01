@@ -628,50 +628,30 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
         if self.dp_size == 1:
             return maybe_padded_num_tokens, None, with_prefill, enable_dbo
-        if self.is_kv_producer and not envs_ascend.VLLM_ASCEND_ENABLE_CHUNK_MC2:
-            num_tokens_across_dp = torch.tensor([num_tokens] * self.dp_size,
-                                                device="cpu",
-                                                dtype=torch.int32)
-            return num_tokens, num_tokens_across_dp, True, enable_dbo
-        if self.is_kv_consumer and self.torchair_graph_enabled and len(
-                self.torchair_graph_batch_sizes
-        ) == 1 and not self.in_profile_run:
-            max_num_decode_tokens = self.torchair_graph_batch_sizes[0]
-            num_tokens_across_dp = torch.tensor([max_num_decode_tokens] *
-                                                self.dp_size,
-                                                device="cpu",
-                                                dtype=torch.int32)
-            return max_num_decode_tokens, num_tokens_across_dp, False, enable_dbo
 
-        num_tokens_across_dp = [0] * self.dp_size * 2
-        num_tokens_across_dp[self.dp_rank] = maybe_padded_num_tokens
-        num_tokens_across_dp[self.dp_size + self.dp_rank] = num_tokens
-        forward_metadata = torch.tensor(num_tokens_across_dp +
-                                        [with_prefill, not enable_dbo],
-                                        device="cpu",
-                                        dtype=torch.int32)
-        dist.all_reduce(forward_metadata, group=get_dp_group().cpu_group)
-        with_prefill = bool(forward_metadata[-2])
+        # Compose: all_reduce metadata (maybe_padded_num_tokens of each rank, with_prefill, enable_dbo)
+        forward_metadata = torch.zeros(self.dp_size + 2, dtype=torch.int32, device="cpu")
+        forward_metadata[self.dp_rank] = maybe_padded_num_tokens
+        forward_metadata[-2]   = int(with_prefill)
+        forward_metadata[-1]   = int(not enable_dbo)
+        dist.all_reduce(forward_metadata, group=get_dp_group().cpu_group) 
+        
+        # Unpack reduced flags: with_prefill, enable_dbo
+        with_prefill = bool(forward_metadata[-2].item())
+        enable_dbo = not bool(forward_metadata[-1].item())
 
-        # NOTE: when with_prefill is false before all_reduce and true after all_reduce, we need to revert pad.
-        if with_prefill:
-            num_tokens_across_dp = forward_metadata[self.dp_size:self.dp_size *
-                                                    2]
-            maybe_padded_num_tokens = num_tokens
-        else:
-            num_tokens_across_dp = forward_metadata[:self.dp_size]
+        # NOTE: Only in the decode phase and with torchair graph mode enabled do we need to pad each DP rank’s tokens to the global maximum; otherwise, keep the original num_tokens.
+        if not with_prefill and self.torchair_graph_enabled:
+            # pad to global max(maybe_padded_num_tokens)
+            global_max = int(forward_metadata[:self.dp_size].max().item())
+            num_tokens_across_dp = torch.full((self.dp_size,), global_max, dtype=torch.int32, device="cpu")
+            return  global_max, num_tokens_across_dp, with_prefill, enable_dbo
 
-        # NOTE: when in torchair_graph_mode, we need to pad local_num_tokens to
-        # `max_num_tokens_across_dp`, in other situation it is not necessary.
-        if self.torchair_graph_enabled and not with_prefill:
-            maybe_padded_num_tokens = torch.max(num_tokens_across_dp).item()
-            num_tokens_across_dp = torch.tensor([maybe_padded_num_tokens] *
-                                                self.dp_size,
-                                                device="cpu",
-                                                dtype=torch.int32)
-
-        return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, not bool(
-            forward_metadata[-1])
+        # else: need real (unpadded) tokens
+        num_tokens_across_dp = torch.zeros(self.dp_size, dtype=torch.int32, device="cpu")
+        num_tokens_across_dp[self.dp_rank] = num_tokens 
+        dist.all_reduce(num_tokens_across_dp, group=get_dp_group().cpu_group)
+        return num_tokens, num_tokens_across_dp, with_prefill, enable_dbo
 
     def _check_dbo_is_valid(self, query_lens: torch.Tensor,
                             attn_state: AscendAttentionState,
