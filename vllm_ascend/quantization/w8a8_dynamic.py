@@ -334,6 +334,29 @@ def fused_experts_with_mc2(
         return hidden_states, shared_output
 
 
+def init_routing_quant(hidden_states, top_k, topk_ids, global_num_experts):
+    num_tokens, _ = hidden_states.shape
+    row_idx_len = num_tokens * top_k
+    row_idx = (torch.arange(0,
+                            row_idx_len,
+                            dtype=torch.int32,
+                            device=hidden_states.device).view(
+                                top_k, -1).permute(1, 0).contiguous())
+    hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
+        hidden_states,
+        row_idx=row_idx,
+        expert_idx=topk_ids,
+        active_num=num_tokens)
+
+    expanded_row_idx = (expanded_row_idx.view(top_k, -1).permute(
+        1, 0).contiguous().view(-1))
+    global_expert_tokens = torch.bincount(expanded_expert_idx,
+                                          minlength=global_num_experts)
+    global_expert_tokens = global_expert_tokens.to(torch.int32)
+    quantized_tokens, token_scales = torch_npu.npu_dynamic_quant(hidden_states)
+    return quantized_tokens, expanded_row_idx, global_expert_tokens, token_scales
+
+
 # currently expert parallelism implemented with all2all
 # is under-optimized.
 def fused_experts_with_all2all(
@@ -358,7 +381,6 @@ def fused_experts_with_all2all(
 
     num_tokens, _ = hidden_states.shape
     num_experts = w1.shape[0]
-    device = hidden_states.device
 
     if expert_map is not None:
         global_num_experts = len(expert_map) + global_redundant_expert_num
@@ -378,23 +400,28 @@ def fused_experts_with_all2all(
             quantized_tokens, expanded_row_idx, global_expert_tokens, token_scales = init_routing_quant(
                 hidden_states, top_k, topk_ids, global_num_experts)
 
-        gather_sizes = global_expert_tokens.new_empty(global_expert_tokens.shape[0])
+        gather_sizes = global_expert_tokens.new_empty(
+            global_expert_tokens.shape[0])
         dist.all_to_all_single(gather_sizes, global_expert_tokens)
 
-        token_counts_combined = torch.stack([gather_sizes, global_expert_tokens], dim=0)
-        token_counts_combined = token_counts_combined.view(2, ep_group.world_size, -1).sum(dim=2)
-        token_counts_combined_cpu = token_counts_combined.to(torch.device("cpu"), non_blocking=True).numpy()
+        token_counts_combined = torch.stack(
+            [gather_sizes, global_expert_tokens], dim=0)
+        token_counts_combined = token_counts_combined.view(
+            2, ep_group.world_size, -1).sum(dim=2)
+        token_counts_combined_cpu = token_counts_combined.to(
+            torch.device("cpu"), non_blocking=True).numpy()
         all_tokens = gather_sizes.sum()
 
-        gathered_tokens = quantized_tokens.new_empty(
-            all_tokens.item(), quantized_tokens.shape[1]
-        )
+        gathered_tokens = quantized_tokens.new_empty(all_tokens.item(),
+                                                     quantized_tokens.shape[1])
         dynamic_scale = token_scales.new_empty(gathered_tokens.shape[0])
         gather_size_list = token_counts_combined_cpu[1]
         scatter_size_list = token_counts_combined_cpu[0]
 
-        dist.all_to_all_single(gathered_tokens, quantized_tokens, scatter_size_list, gather_size_list)
-        dist.all_to_all_single(dynamic_scale, token_scales, scatter_size_list, gather_size_list)
+        dist.all_to_all_single(gathered_tokens, quantized_tokens,
+                               scatter_size_list, gather_size_list)
+        dist.all_to_all_single(dynamic_scale, token_scales, scatter_size_list,
+                               gather_size_list)
 
         hidden_states, dynamic_scale, inverse_indices, expert_tokens = torch_npu.npu_moe_re_routing(
             gathered_tokens,
@@ -441,7 +468,7 @@ def fused_experts_with_all2all(
 
         hidden_states = reordered_outputs.new_empty(*quantized_tokens.shape)
         dist.all_to_all_single(hidden_states, reordered_outputs,
-                            gather_size_list, scatter_size_list)
+                               gather_size_list, scatter_size_list)
 
         final_hidden_states = torch_npu.npu_moe_finalize_routing(
             hidden_states,
