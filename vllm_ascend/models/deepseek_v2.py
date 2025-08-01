@@ -313,7 +313,8 @@ class CustomDeepseekV2MoE(nn.Module):
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_multistream_moe = \
-            ascend_config.torchair_graph_config.enable_multistream_moe
+            ascend_config.torchair_graph_config.enable_multistream_moe and \
+            self.torchair_graph_enabled
 
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.n_routed_experts,
