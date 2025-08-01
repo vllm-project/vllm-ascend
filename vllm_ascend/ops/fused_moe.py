@@ -57,7 +57,6 @@ from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
                                get_rm_router_logits_state, is_310p)
 
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
-SELECT_GATING_TOPK_SOTFMAX_EXPERTS: bool = envs_ascend.SELECT_GATING_TOPK_SOTFMAX_EXPERTS
 
 
 def process_topk_ids(topk_ids: torch.Tensor, expert_num: int, ep_size: int,
@@ -880,39 +879,6 @@ def fused_experts(
     return final_hidden_states
 
 
-def select_gating_top_k_softmax_experts(
-        hidden_states: torch.Tensor, router_logits: torch.Tensor, top_k: int,
-        renormalize: bool) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Select top-k experts based on router logits.
-    only supports float16、bfloat16、float32
-
-    Args:
-        hidden_states: Hidden states of shape (num_tokens, hidden_size).
-        router_logits: Router logits of shape (num_tokens, num_experts).
-        top_k: Number of experts to select.
-        renormalize: Whether to renormalize the routing weights.
-
-    Returns:
-        topk_weights: Routing weights of shape (num_tokens, top_k).
-        topk_ids: Selected expert IDs of shape (num_tokens, top_k).
-
-    Raises:
-        ValueError: If an unsupported scoring function is provided.
-    """
-    topk_weights, topk_ids, row_idx = torch_npu.npu_moe_gating_top_k_softmax(
-        router_logits, None, k=top_k)
-
-    # # Required by npu_moe_init_routing
-    # topk_weights = topk_weights.to(hidden_states.dtype)
-    # topk_ids = topk_ids.to(torch.int32)
-
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
-
-    return topk_weights, topk_ids
-
-
 def native_grouped_topk(
     topk_weights: torch.Tensor,
     num_expert_group: Optional[int],
@@ -974,8 +940,24 @@ def select_experts(
         ValueError: If an unsupported scoring function is provided.
     """
 
+    def _renormalize_topk_weights(
+        topk_weights: torch.Tensor,
+        renormalize: bool,
+    ):
+        if renormalize:
+            topk_weights = topk_weights / topk_weights.sum(dim=-1,
+                                                           keepdim=True)
+        return topk_weights
+
     if scoring_func == "softmax":
         # NOTE: vLLM use dtype=torch.float here
+        if not use_grouped_topk and custom_routing_function is None:
+            topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k_softmax(
+                x=router_logits, finished=None, k=top_k)
+            topk_ids = topk_ids.to(torch.int32)
+            topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+            return topk_weights, topk_ids
+
         topk_weights = router_logits.softmax(dim=-1)
     elif scoring_func == "sigmoid":
         topk_weights = router_logits.sigmoid()
@@ -1009,10 +991,11 @@ def select_experts(
                                                 k=top_k,
                                                 dim=-1,
                                                 sorted=False)
-    elif custom_routing_function is None:
-        topk_weights, topk_ids = topk_weights.topk(top_k, dim=-1)
-        topk_weights = topk_weights.to(hidden_states.dtype)
-    else:
+        topk_ids = topk_ids.to(torch.int32)
+        topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+        return topk_weights, topk_ids
+
+    if custom_routing_function is not None:
         topk_weights, topk_ids = custom_routing_function(
             hidden_states=hidden_states,
             gating_output=router_logits,
@@ -1023,11 +1006,12 @@ def select_experts(
         topk_ids = topk_ids.to(torch.int32)
         return topk_weights, topk_ids
 
+    topk_weights, topk_ids = topk_weights.topk(top_k, dim=-1)
+    topk_weights = topk_weights.to(hidden_states.dtype)
+
     # Required by npu_moe_init_routing
     topk_ids = topk_ids.to(torch.int32)
-
-    if renormalize:
-        topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True)
+    topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
     return topk_weights, topk_ids
 
@@ -1091,23 +1075,18 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         if is_deepseek_v3_r1:
             topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
                 router_logits,
-                k=top_k,  # topk当前写8
+                k=top_k,  # topk currently is 8
                 bias=e_score_correction_bias,
                 k_group=topk_group,  # fix: 4
                 group_count=num_expert_group,  # fix 8
-                group_select_mode=1,  # 0: group中的最大; 1: topk2.sum(fix)
+                group_select_mode=
+                1,  # 0: the maximum in the group; 1: topk2.sum(fix)
                 renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
                 norm_type=1,  # 0: softmax; 1: sigmoid(fix)
-                # out_flag=False, # todo new api; 第三个输出是否输出
-                # y2_flag=False, # old api; 第三个输出是否输出
+                # out_flag=False, # todo new api; should the third output be output
+                # y2_flag=False, # old api; should the third output be output
                 routed_scaling_factor=1,
                 eps=float(1e-20))
-        elif SELECT_GATING_TOPK_SOTFMAX_EXPERTS:
-            topk_weights, topk_ids = select_gating_top_k_softmax_experts(
-                hidden_states=x,
-                router_logits=router_logits,
-                top_k=top_k,
-                renormalize=renormalize)
         else:
             topk_weights, topk_ids = select_experts(
                 hidden_states=x,
@@ -1284,7 +1263,8 @@ class AscendFusedMoE(FusedMoE):
 
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_multistream_moe = \
-            ascend_config.torchair_graph_config.enable_multistream_moe
+            ascend_config.torchair_graph_config.enable_multistream_moe and \
+            self.torchair_graph_enabled
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
@@ -1520,6 +1500,8 @@ class AscendFusedMoE(FusedMoE):
                     e_hidden_states, dim=0)
                 final_hidden_states = final_hidden_states[:num_tokens]
                 dispose_tensor(e_hidden_states)
+            else:
+                final_hidden_states = e_hidden_states
         else:
             final_hidden_states = e_hidden_states
 
