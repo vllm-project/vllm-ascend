@@ -26,7 +26,12 @@ on HuggingFace model repository.
 
 import os
 import argparse
-import librosa
+
+from vllm.assets.audio import AudioAsset
+try:
+    import librosa
+except ImportError:
+    raise Exception("Can't import librosa, please ensure it's installed")
 
 from vllm import LLM, SamplingParams
 
@@ -35,8 +40,12 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 
 def prepare_inputs(audio_count: int, audio_path1: str, audio_path2: str):
-    audio_assets = [librosa.load(audio_path1, sr=None), librosa.load(audio_path2, sr=None)]
-    print("load audio_assets is done.")
+    use_vllm_audio_assert = True if audio_path1 == "mary_had_lamb" and audio_path2 == "winning_call" else False
+    if use_vllm_audio_assert:
+        audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
+    else:
+        audio_assets = [librosa.load(audio_path1, sr=None), librosa.load(audio_path2, sr=None)]
+
     question_per_audio_count = {
         1: "What is recited in the audio?",
         2: "What sport and what nursery rhyme are referenced?"
@@ -54,7 +63,7 @@ def prepare_inputs(audio_count: int, audio_path1: str, audio_path2: str):
 
     mm_data = {
         "audio":
-        audio_assets
+        audio_assets if not use_vllm_audio_assert else [asset.audio_and_sample_rate for asset in audio_assets[:audio_count]]
     }
 
     # Merge text prompt and audio data into inputs
@@ -88,8 +97,8 @@ def main(audio_count: int, audio_path1: str, audio_path2: str):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Arguments of rank table generator", )
-    parser.add_argument("--audio-path1", type=str, required=True)
-    parser.add_argument("--audio-path2", type=str, required=True)
+    parser.add_argument("--audio-path1", type=str, default="mary_had_lamb")
+    parser.add_argument("--audio-path2", type=str, default="winning_call")
     args = parser.parse_args()
 
     audio_count = 2
