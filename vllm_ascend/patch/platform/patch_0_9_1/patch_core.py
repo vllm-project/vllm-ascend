@@ -5,8 +5,11 @@ from typing import Optional
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.transformers_utils.config import \
     maybe_register_config_serialize_by_value
-from vllm.utils import logger
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 import vllm_ascend.envs as vllm_ascend_envs
 
