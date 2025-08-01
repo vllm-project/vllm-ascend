@@ -178,7 +178,7 @@ vllm serve /root/.cache/ds_v3 \
 ```
 
 The Deployment view looks like:
-![alt text](../assets/multi_node_dp.png)
+![alt text](../assets/multi_node_dp_deepseek.png)
 
 Once your server is started, you can query the model with input prompts:
 
