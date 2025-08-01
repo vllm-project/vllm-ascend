@@ -1,6 +1,89 @@
 # Adapted from https://github.com/vllm-project/vllm/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py
 
 # SPDX-License-Identifier: Apache-2.0
+#
+# Tutorial: Using the Load Balance Proxy Server Example
+#
+# This proxy server is designed to distribute requests between multiple
+# "prefiller" and "decoder" backend servers for large language model inference.
+# It is useful for scaling out inference workloads and balancing load across
+# multiple backend instances.
+#
+# Features:
+# - Load balances requests to multiple prefiller and decoder servers.
+# - Supports OpenAI-compatible /v1/completions and /v1/chat/completions endpoints.
+# - Streams responses from backend servers to clients.
+#
+# Prerequisites:
+# - Python 3.8+
+# - Install dependencies:
+#     pip install fastapi httpx uvicorn vllm
+#
+# Step 1: Start Your Backend Servers
+# ----------------------------------
+# You need to have at least one prefiller and one decoder backend running.
+# These can be mock servers or actual vLLM servers.
+#
+# For testing, you can use the provided mock server:
+#
+#   vllm serve --host 0.0.0.0 --port 8100 ... # Prefiller 1
+#   vllm serve --host 0.0.0.0 --port 8101 ... # Prefiller 2
+#   vllm serve --host 0.0.0.0 --port 8200 ... # Decoder 1
+#   vllm serve --host 0.0.0.0 --port 8201 ... # Decoder 2
+#
+# Step 2: Start the Proxy Server
+# ------------------------------
+# Run the proxy server, specifying the host/port for each prefiller and decoder:
+#
+#   python load_balance_proxy_server_example.py \
+#     --host 0.0.0.0 --port 9000 \
+#     --prefiller-hosts 127.0.0.1 127.0.0.1 \
+#     --prefiller-ports 8100 8101 \
+#     --decoder-hosts 127.0.0.1 127.0.0.1 \
+#     --decoder-ports 8200 8201
+#
+# This will start the proxy on port 9000, load balancing between two prefiller
+# and two decoder servers.
+#
+# Step 3: Send a Request to the Proxy
+# -----------------------------------
+# You can now send OpenAI-compatible requests to the proxy. For example:
+#
+#   curl -X POST http://localhost:9000/v1/completions \
+#     -H "Content-Type: application/json" \
+#     -d '{
+#           "model": "your-model",
+#           "prompt": "The quick brown fox jumps over the lazy dog",
+#           "max_tokens": 16
+#         }'
+#
+# Or for chat completions:
+#
+#   curl -X POST http://localhost:9000/v1/chat/completions \
+#     -H "Content-Type: application/json" \
+#     -d '{
+#           "model": "your-model",
+#           "messages": [{"role": "user", "content": "Hello!"}],
+#           "max_tokens": 16
+#         }'
+#
+# Step 4: Health Check
+# --------------------
+# To check if the proxy is running and see how many backend instances are
+# connected, use:
+#
+#   curl http://localhost:9000/healthcheck
+#
+# This will return a JSON object with the status and the number of prefiller
+# and decoder instances.
+#
+# Notes:
+# - You can scale the number of prefiller and decoder servers as needed.
+# - The proxy will round-robin requests to balance load.
+# - For production, ensure your backend servers are robust and secure.
+#
+# For more details, see the code and comments in this file.
+
 
 import argparse
 import asyncio
