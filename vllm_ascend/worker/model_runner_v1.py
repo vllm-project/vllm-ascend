@@ -85,7 +85,9 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
-from vllm_ascend.utils import ProfileExecuteDuration
+from vllm_ascend.utils import (ProfileExecuteDuration,
+                               check_torchair_cache_exist,
+                               write_kv_cache_bytes_to_file)
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 
 if TYPE_CHECKING:
@@ -218,6 +220,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.spec_token_num = 0
         self.decode_token_per_req = 1
         if self.speculative_config:
+            if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+                raise NotImplementedError(
+                    "DBO and mtp can't work at the same currently")
             self.use_spec_decode = True
             self.spec_token_num = self.speculative_config.num_speculative_tokens
             assert self.spec_token_num > 0
@@ -359,7 +364,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.attn_mask_len, self.dtype)
 
         self.sampler = Sampler()
-
+        self.new_kv_cache_bytes = -1
         self.torchair_compiled_model = None  # type: ignore
         self.torchair_compiled_models = {}  # type: ignore
         ascend_config = get_ascend_config()
@@ -1142,7 +1147,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if self.torchair_graph_enabled:
                     model_kwargs["kv_caches"] = self.kv_caches
                     model_kwargs["attn_metadata"] = attn_metadata
-                if envs_ascend.VLLM_ASCEND_ENABLE_DBO and with_prefill:
+                if envs_ascend.VLLM_ASCEND_ENABLE_DBO and self.model_config.is_deepseek_mla and with_prefill:
                     model_kwargs["graph_enable"] = False  # type: ignore
                 if self.torchair_graph_enabled and not with_prefill:
                     compiled_model = self._get_torchair_lazy_compiled_model(
@@ -1749,7 +1754,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         num_tokens)
                     model_kwargs["kv_caches"] = self.kv_caches
                     model_kwargs["attn_metadata"] = attn_metadata
-                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO and self.model_config.is_deepseek_mla:
                         model_kwargs["graph_enable"] = True  # type: ignore
                     hidden_states = compiled_model(
                         input_ids=input_ids,
@@ -1759,7 +1764,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         **model_kwargs,
                     )
                 else:
-                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+                    if envs_ascend.VLLM_ASCEND_ENABLE_DBO and self.model_config.is_deepseek_mla:
                         model_kwargs["graph_enable"] = False  # type: ignore
                     hidden_states = model(
                         input_ids=input_ids,
@@ -2063,6 +2068,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         return kv_cache_spec
 
+    def _compile_torchair_graph(self, torchair_graph_batch_sizes) -> None:
+        # Trigger torchair graph capture for specific shapes.
+        # Capture the large shapes first so that the smaller shapes
+        # can reuse the memory pool allocated for the large shapes.
+        for idx, num_tokens in enumerate(reversed(torchair_graph_batch_sizes)):
+            for _ in range(self.vllm_config.compilation_config.
+                           cudagraph_num_of_warmups):
+                self._dummy_run(num_tokens, is_torchair_compile=True)
+            self._dummy_run(num_tokens, is_torchair_compile=True)
+            logger.info("Batchsize %d is compiled successfully: %d/%d.",
+                        num_tokens, idx + 1, len(torchair_graph_batch_sizes))
+
     def capture_model(self) -> None:
         start_time = time.perf_counter()
         start_free_npu_memory = torch.npu.mem_get_info()[0]
@@ -2072,22 +2089,33 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.torchair_graph_enabled:
             torchair_graph_batch_sizes = self.torchair_graph_batch_sizes
             graph_num = len(torchair_graph_batch_sizes)
-            logger.info(
-                "Capturing torchair graph, this usually takes %.1f~%.1f mins.",
-                0.5 * graph_num, 1.5 * graph_num)
-            # Trigger torchair graph capture for specific shapes.
-            # Capture the large shapes first so that the smaller shapes
-            # can reuse the memory pool allocated for the large shapes.
-            for idx, num_tokens in enumerate(
-                    reversed(torchair_graph_batch_sizes)):
-                for _ in range(self.vllm_config.compilation_config.
-                               cudagraph_num_of_warmups):
-                    # NOTE: when in torchair graph and not with_prefill,
-                    # we don't need to set `skip_attn=False`
-                    self._dummy_run(num_tokens, is_torchair_compile=True)
-                self._dummy_run(num_tokens, is_torchair_compile=True)
-                logger.info("Batchsize %d is compiled successfully: %d/%d.",
-                            num_tokens, idx + 1, graph_num)
+            if self.use_cached_npu_graph and not check_torchair_cache_exist():
+                # If caching is enabled but does not exist, we will compile the model twice. The first
+                # time is used to generate the cache, and the second time is used to load the cache to
+                # skip the overhead caused by Dynamo guard mechanism.
+                logger.info(
+                    "Use cached npu graph but cache doesn't exist! Now we compile graph to genetate torchair cache, this usually takes %.1f~%.1f mins.",
+                    0.5 * graph_num, 1.5 * graph_num)
+                self._compile_torchair_graph(torchair_graph_batch_sizes)
+                NPUPlatform.synchronize()
+                torch._dynamo.reset()
+                self.torchair_compiled_models.clear()
+                if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
+                    self.drafter.torchair_compiled_models.clear()
+            if self.use_cached_npu_graph:
+                logger.info(
+                    "Loading torchair graph cache, this usually takes %.1f~%.1f mins.",
+                    0.3 * graph_num, 0.5 * graph_num)
+                self._compile_torchair_graph(torchair_graph_batch_sizes)
+            else:
+                logger.info(
+                    "Capturing torchair graph, this usually takes %.1f~%.1f mins.",
+                    0.5 * graph_num, 1.5 * graph_num)
+                self._compile_torchair_graph(torchair_graph_batch_sizes)
+
+            if self.new_kv_cache_bytes > 0:
+                write_kv_cache_bytes_to_file(torch.distributed.get_rank(),
+                                             self.new_kv_cache_bytes)
         elif self.use_aclgraph:
             # Trigger ACL graph capture for specific shapes.
             # Capture the large shapes first so that the smaller shapes
