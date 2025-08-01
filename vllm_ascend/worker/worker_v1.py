@@ -17,8 +17,8 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py
 #
 
-from typing import Optional
 import copy
+from typing import Optional
 
 import torch
 import torch.nn as nn

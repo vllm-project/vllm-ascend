@@ -1482,8 +1482,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
             finished_sending=finished_sending,
-            finished_recving=finished_receiving
-        )
+            finished_recving=finished_receiving)
 
     @torch.inference_mode()
     def execute_model(
@@ -1530,7 +1529,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             else:
                 if self.input_batch.pooling_params:
                     return self._pool(hidden_states, num_scheduled_tokens,
-                                      num_scheduled_tokens_np, finished_sending, finished_recving)
+                                      num_scheduled_tokens_np,
+                                      finished_sending, finished_recving)
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states, None)
             if broadcast_pp_output:
