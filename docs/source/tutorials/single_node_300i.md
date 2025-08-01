@@ -84,7 +84,7 @@ curl http://localhost:8000/v1/completions \
 
 ::::
 
-::::{tab-item} Qwen/Qwen2.5-7B-Instruct
+::::{tab-item} Qwen2.5-7B-Instruct
 :sync: qwen7b
 
 Run the following command to start the vLLM server:
