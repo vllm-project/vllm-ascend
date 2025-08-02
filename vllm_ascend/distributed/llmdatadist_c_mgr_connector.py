@@ -813,10 +813,8 @@ class LLMDataDistCMgrConnectorWorker():
         url = f"tcp://{host}:{port}"
         logger.info(f"Sending checking to remote: {url}")
         msg_encoder = msgspec.msgpack.Encoder()
-        msg_send = msg_encoder.encode([
-            LLMDataDistCMgrEvent.ReqForChecking,
-            [request_id]
-        ])
+        msg_send = msg_encoder.encode(
+            [LLMDataDistCMgrEvent.ReqForChecking, [request_id]])
         with zmq_ctx(zmq.REQ, url) as sock:  # type: ignore[attr-defined]
             try:
                 sock.send(msg_send)
@@ -855,7 +853,7 @@ class LLMDataDistCMgrConnectorWorker():
 
         logger.info(f"remote cluster id is: {remote_cluster_id}")
         if not self.send_checking_to_prefill_node(remote_ip, remote_port,
-                                                  request_id):            
+                                                  request_id):
             raise RuntimeError(
                 "Remote prefill node has already free blocks, skipping pull blocks"
             )
@@ -910,7 +908,7 @@ class LLMDataDistCMgrConnectorWorker():
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         """Get the finished recving and sending requuests."""
         now = time.perf_counter()
-        
+
         with self.thread_lock:
             while self.reqs_to_send:
                 req_id, expires = next(iter(self.reqs_to_send.items()))
