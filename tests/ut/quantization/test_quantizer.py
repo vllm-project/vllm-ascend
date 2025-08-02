@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 from tests.ut.base import TestBase
 from vllm_ascend.quantization.quant_config import AscendQuantConfig
 from vllm_ascend.quantization.quantizer import (VLLMAscendQuantizer,
+                                                W4A8DYNAMICQuantizer,
                                                 W8A8Quantizer)
 
 SUPPORT_ASCEND_QUANTIZER_TYPE = {"test": "1"}
@@ -119,4 +120,26 @@ class TestW8A8Quantizer(TestBase):
                    return_value=MagicMock()) as mock_linear:
             result = self.quantizer.build_attention_method()
             mock_linear.assert_called_once_with()
+            self.assertIsInstance(result, MagicMock)
+
+
+class TestW4A8DYNAMICQuantizer(TestBase):
+
+    def setUp(self):
+        self.quantizer = W4A8DYNAMICQuantizer(quant_description={})
+
+    def test_build_linear_method(self):
+        with patch(
+                'vllm_ascend.quantization.quantizer.AscendW4A8DynamicLinearMethod',
+                return_value=MagicMock()) as mock_linear:
+            result = self.quantizer.build_linear_method()
+            mock_linear.assert_called_once_with()
+            self.assertIsInstance(result, MagicMock)
+
+    def test_build_moe_method(self):
+        with patch(
+                'vllm_ascend.quantization.quantizer.AscendW4A8DynamicFusedMoEMethod',
+                return_value=MagicMock()) as mock_fused_moe:
+            result = self.quantizer.build_moe_method()
+            mock_fused_moe.assert_called_once_with()
             self.assertIsInstance(result, MagicMock)

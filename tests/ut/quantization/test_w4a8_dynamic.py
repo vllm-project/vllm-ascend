@@ -1,7 +1,10 @@
+from unittest.mock import Mock, patch
+
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.quantization.w4a8_dynamic import AscendW4A8DynamicLinearMethod
+from vllm_ascend.quantization.w4a8_dynamic import (
+    AscendW4A8DynamicFusedMoEMethod, AscendW4A8DynamicLinearMethod)
 
 
 class TestAscendW4A8DynamicLinearMethod(TestBase):
@@ -25,3 +28,43 @@ class TestAscendW4A8DynamicLinearMethod(TestBase):
         self.assertEqual(params["weight_scale_second"].shape, (32, 1))
         self.assertEqual(params["weight_offset_second"].dtype, torch.bfloat16)
         self.assertEqual(params["weight_offset_second"].shape, (32, 1))
+
+
+class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
+
+    @patch('vllm_ascend.quantization.w4a8_dynamic.get_ep_group')
+    @patch("vllm_ascend.ascend_config.get_ascend_config")
+    @patch('vllm_ascend.quantization.w4a8_dynamic.get_mc2_group')
+    @patch('torch.distributed.get_rank', return_value=0)
+    def setUp(self, mock_get_ep_group, mock_get_ascend_config,
+              mock_get_mc2_group, mock_get_rank):
+        mock_ascend_config = Mock()
+        mock_ascend_config.torchair_graph_config = Mock(enabled=False)
+        mock_get_ascend_config.return_value = mock_ascend_config
+        self.quant_method = AscendW4A8DynamicFusedMoEMethod()
+
+    def test_get_weight(self):
+        param_dict = self.quant_method.get_weight(8, 4, 14, torch.bfloat16)
+        self.assertEqual(param_dict["w13_weight"].dtype, torch.int8)
+        self.assertEqual(param_dict["w13_weight"].shape, (8, 8, 14))
+
+    @patch('vllm_ascend.quantization.w4a8_dynamic.get_current_vllm_config')
+    def test_get_dynamic_quant_param(self, mock_get_current_vllm_config):
+        mock_vllm_config = Mock()
+        mock_vllm_config.quant_config = Mock(
+            quant_description={"group_size": 2})
+        mock_get_current_vllm_config.return_value = mock_vllm_config
+        param_dict = self.quant_method.get_dynamic_quant_param(
+            8, 4, 14, torch.bfloat16)
+        self.assertEqual(param_dict["w13_weight_scale"].dtype, torch.bfloat16)
+        self.assertEqual(param_dict["w13_weight_scale"].shape, (8, 8, 1))
+        self.assertEqual(param_dict["w13_weight_scale_second"].dtype,
+                         torch.bfloat16)
+        self.assertEqual(param_dict["w13_weight_scale_second"].shape,
+                         (8, 8, 7))
+        self.assertEqual(param_dict["w2_weight_scale"].dtype, torch.bfloat16)
+        self.assertEqual(param_dict["w2_weight_scale"].shape, (8, 14, 1))
+        self.assertEqual(param_dict["w2_weight_scale_second"].dtype,
+                         torch.bfloat16)
+        self.assertEqual(param_dict["w2_weight_scale_second"].shape,
+                         (8, 14, 2))
