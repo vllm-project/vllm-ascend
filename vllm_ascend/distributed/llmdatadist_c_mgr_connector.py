@@ -1,3 +1,4 @@
+import copy
 import contextlib
 import json
 import math
@@ -44,7 +45,8 @@ TORCH_DTYPE_TO_NPU_DTYPE = {
 
 class LLMDataDistCMgrEvent(Enum):
     ReqForMetadata = 0
-    ReqForFinished = 1
+    ReqForChecking = 1
+    ReqForFinished = 2
 
 
 class LLMDataDistCMgrAgentMetadata(msgspec.Struct):
@@ -134,9 +136,8 @@ class LLMDataDistCMgrConnector(KVConnectorBase_V1):
     ############################################################
     def register_kv_caches(
             self,
-            kv_caches: dict[
-                str,  # type: ignore[override]
-                Tuple[torch.Tensor]]):
+            kv_caches: dict[str,  # type: ignore[override]
+                            Tuple[torch.Tensor]]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
@@ -184,6 +185,7 @@ class LLMDataDistCMgrConnectorScheduler():
         self.port = dp_rank_local * tp_size + envs.VLLM_LLMDD_RPC_PORT if dp_rank_local is not None else tp_size + envs.VLLM_LLMDD_RPC_PORT
 
         self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
+        self._reqs_need_send: dict[str, float] = {}
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -248,7 +250,12 @@ class LLMDataDistCMgrConnectorScheduler():
             meta.add_new_req(request_id=req_id,
                              local_block_ids=block_ids,
                              kv_transfer_params=req.kv_transfer_params)
+
+        meta.reqs_to_send = copy.deepcopy(self._reqs_need_send)
+
+        # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()
+        self._reqs_need_send.clear()
 
         return meta
 
@@ -272,9 +279,14 @@ class LLMDataDistCMgrConnectorScheduler():
         # note: there might be some issue on this, check it if there is any unexpected result
         computed_block_ids = block_ids
         delay_free_blocks = len(computed_block_ids) > 0
+
         if delay_free_blocks:
             logger.info("Delaying free of %d blocks for request %s",
                         len(computed_block_ids), request.request_id)
+            # Prefill request on remote. It will be read from D upon completion
+            self._reqs_need_send[request.request_id] = time.perf_counter(
+            ) + envs.VLLM_LLMDD_ABORT_REQUEST_TIMEOUT
+
         return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
@@ -331,9 +343,7 @@ class LLMDataDistCMgrConnectorWorker():
         self.prefill_device_list: list[tuple[int, int]] = []
         self.decode_device_list: list[tuple[int, int]] = []
         global_rank_table = self.read_offline_rank_table()
-        self.local_agent_metadata = self.read_agent_metadata(
-            global_rank_table, self.local_ip, self.local_rank_on_node,
-            self.llm_datadist_role)
+        self.local_agent_metadata = self.read_agent_metadata(global_rank_table)
         self.llm_datadist = LLMDataDist(self.llm_datadist_role,
                                         self.local_agent_metadata.cluster_id)
         self.init_llm_datadist()
@@ -343,6 +353,7 @@ class LLMDataDistCMgrConnectorWorker():
         os.environ["HCCL_DETERMINISTIC"] = "true"
         self.done_receiving_counts: defaultdict[str,
                                                 set[int]] = defaultdict(set)
+        self.reqs_to_send: dict[str, float] = {}
 
     def listen_for_agent_metadata_req(self, event: threading.Event):
         assert self.local_agent_metadata is not None
@@ -375,6 +386,13 @@ class LLMDataDistCMgrConnectorWorker():
                         logger.warning(
                             f"LLMDataDistCMgrConnectorWorker: receiving unrecognized data {decode_msg}"
                         )
+                elif event_msg == LLMDataDistCMgrEvent.ReqForChecking:
+                    finished_req_id = decode_msg[0]
+                    checking = 1
+                    with self.thread_lock:
+                        checking = 1 if finished_req_id in self.reqs_to_send else 0
+                    checking_to_send = msg_encoder.encode(checking)
+                    sock.send_multipart((identity, b"", checking_to_send))
                 elif event_msg == LLMDataDistCMgrEvent.ReqForFinished:
                     finished_req_id = decode_msg[0]
                     decode_tp_rank = decode_msg[1]
@@ -387,6 +405,7 @@ class LLMDataDistCMgrConnectorWorker():
                                 f"LLMDataDistCMgrConnectorWorker: Receiving request {finished_req_id} finished"
                             )
                             self.finished_reqs.add(finished_req_id)
+                            del self.reqs_to_send[finished_req_id]
                     sock.send_multipart(
                         (identity, b"", b"receiving decode finished"))
                 else:
@@ -448,8 +467,22 @@ class LLMDataDistCMgrConnectorWorker():
         # global_rank_table = json.dumps(global_rank_table)
         return global_rank_table
 
-    def read_agent_metadata(self, global_rank_table, server_id, device_rank,
-                            agent_role):
+    @staticmethod
+    def _get_visible_devices() -> list[int]:
+        """
+        Get the visible NPU devices in the current environment.
+        Returns: a list of physical device IDs that are visible to the process.
+        """
+        visible_devices = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
+        if not visible_devices:
+            return list(range(torch.npu.device_count()))
+        return [int(device_id) for device_id in visible_devices.split(",")]
+
+    def read_agent_metadata(self, global_rank_table):
+        visible_devices = [
+            str(x)
+            for x in LLMDataDistCMgrConnectorWorker._get_visible_devices()
+        ]
         devices_type_list = []
         agent_metadata = None
         if self.llm_datadist_role == LLMRole.PROMPT:
@@ -462,11 +495,12 @@ class LLMDataDistCMgrConnectorWorker():
         for device_type in devices_type_list:
             device_list = global_rank_table[device_type]
             device_list = [
-                d for d in device_list if d.get("server_id") == server_id
+                d for d in device_list if d.get("server_id") == self.local_ip
+                and d.get("device_id") in visible_devices
             ]
-            if len(device_list) <= device_rank:
+            if len(device_list) <= self.tp_rank:
                 continue
-            device_info = device_list[device_rank]
+            device_info = device_list[self.tp_rank]
             super_pod_id_ = device_info.get("super_pod_id", None)
             server_id_ = device_info["server_id"]
             device_id_ = device_info["device_id"]
@@ -481,7 +515,7 @@ class LLMDataDistCMgrConnectorWorker():
                 super_device_id=super_device_id_,
                 cluster_id=cluster_id_,
             )
-        assert agent_metadata is not None, f"Can't read the target server_id {server_id} and device_rank {device_rank} from rank table"
+        assert agent_metadata is not None, f"Can't read the target server_id {self.local_ip} and device_id {visible_devices[self.tp_rank]} from rank table"
         return agent_metadata
 
     def register_kv_caches(self, kv_caches: dict[str, Tuple[torch.Tensor]]):
@@ -594,6 +628,7 @@ class LLMDataDistCMgrConnectorWorker():
 
         for future in futures:
             future.add_done_callback(handle_exception)
+        self.reqs_to_send.update(metadata._reqs_need_send)
 
     def add_remote_agent(self, metadata: LLMDataDistCMgrAgentMetadata) -> int:
         assert self.local_agent_metadata is not None
@@ -775,6 +810,28 @@ class LLMDataDistCMgrConnectorWorker():
                 logger.error(
                     f"Failed to send reqest_id {request_id} to prefill: {e}")
 
+    def send_checking_to_prefill_node(self, host: str, port: int, request_id):
+        url = f"tcp://{host}:{port}"
+        logger.info(f"Sending checking to remote: {url}")
+        msg_encoder = msgspec.msgpack.Encoder()
+        msg_send = msg_encoder.encode([
+            LLMDataDistCMgrEvent.ReqForChecking,
+            [request_id]
+        ])
+        with zmq_ctx(zmq.REQ, url) as sock:  # type: ignore[attr-defined]
+            try:
+                sock.send(msg_send)
+                logger.info(
+                    f"Request id {request_id} checking message send to remote {url}"
+                )
+                checking_bytes = sock.recv()
+                decoder = msgspec.msgpack.Decoder()
+                checking_flag = decoder.decode(checking_bytes)
+                return checking_flag
+            except Exception as e:
+                logger.error(
+                    f"Failed to send reqest_id {request_id} to prefill: {e}")
+
     def _read_blocks(
         self,
         local_block_ids: list[int],
@@ -798,6 +855,10 @@ class LLMDataDistCMgrConnectorWorker():
             remote_block_ids = remote_block_ids[-num_local_blocks:]
 
         logger.info(f"remote cluster id is: {remote_cluster_id}")
+        if not self.send_checking_to_prefill_node(remote_ip, remote_port, request_id):
+            raise RuntimeError(
+                    "Remote prefill node has already free blocks, skipping pull blocks"
+                )
         if self.use_mla:
             remote_cache_key_k_normed = BlocksCacheKey(
                 cluster_id=remote_cluster_id, model_id=0)
@@ -848,8 +909,19 @@ class LLMDataDistCMgrConnectorWorker():
         self, finished_req_ids: set[str]
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         """Get the finished recving and sending requuests."""
-        import copy
+        now = time.perf_counter()
+        
         with self.thread_lock:
+            while self.reqs_to_send:
+                req_id, expires = next(iter(self.reqs_to_send.items()))
+                if now < expires:
+                    break
+                logger.warning(
+                            "Some requests in prefill node fail to receive KV Cache transfer done signal. "
+                            "If a greater mean TTFT is acceptable, you can 'export VLLM_LLMDD_ABORT_REQUEST_TIMEOUT=600' (10 minutes) to relax the timeout condition. "
+                        )
+                self.finished_reqs.add(req_id)
+                del self.reqs_to_send[req_id]
             req_ids_to_ret = copy.deepcopy(self.finished_reqs)
             self.finished_reqs.clear()
         if self.llm_datadist_role == LLMRole.PROMPT:
