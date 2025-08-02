@@ -951,8 +951,13 @@ class AscendW8A8DynamicFusedMoEMethod:
                 1, 2).contiguous()
             layer.w2_weight.data = layer.w2_weight.data.transpose(
                 1, 2).contiguous()
+
+        torch_npu.npu_format_cast_(layer.w13_weight, 29)
+        torch_npu.npu_format_cast_(layer.w2_weight, 29)
+
         if envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP:
             torch_npu.npu_format_cast_(layer.w2_weight, ACL_FORMAT_FRACTAL_NZ)
+
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
             layer.w13_weight_scale.data.shape[0], -1)
         layer.w13_weight_scale_fp32 = layer.w13_weight_scale.data.to(
