@@ -144,6 +144,7 @@ class NPUWorker(WorkerBase):
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = NPUModelRunner(self.vllm_config, device)
 
+    @torch.inference_mode()
     def determine_available_memory(self) -> int:
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
