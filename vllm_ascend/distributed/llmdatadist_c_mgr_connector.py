@@ -1,5 +1,5 @@
-import copy
 import contextlib
+import copy
 import json
 import math
 import os
@@ -136,8 +136,9 @@ class LLMDataDistCMgrConnector(KVConnectorBase_V1):
     ############################################################
     def register_kv_caches(
             self,
-            kv_caches: dict[str,  # type: ignore[override]
-                            Tuple[torch.Tensor]]):
+            kv_caches: dict[
+                str,  # type: ignore[override]
+                Tuple[torch.Tensor]]):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
@@ -795,10 +796,8 @@ class LLMDataDistCMgrConnectorWorker():
         url = f"tcp://{host}:{port}"
         logger.debug(f"Sending finished to remote: {url}")
         msg_encoder = msgspec.msgpack.Encoder()
-        msg_send = msg_encoder.encode([
-            LLMDataDistCMgrEvent.ReqForFinished,
-            [request_id, self.tp_rank, self.tp_size]
-        ])
+        msg_send = msg_encoder.encode(
+            [LLMDataDistCMgrEvent.ReqForChecking, [request_id]])
         with zmq_ctx(zmq.REQ, url) as sock:  # type: ignore[attr-defined]
             try:
                 sock.send(msg_send)
@@ -855,10 +854,11 @@ class LLMDataDistCMgrConnectorWorker():
             remote_block_ids = remote_block_ids[-num_local_blocks:]
 
         logger.info(f"remote cluster id is: {remote_cluster_id}")
-        if not self.send_checking_to_prefill_node(remote_ip, remote_port, request_id):
+        if not self.send_checking_to_prefill_node(remote_ip, remote_port,
+                                                  request_id):            
             raise RuntimeError(
-                    "Remote prefill node has already free blocks, skipping pull blocks"
-                )
+                "Remote prefill node has already free blocks, skipping pull blocks"
+            )
         if self.use_mla:
             remote_cache_key_k_normed = BlocksCacheKey(
                 cluster_id=remote_cluster_id, model_id=0)
@@ -917,9 +917,9 @@ class LLMDataDistCMgrConnectorWorker():
                 if now < expires:
                     break
                 logger.warning(
-                            "Some requests in prefill node fail to receive KV Cache transfer done signal. "
-                            "If a greater mean TTFT is acceptable, you can 'export VLLM_LLMDD_ABORT_REQUEST_TIMEOUT=600' (10 minutes) to relax the timeout condition. "
-                        )
+                    "Some requests in prefill node fail to receive KV Cache transfer done signal. "
+                    "If a greater mean TTFT is acceptable, you can 'export VLLM_LLMDD_ABORT_REQUEST_TIMEOUT=600' (10 minutes) to relax the timeout condition. "
+                )
                 self.finished_reqs.add(req_id)
                 del self.reqs_to_send[req_id]
             req_ids_to_ret = copy.deepcopy(self.finished_reqs)
