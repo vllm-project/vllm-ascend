@@ -54,9 +54,6 @@ class AscendConfig:
         self.num_wait_worker_iterations = additional_config.get(
             "num_wait_worker_iterations", 30
         )  # Number of iterations to wait before applying a redistribution plan
-        self.chunked_prefill_for_mla = additional_config.get(
-            "chunked_prefill_for_mla",
-            False)  # Whether to enable the fused operator-like chunked_prefill
         self.enable_weight_nz_layout = additional_config.get(
             "enable_weight_nz_layout", False
         )  # Whether to convert quantized weights to NZ format to accelerate matrix multiplication

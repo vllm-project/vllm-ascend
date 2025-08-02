@@ -71,8 +71,6 @@ vllm serve /models/deepseek_r1_w8a8 \
   "engine_id": "0",
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
-  --additional-config \
-  '{"chunked_prefill_for_mla":true}' 
 ```
 
 Run prefill server P2 on second node:
@@ -115,8 +113,6 @@ vllm serve /models/deepseek_r1_w8a8 \
   "engine_id": "0",
   "kv_connector_module_path": "vllm_ascend.distributed.llmdatadist_c_mgr_connector"
   }'  \
-  --additional-config \
-  '{"chunked_prefill_for_mla":true}'
 ```
 
 Run decode server d1 on third node:
