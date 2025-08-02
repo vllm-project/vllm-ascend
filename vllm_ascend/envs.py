@@ -154,6 +154,11 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # this feature is supported in A2, and eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", '0'))),
+    # Whether to enable the alltoall_seq flag, this provides a basic framework on the basis of alltoall for easy expansion.
+    #   0: default, normal init.
+    #   1: enable moe all2all seq.
+    "VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ":
+    lambda: bool(int(os.getenv('VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ', '0'))),
 }
 
 # end-env-vars-definition
