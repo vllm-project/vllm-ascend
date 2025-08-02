@@ -24,6 +24,7 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -65,10 +66,6 @@ class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         nn.Module.__init__(self)
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-        )
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -94,13 +91,13 @@ class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
         inputs_embeds: Optional[torch.Tensor] = None,
         spec_step_index: int = 0,
     ) -> torch.Tensor:
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
-        inputs_embeds = torch.where((positions == 0).unsqueeze(-1),
-                                    torch.zeros_like(inputs_embeds),
-                                    inputs_embeds)
+        forward_context = get_forward_context()
+        if forward_context.with_prefill:
+            inputs_embeds = torch.where((positions == 0).unsqueeze(-1),
+                                        torch.zeros_like(inputs_embeds),
+                                        inputs_embeds)
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
@@ -136,6 +133,10 @@ class CustomDeepSeekMultiTokenPredictor(DeepSeekMultiTokenPredictor):
             for idx in range(self.mtp_start_layer_idx,
                              self.mtp_start_layer_idx + self.num_mtp_layers)
         })
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+        )
 
         # Note: torch._dynamo.exc.Unsupported: builtin: str
         self.layers_list = [
@@ -155,6 +156,8 @@ class CustomDeepSeekMultiTokenPredictor(DeepSeekMultiTokenPredictor):
         inputs_embeds: Optional[torch.Tensor] = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
         current_step_idx = (spec_step_idx % self.num_mtp_layers)
         step_kv_cache = kv_caches[
             current_step_idx] if kv_caches is not None else None
