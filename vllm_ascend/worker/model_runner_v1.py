@@ -1119,11 +1119,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
          enable_dbo) = self._get_forward_metadata_across_dp(
              maybe_padded_num_tokens, total_num_scheduled_tokens, with_prefill)
 
+        self.with_prefill = with_prefill
+        self.num_tokens_across_dp = num_tokens_across_dp
         if self.torchair_graph_enabled and not with_prefill:
-            graph_pad_size = padded_num_tokens_across_dp - total_num_scheduled_tokens
-
-            extra_builder_kwargs['graph_pad_size'] = graph_pad_size
-        self.graph_pad_size = graph_pad_size
+            self.graph_pad_size = padded_num_tokens_across_dp
+            extra_builder_kwargs['graph_pad_size'] = self.graph_pad_size
+        else:
+            self.graph_pad_size = -1
 
         if self.vllm_config.model_config.use_mla:
             extra_builder_kwargs[
@@ -1778,10 +1780,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # has num_tokens in total.
         assert num_tokens <= self.scheduler_config.max_num_batched_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
-        if not with_prefill:
+        if with_prefill:
+            num_reqs = num_tokens
+        else:
             num_reqs = (num_tokens + self.decode_token_per_req -
                         1) // self.decode_token_per_req
-        num_reqs = min(num_tokens, max_num_reqs)
+        num_reqs = min(num_reqs, max_num_reqs)
         min_tokens_per_req = num_tokens // num_reqs
         num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
         num_scheduled_tokens_list[-1] += num_tokens % num_reqs
@@ -1903,7 +1907,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.drafter.dummy_run(
                     num_tokens=num_tokens,
                     with_prefill=with_prefill,
-                    num_reqs=num_reqs)
+                    skip_attn=skip_attn,
+                    num_reqs=num_reqs,
+                    num_tokens_across_dp=num_tokens_across_dp)
 
             return hidden_states
 
@@ -2658,7 +2664,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             f"cur batch_size is invalid, torchair_graph_batch_sizes is "
             f"{self.torchair_graph_batch_sizes}, but cur batch_size is {batch_size}."
         )
-    
+
     def check_torchair_graph_batch_sizes(self):
         # return graph_batch_sizes according to the max number of tokens
         # first pad according to the number of requests

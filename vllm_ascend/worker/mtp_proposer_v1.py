@@ -16,8 +16,6 @@ from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
-from vllm_ascend.attention.utils import \
-    AscendCommonAttentionMetadata as CommonAttentionMetadata
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
 from vllm_ascend.utils import ProfileExecuteDuration
 
@@ -33,6 +31,7 @@ class MtpProposer:
         self.num_speculative_tokens = (
             vllm_config.speculative_config.num_speculative_tokens)
         self.block_size = vllm_config.cache_config.block_size
+        self.hidden_size = vllm_config.model_config.get_hidden_size()
         self.runner = runner
         # persistent buffers for graph
         self.input_ids = torch.zeros(self.runner.max_num_tokens,
@@ -42,7 +41,7 @@ class MtpProposer:
                                      dtype=torch.int64,
                                      device=self.runner.device)
         self.hidden_states = torch.zeros(
-            (self.runner.max_num_tokens, self.runner.hidden_size),
+            (self.runner.max_num_tokens, self.hidden_size),
             dtype=self.runner.dtype,
             device=self.runner.device)
         self.torchair_compiled_model = None  # type: ignore
@@ -123,11 +122,8 @@ class MtpProposer:
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         if token_indices is not None and self.runner.torchair_graph_enabled:
             last_token_indices = token_indices
-            common_attn_metadata = self.runner.common_attn_metadata
         else:
             seq_lens = (target_positions[last_token_indices] + 1)
-            common_attn_metadata = CommonAttentionMetadata(
-                query_start_loc=cu_num_tokens, seq_lens=seq_lens)
 
         self.input_ids[last_token_indices] = next_token_ids
 
@@ -144,14 +140,13 @@ class MtpProposer:
         #     input_batch=self.runner.input_batch,
         #     scheduler_output=self.runner.scheduler_output,
         # )
-        extra_builder_kwargs = self.runner.extra_builder_kwargs
+        extra_builder_kwargs = {}
 
         is_running_torchair = self.runner.torchair_graph_enabled and \
             not self.runner.with_prefill
 
         if is_running_torchair:
-            extra_builder_kwargs[
-                'graph_pad_size'] = self.runner.graph_pad_size
+            extra_builder_kwargs['graph_pad_size'] = self.runner.graph_pad_size
             num_input_tokens = self.runner.graph_pad_size
         else:
             extra_builder_kwargs['graph_pad_size'] = -1
@@ -161,15 +156,14 @@ class MtpProposer:
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
+            query_start_loc=cu_num_tokens,
             **extra_builder_kwargs)
 
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
 
         if attn_metadata.prefill is not None:
-            attn_metadata.prefill.query_lens = query_lens
+            attn_metadata.prefill.query_lens = query_lens.cpu()
             attn_metadata.prefill.input_positions = target_positions
 
         if not self.runner.torchair_graph_enabled:
@@ -293,8 +287,9 @@ class MtpProposer:
                 torch._dynamo.mark_static(previous_hidden_states)
                 torch._dynamo.mark_static(attn_metadata.decode.block_table)
                 torch._dynamo.mark_static(attn_metadata.decode.input_positions)
-                torch._dynamo.mark_static(attn_metadata.decode.sin)
-                torch._dynamo.mark_static(attn_metadata.decode.cos)
+                if hasattr(attn_metadata.decode, "sin"):
+                    torch._dynamo.mark_static(attn_metadata.decode.sin)
+                    torch._dynamo.mark_static(attn_metadata.decode.cos)
                 torch._dynamo.mark_static(get_forward_context().mc2_mask)
                 torch._dynamo.mark_static(attn_metadata.slot_mapping)
                 torch._dynamo.mark_static(attn_metadata.decode.attn_mask)

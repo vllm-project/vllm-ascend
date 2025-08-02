@@ -328,13 +328,13 @@ class AscendMLAMetadataBuilder:
                                      -1,
                                      dtype=torch.int32,
                                      device=device)
-        sin = torch.ones(num_reqs,
+        sin = torch.ones(num_tokens,
                          1,
                          1,
                          self.rope_dim,
                          dtype=self.runner.dtype,
                          device=device)
-        cos = torch.ones(num_reqs,
+        cos = torch.ones(num_tokens,
                          1,
                          1,
                          self.rope_dim,
@@ -493,6 +493,7 @@ class AscendMLAMetadataBuilder:
                     AscendAttentionState.SpecDecoding
             ]:
                 num_reqs_pad_size = 0
+                num_token_pad_size = 0
                 if graph_pad_size != 0:
                     pad_value = 0
                     num_token_pad_size = graph_pad_size - self._num_decode_tokens
