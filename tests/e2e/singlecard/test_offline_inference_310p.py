@@ -16,6 +16,7 @@
 # This file is a part of the vllm-ascend project.
 import pytest
 import vllm  # noqa: F401
+from vllm import SamplingParams
 
 import vllm_ascend  # noqa: F401
 from tests.e2e.conftest import VllmRunner
@@ -42,3 +43,30 @@ def test_models(model: str, dtype: str, max_tokens: int) -> None:
                         ["none", "+rms_norm", "+rotary_embedding"]
                     }) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+VL_MODELS = ["Qwen/Qwen2.5-VL-3B-Instruct"]
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["float16"])
+def test_vl_model_with_samples(model: str, dtype: str) -> None:
+    example_prompts = [
+        "Hello, my name is",
+        "The future of AI is",
+    ]
+
+    with VllmRunner(model,
+                    tensor_parallel_size=1,
+                    dtype=dtype,
+                    max_model_len=2048,
+                    enforce_eager=True,
+                    compilation_config={
+                        "custom_ops":
+                        ["none", "+rms_norm", "+rotary_embedding"]
+                    }) as vllm_model:
+        sampling_params = SamplingParams(max_tokens=100,
+                                         top_p=0.95,
+                                         top_k=50,
+                                         temperature=0.6)
+        vllm_model.generate(example_prompts, sampling_params)
