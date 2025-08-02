@@ -157,6 +157,28 @@ def test_models_distributed_topk() -> None:
         vllm_model.generate(example_prompts, sampling_params)
 
 
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ": "1"})
+def test_models_distributed_alltoallv() -> None:
+    example_prompts = [
+        "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
+        "Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.",
+        "Compare and contrast artificial intelligence with human intelligence in terms of processing information.",
+    ]
+    dtype = "half"
+    sampling_params = SamplingParams(max_tokens=5,
+                                     temperature=0.0,
+                                     top_k=50,
+                                     top_p=0.9)
+
+    with VllmRunner(
+            "deepseek-ai/DeepSeek-V2-Lite",
+            dtype=dtype,
+            tensor_parallel_size=2,
+            distributed_executor_backend="mp",
+    ) as vllm_model:
+        vllm_model.generate(example_prompts, sampling_params)
+
+
 def test_models_distributed_Qwen3_W8A8():
     example_prompts = [
         "Hello, my name is",
