@@ -1,10 +1,10 @@
+import copy
 import contextlib
 import json
 import math
 import os
 import threading
 import time
-import copy
 from collections import defaultdict
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
