@@ -173,6 +173,22 @@ def test_models_distributed_Qwen3_W8A8():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+def test_models_distributed_Qwen3MoE_W8A8():
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+
+    with VllmRunner(
+            snapshot_download("vllm-ascend/Qwen3-30B-A3B-W8A8"),
+            max_model_len=8192,
+            dtype="auto",
+            tensor_parallel_size=2,
+            quantization="ascend",
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
 def test_models_distributed_Qwen3_W4A8DYNAMIC():
     example_prompts = [
         "Hello, my name is",
