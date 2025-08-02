@@ -110,7 +110,7 @@ class MtpProposer:
             # [batch_size, max_num_blocks_per_req]
             block_table: torch.Tensor,
             sampling_metadata: SamplingMetadata,
-            token_indices=None) -> tuple[torch.Tensor, torch.Tensor]:
+            token_indices=None) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = cu_num_tokens[1:] - 1
@@ -122,8 +122,6 @@ class MtpProposer:
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         if token_indices is not None and self.runner.torchair_graph_enabled:
             last_token_indices = token_indices
-        else:
-            seq_lens = (target_positions[last_token_indices] + 1)
 
         self.input_ids[last_token_indices] = next_token_ids
 
