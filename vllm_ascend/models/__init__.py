@@ -12,6 +12,7 @@ def register_model():
         AscendQwen2_5_VLForConditionalGeneration  # noqa: F401
     from .qwen2_vl import AscendQwen2VLForConditionalGeneration  # noqa: F401
     from .qwen3 import CustomQwen3ForCausalLM  # noqa: F401
+    from .qwen2 import CustomQwen2ForCausalLM  # noqa: F401
 
     ModelRegistry.register_model(
         "DeepSeekMTPModel",
@@ -59,3 +60,7 @@ def register_model():
     ModelRegistry.register_model(
         "PanguProMoEForCausalLM",
         "vllm_ascend.models.pangu_moe:PanguProMoEForCausalLM")
+    
+    ModelRegistry.register_model(
+        "Qwen2ForCausalLM",
+        "vllm_ascend.models.qwen2:CustomQwen2ForCausalLM")
