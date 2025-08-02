@@ -29,15 +29,3 @@
   }
 
 
-namespace vllm_ascend {
-AscendType get_dtype_from_torch(at::ScalarType scalarType)
-{
-    if (scalarType == at::ScalarType::Float) {
-        return AscendType::FP32;
-    } else if (scalarType == at::ScalarType::BFloat16) {
-        return AscendType::BF16;
-    } else {
-        return AscendType::FP16;
-    }
-}
-} // namespace vllm_ascend
