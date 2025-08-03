@@ -18,7 +18,7 @@
 # limitations under the License.
 
 from functools import partial
-from typing import Callable, Iterable, Optional, Set, Tuple
+from typing import Callable, Iterable, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -293,7 +293,7 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
-        stacked_params_mapping = [
+        stacked_params_mapping: list[tuple[str, str, Union[str, int]]] = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
