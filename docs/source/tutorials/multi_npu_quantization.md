@@ -28,21 +28,26 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-## Install modelslim and convert model
+## Install modelslim
+
+```bash
+git clone https://gitee.com/ascend/msit
+
+cd msit/msmodelslim
+# Install by run this script
+bash install.sh
+pip install accelerate
+```
+
+## Convert models
+
+### QwQ-32B
 :::{note}
 You can choose to convert the model yourself or use the quantized model we uploaded,
 see https://www.modelscope.cn/models/vllm-ascend/QwQ-32B-W8A8
 :::
 
 ```bash
-# (Optional)This tag is recommended and has been verified
-git clone https://gitee.com/ascend/msit -b modelslim-VLLM-8.1.RC1.b020_001
-
-cd msit/msmodelslim
-# Install by run this script
-bash install.sh
-pip install accelerate
-
 cd example/Qwen
 # Original weight path, Replace with your local model path
 MODEL_PATH=/home/models/QwQ-32B
@@ -51,6 +56,30 @@ SAVE_PATH=/home/models/QwQ-32B-w8a8
 
 # In this conversion process, the npu device is not must, you can also set --device_type cpu to have a conversion
 python3 quant_qwen.py --model_path $MODEL_PATH --save_directory $SAVE_PATH --calib_file ../common/boolq.jsonl --w_bit 8 --a_bit 8 --device_type npu --anti_method m1 --trust_remote_code True
+```
+
+### Kimi-K2-Instruct
+:::{note}
+You can choose to convert the model yourself or use the quantized model we uploaded,
+see https://www.modelscope.cn/models/vllm-ascend/Kimi-K2-Instruct-W8A8
+This conversion process will require a larger CPU memory, please ensure that the RAM size is greater than 2TB
+:::
+
+#### Adapts and change
+1. Ascend does not support the `flash_attn` library. To run the model, you need to follow the [guide](https://gitee.com/ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v3r1) and comment out certain parts of the code in `modeling_deepseek.py` located in the weights folder.
+2. The current version of transformers does not support loading weights in FP8 quantization format. you need to follow the [guide](https://gitee.com/ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v3r1) and delete the quantization related fields from `config.json` in the weights folder
+
+#### Generate the w8a8 weights
+
+```bash
+cd example/DeepSeek
+
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:False
+export MODEL_PATH="/root/.cache/Kimi-K2-Instruct"
+export SAVE_PATH="/root/.cache/Kimi-K2-Instruct-W8A8"
+
+python3 quant_deepseek_w8a8.py --model_path $MODEL_PATH --save_path $SAVE_PATH --batch_size 4
 ```
 
 ## Verify the quantized model
