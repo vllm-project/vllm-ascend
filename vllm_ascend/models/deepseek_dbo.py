@@ -358,7 +358,6 @@ class CustomDeepseekDBODecoderLayer(CustomDeepseekV2DecoderLayer):
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
-
         if mla_moe_communication and residual.shape[0] != hidden_states.shape[
                 0]:
             chunk_hidden_states = torch.tensor_split(residual,
@@ -439,7 +438,6 @@ class CustomDeepseekDBODecoderLayer(CustomDeepseekV2DecoderLayer):
         expanded_expert_idx = []
         sorted_local_expert_idx = []
         sorted_idx = []
-
         global_num_experts = len(
             self.mlp.experts.expert_map
         ) if self.mlp.experts.expert_map is not None else self.global_num_experts
@@ -513,7 +511,7 @@ class CustomDeepseekDBODecoderLayer(CustomDeepseekV2DecoderLayer):
             # TODO: need a better flag to indicate whether in profile run or not.
             router_logit = self.mlp._forward_ms_op_gate(hidden_states[i])
             router_logits.append(router_logit)
-
+            batch_size, hidden_size = hidden_states[i].shape
             if CustomDeepseekDBOMoE.top_k:
                 real_top_k = CustomDeepseekDBOMoE.top_k
             else:
@@ -557,7 +555,7 @@ class CustomDeepseekDBODecoderLayer(CustomDeepseekV2DecoderLayer):
             # ----------------------------------------------------------------------------
             hidden_states[i], pertoken_scale = torch_npu.npu_dynamic_quant(hidden_states[i])
 
-            hidden_states[i], expanded_x_idx_i, expert_tokens_i, pertoken_scale = torch_npu.npu_moe_init_routing_v2(
+            hidden_states[i], expanded_x_idx, expert_tokens, pertoken_scale = torch_npu.npu_moe_init_routing_v2(
                 hidden_states[i],
                 topk_ids[i],
                 scale=pertoken_scale,
@@ -572,267 +570,70 @@ class CustomDeepseekDBODecoderLayer(CustomDeepseekV2DecoderLayer):
                 quant_mode=-1,
                 row_idx_type=1)
 
+            sorted_topk_weight = torch.index_select(topk_weights[i].view(-1), 0,
+                                                    expanded_x_idx)
+            row_index = expanded_x_idx // topk_ids[i].shape[-1]
+            row_index = row_index.to(torch.int64)
+            share_input = torch.zeros((batch_size, hidden_size),
+                                        dtype=torch.bfloat16,
+                                        device="npu")
 
+            hidden_states[i] = torch_npu.npu_grouped_matmul(
+                x=[hidden_states[i]],
+                weight=[self.mlp.experts.w13_weight,],
+                split_item=3,
+                group_list_type=1,
+                group_type=0,
+                group_list=expert_tokens,
+                output_dtype=torch.int32)[0]
 
-            # hidden_states[
-            #     i], expanded_row_idx_i, expanded_expert_idx_i = torch_npu.npu_moe_init_routing(
-            #         hidden_states[i],
-            #         row_idx=row_idx,
-            #         expert_idx=topk_ids[i],
-            #         active_num=num_moe_tokens[i])
-            expanded_row_idx.append(expanded_row_idx_i)
-            expanded_expert_idx.append(expanded_expert_idx_i)
-
-            context = MultiStreamStepMetadata(
-                comm_stream=ms_metadata.communicate_stream,
-                before_comm_event=ms_metadata.ms_events[layer_index][i][
-                    MSEventKey.MOE_ALL_TO_ALL],
-                after_comm_event=ms_metadata.ms_events[layer_index][i][
-                    MSEventKey.MOE_ALL_TO_ALL_FINISH],
-            )
-            context.before_comm_event.record()
-            with torch.npu.stream(ms_metadata.communicate_stream):
-                context.before_comm_event.wait()
-                global_expert_tokens = torch.bincount(
-                    expanded_expert_idx[i], minlength=global_num_experts)
-                scatter_size = global_expert_tokens.view(
-                    ep_group.world_size, -1).sum(-1)
-                scatter_sizes.append(scatter_size)
-                gather_sizes = torch.empty_like(scatter_sizes[i])
-                dist.all_to_all_single(gather_sizes,
-                                       scatter_sizes[i],
-                                       group=ep_group.device_group)
-                scatter_size_list_i = scatter_sizes[i].cpu().tolist()
-                gather_size_list_i = gather_sizes.cpu().tolist()
-                scatter_size_list.append(scatter_size_list_i)
-                gather_size_list.append(gather_size_list_i)
-                expanded_expert_idx[
-                    i] = expanded_expert_idx[i] % local_num_experts
-                hidden_states[i] = ep_group.all_to_all(hidden_states[i], 0, 0,
-                                                       scatter_size_list[i],
-                                                       gather_size_list[i])
-                local_expert_idx_i = ep_group.all_to_all(
-                    expanded_expert_idx[i], 0, 0, scatter_size_list[i],
-                    gather_size_list[i])
-                local_expert_idx.append(local_expert_idx_i)
-
-                sorted_local_expert_idx_i, sorted_idx_i = torch.sort(
-                    local_expert_idx[i])
-                sorted_local_expert_idx.append(sorted_local_expert_idx_i)
-                sorted_idx.append(sorted_idx_i)
-                context.after_comm_event.record()
-
-        for i in range(num_micro_batchs):
-            ms_metadata.try_wait_event(layer_index, i,
-                                       MSEventKey.MOE_ALL_TO_ALL_FINISH)
-            expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
-                sorted_local_expert_idx[i], local_num_experts).to(torch.int64)
-            group_list_type = 0
-            hidden_states[i] = hidden_states[i][sorted_idx[i]]
-            hidden_states[i] = apply_mlp(
-                hidden_states[i],
-                self.mlp.experts.w13_weight,
-                self.mlp.experts.w13_weight_scale,  #17
-                self.mlp.experts.w2_weight,
-                self.mlp.experts.w2_weight_scale,
-                expert_tokens,  #16
-                group_list_type=group_list_type,
-                w1_scale_bias=None,
-                w2_scale_bias=None)
-
-            resorted_idx = torch.argsort(sorted_idx[i])
-            hidden_states[i] = hidden_states[i][resorted_idx]
-            hidden_states[i] = ep_group.all_to_all(hidden_states[i], 0, 0,
-                                                   gather_size_list[i],
-                                                   scatter_size_list[i])
-
-            hidden_states[i] = torch_npu.npu_moe_finalize_routing(
-                hidden_states[i],
-                skip1=None,
-                skip2=None,
+            hidden_states[i], pertoken_scale = torch_npu.npu_dequant_swiglu_quant(
+                x=hidden_states[i],
+                weight_scale=self.mlp.experts.w13_weight_scale.to(torch.float32),
+                activation_scale=pertoken_scale,
                 bias=None,
-                scales=topk_weights[i],
-                expanded_src_to_dst_row=expanded_row_idx[i],
-                export_for_source_row=topk_ids[i],
-            )
-            if len(original_shapes[i]) == 3:
-                hidden_states[i] = hidden_states[i].view(original_shapes[i])
+                quant_scale=None,
+                quant_offset=None,
+                group_index=expert_tokens,
+                activate_left=True,
+                quant_mode=1,
+            )            
 
-            # the following kernels will be submitted to the comm stream to overlap the computation of the
-            # moe computation of next microbatch and the attn computation of next layer
+            hidden_states[i] = torch_npu.npu_grouped_matmul_finalize_routing(
+                hidden_states[i],
+                self.mlp.experts.w2_weight,
+                scale=self.mlp.experts.w2_weight_scale.to(torch.float32),
+                bias=None,
+                pertoken_scale=pertoken_scale.view(-1),
+                group_list=expert_tokens,
+                shared_input=share_input,
+                logit=sorted_topk_weight.to(torch.float32),
+                row_index=row_index,
+                output_bs=batch_size).to(torch.bfloat16)
+
+            if len(original_shape) == 3:
+                hidden_states[i] = hidden_states[i].view(original_shape)
+
+
             context = MultiStreamStepMetadata(
                 comm_stream=ms_metadata.communicate_stream,
                 before_comm_event=ms_metadata.ms_events[layer_index][i][
-                    MSEventKey.FFN_COM_FINISH],
+                    MSEventKey.MOE_GATE_FINISH],
                 after_comm_event=ms_metadata.ms_events[layer_index][i][
                     MSEventKey.FFN_AR_FINISH],
             )
             context.before_comm_event.record()
             with torch.npu.stream(ms_metadata.communicate_stream):
                 context.before_comm_event.wait()
-                if (self.tp_size > 1
-                        and fused_moe_state != FusedMoEState.AllGather):
-                    dist.all_gather(list(chunk_hidden_states[i]),
-                                    hidden_states[i], self.tp_group)
-                    hidden_states[i] = torch.cat(chunk_hidden_states[i], dim=0)
-                    if num_tokens[i] < self.tp_size:
-                        hidden_states[i] = hidden_states[i][:num_tokens[i]]
-                elif self.dp_size > 1 and fused_moe_state == FusedMoEState.AllGather:
-                    hidden_states[
-                        i] = dist._functional_collectives.reduce_scatter_tensor(
-                            hidden_states[i],
-                            "sum",
-                            scatter_dim=0,
-                            group=get_dp_group().device_group)
-                    hidden_states[i] = hidden_states[i][:num_tokens[i]]
-                if self.tp_size > 1 and fused_moe_state == FusedMoEState.AllGather:
-                    hidden_states[i] = tensor_model_parallel_all_reduce(
-                        hidden_states[i])
-                # last
+                # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
+                hidden_states[i] = tensor_model_parallel_all_reduce(hidden_states[i])
+
                 if shared_outputs[i] is not None:
                     hidden_states[i] = hidden_states[
                         i] * self.routed_scaling_factor + shared_outputs[i]
-                hidden_states[i] = hidden_states[i].view(
-                    num_tokens[i], hidden_dims[i])
                 context.after_comm_event.record()
+
         return hidden_states, residual
-
-    # # ----------------------------------------- TBO-related --------------------------------------------
-    # def _forward_ms_layer_alltoallv_finegrained(
-    #     self,
-    #     positions: List[torch.Tensor],
-    #     hidden_states: List[torch.Tensor],
-    #     residual: List[torch.Tensor],
-    #     attn_metadata: List[AttentionMetadata],
-    #     kv_cache: Optional[torch.Tensor] = None,
-    #     is_prefill: bool = False,
-    # ) -> tuple[List[torch.Tensor], List[torch.Tensor]]:
-    #     layer_index, ms_metadata, attn_metadata = get_multistream_layer_context(
-    #     )
-    #     assert layer_index >= 0 and ms_metadata is not None
-    #     num_micro_batchs = ms_metadata.ms_config.num_micro_batches
-    #     assert isinstance(self.mlp, CustomDeepseekDBOMoE)
-    #     assert len(positions) == num_micro_batchs
-    #     assert len(hidden_states) == num_micro_batchs
-    #     assert residual is not None
-    #     assert attn_metadata is not None
-    #     self.mlp.shared_experts.down_proj.reduce_results = False
-    #     num_tokens = [None] * num_micro_batchs
-    #     hidden_dims = [None] * num_micro_batchs
-    #     topk_weights, topk_ids = [None] * num_micro_batchs, [
-    #         None
-    #     ] * num_micro_batchs
-    #     tokens_per_expert = [None] * num_micro_batchs
-    #     dispatched_input = [None] * num_micro_batchs
-    #     router_expert_output = [None] * num_micro_batchs
-    #     chunked_hidden_states_sizes = [None] * num_micro_batchs
-    #     token_dispatchers = self.mlp.experts.token_dispatchers
-
-    #     def discard_tensor(tensor):
-    #         if isinstance(tensor, torch.Tensor):
-    #             tensor = [tensor]
-    #         for t in tensor:
-    #             t.untyped_storage().resize_(0)
-
-    #     # block 1 : attention
-    #     # block 2 : Router Gating
-    #     # block 3 : Token DisPatch
-    #     # the attn computation of microbatch 1 can be overlapped with the moe
-    #     # communication in the previous layer, and the attn computation of microbatch 2
-    #     # can be overlapped with the attn communication of microbatch 1
-    #     for i in range(num_micro_batchs):
-    #         # wait last layer moe finishing communication
-
-    #         forward_context = get_forward_context()
-    #         layer_index, ms_metadata, attn_metadata = get_multistream_layer_context(
-    #         )
-    #         ms_metadata.try_wait_event(layer_index - 1, i,
-    #                                    MSEventKey.FFN_AR_FINISH)
-    #         forward_context.attn_metadata = attn_metadata[i]
-
-    #         # input layernorm
-    #         hidden_states[i], residual[
-    #             i] = self._forward_ms_op_input_layernorm(
-    #                 hidden_states[i], residual[i])
-    #         # attention and tp allreduce
-    #         hidden_states[i], residual[i] = self._forward_ms_op_attn(
-    #             positions[i], hidden_states[i], residual[i], kv_cache,
-    #             attn_metadata[i])
-    #         # post attention layer norm
-    #         hidden_states[i], residual[
-    #             i] = self._forward_ms_op_post_attn_layernorm(
-    #                 hidden_states[i], residual[i])
-    #         num_tokens[i], hidden_dims[i] = hidden_states[i].shape
-    #         # If TP is enabled, hidden_states will be chunked.
-    #         topk_weights[i], topk_ids[i], dispatched_input[
-    #             i], chunked_hidden_states_sizes[
-    #                 i] = self.mlp._forward_op_gating(hidden_states[i],
-    #                                                  attn_metadata[i])
-    #         token_dispatchers[i].preprocess_and_permtute1(
-    #             dispatched_input[i],
-    #             topk_weights[i],
-    #             topk_ids[i],
-    #             self.mlp.shared_experts,
-    #             shared_experts_input=hidden_states[i]
-    #             if self.mlp.n_shared_experts else None)
-    #         # Launch DisPatch Comm in a New Stream.
-    #         dispatch_context = MultiStreamStepMetadata(
-    #             comm_stream=ms_metadata.communicate_stream,
-    #             before_comm_event=ms_metadata.ms_events[layer_index][i][
-    #                 MSEventKey.MOE_BEFORE_COMM],
-    #             after_comm_event=ms_metadata.ms_events[layer_index][i][
-    #                 MSEventKey.MOE_AFTER_COMM],
-    #         )
-    #         dispatch_context.before_comm_event.record()
-    #         # print_with_sync(f'begin token dispatch{i}...', torch.distributed.get_rank())
-    #         with torch.npu.stream(dispatch_context.comm_stream):
-    #             dispatch_context.comm_stream.wait_event(
-    #                 dispatch_context.before_comm_event)
-    #             token_dispatchers[i].dispatch_alltoall()
-    #             dispatched_input[i], tokens_per_expert[i] = token_dispatchers[
-    #                 i].permute2()
-    #             dispatch_context.after_comm_event.record()
-
-    #             if self.mlp.n_shared_experts and self.tp_size > 1:
-    #                 token_dispatchers[
-    #                     i].cached_shared_expert_output = tensor_model_parallel_all_reduce(
-    #                         token_dispatchers[i].cached_shared_expert_output)
-    #                 ms_metadata.ms_events[layer_index][i][
-    #                     MSEventKey.MOE_SE_COMM_FINISH].record()
-
-    #     # print_with_sync('begin experts...', torch.distributed.get_rank())
-    #     # block 4 : Router Experts Computation
-    #     # block 5 : Token Combine Communication
-    #     for i in range(num_micro_batchs):
-
-    #         ms_metadata.try_wait_event(layer_index, i,
-    #                                    MSEventKey.MOE_AFTER_COMM)
-    #         discard_tensor(hidden_states[i])
-
-    #         router_expert_output[i] = self.mlp._forward_op_grouped_mlp(
-    #             dispatched_input[i], tokens_per_expert[i])
-    #         discard_tensor(dispatched_input[i])
-
-    #         # Launch Combine Comm in a New Stream.
-    #         combine_context = MultiStreamStepMetadata(
-    #             comm_stream=ms_metadata.communicate_stream,
-    #             before_comm_event=ms_metadata.ms_events[layer_index][i][
-    #                 MSEventKey.FFN_COM_FINISH],
-    #             after_comm_event=ms_metadata.ms_events[layer_index][i][
-    #                 MSEventKey.FFN_AR_FINISH],
-    #         )
-    #         combine_context.before_comm_event.record()
-    #         ms_metadata.try_wait_event(layer_index, i,
-    #                                    MSEventKey.MOE_SE_COMM_FINISH)
-    #         with torch.npu.stream(combine_context.comm_stream):
-    #             combine_context.comm_stream.wait_event(
-    #                 combine_context.before_comm_event)
-    #             hidden_states[i] = self.mlp._forward_combine_comm(
-    #                 router_expert_output[i], i, num_tokens[i],
-    #                 chunked_hidden_states_sizes[i])
-    #             combine_context.after_comm_event.record()
-
-    #     return hidden_states, residual
 
     # should split ops in Decoder Layer
     def _forward_ms_op_input_layernorm(
