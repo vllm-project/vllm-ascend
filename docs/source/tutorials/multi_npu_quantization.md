@@ -99,10 +99,6 @@ The converted model files looks like:
 
 Run the following script to start the vLLM server with quantized model:
 
-:::{note}
-The value "ascend" for "--quantization" argument will be supported after [a specific PR](https://github.com/vllm-project/vllm-ascend/pull/877) is merged and released, you can cherry-pick this commit for now.
-:::
-
 ```bash
 vllm serve /home/models/QwQ-32B-w8a8  --tensor-parallel-size 4 --served-model-name "qwq-32b-w8a8" --max-model-len 4096 --quantization ascend
 ```
