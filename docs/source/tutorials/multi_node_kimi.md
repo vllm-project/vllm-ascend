@@ -60,8 +60,8 @@ Run the following scripts on two nodes respectively
 
 # this obtained through ifconfig
 # nic_name is the network interface name corresponding to local_ip
-nic_name="enp23s0f3"
-local_ip="172.22.0.218"
+nic_name="xxxx"
+local_ip="xxxx"
 
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
@@ -101,8 +101,8 @@ vllm serve /home/cache/weights/Kimi-K2-Instruct-W8A8 \
 ```shell
 #!/bin/sh
 
-nic_name="enp23s0f3"
-local_ip="172.22.0.155"
+nic_name="xxxx"
+local_ip="xxxx"
 
 export HCCL_IF_IP=$local_ip
 export GLOO_SOCKET_IFNAME=$nic_name
@@ -120,7 +120,7 @@ vllm serve /home/cache/weights/Kimi-K2-Instruct-W8A8 \
 --data-parallel-size 4 \
 --data-parallel-size-local 2 \
 --data-parallel-start-rank 2 \
---data-parallel-address 172.22.0.218 \
+--data-parallel-address $node0_ip \
 --data-parallel-rpc-port 13389 \
 --seed 1024 \
 --tensor-parallel-size 8 \
