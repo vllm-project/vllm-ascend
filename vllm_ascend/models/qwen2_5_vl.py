@@ -30,7 +30,8 @@ from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import (
 from vllm.config import VllmConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.model_executor.layers.activation import get_act_and_mul_fn
+from vllm.model_executor.layers.activation import (_ACTIVATION_REGISTRY,
+                                                   get_act_and_mul_fn)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -199,12 +200,16 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
             in_channels=vision_config.in_channels,
             hidden_size=self.hidden_size,
         )
+
+        act_fn = get_act_and_mul_fn(vision_config.hidden_act)
+        if vllm_version_is("0.10.0"):
+            act_fn = _ACTIVATION_REGISTRY[vision_config.hidden_act]
         self.blocks = nn.ModuleList([
             AscendQwen2_5_VisionBlock(
                 dim=self.hidden_size,
                 num_heads=self.num_heads,
                 mlp_hidden_dim=vision_config.intermediate_size,
-                act_fn=get_act_and_mul_fn(vision_config.hidden_act),
+                act_fn=act_fn,
                 norm_layer=norm_layer,
                 quant_config=quant_config,
                 prefix=f"{prefix}.blocks.{layer_idx}")
