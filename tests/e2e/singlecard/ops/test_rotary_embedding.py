@@ -233,8 +233,18 @@ class ModelwithRotaryEmbedding(nn.Module):
         offsets: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # we simulated a simple attention layer to test if it can be seamlessly captured into aclgraph
-        q, k, v = self.qkv_proj(hidden_states).chunk(3, dim=-1)
-        query, key = self.rope.forward_native(positions, q, k, offsets)
+        qkv = self.qkv_proj(hidden_states)
+        q, k, v = qkv.chunk(3, dim=-1)
+        query, key = torch.ops._C.rotary_embedding(
+            positions,
+            q,
+            k,
+            self.rope.head_size,
+            self.rope.cos_sin_cache,
+            self.rope.is_neox_style,
+        )
+        query = query.view(q.shape)
+        key = key.view(k.shape)
         o = self.o_proj(query)
         return o
 
@@ -257,14 +267,16 @@ def test_capture_rotary_embedding_in_aclgraph(
     dtype: torch.dtype,
     seed: int,
     device: str,
-    max_position_embeddings: int,
-    base: int,
+    max_position_embeddings: int = 8192,
+    base: int = 10000,
 ):
     """Test if the rotary embedding can be captured in aclgraph."""
     torch.manual_seed(seed)
     torch.set_default_device(device)
+    if rotary_dim is None:
+        rotary_dim = head_size
     model = ModelwithRotaryEmbedding(
-        hidden_size=num_tokens,
+        hidden_size=num_heads * head_size,
         num_heads=num_heads,
         head_size=head_size,
         rotary_dim=rotary_dim,
@@ -274,13 +286,20 @@ def test_capture_rotary_embedding_in_aclgraph(
         dtype=dtype,
     )
 
+    def custom_op_checking_backend(gm: torch.fx.GraphModule, example_input):
+        # Validate if the rotary_embedding custom kernel is indeed inside the graph by
+        # string match
+        graph = str(gm.graph)
+        assert "_C.rotary_embedding" in graph
+        return gm
+
     static_positions = torch.randint(0, max_position_embeddings,
                                      (num_tokens, ))
     static_hidden_states = torch.randn(num_tokens,
                                        num_heads * head_size,
                                        dtype=dtype,
                                        device="npu")
-    compiled_model = torch.compile(model)
+    compiled_model = torch.compile(model, backend=custom_op_checking_backend)
     stream = torch.npu.Stream()
     stream.wait_stream(torch.npu.current_stream())
     with torch.npu.stream(stream):
