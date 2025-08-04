@@ -287,7 +287,7 @@ class CustomQwen2Model(Qwen2Model):
             residual = intermediate_tensors["residual"]
         pad_size = 0
         flashcomm_v1_enabled = False
-        attn_metadata = get_forward_context().attn_metadata
+
         if ascend_envs.VLLM_ASCEND_ENABLE_FLASHCOMM == 1 and \
             envs.VLLM_USE_V1 and \
             attn_metadata is not None and \
