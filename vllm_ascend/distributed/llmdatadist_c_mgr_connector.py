@@ -396,8 +396,9 @@ class LLMDataDistCMgrConnectorWorker():
                             logger.debug(
                                 f"LLMDataDistCMgrConnectorWorker: Receiving request {finished_req_id} finished"
                             )
-                            self.finished_reqs.add(finished_req_id)
-                            del self.reqs_to_send[finished_req_id]
+                            if finished_req_id in self.reqs_to_send:
+                                self.finished_reqs.add(finished_req_id)
+                                del self.reqs_to_send[finished_req_id]
                     sock.send_multipart(
                         (identity, b"", b"receiving decode finished"))
                 else:
@@ -620,7 +621,7 @@ class LLMDataDistCMgrConnectorWorker():
 
         for future in futures:
             future.add_done_callback(handle_exception)
-        self.reqs_to_send.update(metadata._reqs_need_send)
+        self.reqs_to_send.update(metadata.reqs_to_send)
 
     def add_remote_agent(self, metadata: LLMDataDistCMgrAgentMetadata) -> int:
         assert self.local_agent_metadata is not None
@@ -886,8 +887,9 @@ class LLMDataDistCMgrConnectorWorker():
                     "Some requests in prefill node fail to receive KV Cache transfer done signal. "
                     "If a greater mean TTFT is acceptable, you can 'export VLLM_LLMDD_ABORT_REQUEST_TIMEOUT=600' (10 minutes) to relax the timeout condition. "
                 )
-                self.finished_reqs.add(req_id)
-                del self.reqs_to_send[req_id]
+                if req_id in self.reqs_to_send:
+                    self.finished_reqs.add(req_id)
+                    del self.reqs_to_send[req_id]
             req_ids_to_ret = copy.deepcopy(self.finished_reqs)
             self.finished_reqs.clear()
         if self.llm_datadist_role == LLMRole.PROMPT:
