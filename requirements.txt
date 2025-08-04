@@ -23,6 +23,9 @@ quart
 # Required for N-gram speculative decoding
 numba
 
+# Required by dynamic eplb
+networkx
+
 # Install torch_npu
 --pre
 --extra-index-url https://mirrors.huaweicloud.com/ascend/repos/pypi
