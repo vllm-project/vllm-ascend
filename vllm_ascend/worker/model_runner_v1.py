@@ -109,6 +109,8 @@ import vllm_ascend.envs as envs_ascend
 if is_310p():
     torch_npu.npu.set_compile_mode(jit_compile=False)
 
+# todo ttt to config
+VLLM_USE_ACL_GRAPH = os.environ.get("VLLM_USE_ACL_GRAPH", 0)
 
 @dataclass
 class GraphCaptureContext:
@@ -2041,6 +2043,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             communication_adaptation_310p()
 
         config = torchair.CompilerConfig()
+        if VLLM_USE_ACL_GRAPH == '1':
+            config.mode = "reduce-overhead"
+            config.debug.aclgraph.disable_reinplace_inplaceable_ops_pass=True
         config.experimental_config.frozen_parameter = True
         # enabling tiling_schedule_optimize on 300I Duo has some bugs, so we have to
         # disable it on 300I Duo platform now.
