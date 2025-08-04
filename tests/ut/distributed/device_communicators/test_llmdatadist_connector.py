@@ -4,6 +4,7 @@ import llm_datadist  # type: ignore
 import pytest
 import torch
 from pytest_mock import MockerFixture
+
 from vllm_ascend.distributed.llmdatadist_connector import (  # type: ignore
     KVTransferEngine, LLMDataDistConnector, get_device_ips)
 
@@ -91,7 +92,7 @@ class TestKVTransferEngine():
         # call args should is ("kv_producer", 0)
         assert mock_llm_datadist.call_args[0][0] == llm_datadist.LLMRole.PROMPT
         assert mock_llm_datadist.call_args[0][1] == 0
-        
+
         assert kv_transfer_engine.prompt_ip_list == [
             '124.0.2.90', '124.0.2.91', '124.0.2.92', '124.0.2.93'
         ]
