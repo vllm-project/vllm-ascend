@@ -317,7 +317,8 @@ class CustomDeepseekV2MoE(nn.Module):
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_multistream_moe = \
-            ascend_config.torchair_graph_config.enable_multistream_moe
+            ascend_config.torchair_graph_config.enable_multistream_moe and \
+            self.torchair_graph_enabled
 
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.n_routed_experts,
@@ -397,7 +398,7 @@ class CustomDeepseekV2MoE(nn.Module):
 
         # router_logits: (num_tokens, n_experts)
         router_logits = None
-        if not self.rm_router_logits:
+        if not self.rm_router_logits and not self.enable_multistream_moe:
             router_logits, _ = self.gate(hidden_states)
 
         experts_hidden_states = self.experts(
@@ -956,7 +957,9 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(config.vocab_size,
                                           config.hidden_size,
-                                          quant_config=quant_config)
+                                          quant_config=quant_config,
+                                          prefix=maybe_prefix(
+                                              prefix, "lm_head"))
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = LogitsProcessor(config.vocab_size)

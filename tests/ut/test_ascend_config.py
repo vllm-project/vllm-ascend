@@ -236,3 +236,71 @@ class TestAscendConfig(TestBase):
         for model_type, expected_output in test_cases:
             self.assertEqual(_check_torchair_supported(model_type),
                              expected_output)
+
+    @_clean_up_ascend_config
+    def test_ascend_config_load_error(self):
+        test_vllm_config = VllmConfig()
+        # graph_batch_sizes should be list.
+        with self.assertRaises(TypeError):
+            test_vllm_config.additional_config = {
+                "torchair_graph_config": {
+                    "graph_batch_sizes": "fake_size",
+                },
+                "refresh": True
+            }
+            init_ascend_config(test_vllm_config)
+
+        # use_cached_graph should not be enabled without torchair graph mode
+        with self.assertRaises(RuntimeError):
+            test_vllm_config.additional_config = {
+                "torchair_graph_config": {
+                    "enabled": False,
+                    "use_cached_graph": True,
+                },
+                "refresh": True
+            }
+            init_ascend_config(test_vllm_config)
+
+        # graph_batch_sizes_init should not be enabled without torchair graph mode
+        with self.assertRaises(RuntimeError):
+            test_vllm_config.additional_config = {
+                "torchair_graph_config": {
+                    "enabled": False,
+                    "graph_batch_sizes_init": True,
+                },
+                "refresh": True
+            }
+            init_ascend_config(test_vllm_config)
+
+        # enable_multistream_mla should not be enabled without torchair graph mode
+        with self.assertRaises(RuntimeError):
+            test_vllm_config.additional_config = {
+                "torchair_graph_config": {
+                    "enabled": False,
+                    "enable_multistream_mla": True,
+                },
+                "refresh": True
+            }
+            init_ascend_config(test_vllm_config)
+
+        # enable_multistream_moe should not be enabled without torchair graph mode
+        with self.assertRaises(RuntimeError):
+            test_vllm_config.additional_config = {
+                "torchair_graph_config": {
+                    "enabled": False,
+                    "enable_multistream_moe": True,
+                },
+                "refresh": True
+            }
+            init_ascend_config(test_vllm_config)
+
+        # enable_kv_nz should not be enabled without torchair graph mode
+        with self.assertRaises(RuntimeError):
+            test_vllm_config.additional_config = {
+                "torchair_graph_config": {
+                    "enabled": False,
+                    "enable_kv_nz": True,
+                },
+                "refresh": True
+            }
+            init_ascend_config(test_vllm_config)

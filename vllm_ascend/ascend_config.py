@@ -76,6 +76,31 @@ class TorchairGraphConfig:
             raise ValueError(
                 "graph_batch_sizes_init is only valid when graph_batch_sizes is empty"
             )
+        if not self.enabled:
+            if self.use_cached_graph:
+                raise RuntimeError(
+                    "use_cached_graph is valid only when Torchair graph mode is enabled"
+                )
+            if self.graph_batch_sizes:
+                raise RuntimeError(
+                    "graph_batch_sizes is valid only when Torchair graph mode is enabled"
+                )
+            if self.graph_batch_sizes_init:
+                raise RuntimeError(
+                    "graph_batch_sizes_init is valid only when Torchair graph mode is enabled"
+                )
+            if self.enable_multistream_mla:
+                raise RuntimeError(
+                    "enable_multistream_mla is valid only when Torchair graph mode is enabled"
+                )
+            if self.enable_multistream_moe:
+                raise RuntimeError(
+                    "enable_multistream_moe is valid only when Torchair graph mode is enabled"
+                )
+            if self.enable_kv_nz:
+                raise RuntimeError(
+                    "enable_kv_nz is valid only when Torchair graph mode is enabled"
+                )
 
 
 class AscendSchedulerConfig:

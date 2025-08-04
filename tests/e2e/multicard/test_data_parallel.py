@@ -27,7 +27,7 @@ from unittest.mock import patch
 
 import pytest
 
-MODELS = ["Qwen/Qwen2.5-0.5B-Instruct"]
+MODELS = ["Qwen/Qwen2.5-0.5B-Instruct", "Qwen/Qwen3-30B-A3B"]
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -54,6 +54,8 @@ def test_data_parallel_inference(model, max_tokens):
         "--trust-remote-code",
         "--enforce-eager",
     ]
+    if model == "Qwen/Qwen3-30B-A3B":
+        cmd.append("--enable-expert-parallel")
 
     print(f"Running subprocess: {' '.join(cmd)}")
     proc = subprocess.run(cmd,

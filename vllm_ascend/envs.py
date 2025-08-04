@@ -117,22 +117,17 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value to False to disable the optimized model.
     "USE_OPTIMIZED_MODEL":
     lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
-    # SELECT_GATING_TOPK_SOTFMAX_EXPERTS is the equivalent of select_experts in non-quantized scenarios.
-    # In theory, it should have better performance than select_experts.
-    # Subsequent versions will remove the SELECT_GATING_TOPK_SOTFMAX_EXPERTS tag and use it as the default mode.
-    "SELECT_GATING_TOPK_SOTFMAX_EXPERTS":
-    lambda: bool(int(os.getenv("SELECT_GATING_TOPK_SOTFMAX_EXPERTS", '0'))),
     # The tolerance of the kv cache size, if the difference between the
     # actual kv cache size and the cached kv cache size is less than this value,
     # then the cached kv cache size will be used.
     "VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE":
     lambda: int(
         os.getenv("VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE", 64)),
-    # Whether to enable the topk optimization. It's disabled by default for experimental support
-    # We'll make it enabled by default in the future.
+    # Whether to enable the topk optimization. It's enabled by default. Please set to False if you hit any issue.
+    # We'll remove this flag in the future once it's stable enough.
     "VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION":
     lambda: bool(
-        int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION", '0'))),
+        int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION", '1'))),
 
     # `LLMDataDistCMgrConnector` required variable. `DISAGGREGATED_PREFILL_RANK_TABLE_PATH` is
     # used for llmdatadist to build the communication topology for kv cache transfer, it is
@@ -164,6 +159,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     #   1: enable moe all2all seq.
     "VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ":
     lambda: bool(int(os.getenv('VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ', '0'))),
+    # Whether to enable FlashComm1 for eager mode deepseek model prefill stage.
     "VLLM_ASCEND_FC1_ENABLED":
     lambda: bool(int(os.getenv("VLLM_ASCEND_FC1_ENABLED", '0'))),
 }
