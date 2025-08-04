@@ -1277,9 +1277,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 max_num_reqs_across_dp = padded_num_tokens_across_dp
             else:
                 max_num_reqs_across_dp = self.max_num_reqs
-            sample_indices = nn.functional.pad(
-                sample_indices,
-                (0, max_num_reqs_across_dp - sample_indices.shape[0]))
+            logits_indices = nn.functional.pad(
+                logits_indices,
+                (0, max_num_reqs_across_dp - logits_indices.shape[0]))
 
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
                 total_num_scheduled_tokens, logits_indices, aux_hidden_states,
@@ -1903,7 +1903,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     if self.use_spec_decode and isinstance(
                             self.drafter, EagleProposer):
                         self.drafter.dummy_run(num_tokens)
-                
+
                 if not self.in_profile_run and is_lmhead_tp():
                     # lmhead_tp introduces additional communication across
                     # dp when computing logits. Hence we need to add it

@@ -46,7 +46,8 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                      backend,
                                      group_name="mc2")
 
-    all_ranks = torch.arange(world_size).reshape(-1, parallel_config.lmhead_tp_size)
+    all_ranks = torch.arange(world_size).reshape(
+        -1, parallel_config.lmhead_tp_size)
     global _LMHEAD
     group_ranks = all_ranks.unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]

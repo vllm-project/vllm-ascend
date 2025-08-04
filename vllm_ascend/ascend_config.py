@@ -49,6 +49,7 @@ class AscendConfig:
             "chunked_prefill_for_mla", False)
         self.lmhead_tp_size = additional_config.get("lmhead_tp_size", -1)
 
+
 class TorchairGraphConfig:
     """
     Configuration Object for torchair_graph_config from additional_config
