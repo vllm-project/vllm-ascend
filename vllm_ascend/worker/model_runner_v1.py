@@ -1475,7 +1475,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         num_scheduled_tokens: int,
         num_scheduled_tokens_np: np.ndarray,
         finished_sending: Optional[set[str]] = None,
-        finished_receiving: Optional[set[str]] = None,
+        finished_recving: Optional[set[str]] = None,
         kv_connector_output: Optional["KVConnectorOutput"] = None,
     ) -> ModelRunnerOutput:
         assert self.input_batch.num_reqs ==\
@@ -1502,28 +1502,23 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 pooler_output.append(raw_output.data.cpu())
             else:
                 pooler_output.append(None)
+        extra_args = ({
+            "finished_sending": finished_sending,
+            "finished_recving": finished_recving
+        } if vllm_version_is("0.10.0") else {
+            "kv_connector_output": kv_connector_output
+        })
 
-        if vllm_version_is("0.10.0"):
-            return ModelRunnerOutput(
-                req_ids=self.input_batch.req_ids,
-                req_id_to_index=self.input_batch.req_id_to_index,
-                sampled_token_ids=[],
-                spec_token_ids=None,
-                logprobs=None,
-                prompt_logprobs_dict={},
-                pooler_output=pooler_output,
-                finished_sending=finished_sending,
-                finished_recving=finished_receiving)
-        else:
-            return ModelRunnerOutput(
-                req_ids=self.input_batch.req_ids,
-                req_id_to_index=self.input_batch.req_id_to_index,
-                sampled_token_ids=[],
-                spec_token_ids=None,
-                logprobs=None,
-                prompt_logprobs_dict={},
-                pooler_output=pooler_output,
-                kv_connector_output=kv_connector_output)
+        return ModelRunnerOutput(
+            req_ids=self.input_batch.req_ids,
+            req_id_to_index=self.input_batch.req_id_to_index,
+            sampled_token_ids=[],
+            spec_token_ids=None,
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=pooler_output,
+            **extra_args,
+        )
 
     @torch.inference_mode()
     def execute_model(
@@ -1715,29 +1710,23 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if has_kv_transfer_group():
                 get_kv_transfer_group().clear_connector_metadata()
 
-            if vllm_version_is("0.10.0"):
-                model_runner_output = ModelRunnerOutput(
-                    req_ids=self.input_batch.req_ids,
-                    req_id_to_index=self.input_batch.req_id_to_index,
-                    sampled_token_ids=valid_sampled_token_ids,
-                    spec_token_ids=spec_token_ids,
-                    logprobs=logprobs_lists,
-                    prompt_logprobs_dict=prompt_logprobs_dict,
-                    pooler_output=[],
-                    finished_sending=finished_sending,
-                    finished_recving=finished_recving,
-                )
-            else:
-                model_runner_output = ModelRunnerOutput(
-                    req_ids=self.input_batch.req_ids,
-                    req_id_to_index=self.input_batch.req_id_to_index,
-                    sampled_token_ids=valid_sampled_token_ids,
-                    spec_token_ids=spec_token_ids,
-                    logprobs=logprobs_lists,
-                    prompt_logprobs_dict=prompt_logprobs_dict,
-                    pooler_output=[],
-                    kv_connector_output=kv_connector_output,
-                )
+        extra_args = ({
+            "finished_sending": finished_sending,
+            "finished_recving": finished_recving
+        } if vllm_version_is("0.10.0") else {
+            "kv_connector_output": kv_connector_output
+        })
+
+        model_runner_output = ModelRunnerOutput(
+            req_ids=self.input_batch.req_ids,
+            req_id_to_index=self.input_batch.req_id_to_index,
+            sampled_token_ids=valid_sampled_token_ids,
+            spec_token_ids=spec_token_ids,
+            logprobs=logprobs_lists,
+            prompt_logprobs_dict=prompt_logprobs_dict,
+            pooler_output=[],
+            **extra_args,
+        )
 
         durations = ProfileExecuteDuration().pop_captured_sync()
         if durations:
