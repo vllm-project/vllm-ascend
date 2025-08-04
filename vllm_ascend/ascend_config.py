@@ -48,7 +48,7 @@ class AscendConfig:
         self.chunked_prefill_for_mla = additional_config.get(
             "chunked_prefill_for_mla", False)
         self.enable_shared_expert_dp = additional_config.get(
-            "enable_shared_expert_dp", False)
+            "enable_shared_expert_dp", True)
 
 
 class TorchairGraphConfig:
