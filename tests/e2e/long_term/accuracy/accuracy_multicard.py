@@ -18,15 +18,11 @@
 #
 import gc
 import multiprocessing
-import signal
-import subprocess
 import sys
-import time
 from multiprocessing import Queue
 
 import lm_eval
 import pytest
-import requests
 import torch
 
 SERVER_HOST = "127.0.0.1"
@@ -36,7 +32,7 @@ COMPLETIONS_URL = f"http://{SERVER_HOST}:{SERVER_PORT}/v1/completions"
 
 # pre-trained model path on Hugging Face.
 # Qwen/Qwen2.5-0.5B-Instruct: accuracy test for DP.
-# Qwen/Qwen3-30B-A3B: accuracy test for EP.
+# Qwen/Qwen3-30B-A3B: accuracy test for EP and DP.
 # deepseek-ai/DeepSeek-V2-Lite: accuracy test for TP.
 MODEL_NAME = ["Qwen/Qwen3-30B-A3B", "deepseek-ai/DeepSeek-V2-Lite"]
 
@@ -145,58 +141,27 @@ def test_lm_eval_accuracy(monkeypatch: pytest.MonkeyPatch, model):
             f"Expected: {EXPECTED_VALUE[model]}±{RTOL} | Measured: {result}"
 
 
-@pytest.mark.parametrize("max_tokens", [10])
-@pytest.mark.parametrize("model", ["Qwen/Qwen2.5-0.5B-Instruct"])
-def test_lm_eval_accuracy_dp(model, max_tokens):
-    log_file = open("accuracy_pd.log", "a+")
-    cmd = [
-        "vllm", "serve", model, "--max_model_len", "4096",
-        "--tensor_parallel_size", "2", "--data_parallel_size", "2"
-    ]
-    server_proc = subprocess.Popen(cmd,
-                                   stdout=log_file,
-                                   stderr=subprocess.DEVNULL)
+DP_DENSCE_MODEL = ["Qwen/Qwen2.5-0.5B-Instruct"]
+DP_MOE_MOEDL = ["Qwen/Qwen3-30B-A3B"]
 
-    try:
-        for _ in range(300):
-            try:
-                r = requests.get(HEALTH_URL, timeout=1)
-                if r.status_code == 200:
-                    break
-            except requests.exceptions.RequestException:
-                pass
-            time.sleep(1)
-        else:
-            log_file.flush()
-            log_file.seek(0)
-            log_content = log_file.read()
-            pytest.fail(
-                f"vLLM serve did not become healthy after 300s: {HEALTH_URL}\n"
-                f"==== vLLM Serve Log Start ===\n{log_content}\n==== vLLM Serve Log End ==="
-            )
+DP_MORE_ARGS = {
+    "Qwen/Qwen2.5-0.5B-Instruct":
+    "tensor_parallel_size=2,data_parallel_size=2",
+    "Qwen/Qwen3-30B-A3B":
+    "tensor_parallel_size=2,data_parallel_size=2,enable_expert_parallel=True,max_model_len=1024,enforce_eager=True",
+}
 
-        prompt = "bejing is a"
-        payload = {
-            "prompt": prompt,
-            "max_tokens": max_tokens,
-            "sampling_params": {
-                "temperature": 0.0,
-                "top_p": 1.0,
-                "seed": 123
-            }
-        }
-        resp = requests.post(COMPLETIONS_URL, json=payload, timeout=30)
-        resp.raise_for_status()
-        data = resp.json()
 
-        generated = data["choices"][0]["text"].strip()
-        expected = "city in north china, it has many famous attractions"
-        assert generated == expected, f"Expected `{expected}`, got `{generated}`"
-
-    finally:
-        server_proc.send_signal(signal.SIGINT)
-        try:
-            server_proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            server_proc.kill()
-            server_proc.wait()
+@pytest.mark.parametrize("model", DP_DENSCE_MODEL)
+def test_lm_eval_accuracy_dp(model):
+    result_queue: Queue[float] = multiprocessing.Queue()
+    p = multiprocessing.Process(target=run_test,
+                                args=(result_queue, model,
+                                      MAX_MODEL_LEN[model], MODEL_TYPE[model],
+                                      DP_MORE_ARGS[model]))
+    p.start()
+    p.join()
+    result = result_queue.get()
+    print(result)
+    assert (EXPECTED_VALUE[model] - RTOL < result < EXPECTED_VALUE[model] + RTOL), \
+        f"Expected: {EXPECTED_VALUE[model]}±{RTOL} | Measured: {result}"
