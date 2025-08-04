@@ -187,7 +187,7 @@ def create_model_runner_output(
 
     # Make output data structure.
     extra_args = {}
-    if vllm_version_is("0.10.0"):
+    if not vllm_version_is("0.10.0"):
         from vllm.v1.worker.kv_connector_model_runner_mixin import \
             KVConnectorOutput  # type: ignore  # noqa
         kv_connector_output = KVConnectorOutput(
