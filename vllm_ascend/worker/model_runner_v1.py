@@ -94,8 +94,8 @@ from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if not vllm_version_is("0.10.0"):
     from vllm.tasks import GenerationTask, SupportedTask
-    from vllm.v1.worker.kv_connector_model_runner_mixin import (
-        KVConnectorModelRunnerMixin, KVConnectorOutput)
+    from vllm.v1.worker.kv_connector_model_runner_mixin import \
+        KVConnectorOutput
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -149,7 +149,7 @@ def graph_capture(device: torch.device):
         yield graph_capture_context
 
 
-class NPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
+class NPUModelRunner(LoRAModelRunnerMixin):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         self.vllm_config = vllm_config
