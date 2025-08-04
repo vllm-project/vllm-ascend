@@ -52,6 +52,7 @@ Please use the following recommended versions to get started quickly:
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
 |v0.9.2rc1|Latest release candidate|[QuickStart](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/latest/installation.html) for more details|
+|v0.9.1rc2|Next stable release|[QuickStart](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/installation.html) for more details|
 |v0.7.3.post1|Latest stable version|[QuickStart](https://vllm-ascend.readthedocs.io/en/stable/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/stable/installation.html) for more details|
 
 ## Contributing
