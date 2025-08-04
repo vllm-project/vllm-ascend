@@ -22,6 +22,39 @@ import torch_npu
 from vllm.logger import logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    DEFAULT_VOCAB_PADDING_SIZE, QuantizationConfig)
+
+
+# func refers to vocabParallelEmbedding.__init__
+def wrapper_vocab_parallel_embedding_init(func):
+
+    def init(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        params_dtype: Optional[torch.dtype] = None,
+        org_num_embeddings: Optional[int] = None,
+        padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
+        func(
+            self,
+            num_embeddings,
+            embedding_dim,
+            params_dtype,
+            org_num_embeddings,
+            padding_size,
+            quant_config,
+            prefix,
+        )
+        # TODO: Contact vLLM maintainers to add a `params_dtype` attribute to the `VocabParallelEmbedding` class.
+        if params_dtype is None:
+            params_dtype = torch.get_default_dtype()
+        self.params_dtype = params_dtype
+
+    return init
 
 
 # func refers to RMSNorm.__init__
