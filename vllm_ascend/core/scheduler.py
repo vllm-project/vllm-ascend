@@ -322,7 +322,8 @@ class AscendScheduler(Scheduler):
                 scheduled_running_reqs.append(request)
                 self.scheduled_req_ids.add(request.request_id)
                 if request.use_structured_output:
-                    structured_output_request_ids[request.request_id] = req_index
+                    structured_output_request_ids[
+                        request.request_id] = req_index
                 req_to_new_block_ids[request.request_id] = (
                     new_blocks.get_block_ids())
                 num_scheduled_tokens[request.request_id] = num_new_tokens
