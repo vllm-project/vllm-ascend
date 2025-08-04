@@ -429,7 +429,7 @@ def sample_recovered_tokens_pytorch(
 
             if IS_NGRAM:
                 draft_token_id = draft_token_ids[token_idx]
-                orig_prob = target_probs[token_idx, draft_token_id]
+                orig_prob = target_probs[token_idx, draft_token_id].item()
                 target_probs[token_idx, draft_token_id] = 0
                 prob = target_probs[token_idx].clone()
             else:
