@@ -1,10 +1,9 @@
 import vllm.envs as envs
 from vllm.config import DistributedExecutorBackend, ParallelConfig
 from vllm.logger import init_logger
-
+import vllm_ascend.envs as vllm_ascend_envs
 logger = init_logger(__name__)
 
-import vllm_ascend.envs as vllm_ascend_envs
 
 
 def __post_init__(self: ParallelConfig) -> None:

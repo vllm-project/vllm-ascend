@@ -7,11 +7,9 @@ from vllm.transformers_utils.config import \
     maybe_register_config_serialize_by_value
 from vllm.v1.engine.core import DPEngineCoreProc, EngineCoreProc
 from vllm.logger import init_logger
-
+import vllm_ascend.envs as vllm_ascend_envs
 logger = init_logger(__name__)
 
-
-import vllm_ascend.envs as vllm_ascend_envs
 
 
 class ExternealDPEngineCoreProc(DPEngineCoreProc):
