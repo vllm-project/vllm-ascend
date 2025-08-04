@@ -52,12 +52,15 @@ class AscendScheduler(Scheduler):
         self.running: list[Request] = []
 
     def schedule(self) -> SchedulerOutput:
-        if self.scheduler_config.chunked_prefill_enabled:
+        if self.scheduler_config.chunked_prefill_enabled or \
+            self.cache_config.enable_prefix_caching:
             return super().schedule()
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
         preempted_reqs: list[Request] = []
+
+        structured_output_request_ids: dict[str, int] = {}
 
         req_to_new_block_ids: dict[str, list[int]] = {}
         num_scheduled_tokens: dict[str, int] = {}
@@ -76,6 +79,7 @@ class AscendScheduler(Scheduler):
         skipped_waiting_requests: deque[Request] = deque()
 
         # Schedule prefill requests first.
+        req_index = 0
         while self.waiting and token_budget > 0:
             if len(self.running) == self.max_num_running_reqs:
                 break
@@ -85,6 +89,15 @@ class AscendScheduler(Scheduler):
             def skip_cur_request():
                 self.waiting.popleft()
                 skipped_waiting_requests.appendleft(request)
+
+            # skip request if the gd output request is still waiting for FSM compilation.
+            if request.status == RequestStatus.WAITING_FOR_FSM:
+                structured_output_req = request.structured_output_request
+                if structured_output_req and structured_output_req.grammar:
+                    request.status = Request.WAITING
+                else:
+                    skip_cur_request()
+                    continue
 
             # P/D: skip request if still waiting for remote kvs.
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -201,7 +214,9 @@ class AscendScheduler(Scheduler):
                 skipped_waiting_requests.appendleft(request)
                 request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                 continue
-
+            if request.use_structured_output:
+                structured_output_request_ids[request.request_id] = req_index
+            req_index += 1
             self.running.append(request)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.SCHEDULED,
@@ -235,7 +250,6 @@ class AscendScheduler(Scheduler):
         # If no prefill requests are scheduled,
         # Schedule decode requests next.
         if len(self.scheduled_req_ids) == 0:
-            req_index = 0
             while req_index < len(self.running) and token_budget > 0:
                 request = self.running[req_index]
                 if request.request_id in self.scheduled_req_ids:
@@ -307,6 +321,8 @@ class AscendScheduler(Scheduler):
                 # Schedule the request.
                 scheduled_running_reqs.append(request)
                 self.scheduled_req_ids.add(request.request_id)
+                if request.use_structured_output:
+                    structured_output_request_ids[request.request_id] = req_index
                 req_to_new_block_ids[request.request_id] = (
                     new_blocks.get_block_ids())
                 num_scheduled_tokens[request.request_id] = num_new_tokens
@@ -345,6 +361,12 @@ class AscendScheduler(Scheduler):
                 self.kv_cache_manager.get_num_common_prefix_blocks(
                     any_request, len(self.running)))
 
+        grammar_bitmask = self.structured_output_manager.grammar_bitmask(
+            self.requests,
+            structured_output_request_ids,
+            scheduled_spec_decode_tokens,
+        )
+
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(req,
@@ -372,8 +394,8 @@ class AscendScheduler(Scheduler):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,  # type: ignore
             free_encoder_input_ids=self.encoder_cache_manager.get_freed_ids(),
-            structured_output_request_ids={},
-            grammar_bitmask=None,
+            structured_output_request_ids=structured_output_request_ids,
+            grammar_bitmask=grammar_bitmask,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
