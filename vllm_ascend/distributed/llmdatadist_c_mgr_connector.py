@@ -45,8 +45,7 @@ TORCH_DTYPE_TO_NPU_DTYPE = {
 
 class LLMDataDistCMgrEvent(Enum):
     ReqForMetadata = 0
-    ReqForChecking = 1
-    ReqForFinished = 2
+    ReqForFinished = 1
 
 
 class LLMDataDistCMgrAgentMetadata(msgspec.Struct):
@@ -386,13 +385,6 @@ class LLMDataDistCMgrConnectorWorker():
                         logger.warning(
                             f"LLMDataDistCMgrConnectorWorker: receiving unrecognized data {decode_msg}"
                         )
-                elif event_msg == LLMDataDistCMgrEvent.ReqForChecking:
-                    finished_req_id = decode_msg[0]
-                    checking = 1
-                    with self.thread_lock:
-                        checking = 1 if finished_req_id in self.reqs_to_send else 0
-                    checking_to_send = msg_encoder.encode(checking)
-                    sock.send_multipart((identity, b"", checking_to_send))
                 elif event_msg == LLMDataDistCMgrEvent.ReqForFinished:
                     finished_req_id = decode_msg[0]
                     decode_tp_rank = decode_msg[1]
@@ -810,26 +802,6 @@ class LLMDataDistCMgrConnectorWorker():
                 logger.error(
                     f"Failed to send reqest_id {request_id} to prefill: {e}")
 
-    def send_checking_to_prefill_node(self, host: str, port: int, request_id):
-        url = f"tcp://{host}:{port}"
-        logger.info(f"Sending checking to remote: {url}")
-        msg_encoder = msgspec.msgpack.Encoder()
-        msg_send = msg_encoder.encode(
-            [LLMDataDistCMgrEvent.ReqForChecking, [request_id]])
-        with zmq_ctx(zmq.REQ, url) as sock:  # type: ignore[attr-defined]
-            try:
-                sock.send(msg_send)
-                logger.info(
-                    f"Request id {request_id} checking message send to remote {url}"
-                )
-                checking_bytes = sock.recv()
-                decoder = msgspec.msgpack.Decoder()
-                checking_flag = decoder.decode(checking_bytes)
-                return checking_flag
-            except Exception as e:
-                logger.error(
-                    f"Failed to send reqest_id {request_id} to prefill: {e}")
-
     def _read_blocks(
         self,
         local_block_ids: list[int],
@@ -853,11 +825,6 @@ class LLMDataDistCMgrConnectorWorker():
             remote_block_ids = remote_block_ids[-num_local_blocks:]
 
         logger.info(f"remote cluster id is: {remote_cluster_id}")
-        if not self.send_checking_to_prefill_node(remote_ip, remote_port,
-                                                  request_id):
-            raise RuntimeError(
-                "Remote prefill node has already free blocks, skipping pull blocks"
-            )
         if self.use_mla:
             remote_cache_key_k_normed = BlocksCacheKey(
                 cluster_id=remote_cluster_id, model_id=0)
