@@ -24,11 +24,14 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
+import torch_npu
 
 MODELS = ["Qwen/Qwen3-0.6B"]
 MOE_MODELS = ["Qwen/Qwen3-30B-A3B"]
+DEVICE_NAME = torch_npu.npu.get_device_name(0)[:10]
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -146,4 +149,39 @@ def test_external_launcher_and_sleepmode():
     assert "TP RANKS: [1]" in output
     assert "Generated text:" in output
     assert "Sleep and wake up successfully!!" in output
+    assert proc.returncode == 0
+
+
+@pytest.mark.skipif(
+    DEVICE_NAME != "Ascend910B",
+    reason="This test is only for Ascend910B devices.",
+)
+@pytest.mark.parametrize("model", MODELS)
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE": "1"})
+def test_mm_allreduce(model):
+    script = Path(
+        __file__
+    ).parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
+    env = os.environ.copy()
+    cmd = [
+        sys.executable,
+        str(script),
+        "--model",
+        model,
+        "--trust-remote-code",
+    ]
+
+    print(f"Running subprocess: {' '.join(cmd)}")
+    proc = subprocess.run(
+        cmd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=600,
+    )
+
+    output = proc.stdout.decode()
+    print(output)
+
+    assert "Generated text:" in output
     assert proc.returncode == 0
