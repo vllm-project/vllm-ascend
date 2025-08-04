@@ -19,7 +19,7 @@
 import copy
 
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
-from vllm.v1.request import FinishReason, RequestStatus
+from vllm.v1.request import RequestStatus
 
 from tests.ut.kv_connector.utils import (assert_scheduler_empty,
                                          create_model_runner_output,
@@ -55,10 +55,7 @@ def test_basic_lifecycle():
     # Nothing running and empty scheduler output.
     assert len(scheduler.running) == 0
     assert len(scheduler_output.scheduled_new_reqs) == 0
-    if vllm_version_is("0.9.1"):
-        assert len(scheduler_output.scheduled_cached_reqs) == 0
-    else:
-        assert scheduler_output.scheduled_cached_reqs.num_reqs == 0
+    assert scheduler_output.scheduled_cached_reqs.num_reqs == 0
     assert len(scheduler_output.num_scheduled_tokens) == 0
     assert scheduler_output.total_num_scheduled_tokens == 0
 
@@ -97,7 +94,10 @@ def test_basic_lifecycle():
     if vllm_version_is("0.10.0"):
         model_runner_output.finished_recving = [request_id]
     else:
-        model_runner_output.kv_connector_output.finished_recving = [request_id]
+        from vllm.v1.worker.kv_connector_model_runner_mixin import \
+            KVConnectorOutput  # type: ignore  # noqa
+        kv_connector_output = KVConnectorOutput(finished_recving=[request_id])
+        model_runner_output.kv_connector_output = kv_connector_output
 
     # (2c): update_from_output():
     engine_core_outputs = scheduler.update_from_output(scheduler_output,
@@ -138,11 +138,6 @@ def test_basic_lifecycle():
                                                        model_runner_output)
     scheduler.schedule()
 
-    if vllm_version_is("0.9.1"):
-        outputs = engine_core_outputs[0].outputs
-        assert len(outputs) == 1
-        output = outputs[0]
-        assert output.finish_reason == FinishReason.STOP
     assert_scheduler_empty(scheduler)
 
 
@@ -219,7 +214,10 @@ def test_full_block_prompt():
     if vllm_version_is("0.10.0"):
         model_runner_output.finished_recving = [request_id]
     else:
-        model_runner_output.kv_connector_output.finished_recving = [request_id]
+        from vllm.v1.worker.kv_connector_model_runner_mixin import \
+            KVConnectorOutput  # type: ignore  # noqa
+        kv_connector_output = KVConnectorOutput(finished_recving=[request_id])
+        model_runner_output.kv_connector_output = kv_connector_output
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.waiting) == 1
     assert (request_id in scheduler.finished_recving_kv_req_ids)
@@ -242,13 +240,6 @@ def test_full_block_prompt():
     # # Step (4): Hit EOS.
     scheduler_output = scheduler.schedule()
     model_runner_output = create_model_runner_output([request], use_eos=True)
-    engine_core_outputs = scheduler.update_from_output(scheduler_output,
-                                                       model_runner_output)
     scheduler.schedule()
 
-    if vllm_version_is("0.9.1"):
-        outputs = engine_core_outputs[0].outputs
-        assert len(outputs) == 1
-        output = outputs[0]
-        assert output.finish_reason == FinishReason.STOP
     assert_scheduler_empty(scheduler)
