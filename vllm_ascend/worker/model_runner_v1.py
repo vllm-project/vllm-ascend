@@ -1581,7 +1581,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             sampling_metadata = self.input_batch.sampling_metadata
             if spec_decode_metadata is None:
                 if is_lmhead_tp():
-                    logits = logits[:self.input_batch.num_reqs]
+                    logits = logits[:self.input_batch.num_reqs]  # noqa
 
                 sampler_output = self.sampler(
                     logits=logits,
@@ -1589,7 +1589,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 )
             else:
                 if is_lmhead_tp():
-                    logits = logits[:len(spec_decode_metadata.logits_indices)]
+                    logits = logits[:len(
+                        spec_decode_metadata.logits_indices)]  # noqa
 
                 # When indexing with a tensor (bonus_logits_indices), PyTorch
                 # creates a new tensor with separate storage from the original
@@ -1597,7 +1598,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # won't affect the original logits tensor.
                 assert logits is not None
                 bonus_logits = logits[
-                    spec_decode_metadata.bonus_logits_indices]
+                    spec_decode_metadata.bonus_logits_indices]  # noqa
                 sampler_output = self.sampler(
                     logits=bonus_logits,
                     sampling_metadata=sampling_metadata,
