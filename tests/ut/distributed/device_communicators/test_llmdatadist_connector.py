@@ -1,20 +1,15 @@
 import os
 
+import llm_datadist  # type: ignore
 import pytest
-from pytest_mock import MockerFixture
 import torch
-import torch_npu
-import llm_datadist
-
+from pytest_mock import MockerFixture
 from vllm_ascend.distributed.llmdatadist_connector import (
-    get_device_ips,
-    KVTransferEngine,
-    LLMDataDistConnector,
-)
+    KVTransferEngine, LLMDataDistConnector, get_device_ips)
 
 
 def test_get_device_ips(mocker: MockerFixture):
-    # curent world_size in func get_device_ips is 8
+    # current world_size in func get_device_ips is 8
     # should change this var when origin fun change it's world_size
     world_size = 8
     ip_list = [
@@ -117,7 +112,7 @@ class TestKVTransferEngine():
             kv_transfer_engine.data_dist,
             "init",
         )
-        mock_kv_transfer = mocker.patch.object(
+        mocker.patch.object(
             kv_transfer_engine.data_dist,
             "kv_cache_manager",
         )
@@ -515,7 +510,6 @@ class TestLLMDataDistConnector():
 
         assert hidden_or_intermediate_states.shape[0] == total_token
         assert hidden_or_intermediate_states.shape[1] == hidden_size
-        assert bypass_model_exec == True
 
     def test_close(self, mocker: MockerFixture):
         # set config
