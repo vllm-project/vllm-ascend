@@ -13,7 +13,6 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         self.num_tokens = 128
         self.placeholder = torch.randn(self.num_tokens, self.hidden_size)
 
-    @patch("torch_npu.npu_moe_init_routing_quant")
     @patch("torch.distributed.all_to_all_single")
     @patch("torch_npu.npu_moe_re_routing")
     @patch("torch_npu.npu_grouped_matmul")
@@ -21,11 +20,12 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
     @patch("torch_npu.npu_dynamic_quant")
     @patch("torch_npu.npu_moe_finalize_routing")
     @patch("torch_npu.npu_moe_init_routing")
-    def test_fused_experts_with_all2all(
-            self, mock_moe_init_routing, mock_moe_finalize_routing,
-            mock_dynamic_quant, mock_swiglu, mock_grouped_matmul,
-            mock_moe_re_routing, mock_all_to_all_single,
-            mock_moe_init_routing_quant):
+    def test_fused_experts_with_all2all(self, mock_moe_init_routing,
+                                        mock_moe_finalize_routing,
+                                        mock_dynamic_quant, mock_swiglu,
+                                        mock_grouped_matmul,
+                                        mock_moe_re_routing,
+                                        mock_all_to_all_single):
         expert_map = MagicMock()
         ep_group = MagicMock()
         placeholder_int8 = torch.randint(0,
@@ -35,10 +35,6 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         placeholder_ones = torch.ones(self.num_tokens, dtype=torch.int32)
         mock_all_to_all_single.side_effect = lambda output, input, *args, **kwargs: output.copy_(
             input)
-        mock_moe_init_routing_quant.return_value = (placeholder_int8, None,
-                                                    placeholder_ones, None,
-                                                    torch.randn(
-                                                        self.num_tokens))
         mock_moe_init_routing.return_value = (
             placeholder_int8,
             placeholder_ones,
