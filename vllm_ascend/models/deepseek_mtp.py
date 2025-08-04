@@ -37,8 +37,8 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from vllm_ascend.layers.lmhead import CustomParallelLMHead
-from vllm_ascend.layers.logits_processor import CustomLogitsProcessor
+from vllm_ascend.ops.lmhead import CustomParallelLMHead
+from vllm_ascend.ops.logits_processor import CustomLogitsProcessor
 
 from .deepseek_v2 import CustomDeepseekV2DecoderLayer
 

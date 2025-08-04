@@ -67,8 +67,8 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.layers.lmhead import CustomParallelLMHead
-from vllm_ascend.layers.logits_processor import CustomLogitsProcessor
+from vllm_ascend.ops.lmhead import CustomParallelLMHead
+from vllm_ascend.ops.logits_processor import CustomLogitsProcessor
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
