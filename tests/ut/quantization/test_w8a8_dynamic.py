@@ -54,7 +54,7 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
         )
         mock_moe_finalize_routing.return_value = self.placeholder
 
-        fused_experts_with_all2all(
+        result = fused_experts_with_all2all(
             hidden_states=self.placeholder,
             w1=self.placeholder,
             w1_scale=self.placeholder,
@@ -68,3 +68,6 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
             log2phy=None,
             global_redundant_expert_num=256,
         )
+        self.assertIsNotNone(result)
+        self.assertEqual(result.dtype, torch.bfloat16)
+        self.assertEqual(result.shape, (128, 128))
