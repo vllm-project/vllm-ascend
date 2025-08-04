@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py
 #
 
+import copy
 from typing import Optional
 
 import torch
@@ -27,7 +28,8 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
-from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
+from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
+                                          has_kv_transfer_group)
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
@@ -35,7 +37,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_ascend.ascend_config import init_ascend_config
@@ -204,9 +206,18 @@ class NPUWorker(WorkerBase):
             assert isinstance(output, IntermediateTensors)
             get_pp_group().send_tensor_dict(output.tensors,
                                             all_gather_group=get_tp_group())
-            return None
+            if not has_kv_transfer_group():
+                return None
+
+            new_output = EMPTY_MODEL_RUNNER_OUTPUT
+            if output.finished_sending or output.finished_recving:
+                new_output = copy.copy(new_output)
+                new_output.finished_sending = output.finished_sending
+                new_output.finished_recving = output.finished_recving
+            output = new_output
+
         assert isinstance(output, ModelRunnerOutput)
-        return output if self.is_driver_worker else None
+        return output
 
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
