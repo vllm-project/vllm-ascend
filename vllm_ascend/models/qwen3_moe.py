@@ -100,6 +100,8 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
+        parallel_config = vllm_config.parallel_config
+        self.num_redundant_experts = parallel_config.num_redundant_experts
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.config = config
