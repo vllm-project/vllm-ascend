@@ -1476,7 +1476,7 @@ class NPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         num_scheduled_tokens_np: np.ndarray,
         finished_sending: Optional[set[str]] = None,
         finished_receiving: Optional[set[str]] = None,
-        kv_connector_output: Optional[KVConnectorOutput] = None,
+        kv_connector_output: Optional["KVConnectorOutput"] = None,
     ) -> ModelRunnerOutput:
         assert self.input_batch.num_reqs ==\
             len(self.input_batch.pooling_params), \
