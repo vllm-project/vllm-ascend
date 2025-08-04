@@ -4,7 +4,7 @@ import llm_datadist  # type: ignore
 import pytest
 import torch
 from pytest_mock import MockerFixture
-from vllm_ascend.distributed.llmdatadist_connector import (
+from vllm_ascend.distributed.llmdatadist_connector import (  # type: ignore
     KVTransferEngine, LLMDataDistConnector, get_device_ips)
 
 
@@ -274,7 +274,7 @@ class TestLLMDataDistConnector():
         local_rank = 0
 
         with pytest.raises(NotImplementedError) as error:
-            test_instance = self.mock_and_generate_LLMDataDistConnector(
+            self.mock_and_generate_LLMDataDistConnector(
                 kv_role, tensor_parallel_size, world_size, num_layers, rank,
                 local_rank, mocker)
         assert "kv_role should be inside" in str(error.value)
