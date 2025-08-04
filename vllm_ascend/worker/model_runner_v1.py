@@ -1193,12 +1193,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         if is_lmhead_tp():
             if not with_prefill:
-                max_num_reqs_across_dp = padded_num_tokens_across_dp
+                padded_num_indices = padded_num_tokens_across_dp
             else:
-                max_num_reqs_across_dp = self.max_num_reqs
+                padded_num_indices = self.max_num_reqs
             sample_indices = nn.functional.pad(
                 sample_indices,
-                (0, max_num_reqs_across_dp - sample_indices.shape[0]))
+                (0, padded_num_indices - sample_indices.shape[0]))
 
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
                 total_num_scheduled_tokens, sample_indices, finished_sending,
@@ -1791,10 +1791,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # dp when computing logits. Hence we need to add it
                 # in profile_run.
                 if not with_prefill:
-                    max_num_reqs_across_dp = num_tokens
+                    padded_num_indices = num_tokens
                 else:
-                    max_num_reqs_across_dp = max_num_reqs
-                dummy_indices = torch.zeros(max_num_reqs_across_dp,
+                    padded_num_indices = max_num_reqs
+                dummy_indices = torch.zeros(padded_num_indices,
                                             device=hidden_states.device,
                                             dtype=torch.int32)
                 model.compute_logits(hidden_states[dummy_indices], None)
@@ -1810,10 +1810,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
                 if not self.in_profile_run and is_lmhead_tp():
                     if not with_prefill:
-                        max_num_reqs_across_dp = num_reqs
+                        padded_num_indices = num_reqs
                     else:
-                        max_num_reqs_across_dp = max_num_reqs
-                    dummy_indices = torch.zeros(max_num_reqs_across_dp,
+                        padded_num_indices = max_num_reqs
+                    dummy_indices = torch.zeros(padded_num_indices,
                                                 device=hidden_states.device,
                                                 dtype=torch.int32)
                     model.compute_logits(hidden_states[dummy_indices], None)

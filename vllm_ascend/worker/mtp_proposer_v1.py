@@ -268,11 +268,11 @@ class MtpProposer:
         num_indices = last_token_indices.shape[0]
         if is_lmhead_tp():
             if not self.runner.with_prefill:
-                max_num_reqs_across_dp = num_input_tokens // self.runner.decode_token_per_req
+                padded_num_indices = num_input_tokens // self.runner.decode_token_per_req
             else:
-                max_num_reqs_across_dp = self.vllm_config.scheduler_config.max_num_seqs
+                padded_num_indices = self.vllm_config.scheduler_config.max_num_seqs
             last_token_indices = nn.functional.pad(
-                last_token_indices, (0, max_num_reqs_across_dp - num_indices))
+                last_token_indices, (0, padded_num_indices - num_indices))
 
         sample_hidden_states = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
