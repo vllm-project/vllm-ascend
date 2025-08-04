@@ -94,6 +94,8 @@ from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if not vllm_version_is("0.10.0"):
     from vllm.tasks import GenerationTask, SupportedTask
+    from vllm.v1.worker.kv_connector_model_runner_mixin import \
+        KVConnectorOutput
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -1472,8 +1474,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         hidden_states: torch.Tensor,
         num_scheduled_tokens: int,
         num_scheduled_tokens_np: np.ndarray,
-        finished_sending: Optional[set[str]],
-        finished_receiving: Optional[set[str]],
+        finished_sending: Optional[set[str]] = None,
+        finished_recving: Optional[set[str]] = None,
+        kv_connector_output: Optional["KVConnectorOutput"] = None,
     ) -> ModelRunnerOutput:
         assert self.input_batch.num_reqs ==\
             len(self.input_batch.pooling_params), \
@@ -1499,6 +1502,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 pooler_output.append(raw_output.data.cpu())
             else:
                 pooler_output.append(None)
+        extra_args = ({
+            "finished_sending": finished_sending,
+            "finished_recving": finished_recving
+        } if vllm_version_is("0.10.0") else {
+            "kv_connector_output": kv_connector_output
+        })
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -1508,8 +1517,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
-            finished_sending=finished_sending,
-            finished_recving=finished_receiving)
+            **extra_args,
+        )
 
     @torch.inference_mode()
     def execute_model(
@@ -1533,7 +1542,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
              num_scheduled_tokens_np, finished_sending,
              finished_recving) = (self._process_reqs(scheduler_output,
                                                      intermediate_tensors))
-
+        kv_connector_output = None
+        if not vllm_version_is("0.10.0"):
+            kv_connector_output = KVConnectorOutput(
+                finished_sending=finished_sending,
+                finished_recving=finished_recving)
+            finished_sending = None
+            finished_recving = None
         with ProfileExecuteDuration().capture_async("post process"):
             # Broadcast PP output for external_launcher (torchrun)
             # to make sure we are synced across pp ranks
@@ -1545,7 +1560,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if not get_pp_group().is_last_rank:
                 # For mid-pipeline stages, return the hidden states.
                 if not broadcast_pp_output:
-                    if finished_sending or finished_recving:
+                    if kv_connector_output is not None:
+                        hidden_states.kv_connector_output = kv_connector_output
+                    else:
+                        #TODO: Remove this after we drop vllm v0.10.0
                         hidden_states.finished_sending = finished_sending
                         hidden_states.finished_recving = finished_recving
                     return hidden_states
@@ -1557,7 +1575,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 if self.input_batch.pooling_params:
                     return self._pool(hidden_states, num_scheduled_tokens,
                                       num_scheduled_tokens_np,
-                                      finished_sending, finished_recving)
+                                      finished_sending, finished_recving,
+                                      kv_connector_output)
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states, None)
             if broadcast_pp_output:
@@ -1691,17 +1710,23 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if has_kv_transfer_group():
                 get_kv_transfer_group().clear_connector_metadata()
 
-            model_runner_output = ModelRunnerOutput(
-                req_ids=self.input_batch.req_ids,
-                req_id_to_index=self.input_batch.req_id_to_index,
-                sampled_token_ids=valid_sampled_token_ids,
-                spec_token_ids=spec_token_ids,
-                logprobs=logprobs_lists,
-                prompt_logprobs_dict=prompt_logprobs_dict,
-                pooler_output=[],
-                finished_sending=finished_sending,
-                finished_recving=finished_recving,
-            )
+        extra_args = ({
+            "finished_sending": finished_sending,
+            "finished_recving": finished_recving
+        } if vllm_version_is("0.10.0") else {
+            "kv_connector_output": kv_connector_output
+        })
+
+        model_runner_output = ModelRunnerOutput(
+            req_ids=self.input_batch.req_ids,
+            req_id_to_index=self.input_batch.req_id_to_index,
+            sampled_token_ids=valid_sampled_token_ids,
+            spec_token_ids=spec_token_ids,
+            logprobs=logprobs_lists,
+            prompt_logprobs_dict=prompt_logprobs_dict,
+            pooler_output=[],
+            **extra_args,
+        )
 
         durations = ProfileExecuteDuration().pop_captured_sync()
         if durations:

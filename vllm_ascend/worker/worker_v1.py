@@ -209,12 +209,27 @@ class NPUWorker(WorkerBase):
             if not has_kv_transfer_group():
                 return None
 
-            new_output = EMPTY_MODEL_RUNNER_OUTPUT
-            if output.finished_sending or output.finished_recving:
-                new_output = copy.copy(new_output)
-                new_output.finished_sending = output.finished_sending
-                new_output.finished_recving = output.finished_recving
-            output = new_output
+            is_legacy = vllm_version_is("0.10.0")
+
+            if is_legacy:
+                finished_sending = output.finished_sending
+                finished_recving = output.finished_recving
+            else:
+                kv_connector_output = output.kv_connector_output
+                finished_sending = kv_connector_output.finished_sending
+                finished_recving = kv_connector_output.finished_recving
+
+            if not finished_sending and not finished_recving:
+                return EMPTY_MODEL_RUNNER_OUTPUT
+
+            new_output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+
+            if is_legacy:
+                new_output.finished_sending = finished_sending
+                new_output.finished_recving = finished_recving
+            else:
+                new_output.kv_connector_output = kv_connector_output
+            return new_output
 
         assert isinstance(output, ModelRunnerOutput)
         return output
