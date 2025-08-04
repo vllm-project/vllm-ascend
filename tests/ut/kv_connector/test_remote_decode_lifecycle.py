@@ -108,8 +108,8 @@ def test_basic_lifecycle():
     else:
         from vllm.v1.worker.kv_connector_model_runner_mixin import \
             KVConnectorOutput  # type: ignore  # noqa
-        kv_connector_output = KVConnectorOutput(finished_sending=[request_id])
-        model_runner_output.kv_connector_output = kv_connector_output
+        model_runner_output.kv_connector_output = KVConnectorOutput(
+            finished_sending=[request_id])
 
     # (3c): update_from_output()
     scheduler.update_from_output(scheduler_output, model_runner_output)
@@ -169,9 +169,8 @@ def test_prefix_cache_lifecycle():
     else:
         from vllm.v1.worker.kv_connector_model_runner_mixin import \
             KVConnectorOutput  # noqa
-        kv_connector_output = KVConnectorOutput(
+        model_runner_output.kv_connector_output = KVConnectorOutput(
             finished_sending=[request_remote.request_id])
-        model_runner_output.kv_connector_output = kv_connector_output
     scheduler.update_from_output(scheduler_output, model_runner_output)
     _ = scheduler.schedule()
     assert_scheduler_empty(scheduler)
