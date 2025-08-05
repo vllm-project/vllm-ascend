@@ -98,12 +98,15 @@ class VLLMAscendQuantizer:
         if target_function is not None:
             setattr(original_module, target_function, candidate)
 
-        for key, value in sys.modules.copy().items():
-            if (target_function is not None
-                    and hasattr(value, target_function)
-                    and id(getattr(value,
-                                   target_function)) == original_function_id):
-                setattr(value, target_function, candidate)
+        for _, value in sys.modules.copy().items():
+            if target_function is None:
+                continue
+            try:
+                attr = getattr(value, target_function, None)
+                if attr is not None and id(attr) == original_function_id:
+                    setattr(value, target_function, candidate)
+            except ImportError:
+                continue
 
     @staticmethod
     def parse_path(module_path, function_name, create_dummy):

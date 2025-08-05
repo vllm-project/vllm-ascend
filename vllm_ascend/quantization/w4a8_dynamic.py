@@ -248,15 +248,16 @@ class AscendW4A8DynamicFusedMoEMethod:
         if global_num_experts == 256:
             topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k(
                 router_logits,
-                k=top_k,  # topk当前写8
+                k=top_k,  # topk currently is 8
                 bias=e_score_correction_bias,
                 k_group=topk_group,  # fix: 4
                 group_count=num_expert_group,  # fix 8
-                group_select_mode=1,  # 0: group中的最大; 1: topk2.sum(fix)
+                group_select_mode=
+                1,  # 0: the maximum in the group; 1: topk2.sum(fix)
                 renorm=0,  # 0: softmax->topk(fix); 1: topk->softmax
                 norm_type=1,  # 0: softmax; 1: sigmoid(fix)
-                # out_flag=False, # todo new api; 第三个输出是否输出
-                # y2_flag=False, # old api; 第三个输出是否输出
+                # out_flag=False, # todo new api; should the third output be output
+                # y2_flag=False, # old api; should the third output be output
                 routed_scaling_factor=1,
                 eps=float(1e-20))
         else:
