@@ -875,6 +875,7 @@ class MooncakeConnectorWorker:
         # After KV Caches registered, start the sending or receiving thread.
         metadata = MooncakeAgentMetadata(
             engine_id=self.engine_id,
+            te_rpc_port=self.te_rpc_port,
             kv_caches_base_addr=kv_caches_base_addr,
             num_blocks=self.num_blocks,
         )
