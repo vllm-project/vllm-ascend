@@ -259,16 +259,10 @@ class NPUPlatform(Platform):
 
         assert is_hccl_available()
 
-        # TODO(Yizhou): The reason we need to set options while vllm does not
-        # seems to be related to the version of PyTorch. In the latest version,
-        # there is no need to set options. While in the older version, 2.5.1
-        # specifically, we need to set options.
-        options = ProcessGroup.Options(backend=backend)
         pg: ProcessGroup = ProcessGroup(
             prefix_store,
             group_rank,
             group_size,
-            options,
         )
 
         backend_options = ProcessGroupHCCL.Options()
