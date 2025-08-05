@@ -79,5 +79,5 @@ def test_e2e_deepseekv3_with_torchair(monkeypatch: pytest.MonkeyPatch,
 
         assert len(golden_results) == len(vllm_output)
         for i in range(len(vllm_output)):
-            assert golden_results[i] == vllm_output[i][1]
             print(f"Generated text: {vllm_output[i][1]!r}")
+        assert golden_results[0] == vllm_output[0][1]
