@@ -75,20 +75,6 @@
 #    Future Plan:
 #       Remove this patch when vllm merged them.
 #
-# ** File: worker/patch_common/patch_utils.py **
-# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-#   1. `vllm.utils.direct_register_custom_op`
-#    Why:
-#       pytorch 2.7.o is not compatible with pytorch 2.5.1. While vllm is based on pytorch 2.7.0, but vllm ascend
-#       is based on pytorch 2.5.1, so we need to use this patch to make vllm compatible with pytorch 2.5.1.
-#    How：
-#       patch __annotations__ check to make it compatible with pytorch 2.5.1.
-#    Related PR (if no, explain why):
-#       This is the problem in vllm-ascend
-#    Future Plan:
-#       Remove this patch once pytorch 2.7.0 is supported for vllm ascend.
-#
-# ** File: worker/patch_0_10_0/patch_sampler_gather_logprobs.py **
 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #   1. `vllm.v1.sample.sampler.Sampler.gather_logprobs`
 #    Why:
