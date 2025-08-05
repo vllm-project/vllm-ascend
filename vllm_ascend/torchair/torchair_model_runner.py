@@ -17,9 +17,12 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+from typing import Optional
+
 import torch
 from vllm.config import VllmConfig
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -27,3 +30,40 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+
+    def _get_forward_metadata_across_dp_and_pad(
+            self, num_tokens: int, with_prefill: bool, enable_dbo: bool
+    ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
+        if self.dp_size == 1:
+            return num_tokens, None, with_prefill, enable_dbo
+
+        if self.is_kv_producer and not envs_ascend.VLLM_ASCEND_ENABLE_CHUNK_MC2:
+            num_tokens_across_dp = torch.tensor([num_tokens] * self.dp_size,
+                                                device="cpu",
+                                                dtype=torch.int32)
+            return num_tokens, num_tokens_across_dp, True, enable_dbo
+
+        if self.is_kv_consumer and len(self.torchair_graph_batch_sizes
+                                       ) == 1 and not self.in_profile_run:
+            max_num_decode_tokens = self.torchair_graph_batch_sizes[0]
+            num_tokens_across_dp = torch.tensor([max_num_decode_tokens] *
+                                                self.dp_size,
+                                                device="cpu",
+                                                dtype=torch.int32)
+            return max_num_decode_tokens, num_tokens_across_dp, False, enable_dbo
+
+        num_tokens_across_dp, with_prefill, enable_dbo = self._get_forward_metadata_across_dp(
+            num_tokens, with_prefill, enable_dbo)
+
+        if not with_prefill:
+            max_num_token = num_tokens_across_dp.max().item()
+            maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
+                max_num_token)
+            num_tokens_across_dp = torch.full((self.dp_size, ),
+                                              maybe_padded_num_tokens,
+                                              dtype=torch.int32,
+                                              device="cpu")
+        else:
+            maybe_padded_num_tokens = num_tokens
+
+        return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, enable_dbo

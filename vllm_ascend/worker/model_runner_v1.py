@@ -623,30 +623,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                 dtype=torch.int32)
             return num_tokens, num_tokens_across_dp, True, enable_dbo
 
-        if self.is_kv_consumer and self.torchair_graph_enabled and len(
-                self.torchair_graph_batch_sizes
-        ) == 1 and not self.in_profile_run:
-            max_num_decode_tokens = self.torchair_graph_batch_sizes[0]
-            num_tokens_across_dp = torch.tensor([max_num_decode_tokens] *
-                                                self.dp_size,
-                                                device="cpu",
-                                                dtype=torch.int32)
-            return max_num_decode_tokens, num_tokens_across_dp, False, enable_dbo
-
-        maybe_padded_num_tokens = num_tokens
         num_tokens_across_dp, with_prefill, enable_dbo = self._get_forward_metadata_across_dp(
             num_tokens, with_prefill, enable_dbo)
-
-        if self.torchair_graph_enabled and not with_prefill:
-            max_num_token = num_tokens_across_dp.max().item()
-            maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
-                max_num_token)
-            num_tokens_across_dp = torch.full((self.dp_size, ),
-                                              maybe_padded_num_tokens,
-                                              dtype=torch.int32,
-                                              device="cpu")
-
-        return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, enable_dbo
+        return num_tokens, num_tokens_across_dp, with_prefill, enable_dbo
 
     def _check_dbo_is_valid(self, query_lens: torch.Tensor,
                             attn_state: AscendAttentionState,
