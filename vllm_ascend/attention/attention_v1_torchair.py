@@ -223,7 +223,9 @@ class AscendAttentionTorchairMetadataBuilder:
               num_actual_tokens,
               max_query_len,
               graph_pad_size: int = -1,
-              enable_dbo_across_dp: bool = False):
+              enable_dbo_across_dp: bool = False,
+              *args,
+              **kwargs):
 
         device = self.runner.device
 

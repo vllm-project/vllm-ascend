@@ -50,6 +50,7 @@ from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
     MoEAlltoAllSeqOverLapDispatcher, MoEDispatcherConfig)
+from vllm_ascend.ops.sequence_parallel import MetadataForPadding
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
                                get_all_reduce_merge_state,
@@ -1350,7 +1351,8 @@ class AscendFusedMoE(FusedMoE):
                 top_k: Optional[int] = None,
                 shared_experts: Optional[Any] = None,
                 gate=None,
-                replace_allreduce: bool = False):
+                replace_allreduce: bool = False,
+                _metadata_for_padding: Optional[MetadataForPadding] = None):
 
         assert self.quant_method is not None
 
@@ -1384,7 +1386,17 @@ class AscendFusedMoE(FusedMoE):
                 # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
                 shared_hidden_states = shared_experts(hidden_states)
 
+        mc2_mask = forward_context.mc2_mask
+
+        enable_sp = _metadata_for_padding is not None and _metadata_for_padding.not_dummy_and_is_prefill
         tp_size = get_tensor_model_parallel_world_size()
+        if enable_sp:
+            tp_rank = get_tensor_model_parallel_rank()
+            mc2_mask_sp = _metadata_for_padding.mc2_mask if _metadata_for_padding is not None else forward_context.mc2_mask
+            chunk_mc2_mask = torch.tensor_split(mc2_mask_sp, tp_size, dim=0)
+            mc2_mask = chunk_mc2_mask[tp_rank]
+            replace_allreduce = True
+
         if (fused_moe_state not in [
                 FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
                 FusedMoEState.NaiveMulticast
@@ -1601,6 +1613,7 @@ class AscendSparseMoeBlock(nn.Module):
         self,
         hidden_states: torch.Tensor,
         attn_metadata: Optional[AttentionMetadata] = None,
+        _metadata_for_padding: Optional[MetadataForPadding] = None
     ) -> torch.Tensor:
         if attn_metadata is None:
             attn_metadata = get_forward_context().attn_metadata
@@ -1619,6 +1632,6 @@ class AscendSparseMoeBlock(nn.Module):
             top_k=self.top_k,
             enable_force_load_balance=enable_force_load_balance,
             shared_experts=None,
-        )
+            _metadata_for_padding=_metadata_for_padding)
 
         return hidden_states

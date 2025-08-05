@@ -138,6 +138,17 @@ class NPUPlatform(Platform):
         else:
             enforce_eager = getattr(model_config, "enforce_eager", False)
 
+        if parallel_config:
+            if parallel_config.enable_expert_parallel:
+                parallel_config.expert_tensor_parallel_size = 1
+            else:
+                parallel_config.expert_tensor_parallel_size = parallel_config.world_size_across_dp
+
+            # Calculate expert parallel size based on world size
+            parallel_config.expert_parallel_size = (
+                parallel_config.world_size_across_dp //
+                parallel_config.expert_tensor_parallel_size)
+
         check_ascend_config(vllm_config, enforce_eager)
 
         if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:
@@ -194,6 +205,9 @@ class NPUPlatform(Platform):
                 vllm_config.scheduler_config,
                 ascend_config.ascend_scheduler_config)
             vllm_config.scheduler_config = ascend_scheduler_config
+
+        if compilation_config.pass_config.enable_sequence_parallelism and parallel_config.enable_expert_parallel:
+            assert parallel_config.expert_parallel_size > 1, "For better performance in Qwen3 MoE, SP works exclusively with MC2, AllToAll, and AllToAllV."
 
         # register Ascend CustomOp
         register_ascend_customop()
