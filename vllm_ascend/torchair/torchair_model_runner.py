@@ -33,10 +33,11 @@ from vllm.logger import logger
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
+from vllm_ascend.torchair.utils import (ACL_FORMAT_FRACTAL_ND,
+                                        ACL_FORMAT_FRACTAL_NZ,
+                                        check_torchair_cache_exist,
+                                        converting_weight_acl_format, is_310p,
                                         write_kv_cache_bytes_to_file)
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               is_310p, maybe_converting_weight_acl_format)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -208,8 +209,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
             model_kwargs = {}
             model_kwargs["kv_caches"] = self.kv_caches
             model_kwargs["attn_metadata"] = attn_metadata
-            maybe_converting_weight_acl_format(self.model,
-                                               ACL_FORMAT_FRACTAL_NZ)
+            if is_310p():
+                converting_weight_acl_format(self.model, ACL_FORMAT_FRACTAL_NZ)
 
             compiled_model = self._get_torchair_lazy_compiled_model(
                 padded_num_tokens_across_dp)
@@ -221,6 +222,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
                 **model_kwargs,
             )
         else:
+            if is_310p():
+                converting_weight_acl_format(self.model, ACL_FORMAT_FRACTAL_ND)
             hidden_states = super()._generate_process_reqs_hidden_states(
                 attn_metadata, with_prefill, padded_num_tokens_across_dp,
                 input_ids, positions, intermediate_tensors, inputs_embeds)
@@ -248,9 +251,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
                     assert isinstance(kv, tuple), "kv_cache must be a tuple"
                     torch._dynamo.mark_static(kv[0])
                     torch._dynamo.mark_static(kv[1])
-
-            maybe_converting_weight_acl_format(self.model,
-                                               ACL_FORMAT_FRACTAL_NZ)
+            if is_310p():
+                converting_weight_acl_format(self.model, ACL_FORMAT_FRACTAL_NZ)
 
             compiled_model = self._get_torchair_lazy_compiled_model(num_tokens)
             model_kwargs["kv_caches"] = self.kv_caches
@@ -263,6 +265,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
                 **model_kwargs,
             )
         else:
+            if is_310p():
+                converting_weight_acl_format(self.model, ACL_FORMAT_FRACTAL_ND)
             hidden_states = super()._generate_dummy_run_hidden_states(
                 with_prefill, is_torchair_compile, input_ids, positions,
                 attn_metadata, num_tokens, intermediate_tensors, inputs_embeds)

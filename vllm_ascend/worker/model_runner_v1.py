@@ -82,7 +82,6 @@ from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                ProfileExecuteDuration, is_310p,
-                               maybe_converting_weight_acl_format,
                                vllm_version_is)
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
@@ -987,7 +986,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                              input_ids, positions,
                                              intermediate_tensors,
                                              inputs_embeds):
-        maybe_converting_weight_acl_format(self.model, ACL_FORMAT_FRACTAL_ND)
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
@@ -1780,7 +1778,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                           positions, attn_metadata, num_tokens,
                                           intermediate_tensors, inputs_embeds):
         """Generate hidden states for dummy run."""
-        maybe_converting_weight_acl_format(self.model, ACL_FORMAT_FRACTAL_ND)
         hidden_states = self.model(input_ids=input_ids,
                                    positions=positions,
                                    intermediate_tensors=intermediate_tensors,
