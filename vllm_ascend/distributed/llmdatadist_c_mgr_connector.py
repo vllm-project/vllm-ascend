@@ -28,7 +28,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request, RequestStatus
 
 from vllm_ascend import envs
-from vllm_ascend.soc_info import NPUSocInfo
+from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
 
 TORCH_DTYPE_TO_NPU_DTYPE = {
     torch.half: llm_datadist.DataType.DT_FLOAT16,
@@ -336,7 +336,7 @@ class LLMDataDistCMgrConnectorWorker():
                                         self.local_agent_metadata.cluster_id)
         self.init_llm_datadist()
         self.finished_reqs: set[str] = set()
-        self.soc_info = NPUSocInfo()
+        self.soc_info = get_ascend_soc_version()
         # Set hccl deterministic for model execute
         os.environ["HCCL_DETERMINISTIC"] = "true"
         self.done_receiving_counts: defaultdict[str,
@@ -681,7 +681,7 @@ class LLMDataDistCMgrConnectorWorker():
             rank_table["server_list"].append(  # type: ignore[attr-defined]
                 decode_server_device_info)
 
-        if self.soc_info.is_a3:
+        if self.soc_info == AscendSocVersion.A3:
             # generate super_pod_list for rank table
             super_pod_list = []
             prefill_super_pod_info = {
