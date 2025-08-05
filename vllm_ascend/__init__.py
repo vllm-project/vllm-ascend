@@ -35,4 +35,5 @@ def register_model():
     if envs.VLLM_USE_V1 and \
         envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM != 0:
         import vllm_ascend.patch.platform.patch_0_9_1.patch_decorator  # isort: skip  # noqa: F401
+    import vllm_ascend.patch.platform.patch_0_9_1.patch_cache_manager  # isort: skip  # noqa: F401
     register_model()
