@@ -16,21 +16,26 @@
 # This file is a part of the vllm-ascend project.
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
-
+import types
 from typing import Optional
 
 import torch
+import torch.nn as nn
 import torch_npu
+import torchair
+import vllm.envs as envs_vllm
+from torchair import patch_for_hcom
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs_ascend
+from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         write_kv_cache_bytes_to_file)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               maybe_converting_weight_acl_format)
+                               is_310p, maybe_converting_weight_acl_format)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -38,6 +43,13 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+
+    def _select_torchair_padded_batch_size(self, batch_size: int):
+        selected_batch_size = self.max_num_reqs
+        for padded_batch_size in self.torchair_graph_batch_sizes:
+            if batch_size <= padded_batch_size < selected_batch_size:
+                selected_batch_size = padded_batch_size
+        return selected_batch_size
 
     def _get_forward_metadata_across_dp_and_pad(
             self, num_tokens: int, with_prefill: bool, enable_dbo: bool
@@ -66,7 +78,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
         if not with_prefill:
             max_num_token = num_tokens_across_dp.max().item()
-            maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
+            maybe_padded_num_tokens = self._select_torchair_padded_batch_size(
                 max_num_token)
             num_tokens_across_dp = torch.full((self.dp_size, ),
                                               maybe_padded_num_tokens,
@@ -86,6 +98,97 @@ class NPUTorchairModelRunner(NPUModelRunner):
             attn_metadata = super()._build_attention_metadata(
                 with_prefill, num_tokens, skip_attn)
         return attn_metadata
+
+    def _get_torchair_lazy_compiled_model(self, batch_size: int):
+        if batch_size < 0 or batch_size > self.max_num_reqs:
+            raise ValueError(
+                f"Bad graph batch size:{batch_size}! max_num_reqs:{self.max_num_reqs}"
+            )
+
+        compiled_model = self.torchair_compiled_models.get(
+            batch_size
+        ) if self.use_cached_npu_graph else self.torchair_compiled_model
+
+        if compiled_model:
+            return compiled_model
+
+        patch_for_hcom()
+
+        if is_310p():
+            # on 300I Duo platform, we need to patch broadcast. however, this patch will be
+            # overwritten by patch_for_hcom in torchair. so we need to re-patch it here.
+            from vllm_ascend.patch.platform.patch_common.patch_distributed import \
+                communication_adaptation_310p
+            communication_adaptation_310p()
+
+        config = torchair.CompilerConfig()
+        config.experimental_config.frozen_parameter = True
+        # enabling tiling_schedule_optimize on 300I Duo has some bugs, so we have to
+        # disable it on 300I Duo platform now.
+        config.experimental_config.tiling_schedule_optimize = not is_310p()
+        config.experimental_config.enable_view_optimize = \
+        get_ascend_config().torchair_graph_config.enable_view_optimize
+        torch.npu.set_compile_mode(jit_compile=False)
+        if not self.use_cached_npu_graph:
+            npu_backend = torchair.get_npu_backend(compiler_config=config)
+            self.torchair_compiled_model = torch.compile(
+                self.model,
+                dynamic=True,
+                fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                backend=npu_backend)
+            return self.torchair_compiled_model
+        else:
+            # Generate a new forward proxy code object to prevent the invalidation of
+            # compilation cache caused by dynamo retracing
+            forward_proxy_name = f"{self.model.__class__.__name__}_forward_with_batch_size_{batch_size}"
+            forward_fn = self.model.forward
+            code = forward_fn.__code__
+            # Mark code object with a new proxy name
+            modified_code = code.replace(co_name=forward_proxy_name, )
+
+            modified_func = types.FunctionType(modified_code,
+                                               forward_fn.__globals__,
+                                               name=forward_proxy_name,
+                                               argdefs=forward_fn.__defaults__)
+
+            self.model.__dict__[forward_proxy_name] = modified_func.__get__(
+                self.model, nn.Module)
+            self.torchair_compiled_models[
+                batch_size] = torchair.inference.cache_compile(
+                    self.model.__dict__[forward_proxy_name],
+                    dynamic=True,
+                    fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    config=config,
+                    ge_cache=False)
+            return self.torchair_compiled_models[batch_size]
+
+    def _generate_process_reqs_hidden_states(self, attn_metadata, with_prefill,
+                                             padded_num_tokens_across_dp,
+                                             input_ids, positions,
+                                             intermediate_tensors,
+                                             inputs_embeds):
+        """Override from NPUModelRunner to use compiled_model"""
+        if not with_prefill:
+            model_kwargs = {}
+            model_kwargs["kv_caches"] = self.kv_caches
+            model_kwargs["attn_metadata"] = attn_metadata
+            maybe_converting_weight_acl_format(self.model,
+                                               ACL_FORMAT_FRACTAL_NZ)
+
+            compiled_model = self._get_torchair_lazy_compiled_model(
+                padded_num_tokens_across_dp)
+            hidden_states = compiled_model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                **model_kwargs,
+            )
+        else:
+            hidden_states = super()._generate_process_reqs_hidden_states(
+                attn_metadata, with_prefill, padded_num_tokens_across_dp,
+                input_ids, positions, intermediate_tensors, inputs_embeds)
+        return hidden_states
 
     def _generate_dummy_run_hidden_states(self, with_prefill,
                                           is_torchair_compile, input_ids,
@@ -180,3 +283,28 @@ class NPUTorchairModelRunner(NPUModelRunner):
         if self.new_kv_cache_bytes > 0:
             write_kv_cache_bytes_to_file(torch.distributed.get_rank(),
                                          self.new_kv_cache_bytes)
+
+    def _generate_extra_builder_kwargs(self, enable_dbo, num_reqs,
+                                       with_prefill,
+                                       padded_num_tokens_across_dp,
+                                       total_num_scheduled_tokens) -> dict:
+        """Override from NPUModelRunner to add graph_pad_size."""
+        extra_builder_kwargs = super()._generate_extra_builder_kwargs(
+            enable_dbo, num_reqs, with_prefill, padded_num_tokens_across_dp,
+            total_num_scheduled_tokens)
+        if not with_prefill:
+            extra_builder_kwargs[
+                'graph_pad_size'] = padded_num_tokens_across_dp - total_num_scheduled_tokens
+
+    def _update_input_ids_and_positions(self, input_ids, positions,
+                                        num_input_tokens, with_prefill,
+                                        padded_num_tokens_across_dp):
+        """Override from NPUModelRunner to update input_ids and positions"""
+        input_ids, positions = super()._update_input_ids_and_positions(
+            input_ids, positions, num_input_tokens, with_prefill,
+            padded_num_tokens_across_dp)
+
+        if not with_prefill:
+            input_ids = self.input_ids[:padded_num_tokens_across_dp]
+            positions = self.positions[:padded_num_tokens_across_dp]
+        return input_ids, positions
