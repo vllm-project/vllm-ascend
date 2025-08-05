@@ -13,7 +13,6 @@ import vllm_ascend.envs as vllm_ascend_envs
 logger = init_logger(__name__)
 
 
-
 class ExternealDPEngineCoreProc(DPEngineCoreProc):
 
     def __init__(self, *args, **kwargs):

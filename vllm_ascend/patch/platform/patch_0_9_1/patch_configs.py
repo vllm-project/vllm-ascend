@@ -7,7 +7,6 @@ import vllm_ascend.envs as vllm_ascend_envs
 logger = init_logger(__name__)
 
 
-
 def __post_init__(self: ParallelConfig) -> None:
     self.world_size = self.pipeline_parallel_size * \
         self.tensor_parallel_size
