@@ -226,7 +226,7 @@ def test_sp_for_qwen3_moe() -> None:
             tensor_parallel_size=4,
             distributed_executor_backend="mp",
             compilation_config={
-                "pass_config":{
+                "pass_config": {
                     "enable_sequence_parallelism": True
                 }
             },
