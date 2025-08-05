@@ -79,7 +79,7 @@ def test_mtp_correctness(
                    trust_remote_code=True,
                    enforce_eager=True,
                    max_model_len=2000,
-                   additional_config = {
+                   additional_config={
                        'torchair_graph_config': {
                            'enabled': False,
                            "graph_batch_sizes": [16],
