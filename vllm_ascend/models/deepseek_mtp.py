@@ -24,7 +24,6 @@ import torch.nn as nn
 from transformers import PretrainedConfig
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -93,11 +92,10 @@ class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
-        forward_context = get_forward_context()
-        if forward_context.with_prefill:
-            inputs_embeds = torch.where((positions == 0).unsqueeze(-1),
-                                        torch.zeros_like(inputs_embeds),
-                                        inputs_embeds)
+        inputs_embeds = torch.where((positions == 0).unsqueeze(-1),
+                                    torch.zeros_like(inputs_embeds),
+                                    inputs_embeds)
+
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
