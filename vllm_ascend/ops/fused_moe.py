@@ -135,7 +135,10 @@ def fused_experts_with_mc2(
     shared_experts: Optional[Any] = None,
     is_torchair: bool = False,
     mc2_mask: Optional[torch.Tensor] = None,
+    log2phy: Optional[torch.Tensor] = None,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    if log2phy is not None:
+        topk_ids = log2phy[topk_ids]
     quant_mode = 0
     ep_rank_id = moe_parallel_config.ep_rank
     ep_world_size = moe_parallel_config.ep_size
@@ -336,7 +339,11 @@ def fused_experts_with_all2all(
     top_k: int,
     expert_map: torch.Tensor = None,
     ep_group: GroupCoordinator = None,
+    log2phy: Optional[torch.Tensor] = None,
+    global_redundant_expert_num: int = 0,
 ):
+    if log2phy is not None:
+        topk_ids = log2phy[topk_ids]
     original_shape = hidden_states.shape
     if len(original_shape) == 3:
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
@@ -346,7 +353,7 @@ def fused_experts_with_all2all(
     device = hidden_states.device
 
     if expert_map is not None:
-        global_num_experts = len(expert_map)
+        global_num_experts = len(expert_map) + global_redundant_expert_num
         local_num_experts = global_num_experts // ep_group.world_size
         row_idx_len = num_tokens * top_k
         row_idx = (torch.arange(0,
@@ -680,7 +687,10 @@ def fused_experts_with_all2allv(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
+    log2phy: Optional[torch.Tensor] = None,
 ):
+    if log2phy is not None:
+        routing_map = log2phy[routing_map]
     # Enable moe alltoallv, it's a balanced policy for precision and efficiency.
     (share_experts_output, dispatched_input,
      tokens_per_expert) = (token_dispatcher.token_permutation(
@@ -1051,6 +1061,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         is_prefill: bool = False,
         enable_force_load_balance: bool = False,
         shared_experts: Optional[Any] = None,
+        log2phy: Optional[torch.Tensor] = None,
+        global_redundant_expert_num: int = 0,
         **kwargs,
     ) -> torch.Tensor:
 
@@ -1106,6 +1118,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 expert_map=expert_map,
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name,
                 shared_experts=shared_experts,
+                log2phy=log2phy,
                 mc2_mask=kwargs.get("mc2_mask", None))
         elif fused_moe_state in [
                 FusedMoEState.AllGather, FusedMoEState.NaiveMulticast
@@ -1138,16 +1151,20 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
+                log2phy=log2phy,
             )
         else:
-            return fused_experts_with_all2all(hidden_states=x,
-                                              w1=layer.w13_weight,
-                                              w2=layer.w2_weight,
-                                              topk_weights=topk_weights,
-                                              topk_ids=topk_ids,
-                                              top_k=top_k,
-                                              expert_map=expert_map,
-                                              ep_group=get_ep_group())
+            return fused_experts_with_all2all(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                top_k=top_k,
+                expert_map=expert_map,
+                log2phy=log2phy,
+                global_redundant_expert_num=global_redundant_expert_num,
+                ep_group=get_ep_group())
 
 
 class AscendFusedMoE(FusedMoE):
@@ -1247,17 +1264,17 @@ class AscendFusedMoE(FusedMoE):
         expert_map_path = ascend_config.expert_map_path
         if expert_map_path and os.path.exists(expert_map_path):
             # moe expert load balance
-            expert_load_balancer = ExpertLoadBalancer(expert_map_path,
-                                                      self.global_num_experts)
+            self.expert_load_balancer = ExpertLoadBalancer(
+                expert_map_path, self.global_num_experts)
             self.local_num_experts, self.expert_map = \
-                                expert_load_balancer.get_rank_placement_map(
+                                self.expert_load_balancer.get_rank_placement_map(
                                                 self.moe_instance_id,
                                                 get_ep_group().rank_in_group)
-            self.log2phy = expert_load_balancer.get_rank_log2phy_map(
+            self.log2phy = self.expert_load_balancer.get_rank_log2phy_map(
                 self.moe_instance_id,
                 get_ep_group().rank_in_group)
             self.global_redundant_expert_num = \
-                        expert_load_balancer.get_global_redundant_expert_num()
+                        self.expert_load_balancer.get_global_redundant_expert_num()
         else:
             # Create a tensor of size num_experts filled with -1
             self.local_num_experts, self.expert_map = determine_expert_map(
@@ -1313,6 +1330,9 @@ class AscendFusedMoE(FusedMoE):
         if envs_ascend.VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ and isinstance(
                 self.quant_method, AscendUnquantizedFusedMoEMethod):
             self.reduce_results = False
+            if expert_map_path and os.path.exists(expert_map_path):
+                self.global_num_experts = self.global_num_experts + self.global_redundant_expert_num
+            self.local_num_experts = self.global_num_experts // self.ep_size
             moe_dispatcher_config = (
                 MoEDispatcherConfig().set_num_moe_experts(
                     self.global_num_experts).set_num_local_experts(
