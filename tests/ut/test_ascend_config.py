@@ -232,7 +232,7 @@ class TestAscendConfig(TestBase):
 
     def test_check_torchair_supported(self):
         test_cases = [('deepseek_v3', True), ('PanguProMoE', True),
-                      ('qwen', False), ('llama', False)]
+                      ('qwen', True), ('llama', False)]
         for model_type, expected_output in test_cases:
             self.assertEqual(_check_torchair_supported(model_type),
                              expected_output)
