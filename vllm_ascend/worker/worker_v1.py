@@ -130,17 +130,19 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
-    def init_device(self):
+    def _init_device(self):
         device = torch.device(f"npu:{self.local_rank}")
         NPUPlatform.set_device(device)
         NPUPlatform.empty_cache()
         self.init_npu_memory = NPUPlatform.mem_get_info()[0]
-
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
         # Set random seed.
         NPUPlatform.seed_everything(self.model_config.seed)
+        return device
 
+    def init_device(self):
+        device = self._init_device()
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = NPUModelRunner(self.vllm_config, device)
 
