@@ -17,7 +17,8 @@ from typing import Optional
 
 from vllm.logger import logger
 
-TORCHAIR_MODEL_LIST = ["deepseek", "pangu"]
+# todo ttt check specific qwen
+TORCHAIR_MODEL_LIST = ["deepseek", "pangu", "qwen"]
 
 
 def _check_torchair_supported(model_type: str):
