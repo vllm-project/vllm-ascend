@@ -1254,9 +1254,10 @@ class AscendMLAImpl(MLAAttentionImpl):
                          max_size=MAX_O_PROJ_PREFETCH_SIZE,
                          enabled=enable_multistream_mla)
 
-            output[...] = self.o_proj(o_proj_input,
-                                      is_prefill=True,
-                                      is_force_scatter=self.enable_shared_expert_dp)[0]
+            output[...] = self.o_proj(
+                o_proj_input,
+                is_prefill=True,
+                is_force_scatter=self.enable_shared_expert_dp)[0]
         else:
             with torch.npu.stream(current_ms_metadata.comm_stream):
                 npu_prefetch(self.o_proj.weight,
