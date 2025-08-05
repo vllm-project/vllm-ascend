@@ -9,7 +9,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 import llm_datadist  # type: ignore
 import msgspec
@@ -28,7 +28,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request, RequestStatus
 
 from vllm_ascend import envs
-from vllm_ascend.soc_info import NPUSocInfo
+from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
 
 TORCH_DTYPE_TO_NPU_DTYPE = {
     torch.half: llm_datadist.DataType.DT_FLOAT16,
@@ -331,14 +331,12 @@ class LLMDataDistCMgrConnectorWorker():
         self.prefill_device_list: list[tuple[int, int]] = []
         self.decode_device_list: list[tuple[int, int]] = []
         global_rank_table = self.read_offline_rank_table()
-        self.local_agent_metadata = self.read_agent_metadata(
-            global_rank_table, self.local_ip, self.local_rank_on_node,
-            self.llm_datadist_role)
+        self.local_agent_metadata = self.read_agent_metadata(global_rank_table)
         self.llm_datadist = LLMDataDist(self.llm_datadist_role,
                                         self.local_agent_metadata.cluster_id)
         self.init_llm_datadist()
         self.finished_reqs: set[str] = set()
-        self.soc_info = NPUSocInfo()
+        self.soc_info = get_ascend_soc_version()
         # Set hccl deterministic for model execute
         os.environ["HCCL_DETERMINISTIC"] = "true"
         self.done_receiving_counts: defaultdict[str,
@@ -448,8 +446,20 @@ class LLMDataDistCMgrConnectorWorker():
         # global_rank_table = json.dumps(global_rank_table)
         return global_rank_table
 
-    def read_agent_metadata(self, global_rank_table, server_id, device_rank,
-                            agent_role):
+    @staticmethod
+    def _get_visible_devices() -> Callable[[str], bool]:
+        """
+        Return a test function that check if the given device ID is visible.
+        i.e. ASCEND_RT_VISIBLE_DEVICES is not set or contains the device_id.
+        """
+        visible_devices = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
+        if not visible_devices:
+            return lambda device_id: True
+        visible_device_list = visible_devices.split(",")
+        return lambda device_id: device_id in visible_device_list
+
+    def read_agent_metadata(self, global_rank_table):
+        device_filter = LLMDataDistCMgrConnectorWorker._get_visible_devices()
         devices_type_list = []
         agent_metadata = None
         if self.llm_datadist_role == LLMRole.PROMPT:
@@ -462,11 +472,12 @@ class LLMDataDistCMgrConnectorWorker():
         for device_type in devices_type_list:
             device_list = global_rank_table[device_type]
             device_list = [
-                d for d in device_list if d.get("server_id") == server_id
+                d for d in device_list if d.get("server_id") == self.local_ip
+                and device_filter(d.get("device_id", ""))
             ]
-            if len(device_list) <= device_rank:
+            if len(device_list) <= self.tp_rank:
                 continue
-            device_info = device_list[device_rank]
+            device_info = device_list[self.tp_rank]
             super_pod_id_ = device_info.get("super_pod_id", None)
             server_id_ = device_info["server_id"]
             device_id_ = device_info["device_id"]
@@ -481,7 +492,7 @@ class LLMDataDistCMgrConnectorWorker():
                 super_device_id=super_device_id_,
                 cluster_id=cluster_id_,
             )
-        assert agent_metadata is not None, f"Can't read the target server_id {server_id} and device_rank {device_rank} from rank table"
+        assert agent_metadata is not None, f"Can't read the target server_id {self.local_ip} and device_rank {self.rank} from rank table"
         return agent_metadata
 
     def register_kv_caches(self, kv_caches: dict[str, Tuple[torch.Tensor]]):
@@ -670,7 +681,7 @@ class LLMDataDistCMgrConnectorWorker():
             rank_table["server_list"].append(  # type: ignore[attr-defined]
                 decode_server_device_info)
 
-        if self.soc_info.is_a3:
+        if self.soc_info == AscendSocVersion.A3:
             # generate super_pod_list for rank table
             super_pod_list = []
             prefill_super_pod_info = {

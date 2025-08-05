@@ -479,7 +479,8 @@ def register_ascend_customop():
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
 
 
-# TODO(zzzzwwjj): It will be judged with _build_info afterwards.
+# TODO(zzzzwwjj): Currently there is no clear SOC_VERSION policy for A2 and A3 in CANN.
+# So we get the version dynamically. In the future, we should get the version info from _build_info like 310p does.
 class AscendSocVersion(Enum):
     A2 = 0
     A3 = 1

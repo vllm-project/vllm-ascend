@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 
+import os
+import types
+
 from tests.ut.kv_connector.utils import (create_request, create_scheduler,
                                          create_vllm_config)
-from vllm_ascend.distributed.llmdatadist_c_mgr_connector import \
-    LLMDataDistCMgrConnectorMetadata
+from vllm_ascend.distributed.llmdatadist_c_mgr_connector import (
+    LLMDataDistCMgrConnectorMetadata, LLMDataDistCMgrConnectorWorker, LLMRole)
 
 
 def test_basic_inferface():
@@ -40,3 +43,54 @@ def test_basic_inferface():
             req_meta.local_block_ids, scheduler.kv_cache_manager.coordinator.
             single_type_managers[0].req_to_blocks[request_id]):
         assert block_id == block.block_id
+
+
+def test_read_agent_metadata():
+    rank_table = {
+        "version":
+        "1.2",
+        "server_count":
+        "2",
+        "prefill_device_list": [{
+            "server_id": "192.168.1.1",
+            "device_id": "0",
+            "device_ip": "10.30.0.1",
+            "cluster_id": "0",
+        }, {
+            "server_id": "192.168.1.1",
+            "device_id": "1",
+            "device_ip": "10.30.0.2",
+            "cluster_id": "1",
+        }, {
+            "server_id": "192.168.1.2",
+            "device_id": "0",
+            "device_ip": "10.30.0.3",
+            "cluster_id": "2",
+        }, {
+            "server_id": "192.168.1.2",
+            "device_id": "1",
+            "device_ip": "10.30.0.4",
+            "cluster_id": "3",
+        }]
+    }
+
+    def get_device_ip(worker_local_ip, worker_tp_rank, worker_visible_devices):
+        old_visible_devices = os.environ.get("ASCEND_RT_VISIBLE_DEVICES", "")
+        worker = types.SimpleNamespace()
+        worker.local_ip = worker_local_ip
+        worker.tp_rank = worker_tp_rank
+        worker.llm_datadist_role = LLMRole.PROMPT
+        os.environ["ASCEND_RT_VISIBLE_DEVICES"] = worker_visible_devices
+        agent_metadata = LLMDataDistCMgrConnectorWorker.read_agent_metadata(
+            worker, rank_table)
+        os.environ["ASCEND_RT_VISIBLE_DEVICES"] = old_visible_devices
+        return agent_metadata.device_ip
+
+    assert get_device_ip("192.168.1.1", 0, "0") == "10.30.0.1"
+    assert get_device_ip("192.168.1.1", 0, "1") == "10.30.0.2"
+    assert get_device_ip("192.168.1.2", 0, "0") == "10.30.0.3"
+    assert get_device_ip("192.168.1.2", 0, "1") == "10.30.0.4"
+    assert get_device_ip("192.168.1.1", 0, "0,1") == "10.30.0.1"
+    assert get_device_ip("192.168.1.1", 1, "0,1") == "10.30.0.2"
+    assert get_device_ip("192.168.1.1", 0, "") == "10.30.0.1"
+    assert get_device_ip("192.168.1.1", 1, "") == "10.30.0.2"

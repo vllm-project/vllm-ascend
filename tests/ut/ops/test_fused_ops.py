@@ -21,7 +21,7 @@ import torch.nn as nn
 import torch_npu
 from pytest_mock import MockerFixture
 
-from vllm_ascend.ascend_forward_context import get_fused_moe_state
+from vllm_ascend.ascend_forward_context import _get_fused_moe_state
 from vllm_ascend.ops.fused_moe import (AscendFusedMoE,
                                        AscendUnquantizedFusedMoEMethod)
 from vllm_ascend.utils import AscendSocVersion, adapt_patch  # noqa E402
@@ -310,7 +310,7 @@ class TestAscendUnquantizedFusedMoEMethod:
         global_num_experts, ep_size = others_param
         is_prefill = False
         is_deepseek_v3_r1 = global_num_experts == 256
-        forward_context = MagicMock(fused_moe_state=get_fused_moe_state(
+        forward_context = MagicMock(fused_moe_state=_get_fused_moe_state(
             ep_size, is_prefill, is_deepseek_v3_r1))
         with patch("vllm_ascend.ops.fused_moe.get_forward_context",
                    return_value=forward_context):
@@ -346,7 +346,7 @@ class TestAscendUnquantizedFusedMoEMethod:
         ep_size, alltoall_buffer = others_param
         is_prefill = False
         forward_context = MagicMock(
-            fused_moe_state=get_fused_moe_state(ep_size, is_prefill, True))
+            fused_moe_state=_get_fused_moe_state(ep_size, is_prefill, True))
         with patch("vllm_ascend.ops.fused_moe.MOE_ALL2ALL_BUFFER",
                    alltoall_buffer), \
              patch("vllm_ascend.ops.fused_moe.get_forward_context", return_value=forward_context), \
