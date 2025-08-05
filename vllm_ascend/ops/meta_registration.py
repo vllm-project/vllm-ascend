@@ -1,7 +1,47 @@
 import torch
 from torch.library import Library
 
+# This file provides a template and registration utilities for writing "meta" implementations
+# of custom operators in Python for the vllm_ascend project.
+#
+# We offer two ways to implement meta implementations for custom ops:
+#   1. Python meta implementation (as shown in this file): Write a Python function that
+#      takes the same arguments as your operator and returns empty tensors with the correct
+#      shapes and dtypes. This is useful for rapid prototyping and for ops that are only
+#      used in Python.
+#   2. C++ meta implementation: You can also implement the meta function in C++ for better
+#      performance or to match the C++ op logic more closely. See `torch_binding_meta.cpp`
+#      for examples of C++ meta implementations and how to register them.
+#
+# Both approaches enable tracing, export, and shape inference in PyTorch and vLLM, which
+# is essential for supporting `torch.compile` and aclgraph.
+
+
+# How to add a new meta implementation in Python:
+# -------------------------------------
+# 1. Write a Python function that takes the same arguments as your operator, and returns
+#    empty tensors (using torch.empty_like, torch.empty, etc.) with the correct shapes and dtypes.
+#    Do NOT perform any real computation or allocate device memory.
+#
+# 2. Register your meta function using `register_meta_if_necessary`, providing:
+#    - The namespace (usually "_C" for custom ops)
+#    - The operator name (as registered in C++)
+#    - The Python meta function
+#    - (Optional) The overload name, if your op has overloads
+#
+# 3. The registration utility will check if a meta implementation already exists for your op,
+#    and only register if necessary. This avoids duplicate registrations.
+#
+# 4. Example meta implementations are provided below for rotary_embedding and get_masked_input_and_mask.
+#
+# 5. When developing new custom ops, always provide a meta implementation to enable tracing,
+#    export, and shape inference in PyTorch and vLLM to enable the capture of `torch.compile` 
+#    and aclgraph.
+#
+# For more details, see: https://pytorch.org/docs/stable/notes/extending.html#meta-tensors
+
 lib = Library("_C", "IMPL")
+
 
 def register_meta_if_necessary(ns:str, op_name: str, fn, overload: str = ""):
   if overload != "":
