@@ -640,6 +640,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self, num_tokens: int, with_prefill: bool, enable_dbo: bool
     ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
         if self.dp_size == 1:
+            if self.torchair_graph_enabled and not with_prefill:
+                maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
+                    num_tokens)
+                return maybe_padded_num_tokens, None, with_prefill, enable_dbo
             return num_tokens, None, with_prefill, enable_dbo
 
         if self.is_kv_producer and not envs_ascend.VLLM_ASCEND_ENABLE_CHUNK_MC2:
