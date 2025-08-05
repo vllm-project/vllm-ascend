@@ -1391,10 +1391,6 @@ class AscendFusedMoE(FusedMoE):
         enable_sp = _metadata_for_padding is not None and _metadata_for_padding.not_dummy_and_is_prefill
         tp_size = get_tensor_model_parallel_world_size()
         if enable_sp:
-            assert fused_moe_state in [
-                FusedMoEState.All2All, FusedMoEState.All2AllSeq,
-                FusedMoEState.MC2
-            ], "For better performance in MoE, SP works exclusively with MC2, AllToAll, and AllToAllV."
             tp_rank = get_tensor_model_parallel_rank()
             mc2_mask_sp = _metadata_for_padding.mc2_mask if _metadata_for_padding is not None else forward_context.mc2_mask
             chunk_mc2_mask = torch.tensor_split(mc2_mask_sp, tp_size, dim=0)
