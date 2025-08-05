@@ -11,7 +11,9 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
     def setUp(self):
         self.hidden_size = 128
         self.num_tokens = 128
-        self.placeholder = torch.randn(self.num_tokens, self.hidden_size)
+        self.placeholder = torch.randn(self.num_tokens,
+                                       self.hidden_size,
+                                       dtype=torch.bfloat16)
 
     @patch("torch.distributed.all_to_all_single")
     @patch("torch_npu.npu_moe_re_routing")
