@@ -37,7 +37,7 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
 
 ## Prerequisites
 
-- Hardware: Atlas 800I A2 Inference series, Atlas A2 Training series
+- Hardware: Atlas 800I A2 Inference series, Atlas A2 Training series, Atlas 800I A3 Inference series, Atlas A3 Training series, Atlas 300I Duo
 - OS: Linux
 - Software:
   * Python >= 3.9, < 3.12
@@ -73,7 +73,7 @@ Below is maintained branches:
 
 | Branch     | Status       | Note                                 |
 |------------|--------------|--------------------------------------|
-| main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.9.x branch   |
+| main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.10.x branch   |
 | v0.7.1-dev | Unmaintained | Only doc fixed is allowed |
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version, only bug fix is allowed and no new release tag any more. |
 | v0.9.1-dev | Maintained   | CI commitment for vLLM 0.9.1 version |
