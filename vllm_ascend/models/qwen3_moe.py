@@ -1,7 +1,4 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
-#
-# Copyright 2024 The Qwen team.
-#
 # Copyright 2024 The Qwen team.
 # Copyright 2023 The vLLM team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved. Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
