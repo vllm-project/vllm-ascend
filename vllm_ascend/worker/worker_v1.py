@@ -71,8 +71,10 @@ class NPUWorker(WorkerBase):
         from vllm_ascend import ops
         ops.register_dummy_fusion_op()
         _register_atb_extensions()
-        # init ascend config
+
+        # init ascend config and soc version
         init_ascend_config(vllm_config)
+        init_ascend_soc_version()
 
         super().__init__(vllm_config=vllm_config,
                          local_rank=local_rank,
@@ -81,9 +83,6 @@ class NPUWorker(WorkerBase):
                          is_driver_worker=is_driver_worker)
 
         # Try to import mindie_turbo to accelerate vLLM inference.
-        local_dp_rank = self.vllm_config.parallel_config.data_parallel_rank_local
-        world_size = self.vllm_config.parallel_config.world_size
-        self.local_rank_across_dp = local_dp_rank * world_size + self.local_rank
         try_register_lib(
             "mindie_turbo",
             "MindIE Turbo is installed. vLLM inference will be accelerated with MindIE Turbo."
@@ -137,7 +136,6 @@ class NPUWorker(WorkerBase):
         NPUPlatform.empty_cache()
         self.init_npu_memory = NPUPlatform.mem_get_info()[0]
 
-        init_ascend_soc_version()
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
         # Set random seed.
