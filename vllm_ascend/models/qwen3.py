@@ -78,7 +78,7 @@ class CustomQwen3Model(Qwen2Model):
                          prefix=prefix,
                          decoder_layer_type=CustomQwen3DecoderLayer)
 
-        self.aux_hidden_state_layers: tuple[int] = tuple()
+        self.aux_hidden_state_layers: tuple[int, ...] = tuple()
 
     def forward(
         self,
