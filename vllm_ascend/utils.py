@@ -215,9 +215,9 @@ def enable_custom_op():
         return _CUSTOM_OP_ENABLED
     try:
         # register custom ops into torch_library here
-        import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
         # register the meta implementation for custom kernel if necessary
-        import vllm_ascend.ops.meta_registration  # type: ignore  # noqa: F401
+        import vllm_ascend.meta_registration  # type: ignore  # noqa: F401
+        import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
         _CUSTOM_OP_ENABLED = True
     except ImportError:
         _CUSTOM_OP_ENABLED = False
