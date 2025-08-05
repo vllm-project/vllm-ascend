@@ -5,6 +5,33 @@
 #include <torch_npu/csrc/framework/OpCommand.h>
 #include <torch_npu/csrc/npu/Module.h>
 #include "utils.h"
+/*
+ * How to write a meta implementation for a custom operator (meta kernel):
+ *
+ * Meta implementations are used for shape and dtype inference, tracing, and export.
+ * They do NOT perform any real computation or allocate device memory.
+ * Instead, they return empty tensors with the correct shapes, dtypes, and device types.
+ *
+ * Steps to write a meta implementation:
+ * 1. The function signature should match the operator's schema, but only use the arguments
+ *    necessary to infer output shapes and dtypes.
+ * 2. Use input tensor shapes, dtypes, and any relevant arguments to compute the output shapes.
+ * 3. Return empty tensors (e.g., at::empty_symint, at::empty_like) with the correct shape and dtype.
+ * 4. Do NOT perform any real computation or data movement.
+ * 5. Register the meta implementation with the "Meta" dispatch key using TORCH_LIBRARY_IMPL or similar.
+ *
+ * Example:
+ *   std::tuple<at::Tensor, at::Tensor> my_op_meta(
+ *       at::Tensor &input, int64_t some_param) {
+ *     // Infer output shape based on input and parameters
+ *     auto out_shape = ...;
+ *     at::Tensor out = at::empty_symint(out_shape, input.options());
+ *     // Return empty tensor(s) with correct shape/dtype
+ *     return {out, ...};
+ *   }
+ *
+ * See below for real examples.
+ */
 
 namespace vllm_ascend {
 namespace meta {
