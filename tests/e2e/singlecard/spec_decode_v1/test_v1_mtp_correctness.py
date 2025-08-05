@@ -80,11 +80,6 @@ def test_mtp_correctness(
                    enforce_eager=True,
                    max_model_len=2000,
                    additional_config={
-                       'torchair_graph_config': {
-                           'enabled': False,
-                           "graph_batch_sizes": [16],
-                           'enable_multistream_shared_expert': False,
-                       },
                        "ascend_scheduler_config": {
                            "enabled": True
                        }
