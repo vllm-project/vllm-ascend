@@ -213,8 +213,9 @@ def test_models_distributed_QwQ_with_flashcomm_v1(enforce_eager: bool):
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM": "2"})
-def test_models_distributed_Qwen3_with_flashcomm_v2():
+@pytest.mark.parametrize("enforce_eager", [True, False])
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_FLASHCOMM": "1"})
+def test_models_distributed_Qwen3_with_flashcomm_v1(enforce_eager: bool):
     example_prompts = [
         "Hello, my name is",
     ]
@@ -223,7 +224,7 @@ def test_models_distributed_Qwen3_with_flashcomm_v2():
     with VllmRunner(
             snapshot_download("Qwen/Qwen3-0.6B-Base"),
             max_model_len=8192,
-            enforce_eager=True,
+            enforce_eager=enforce_eager,
             dtype="auto",
             tensor_parallel_size=2,
     ) as vllm_model:
