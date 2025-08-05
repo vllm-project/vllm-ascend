@@ -78,6 +78,48 @@ class CustomQwen3Model(Qwen2Model):
                          prefix=prefix,
                          decoder_layer_type=CustomQwen3DecoderLayer)
 
+        self.aux_hidden_state_layers: tuple[int] = tuple()
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.get_input_embeddings(input_ids)
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+
+        aux_hidden_states = []
+        for idx, layer in enumerate(
+                self.layers[self.start_layer:self.end_layer]):
+            if idx in self.aux_hidden_state_layers:
+                aux_hidden_states.append(hidden_states + residual)
+            hidden_states, residual = layer(
+                positions,
+                hidden_states,
+                residual,
+            )
+
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({
+                "hidden_states": hidden_states,
+                "residual": residual
+            })
+        hidden_states, _ = self.norm(hidden_states, residual)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
+        return hidden_states
+
 
 class CustomQwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     # add `CustomQwen3Model` to init self.model
@@ -122,6 +164,13 @@ class CustomQwen3ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, int, int]:
+        num_layers = len(self.model.layers)
+        return 2, num_layers // 2, num_layers - 3
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
