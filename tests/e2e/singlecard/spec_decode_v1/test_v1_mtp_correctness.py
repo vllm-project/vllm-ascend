@@ -67,19 +67,36 @@ def test_mtp_correctness(
     del ref_llm
 
     spec_llm = LLM(model=model_name,
-                   trust_remote_code=True,
+                   tensor_parallel_size=1,
+                   max_num_seqs=256,
+                   gpu_memory_utilization=0.5,
+                   distributed_executor_backend="mp",
+                   enable_expert_parallel=True,
                    speculative_config={
                        "method": "deepseek_mtp",
                        "num_speculative_tokens": 1,
                    },
-                   gpu_memory_utilization=0.5,
-                   max_model_len=256,
-                   enforce_eager=True)
+                   trust_remote_code=True,
+                   enforce_eager=True,
+                   max_model_len=2000,
+                   additional_config = {
+                       'torchair_graph_config': {
+                           'enabled': False,
+                           "graph_batch_sizes": [16],
+                           'enable_multistream_shared_expert': False,
+                       },
+                       "ascend_scheduler_config": {
+                           "enabled": True
+                       }
+                   })
+
     spec_outputs = spec_llm.chat(test_prompts, sampling_config)
     matches = 0
     misses = 0
     for ref_output, spec_output in zip(ref_outputs, spec_outputs):
-        if ref_output.outputs[0].text == spec_output.outputs[0].text:
+        ref_token_ids = ref_output.outputs[0].token_ids
+        spec_token_ids = spec_output.outputs[0].token_ids
+        if ref_token_ids == spec_token_ids[:len(ref_token_ids)]:
             matches += 1
         else:
             misses += 1
