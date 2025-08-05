@@ -210,6 +210,9 @@ class AscendMLAMetadataBuilder:
         self.rope_dim = self.runner.model_config.hf_text_config.qk_rope_head_dim
         self.cos_cache = None
         self.sin_cache = None
+        self.prefill_attn_mask = torch.triu(
+            torch.ones(512, 512, device=runner.device, dtype=runner.dtype),
+            1)  # 512: mask only support 512
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -478,7 +481,7 @@ class AscendMLAMetadataBuilder:
                 prefill_input_positions].unsqueeze(  # type: ignore
                     1).unsqueeze(2)
             prefill_metadata = AscendMLAPrefillMetadata(
-                attn_mask=self.runner.attn_mask,
+                attn_mask=self.prefill_attn_mask,
                 query_lens=query_lens[tokens_start:],
                 seq_lens=seq_lens,
                 context_lens=seq_lens[tokens_start:],
@@ -766,16 +769,13 @@ class AscendMLAImpl(MLAAttentionImpl):
             k_nope, v = kv_nope\
                 .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
-            mask = torch.triu(
-                torch.ones(512, 512, device=query.device, dtype=query.dtype),
-                1)
             torch_npu.atb.npu_ring_mla(
                 q_nope=q_nope,
                 q_rope=q_pe,
                 k_nope=k_nope,
                 k_rope=k_pe,
                 value=v,
-                mask=mask,
+                mask=prefill_metadata.attn_mask,
                 seqlen=seq_len,
                 head_num=self.num_heads,
                 kv_head_num=self.num_heads,
@@ -817,17 +817,12 @@ class AscendMLAImpl(MLAAttentionImpl):
         k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
         q_pe = query[..., self.qk_nope_head_dim:]
         q_nope = query[..., :self.qk_nope_head_dim]
-        mask = torch.triu(
-            torch.ones(512, 512, device=query.device, dtype=query.dtype),
-            1)  # 512: mask only support 512
-        if attn_metadata.num_prefills > 1:
-            mask = mask.unsqueeze(0).repeat(attn_metadata.num_prefills, 1, 1)
         torch_npu.atb.npu_ring_mla(q_nope=q_nope,
                                    q_rope=q_pe,
                                    k_nope=k_nope,
                                    k_rope=k_pe,
                                    value=value,
-                                   mask=mask,
+                                   mask=attn_metadata.prefill.attn_mask,
                                    seqlen=torch.tensor(
                                        attn_metadata.prefill.query_lens,
                                        dtype=torch.int32),
