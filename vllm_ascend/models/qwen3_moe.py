@@ -44,7 +44,8 @@ from vllm.model_executor.models.interfaces import (MixtureOfExperts,
 from vllm.model_executor.models.qwen3_moe import (Qwen3MoeAttention,
                                                   Qwen3MoeDecoderLayer,
                                                   Qwen3MoeForCausalLM,
-                                                  Qwen3MoeMLP, Qwen3MoeModel)
+                                                  Qwen3MoeMLP, Qwen3MoeModel,
+                                                  Qwen3MoeSparseMoeBlock)
 from vllm.model_executor.models.utils import (
     PPMissingLayer, extract_layer_index,
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
