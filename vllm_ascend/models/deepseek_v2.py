@@ -355,8 +355,7 @@ class CustomDeepseekV2MoE(nn.Module):
             reduce_results = not self.all_reduce_merge
             intermediate_size = (config.moe_intermediate_size *
                                  config.n_shared_experts)
-            enable_shared_expert_dp = \
-                ascend_config.enable_shared_expert_dp and not ascend_config.torchair_graph_config.enabled
+            enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
             self.shared_experts = CustomDeepseekV2MLP(
                 hidden_size=config.hidden_size,
                 intermediate_size=intermediate_size,
@@ -473,8 +472,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_multistream_mla = \
             ascend_config.torchair_graph_config.enable_multistream_mla
-        self.enable_shared_expert_dp = \
-            ascend_config.enable_shared_expert_dp and not self.torchair_graph_enabled
+        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
         if self.q_lora_rank is not None:
             self.q_a_proj = ReplicatedLinear(self.hidden_size,
@@ -706,8 +704,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.routed_scaling_factor = config.routed_scaling_factor
         self.first_k_dense_replace = config.first_k_dense_replace
         self.tp_group = get_tp_group().device_group
-        self.enable_shared_expert_dp = \
-            ascend_config.enable_shared_expert_dp and not ascend_config.torchair_graph_config.enabled
+        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
     def forward(
         self,

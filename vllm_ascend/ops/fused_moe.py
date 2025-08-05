@@ -1265,8 +1265,7 @@ class AscendFusedMoE(FusedMoE):
         self.enable_multistream_moe = \
             ascend_config.torchair_graph_config.enable_multistream_moe and \
             self.torchair_graph_enabled
-        self.enable_shared_expert_dp = \
-            ascend_config.enable_shared_expert_dp and not self.torchair_graph_enabled
+        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
         if self.scoring_func != "softmax" and not self.use_grouped_topk:
             raise ValueError("Only softmax scoring function is supported for "
