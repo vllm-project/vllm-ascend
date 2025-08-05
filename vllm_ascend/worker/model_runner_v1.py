@@ -1894,6 +1894,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         patch_for_hcom()
         config = torchair.CompilerConfig()
+        if VLLM_USE_ACL_GRAPH == '1':
+            config.mode = "reduce-overhead"
+            config.debug.aclgraph.disable_reinplace_inplaceable_ops_pass=True
         config.experimental_config.frozen_parameter = True
         config.experimental_config.tiling_schedule_optimize = True
         config.experimental_config.enable_view_optimize = \
