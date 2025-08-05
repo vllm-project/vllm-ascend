@@ -40,7 +40,6 @@ def register_model():
         ModelRegistry.register_model(
             "DeepseekV3ForCausalLM",
             "vllm_ascend.models.deepseek_dbo:CustomDeepseekDBOForCausalLM")
-
     else:
         ModelRegistry.register_model(
             "DeepseekV2ForCausalLM",
