@@ -36,7 +36,6 @@ import torch.nn as nn
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
@@ -329,25 +328,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             reversed(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
 
-        self.new_kv_cache_bytes = -1
-        self.torchair_compiled_model = None  # type: ignore
-        self.torchair_compiled_models = {}  # type: ignore
-        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
-        self.use_cached_npu_graph = ascend_config.torchair_graph_config.use_cached_graph
-        self.torchair_graph_batch_sizes = ascend_config.torchair_graph_config.graph_batch_sizes
-        if ascend_config.torchair_graph_config.graph_batch_sizes_init:
-            self.init_torchair_graph_batch_sizes()
-        if len(self.torchair_graph_batch_sizes) == 0:
-            # TODO(zzzzwwjj): check torchair_graph_batch_sizes init code
-            self.torchair_graph_batch_sizes = [self.max_num_reqs]
-
-        torch._dynamo.cache_size.config.cache_size_limit += len(
-            self.torchair_graph_batch_sizes)
-        torch._dynamo.config.capture_dynamic_output_shape_ops = True
-        torch._logging.set_logs(
-            recompiles=envs_ascend.VLLM_ASCEND_TRACE_RECOMPILES)
-
-        self.check_batch_sizes_consistency()
+        self._check_batch_sizes_consistency()
         # NOTE: we need to use `in_profile_run` to determine whether `enable_force_load_balance` is True
         self.in_profile_run = False
 
@@ -358,13 +339,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
 
-    def check_batch_sizes_consistency(self) -> None:
+    def _get_local_batch_size(self):
+        return torch.tensor([self.max_num_reqs],
+                            device="cpu",
+                            dtype=torch.int32)
+
+    def _check_batch_sizes_consistency(self) -> None:
         if not dist.is_initialized():
             return
 
-        local = torch.tensor(self.torchair_graph_batch_sizes,
-                             device="cpu",
-                             dtype=torch.int32)
+        local = self._get_local_batch_size()
         gathered_graph_batch_size = local.clone()
         dist.all_reduce(gathered_graph_batch_size,
                         group=get_dp_group().cpu_group)
@@ -2499,17 +2483,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             torch.npu.synchronize()
 
         return prompt_logprobs_dict
-
-    def init_torchair_graph_batch_sizes(self):
-        start_graph_batch_size = 4
-        tp_size = get_tensor_model_parallel_world_size()
-
-        # NOTE: When use all2all | mc2, We need to slice the `num_tokens` dimension into `tp_size` blocks
-        start_graph_batch_size = max(start_graph_batch_size, tp_size)
-
-        while (start_graph_batch_size <= self.max_num_reqs):
-            self.torchair_graph_batch_sizes.append(start_graph_batch_size)
-            start_graph_batch_size *= 2
 
     def get_supported_pooling_tasks(self):
         model = self.get_model()

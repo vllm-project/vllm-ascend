@@ -26,6 +26,7 @@ import torchair
 import vllm.envs as envs_vllm
 from torchair import patch_for_hcom
 from vllm.config import VllmConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 
@@ -42,7 +43,42 @@ from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 class NPUTorchairModelRunner(NPUModelRunner):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        ascend_config = get_ascend_config()
+        self.new_kv_cache_bytes = -1
+        self.torchair_compiled_model = None  # type: ignore
+        self.torchair_compiled_models = {}  # type: ignore
+        self.use_cached_npu_graph = ascend_config.torchair_graph_config.use_cached_graph
+        self.torchair_graph_batch_sizes = ascend_config.torchair_graph_config.graph_batch_sizes
+        if ascend_config.torchair_graph_config.graph_batch_sizes_init:
+            self._init_torchair_graph_batch_sizes()
+        if len(self.torchair_graph_batch_sizes) == 0:
+            # TODO(zzzzwwjj): check torchair_graph_batch_sizes init code
+            self.torchair_graph_batch_sizes = [self.max_num_reqs]
+
+        torch._dynamo.cache_size.config.cache_size_limit += len(
+            self.torchair_graph_batch_sizes)
+        torch._dynamo.config.capture_dynamic_output_shape_ops = True
+        torch._logging.set_logs(
+            recompiles=envs_ascend.VLLM_ASCEND_TRACE_RECOMPILES)
+
         super().__init__(vllm_config, device)
+
+    def _get_local_batch_size(self):
+        """Override from NPUModelRunner to get graph_batch_sizes"""
+        return torch.tensor(self.torchair_graph_batch_sizes,
+                            device="cpu",
+                            dtype=torch.int32)
+
+    def _init_torchair_graph_batch_sizes(self):
+        start_graph_batch_size = 4
+        tp_size = get_tensor_model_parallel_world_size()
+
+        # NOTE: When use all2all | mc2, We need to slice the `num_tokens` dimension into `tp_size` blocks
+        start_graph_batch_size = max(start_graph_batch_size, tp_size)
+
+        while (start_graph_batch_size <= self.max_num_reqs):
+            self.torchair_graph_batch_sizes.append(start_graph_batch_size)
+            start_graph_batch_size *= 2
 
     def _select_torchair_padded_batch_size(self, batch_size: int):
         selected_batch_size = self.max_num_reqs
