@@ -22,8 +22,6 @@ import torch
 import torch.distributed as dist
 import torch_npu
 from torch import nn
-from transformers import PretrainedConfig
-from vllm.attention import AttentionMetadata
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (GroupCoordinator, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -37,7 +35,6 @@ from vllm.model_executor.layers.fused_moe.config import \
     FusedMoEParallelConfig  # isort: skip
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
-from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 
@@ -1543,82 +1540,6 @@ class AscendFusedMoE(FusedMoE):
             e_score_correction_bias=self.e_score_correction_bias,
             is_prefill=is_prefill,
             enable_force_load_balance=enable_force_load_balance,
-        )
-
-        return hidden_states
-
-
-class AscendSparseMoeBlock(nn.Module):
-
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.tp_size = get_tensor_model_parallel_world_size()
-        if self.tp_size > config.num_experts:
-            raise ValueError(
-                f"Tensor parallel size {self.tp_size} is greater than "
-                f"the number of experts {config.num_experts}.")
-
-        ascend_config = get_ascend_config()
-        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
-        self.enable_multistream_moe = (
-            ascend_config.torchair_graph_config.enable_multistream_moe)
-
-        self.gate = ReplicatedLinear(
-            config.hidden_size,
-            config.num_experts,
-            bias=False,
-            quant_config=None,
-            prefix=f"{prefix}.gate",
-        )
-
-        self.experts = AscendFusedMoE(
-            num_experts=config.num_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.moe_intermediate_size,
-            reduce_results=False,
-            renormalize=config.norm_topk_prob,
-            quant_config=quant_config,
-            prefix=f"{prefix}.experts",
-        )
-
-        self.top_k = config.num_experts_per_tok
-
-        self.dp_size = get_dp_group().world_size
-
-        self.tp_group = get_tp_group().device_group
-        self.tp_rank = get_tp_group().rank_in_group
-        self.ep_group = get_ep_group()
-
-        self.params_dtype = torch.get_default_dtype()
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        attn_metadata: Optional[AttentionMetadata] = None,
-    ) -> torch.Tensor:
-        if attn_metadata is None:
-            attn_metadata = get_forward_context().attn_metadata
-        # when profile runs, force experts to load balanced tokens
-        # to avoid high memory consumption on a single rank.
-        enable_force_load_balance = get_forward_context().in_profile_run
-        is_prefill = get_forward_context().with_prefill
-
-        # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
-
-        hidden_states = self.experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            is_prefill=is_prefill,
-            top_k=self.top_k,
-            enable_force_load_balance=enable_force_load_balance,
-            shared_experts=None,
         )
 
         return hidden_states
