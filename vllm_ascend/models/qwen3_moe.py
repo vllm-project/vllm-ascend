@@ -267,7 +267,7 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
                 continue
 
             assert isinstance(layer, Qwen3MoeDecoderLayer)
-            if isinstance(layer.mlp, AscendSparseMoeBlock):
+            if isinstance(layer.mlp, Qwen3MoeSparseMoeBlock):
                 example_layer = layer.mlp
                 self.moe_layers.append(layer.mlp.experts)
 
