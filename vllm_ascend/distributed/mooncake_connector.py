@@ -362,7 +362,8 @@ class KVCacheRecvingThread(threading.Thread):
         num_transfer_groups = len(grouped_remote_block_ids)
         num_blocks = len(local_block_ids)
 
-        remote_transfer_port = self.remote_te_port[remote_engine_id][remote_handshake_port]
+        remote_transfer_port = self.remote_te_port[remote_engine_id][
+            remote_handshake_port]
         session_id = f"{remote_host}:{remote_transfer_port}"
         src_list, dst_list, length_list = [], [], []
         for k, (src_layer_base_addr, dst_layer_base_addr) in enumerate(
