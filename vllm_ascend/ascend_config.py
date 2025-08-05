@@ -48,7 +48,7 @@ class AscendConfig:
         self.chunked_prefill_for_mla = additional_config.get(
             "chunked_prefill_for_mla", False)
         self.enable_shared_expert_dp = additional_config.get(
-            "enable_shared_expert_dp", True)
+            "enable_shared_expert_dp", True) and not self.torchair_graph_config.enabled
 
 
 class TorchairGraphConfig:
@@ -172,7 +172,6 @@ def check_ascend_config(vllm_config, enforce_eager):
                 logger.warning(
                     "enable_shared_expert_dp is not supported for torchair graph mode currently, "
                     "it has been disabled automatically.")
-                ascend_config.enable_shared_expert_dp = False
         # aclgraph case
         else:
             # aclgraph doesn't work with deepseek model and only qwen model is well tested.
