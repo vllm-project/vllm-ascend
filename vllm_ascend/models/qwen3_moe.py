@@ -17,11 +17,17 @@
 # This file is a part of the vllm-ascend project.
 from typing import Optional
 
+import torch
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, CompilationLevel, VllmConfig
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
+                                             get_tp_group)
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -29,13 +35,84 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.qwen3_moe import (Qwen3MoeAttention,
                                                   Qwen3MoeDecoderLayer,
                                                   Qwen3MoeForCausalLM,
-                                                  Qwen3MoeMLP, Qwen3MoeModel)
+                                                  Qwen3MoeMLP, Qwen3MoeModel,
+                                                  Qwen3MoeSparseMoeBlock)
 from vllm.model_executor.models.utils import (
     extract_layer_index, make_empty_intermediate_tensors_factory, make_layers,
     maybe_prefix)
 
-from vllm_ascend.ops.fused_moe import AscendSparseMoeBlock
-from vllm_ascend.platform import VllmConfig
+from vllm_ascend.ops.fused_moe import AscendFusedMoE
+
+
+class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
+        nn.Module.__init__(self)
+        self.tp_size = get_tensor_model_parallel_world_size()
+        if self.tp_size > config.num_experts:
+            raise ValueError(
+                f"Tensor parallel size {self.tp_size} is greater than "
+                f"the number of experts {config.num_experts}.")
+
+        self.gate = ReplicatedLinear(
+            config.hidden_size,
+            config.num_experts,
+            bias=False,
+            quant_config=None,
+            prefix=f"{prefix}.gate",
+        )
+
+        self.experts = AscendFusedMoE(
+            num_experts=config.num_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            reduce_results=False,
+            renormalize=config.norm_topk_prob,
+            quant_config=quant_config,
+            prefix=f"{prefix}.experts",
+        )
+
+        self.top_k = config.num_experts_per_tok
+
+        self.dp_size = get_dp_group().world_size
+
+        self.tp_group = get_tp_group().device_group
+        self.tp_rank = get_tp_group().rank_in_group
+        self.ep_group = get_ep_group()
+
+        self.params_dtype = torch.get_default_dtype()
+
+    def forward(
+        self,
+        hidden_states,
+        attn_metadata=None,
+    ):
+        if attn_metadata is None:
+            attn_metadata = get_forward_context().attn_metadata
+        # when profile runs, force experts to load balanced tokens
+        # to avoid high memory consumption on a single rank.
+        enable_force_load_balance = get_forward_context().in_profile_run
+        is_prefill = get_forward_context().with_prefill
+
+        # router_logits: (num_tokens, n_experts)
+        router_logits, _ = self.gate(hidden_states)
+
+        hidden_states = self.experts(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            is_prefill=is_prefill,
+            top_k=self.top_k,
+            enable_force_load_balance=enable_force_load_balance,
+            shared_experts=None,
+        )
+
+        return hidden_states
 
 
 class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
@@ -45,6 +122,7 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        vllm_config: Optional[VllmConfig] = None,
         prefix: str = "",
     ) -> None:
 
@@ -73,12 +151,22 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
         layer_idx = extract_layer_index(prefix)
         mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
                            config.mlp_only_layers)
+        use_aclgraph = (vllm_config is not None
+                        and vllm_config.compilation_config.level
+                        == CompilationLevel.PIECEWISE
+                        and not vllm_config.model_config.enforce_eager)
         if (layer_idx not in mlp_only_layers) and (
                 config.num_experts > 0 and
             (layer_idx + 1) % config.decoder_sparse_step == 0):
-            self.mlp = AscendSparseMoeBlock(config=config,
-                                            quant_config=quant_config,
-                                            prefix=f"{prefix}.mlp")
+            if not use_aclgraph:
+                # FIXME: custom sparse moe block doesn't work with aclgraph.
+                self.mlp = CustomSparseMoeBlock(config=config,
+                                                quant_config=quant_config,
+                                                prefix=f"{prefix}.mlp")
+            else:
+                self.mlp = Qwen3MoeSparseMoeBlock(config=config,
+                                                  quant_config=quant_config,
+                                                  prefix=f"{prefix}.mlp")
         else:
             self.mlp = Qwen3MoeMLP(hidden_size=config.hidden_size,
                                    intermediate_size=config.intermediate_size,
@@ -115,6 +203,7 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
                 config=config,
                 cache_config=cache_config,
                 quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix),
             prefix=f"{prefix}.layers",
         )
