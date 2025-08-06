@@ -24,15 +24,14 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 MODELS = ["Qwen/Qwen3-0.6B"]
+MOE_MODELS = ["Qwen/Qwen3-30B-A3B"]
 
 
 @pytest.mark.parametrize("model", MODELS)
-@patch.dict(os.environ, {"ASCEND_RT_VISIBLE_DEVICES": "0,1,2,3"})
 def test_external_launcher(model):
     script = Path(
         __file__
@@ -70,4 +69,81 @@ def test_external_launcher(model):
     assert "TP RANKS: [0]" in output
     assert "TP RANKS: [1]" in output
     assert "Generated text:" in output
+    assert proc.returncode == 0
+
+
+@pytest.mark.parametrize("model", MOE_MODELS)
+def test_moe_external_launcher(model):
+    script = Path(
+        __file__
+    ).parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
+    env = os.environ.copy()
+    # TODO: Change to 2 when ci machine has 4 cards
+    cmd = [
+        sys.executable,
+        str(script), "--model", model, "--tp-size", "2", "--node-size", "1",
+        "--node-rank", "0", "--proc-per-node", "2", "--trust-remote-code",
+        "--enable-expert-parallel"
+    ]
+
+    print(f"Running subprocess: {' '.join(cmd)}")
+    proc = subprocess.run(
+        cmd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=600,
+    )
+    output = proc.stdout.decode()
+
+    print(output)
+
+    assert "TP RANKS: [0, 1]" in output
+    assert "Generated text:" in output
+    assert proc.returncode == 0
+
+
+def test_external_launcher_and_sleepmode():
+    script = Path(
+        __file__
+    ).parent.parent.parent.parent / "examples" / "offline_external_launcher.py"
+    env = os.environ.copy()
+    # TODO: Change to 2 when ci machine has 4 cards
+    cmd = [
+        sys.executable,
+        str(script),
+        "--model",
+        "Qwen/Qwen3-8B",
+        "--tp-size",
+        "1",
+        "--node-size",
+        "1",
+        "--node-rank",
+        "0",
+        "--proc-per-node",
+        "2",
+        "--trust-remote-code",
+        "--enable-sleep-mode",
+        "--temperature",
+        "0",
+        "--model-weight-gib",
+        "16",
+    ]
+
+    print(f"Running subprocess: {' '.join(cmd)}")
+    proc = subprocess.run(
+        cmd,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        timeout=300,
+    )
+    output = proc.stdout.decode()
+
+    print(output)
+
+    assert "TP RANKS: [0]" in output
+    assert "TP RANKS: [1]" in output
+    assert "Generated text:" in output
+    assert "Sleep and wake up successfully!!" in output
     assert proc.returncode == 0
