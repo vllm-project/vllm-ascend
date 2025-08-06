@@ -58,6 +58,10 @@ class CachedRequestState:
 
     lora_request: Optional[LoRARequest] = None
 
+    #cp param
+    kv_rank: Optional[int] = None
+    num_computed_and_new_tokens_cp: Optional[int] = None
+
     def __post_init__(self):
         self.num_prompt_tokens = len(self.prompt_token_ids)
 
@@ -262,6 +266,10 @@ class InputBatch:
 
         self.pooling_params: dict[str, PoolingParams] = {}
 
+        #cp param
+        self.kv_rank: list[bool] = [None] * max_num_reqs
+        self.num_computed_and_new_tokens_cp: list[int] = [None] * max_num_reqs
+
     @property
     def req_ids(self) -> list[str]:
         # None elements should only be present transiently
@@ -286,6 +294,10 @@ class InputBatch:
             self.req_output_token_ids[req_index] = request.output_token_ids
 
         self.req_id_to_index[req_id] = req_index
+
+        #cp param
+        self.kv_rank[req_index] = request.kv_rank
+        self.num_computed_and_new_tokens_cp[req_index] = request.num_computed_and_new_tokens_cp
 
         # Copy the prompt token ids and output token ids.
         num_prompt_tokens = len(request.prompt_token_ids)

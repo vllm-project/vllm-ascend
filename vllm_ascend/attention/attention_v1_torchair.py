@@ -140,8 +140,6 @@ class AscendTorchairMetadata:
 
     decode: Optional[AscendDecodeMetadata] = None
 
-    enable_dbo_across_dp: bool = False
-
 
 class AscendAttentionTorchairMetadataBuilder:
 
@@ -222,8 +220,7 @@ class AscendAttentionTorchairMetadataBuilder:
               num_reqs,
               num_actual_tokens,
               max_query_len,
-              graph_pad_size: int = -1,
-              enable_dbo_across_dp: bool = False):
+              graph_pad_size: int = -1):
 
         device = self.runner.device
 
@@ -301,8 +298,7 @@ class AscendAttentionTorchairMetadataBuilder:
             max_query_len=max_query_len,
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
-            attn_state=attn_state,
-            enable_dbo_across_dp=enable_dbo_across_dp)
+            attn_state=attn_state)
         return attn_metadata
 
 

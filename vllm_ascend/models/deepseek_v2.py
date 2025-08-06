@@ -313,8 +313,7 @@ class CustomDeepseekV2MoE(nn.Module):
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_multistream_moe = \
-            ascend_config.torchair_graph_config.enable_multistream_moe and \
-            self.torchair_graph_enabled
+            ascend_config.torchair_graph_config.enable_multistream_moe
 
         self.gate = ReplicatedLinear(config.hidden_size,
                                      config.n_routed_experts,
@@ -904,8 +903,6 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
-                continue
-            if "module" in name:
                 continue
 
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)

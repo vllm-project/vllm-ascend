@@ -31,7 +31,6 @@ def _deepseek_torchair_test_fixture(
     additional_config: Dict,
     *,
     tensor_parallel_size=2,
-    use_v1_schduler=False,
 ):
     example_prompts = [
         "Hello, my name is",
@@ -39,14 +38,14 @@ def _deepseek_torchair_test_fixture(
         "The capital of France is",
         "The future of AI is",
     ]
-    kwargs = {}
-    if not use_v1_schduler:
-        kwargs = {
-            "ascend_scheduler_config": {
-                "enabled": True,
-            },
-            "refresh": True,
-        }
+
+    # torchair is only work without chunked-prefill now
+    kwargs = {
+        "ascend_scheduler_config": {
+            "enabled": True,
+        },
+        "refresh": True,
+    }
     additional_config.update(**kwargs)
 
     with VllmRunner(
@@ -94,15 +93,6 @@ def test_e2e_deepseekv3_with_torchair_ms_mla():
         },
     }
     _deepseek_torchair_test_fixture(additional_config)
-
-
-def test_e2e_deepseekv3_with_torchair_v1scheduler():
-    additional_config = {
-        "torchair_graph_config": {
-            "enabled": True,
-        },
-    }
-    _deepseek_torchair_test_fixture(additional_config, use_v1_schduler=True)
 
 
 def _pangu_torchair_test_fixture(

@@ -61,10 +61,11 @@ _ASCEND_CUSTOMOP_IS_REIGISTERED = False
 
 def is_310p():
     global _IS_310P
-    if _IS_310P is None:
-        from vllm_ascend import _build_info  # type: ignore
-        _IS_310P = _build_info.__soc_version__.lower().startswith("ascend310p")
-    return _IS_310P
+    return False
+    # if _IS_310P is None:
+    #     from vllm_ascend import _build_info  # type: ignore
+    #     _IS_310P = _build_info.__soc_version__.lower().startswith("ascend310p")
+    # return _IS_310P
 
 
 def sleep_mode_enabled():
@@ -479,8 +480,7 @@ def register_ascend_customop():
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
 
 
-# TODO(zzzzwwjj): Currently there is no clear SOC_VERSION policy for A2 and A3 in CANN.
-# So we get the version dynamically. In the future, we should get the version info from _build_info like 310p does.
+# TODO(zzzzwwjj): It will be judged with _build_info afterwards.
 class AscendSocVersion(Enum):
     A2 = 0
     A3 = 1
