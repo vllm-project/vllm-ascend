@@ -162,9 +162,9 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
         mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
                            config.mlp_only_layers)
         self.use_aclgraph = (vllm_config is not None
-                        and vllm_config.compilation_config.level
-                        == CompilationLevel.PIECEWISE
-                        and not vllm_config.model_config.enforce_eager)
+                             and vllm_config.compilation_config.level
+                             == CompilationLevel.PIECEWISE
+                             and not vllm_config.model_config.enforce_eager)
         if (layer_idx not in mlp_only_layers) and (
                 config.num_experts > 0 and
             (layer_idx + 1) % config.decoder_sparse_step == 0):
@@ -235,10 +235,10 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
             hidden_states, residual)
 
         if not self.use_aclgraph:
-            hidden_states = self.mlp(hidden_states,
-                                     _metadata_for_padding=_metadata_for_padding)
+            hidden_states = self.mlp(
+                hidden_states, _metadata_for_padding=_metadata_for_padding)
         else:
-            hidden_states = self.mlp(Hidden_states)
+            hidden_states = self.mlp(hidden_states)
  
         return hidden_states, residual
 
