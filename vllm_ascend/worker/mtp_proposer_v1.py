@@ -125,6 +125,7 @@ class MtpProposer:
             )
         sample_hidden_states = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
+
         draft_token_ids = logits.argmax(dim=-1)
 
         # [batch_size, 1]
