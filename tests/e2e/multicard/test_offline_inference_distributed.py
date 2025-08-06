@@ -248,7 +248,7 @@ def test_sp_for_qwen3_moe() -> None:
     with VllmRunner(
             snapshot_download("Qwen/Qwen3-30B-A3B"),
             dtype="auto",
-            tensor_parallel_size=4,
+            tensor_parallel_size=2,
             distributed_executor_backend="mp",
             compilation_config={
                 "pass_config": {
