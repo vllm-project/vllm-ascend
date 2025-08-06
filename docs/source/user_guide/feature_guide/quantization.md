@@ -8,12 +8,13 @@ Since 0.9.0rc2 version, quantization feature is experimentally supported in vLLM
 
 To quantize a model, users should install [ModelSlim](https://gitee.com/ascend/msit/blob/master/msmodelslim/README.md) which is the Ascend compression and acceleration tool. It is an affinity-based compression tool designed for acceleration, using compression as its core technology and built upon the Ascend platform.
 
-Currently, only the specific tag [modelslim-VLLM-8.1.RC1.b020_001](https://gitee.com/ascend/msit/blob/modelslim-VLLM-8.1.RC1.b020_001/msmodelslim/README.md) of modelslim works with vLLM Ascend. Please do not install other version until modelslim master version is available for vLLM Ascend in the future.
-
 Install modelslim:
 
 ```bash
-git clone https://gitee.com/ascend/msit -b modelslim-VLLM-8.1.RC1.b020_001
+git clone https://gitee.com/ascend/msit
+# Optional, this commit has been verified
+git checkout f8ab35a772a6c1ee7675368a2aa4bafba3bedd1a
+
 cd msit/msmodelslim
 bash install.sh
 pip install accelerate
@@ -21,41 +22,43 @@ pip install accelerate
 
 ## Quantize model
 
-Take [DeepSeek-V2-Lite](https://modelscope.cn/models/deepseek-ai/DeepSeek-V2-Lite) as an example, you just need to download the model, and then execute the convert command. The command is shown below. More info can be found in modelslim doc [deepseek w8a8 dynamic quantization docs](https://gitee.com/ascend/msit/blob/modelslim-VLLM-8.1.RC1.b020_001/msmodelslim/example/DeepSeek/README.md#deepseek-v2-w8a8-dynamic%E9%87%8F%E5%8C%96).
+:::{note}
+You can choose to convert the model yourself or use the quantized model we uploaded,
+see https://www.modelscope.cn/models/vllm-ascend/Kimi-K2-Instruct-W8A8
+This conversion process will require a larger CPU memory, please ensure that the RAM size is greater than 2TB
+:::
+
+### Adapts and change
+1. Ascend does not support the `flash_attn` library. To run the model, you need to follow the [guide](https://gitee.com/ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v3r1) and comment out certain parts of the code in `modeling_deepseek.py` located in the weights folder.
+2. The current version of transformers does not support loading weights in FP8 quantization format. you need to follow the [guide](https://gitee.com/ascend/msit/blob/master/msmodelslim/example/DeepSeek/README.md#deepseek-v3r1) and delete the quantization related fields from `config.json` in the weights folder
+
+### Generate the w8a8 weights
 
 ```bash
 cd example/DeepSeek
-python3 quant_deepseek.py --model_path {original_model_path} --save_directory {quantized_model_save_path} --device_type cpu --act_method 2 --w_bit 8 --a_bit 8  --is_dynamic True
+
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:False
+export MODEL_PATH="/root/.cache/Kimi-K2-Instruct"
+export SAVE_PATH="/root/.cache/Kimi-K2-Instruct-W8A8"
+
+python3 quant_deepseek_w8a8.py --model_path $MODEL_PATH --save_path $SAVE_PATH --batch_size 4
 ```
 
-:::{note}
-You can also download the quantized model that we uploaded. Please note that these weights should be used for test only. For example, https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V2-Lite-W8A8
-:::
-
-Once convert action is done, there are two important files generated.
-
-1. [config.json](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V2-Lite-W8A8/file/view/master/config.json?status=1). Please make sure that there is no `quantization_config` field in it.
-
-2. [quant_model_description.json](https://www.modelscope.cn/models/vllm-ascend/DeepSeek-V2-Lite-W8A8/file/view/master/quant_model_description.json?status=1). All the converted weights info are recorded in this file.
-
-Here is the full converted model files:
+Here is the full converted model files except safetensors:
 
 ```bash
 .
-├── config.json
-├── configuration_deepseek.py
-├── configuration.json
-├── generation_config.json
-├── quant_model_description.json
-├── quant_model_weight_w8a8_dynamic-00001-of-00004.safetensors
-├── quant_model_weight_w8a8_dynamic-00002-of-00004.safetensors
-├── quant_model_weight_w8a8_dynamic-00003-of-00004.safetensors
-├── quant_model_weight_w8a8_dynamic-00004-of-00004.safetensors
-├── quant_model_weight_w8a8_dynamic.safetensors.index.json
-├── README.md
-├── tokenization_deepseek_fast.py
-├── tokenizer_config.json
-└── tokenizer.json
+|-- config.json
+|-- configuration.json
+|-- configuration_deepseek.py
+|-- generation_config.json
+|-- modeling_deepseek.py
+|-- quant_model_description.json
+|-- quant_model_weight_w8a8_dynamic.safetensors.index.json
+|-- tiktoken.model
+|-- tokenization_kimi.py
+`-- tokenizer_config.json
 ```
 
 ## Run the model
@@ -90,10 +93,7 @@ for output in outputs:
 
 ### Online inference
 
-```bash
-# Enable quantization by specifying `--quantization ascend`
-vllm serve {quantized_model_save_path} --served-model-name "deepseek-v2-lite-w8a8" --max-model-len 2048 --quantization ascend --trust-remote-code
-```
+Enable quantization by specifying `--quantization ascend`, for more details, see DeepSeek-V3-W8A8 [tutorial](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html)
 
 ## FAQs
 
