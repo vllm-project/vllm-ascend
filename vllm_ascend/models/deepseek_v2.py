@@ -460,6 +460,8 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         self.tp_size = get_tensor_model_parallel_world_size()
         assert num_heads % self.tp_size == 0
         self.num_local_heads = num_heads // self.tp_size
+        self.layers = config.num_hidden_layers
+        self.first_k_dense_replace = config.first_k_dense_replace
 
         self.scaling = self.qk_head_dim**-0.5
         self.rope_theta = rope_theta
@@ -609,7 +611,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             return output
         else:
             kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]
-            if self.enable_shared_expert_dp and self.debug_layer_idx > 3 and self.debug_layer_idx < 61:
+            if self.enable_shared_expert_dp and self.debug_layer_idx > self.first_k_dense_replace and self.debug_layer_idx < self.layers:
                 hidden_states_or_q_c = get_tp_group().all_gather(
                     hidden_states_or_q_c, 0)
                 kv_no_split = get_tp_group().all_gather(kv_no_split, 0)
@@ -617,7 +619,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             kv_c, k_pe = kv_no_split.split(
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
             kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
-            if not self.enable_shared_expert_dp or self.debug_layer_idx < 3:
+            if not self.enable_shared_expert_dp or self.debug_layer_idx < self.first_k_dense_replace:
                 output_shape = hidden_states.shape
             else:
                 num_tokens = hidden_states_or_q_c.shape[0]
@@ -761,7 +763,8 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
 
         tp_size = get_tensor_model_parallel_world_size()
         if self.enable_shared_expert_dp and (
-                self.layer_idx == 3 or self.layer_idx == 61) and tp_size > 1:
+                self.layer_idx == self.first_k_dense_replace
+                or self.layer_idx == self.layers) and tp_size > 1:
             num_tokens, _ = residual.shape
             if num_tokens % tp_size:
                 residual = nn.functional.pad(residual,
@@ -796,7 +799,8 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             residual = tensor_model_parallel_all_gather(residual, dim=0)
 
         # for last layer of main model and mtp layer.
-        if self.enable_shared_expert_dp and self.layer_idx >= 60 and tp_size > 1:
+        if self.enable_shared_expert_dp and self.layer_idx >= (
+                self.layers - 1) and tp_size > 1:
             hidden_states = get_tp_group().all_gather(hidden_states, 0)
             residual = get_tp_group().all_gather(residual, 0)
 
