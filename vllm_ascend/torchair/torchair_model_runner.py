@@ -17,9 +17,15 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+from typing import Optional
+
 import torch
 from vllm.config import VllmConfig
+from vllm.forward_context import get_forward_context
 
+import vllm_ascend.envs as envs_ascend
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ,
+                               maybe_converting_weight_acl_format)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
@@ -27,3 +33,93 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+
+    def _get_forward_metadata_across_dp_and_pad(
+            self, num_tokens: int, with_prefill: bool, enable_dbo: bool
+    ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
+        if self.dp_size == 1:
+            return num_tokens, None, with_prefill, enable_dbo
+
+        if self.is_kv_producer and not envs_ascend.VLLM_ASCEND_ENABLE_CHUNK_MC2:
+            num_tokens_across_dp = torch.tensor([num_tokens] * self.dp_size,
+                                                device="cpu",
+                                                dtype=torch.int32)
+            return num_tokens, num_tokens_across_dp, True, enable_dbo
+
+        if self.is_kv_consumer and len(self.torchair_graph_batch_sizes
+                                       ) == 1 and not self.in_profile_run:
+            max_num_decode_tokens = self.torchair_graph_batch_sizes[0]
+            num_tokens_across_dp = torch.tensor([max_num_decode_tokens] *
+                                                self.dp_size,
+                                                device="cpu",
+                                                dtype=torch.int32)
+            return max_num_decode_tokens, num_tokens_across_dp, False, enable_dbo
+
+        num_tokens_across_dp, with_prefill, enable_dbo = self._get_forward_metadata_across_dp(
+            num_tokens, with_prefill, enable_dbo)
+
+        if not with_prefill:
+            max_num_token = num_tokens_across_dp.max().item()
+            maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
+                max_num_token)
+            num_tokens_across_dp = torch.full((self.dp_size, ),
+                                              maybe_padded_num_tokens,
+                                              dtype=torch.int32,
+                                              device="cpu")
+        else:
+            maybe_padded_num_tokens = num_tokens
+
+        return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, enable_dbo
+
+    def _build_attention_metadata(self, with_prefill, num_tokens, skip_attn):
+        """Build attention metadata for dummy run."""
+        if not with_prefill:
+            attn_metadata = self.attn_metadata_builder.build_torchair_graph_dummy(
+                num_reqs=num_tokens, num_actual_tokens=1)
+        else:
+            attn_metadata = super()._build_attention_metadata(
+                with_prefill, num_tokens, skip_attn)
+        return attn_metadata
+
+    def _generate_dummy_run_hidden_states(self, with_prefill,
+                                          is_torchair_compile, input_ids,
+                                          positions, attn_metadata, num_tokens,
+                                          intermediate_tensors, inputs_embeds):
+        """Generate hidden states for dummy run."""
+        model_kwargs = {}
+        if with_prefill:
+            # Only mark static while compiling
+            if is_torchair_compile:
+                torch._dynamo.mark_static(input_ids)
+                torch._dynamo.mark_static(positions)
+                torch._dynamo.mark_static(attn_metadata.decode.block_table)
+                torch._dynamo.mark_static(attn_metadata.decode.input_positions)
+                torch._dynamo.mark_static(get_forward_context().mc2_mask)
+                if hasattr(attn_metadata.decode, "sin"):
+                    torch._dynamo.mark_static(attn_metadata.decode.sin)
+                    torch._dynamo.mark_static(attn_metadata.decode.cos)
+                torch._dynamo.mark_static(attn_metadata.slot_mapping)
+                for kv in self.kv_caches:
+                    assert isinstance(kv, tuple), "kv_cache must be a tuple"
+                    torch._dynamo.mark_static(kv[0])
+                    torch._dynamo.mark_static(kv[1])
+
+            maybe_converting_weight_acl_format(self.model,
+                                               ACL_FORMAT_FRACTAL_NZ)
+
+            compiled_model = self._get_torchair_lazy_compiled_model(num_tokens)
+            model_kwargs["kv_caches"] = self.kv_caches
+            model_kwargs["attn_metadata"] = attn_metadata
+            hidden_states = compiled_model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=None,
+                **model_kwargs,
+            )
+        else:
+            hidden_states = super()._generate_dummy_run_hidden_states(
+                with_prefill, is_torchair_compile, input_ids, positions,
+                attn_metadata, num_tokens, intermediate_tensors, inputs_embeds)
+
+        return hidden_states
