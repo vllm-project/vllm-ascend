@@ -116,7 +116,9 @@ def apply_mlp(hidden_states: torch.Tensor,
               w2_scale: torch.Tensor,
               group_list: torch.Tensor,
               dynamic_scale: torch.Tensor = None,
-              group_list_type: int = 1) -> torch.Tensor:
+              group_list_type: int = 1,
+              w1_scale_bias: torch.Tensor = None,
+              w2_scale_bias: torch.Tensor = None) -> torch.Tensor:
     """
     apply MLP: gate_up_proj -> swiglu -> down_proj
 
@@ -150,17 +152,31 @@ def apply_mlp(hidden_states: torch.Tensor,
     else:
         pertoken_scale = dynamic_scale
 
+    bias1, bias2 = None, None
+    _output_dtype = w2_scale.dtype
+
+    if w1_scale_bias is not None:
+        if group_list_type == 0:
+            group_list = torch.cat(
+                [group_list[:1], torch.diff(group_list, dim=0)])
+            group_list_type = 1
+        bias1 = [w1_scale_bias]
+        bias2 = [w2_scale_bias]
+        # TODO w4a8 scene: dynamic acquisition of dtype in the future
+        _output_dtype = torch.bfloat16
+
     # gmm1: gate_up_proj
     hidden_states = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
         weight=[w1],
         scale=[w1_scale],
+        bias=bias1,
         per_token_scale=[pertoken_scale],
         split_item=2,
         group_list_type=group_list_type,
         group_type=0,
         group_list=group_list,
-        output_dtype=w2_scale.dtype)[0]
+        output_dtype=_output_dtype)[0]
 
     # act_fn: swiglu
     hidden_states = torch_npu.npu_swiglu(hidden_states)
@@ -172,12 +188,13 @@ def apply_mlp(hidden_states: torch.Tensor,
         x=[hidden_states],
         weight=[w2],
         scale=[w2_scale],
+        bias=bias2,
         per_token_scale=[swiglu_out_scale],
         split_item=2,
         group_list_type=group_list_type,
         group_type=0,
         group_list=group_list,
-        output_dtype=w2_scale.dtype)[0]
+        output_dtype=_output_dtype)[0]
 
     return hidden_states
 
@@ -202,6 +219,8 @@ def fused_experts_with_mc2(
     mc2_mask: Optional[torch.Tensor] = None,
     shared_gate_up: Optional[Any] = None,
     shared_dequant_scale: Optional[Any] = None,
+    w1_scale_bias: torch.Tensor = None,
+    w2_scale_bias: torch.Tensor = None,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
     assert mc2_mask is not None
     if log2phy is not None:
@@ -270,13 +289,25 @@ def fused_experts_with_mc2(
             shared_act, swiglu_out_scale = shared_act_out[0], shared_act_out[1]
 
     # `expand_x` will be disposed in the `apply_mlp` function
-    down_out_list = apply_mlp_decode(expand_x,
-                                     w1,
-                                     w1_scale,
-                                     w2,
-                                     w2_scale,
-                                     expert_token_nums,
-                                     dynamic_scale=dynamic_scale)
+    if w1_scale_bias is None:
+        down_out_list = apply_mlp_decode(expand_x,
+                                         w1,
+                                         w1_scale,
+                                         w2,
+                                         w2_scale,
+                                         expert_token_nums,
+                                         dynamic_scale=dynamic_scale)
+    else:
+        # w4a8 scene, cannot use apply_mlp_decode because the operator is not supported
+        down_out_list = apply_mlp(expand_x,
+                                  w1,
+                                  w1_scale,
+                                  w2,
+                                  w2_scale,
+                                  expert_token_nums,
+                                  dynamic_scale=dynamic_scale,
+                                  w1_scale_bias=w1_scale_bias,
+                                  w2_scale_bias=w2_scale_bias)
 
     # moeCombine
     kwargs_mc2 = {
@@ -372,6 +403,8 @@ def fused_experts_with_all2all(
     ep_group: GroupCoordinator = None,
     log2phy: torch.Tensor = None,
     global_redundant_expert_num: int = 0,
+    w1_scale_bias: torch.Tensor = None,
+    w2_scale_bias: torch.Tensor = None,
 ):
     if log2phy is not None:
         topk_ids = log2phy[topk_ids]
@@ -457,7 +490,9 @@ def fused_experts_with_all2all(
         w2_scale,
         expert_tokens,  #16
         dynamic_scale=dynamic_scale,
-        group_list_type=group_list_type)
+        group_list_type=group_list_type,
+        w1_scale_bias=w1_scale_bias,
+        w2_scale_bias=w2_scale_bias)
 
     if expert_map is not None:
         reordered_outputs = torch.index_select(
