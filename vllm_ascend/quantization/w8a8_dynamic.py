@@ -520,6 +520,18 @@ def fused_experts_with_all2all(hidden_states: torch.Tensor,
                 expert_tokens_before_capacity_flag=False,
                 quant_mode=1,
             )
+        elif hasattr(torch_npu, "npu_moe_init_routing_quantv2"):  # TODO: Remove it
+            quantized_tokens, expanded_row_idx, global_expert_tokens, _, token_scales = torch_npu.npu_moe_init_routing_quantv2(
+                hidden_states,
+                expert_idx=topk_ids.to(torch.int32),
+                active_num=0,
+                expert_capacity=0,
+                expert_num=global_num_experts,
+                drop_pad_mode=0,
+                expert_tokens_count_or_cumsum_flag=2,
+                expert_tokens_before_capacity_flag=False,
+                quant_mode=1,
+            )
         else:
             quantized_tokens, expanded_row_idx, global_expert_tokens, token_scales = init_routing_quant(
                 hidden_states, top_k, topk_ids, global_num_experts)
