@@ -37,10 +37,7 @@ def clean_up():
 
 
 def run_prefill(prefill_done, process_close):
-    # ranktable.json needs be generated using gen_ranktable.sh
-    # from the examples/disaggregated_prefill_v1 in the main branch.
-    os.environ['DISAGGREGATED_PREFILL_RANK_TABLE_PATH'] = "./ranktable.json"
-    os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "0"
+    os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "0,1"
 
     from vllm import LLM, SamplingParams
     from vllm.config import KVTransferConfig
@@ -51,15 +48,16 @@ def run_prefill(prefill_done, process_close):
     ]
     sampling_params = SamplingParams(temperature=0, top_p=0.95, max_tokens=1)
 
-    ktc = KVTransferConfig(kv_connector="LLMDataDistCMgrConnector", kv_buffer_device="npu", kv_role="kv_producer",
-                           kv_parallel_size=1,
-                           kv_connector_module_path="vllm_ascend.distributed.llmdatadist_c_mgr_connector")
+    ktc = KVTransferConfig.from_cli(
+        '{"kv_connector":"AscendHcclConnector","kv_buffer_device":"npu","kv_role":"kv_producer", "kv_parallel_size":2}'
+    )
+
     # Set NPU memory utilization to 0.8
     llm = LLM(model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
               kv_transfer_config=ktc,
               max_model_len=2000,
               gpu_memory_utilization=0.8,
-              tensor_parallel_size=1)
+              tensor_parallel_size=2)
 
     llm.generate(prompts, sampling_params)
     print("Prefill node is finished.")
@@ -79,11 +77,7 @@ def run_prefill(prefill_done, process_close):
 
 
 def run_decode(prefill_done):
-    os.environ['VLLM_LLMDD_RPC_PORT'] = '6634'
-    # ranktable.json needs be generated using gen_ranktable.sh
-    # from the examples/disaggregated_prefill_v1 module in the main branch.
-    os.environ['DISAGGREGATED_PREFILL_RANK_TABLE_PATH'] = "./ranktable.json"
-    os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "1"
+    os.environ["ASCEND_RT_VISIBLE_DEVICES"] = "2,3"
 
     from vllm import LLM, SamplingParams
     from vllm.config import KVTransferConfig
@@ -94,14 +88,15 @@ def run_decode(prefill_done):
     ]
     sampling_params = SamplingParams(temperature=0, top_p=0.95)
 
-    ktc = KVTransferConfig(kv_connector="LLMDataDistCMgrConnector", kv_buffer_device="npu", kv_role="kv_consumer",
-                           kv_parallel_size=1, kv_connector_module_path="vllm_ascend.distributed.llmdatadist_c_mgr_connector")
+    ktc = KVTransferConfig.from_cli(
+        '{"kv_connector":"AscendHcclConnector","kv_buffer_device":"npu","kv_role":"kv_consumer","kv_parallel_size":2}'
+    )
 
     llm = LLM(model="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
               kv_transfer_config=ktc,
               max_model_len=2000,
               gpu_memory_utilization=0.8,
-              tensor_parallel_size=1)
+              tensor_parallel_size=2)
 
     # Wait for the producer to start the consumer
     print("Waiting for prefill node to finish...")

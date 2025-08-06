@@ -17,7 +17,6 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py
 #
 
-import copy
 from typing import Optional
 
 import torch
@@ -28,8 +27,7 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
-from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
-                                          has_kv_transfer_group)
+from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
@@ -37,7 +35,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_ascend.ascend_config import init_ascend_config
@@ -71,10 +69,8 @@ class NPUWorker(WorkerBase):
         from vllm_ascend import ops
         ops.register_dummy_fusion_op()
         _register_atb_extensions()
-
-        # init ascend config and soc version
+        # init ascend config
         init_ascend_config(vllm_config)
-        init_ascend_soc_version()
 
         super().__init__(vllm_config=vllm_config,
                          local_rank=local_rank,
@@ -83,6 +79,9 @@ class NPUWorker(WorkerBase):
                          is_driver_worker=is_driver_worker)
 
         # Try to import mindie_turbo to accelerate vLLM inference.
+        local_dp_rank = self.vllm_config.parallel_config.data_parallel_rank_local
+        world_size = self.vllm_config.parallel_config.world_size
+        self.local_rank_across_dp = local_dp_rank * world_size + self.local_rank
         try_register_lib(
             "mindie_turbo",
             "MindIE Turbo is installed. vLLM inference will be accelerated with MindIE Turbo."
@@ -130,19 +129,18 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
-    def _init_device(self):
+    def init_device(self):
         device = torch.device(f"npu:{self.local_rank}")
         NPUPlatform.set_device(device)
         NPUPlatform.empty_cache()
         self.init_npu_memory = NPUPlatform.mem_get_info()[0]
+
+        init_ascend_soc_version()
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
         # Set random seed.
         NPUPlatform.seed_everything(self.model_config.seed)
-        return device
 
-    def init_device(self):
-        device = self._init_device()
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = NPUModelRunner(self.vllm_config, device)
 
@@ -206,33 +204,9 @@ class NPUWorker(WorkerBase):
             assert isinstance(output, IntermediateTensors)
             get_pp_group().send_tensor_dict(output.tensors,
                                             all_gather_group=get_tp_group())
-            if not has_kv_transfer_group():
-                return None
-
-            is_legacy = vllm_version_is("0.10.0")
-
-            if is_legacy:
-                finished_sending = output.finished_sending
-                finished_recving = output.finished_recving
-            else:
-                kv_connector_output = output.kv_connector_output
-                finished_sending = kv_connector_output.finished_sending
-                finished_recving = kv_connector_output.finished_recving
-
-            if not finished_sending and not finished_recving:
-                return EMPTY_MODEL_RUNNER_OUTPUT
-
-            new_output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-
-            if is_legacy:
-                new_output.finished_sending = finished_sending
-                new_output.finished_recving = finished_recving
-            else:
-                new_output.kv_connector_output = kv_connector_output
-            return new_output
-
+            return None
         assert isinstance(output, ModelRunnerOutput)
-        return output
+        return output if self.is_driver_worker else None
 
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
@@ -310,7 +284,8 @@ class NPUWorker(WorkerBase):
                                      self.local_rank, "hccl")
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
-            self.parallel_config.pipeline_parallel_size)
+            self.parallel_config.pipeline_parallel_size,
+            self.parallel_config.context_parallel_size,)
         init_ascend_model_parallel(self.parallel_config)
         ensure_kv_transfer_initialized(self.vllm_config)
 
