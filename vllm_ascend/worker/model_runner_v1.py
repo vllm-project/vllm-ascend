@@ -646,22 +646,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 return maybe_padded_num_tokens, None, with_prefill, enable_dbo
             return num_tokens, None, with_prefill, enable_dbo
 
-        if self.is_kv_producer and not envs_ascend.VLLM_ASCEND_ENABLE_CHUNK_MC2:
-            num_tokens_across_dp = torch.tensor([num_tokens] * self.dp_size,
-                                                device="cpu",
-                                                dtype=torch.int32)
-            return num_tokens, num_tokens_across_dp, True, enable_dbo
-
-        if self.is_kv_consumer and self.torchair_graph_enabled and len(
-                self.torchair_graph_batch_sizes
-        ) == 1 and not self.in_profile_run:
-            max_num_decode_tokens = self.torchair_graph_batch_sizes[0]
-            num_tokens_across_dp = torch.tensor([max_num_decode_tokens] *
-                                                self.dp_size,
-                                                device="cpu",
-                                                dtype=torch.int32)
-            return max_num_decode_tokens, num_tokens_across_dp, False, enable_dbo
-
         maybe_padded_num_tokens = num_tokens
         num_tokens_across_dp, with_prefill, enable_dbo = self._get_forward_metadata_across_dp(
             num_tokens, with_prefill, enable_dbo)
