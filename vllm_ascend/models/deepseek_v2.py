@@ -75,6 +75,7 @@ from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import dispose_tensor, npu_prefetch
+
 FC1_enabled = envs_ascend.VLLM_ASCEND_FC1_ENABLED
 FC1_available = False
 FC1_pad_token_num = 0
@@ -700,7 +701,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.first_k_dense_replace = config.first_k_dense_replace
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tp_group().rank_in_group
-    
+
     def post_attention_process(self, hidden_states, residual, is_prefill):
         if self.tp_size > 1:
             if is_prefill:
@@ -732,7 +733,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             hidden_states, residual = self.post_attention_layernorm(
                 hidden_states, residual)
             return hidden_states, residual
-    
+
     def post_mlp_process(self, hidden_states, residual, is_prefill):
         if self.tp_size:
             if is_prefill:
@@ -845,7 +846,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             hidden_states = tensor_model_parallel_all_gather(hidden_states,
                                                              dim=0)
             residual = tensor_model_parallel_all_gather(residual, dim=0)
-        
+
         if FC1_enabled:
             hidden_states, residual = self.post_mlp_process(
                 hidden_states, residual, is_prefill)
@@ -912,7 +913,7 @@ class CustomDeepseekV2Model(nn.Module):
     ) -> Union[torch.Tensor, IntermediateTensors]:
         forward_context = get_forward_context()
         is_prefill = forward_context.with_prefill
-        
+
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -943,7 +944,7 @@ class CustomDeepseekV2Model(nn.Module):
                 "hidden_states": hidden_states,
                 "residual": residual
             })
-        
+
         if FC1_enabled and self.tp_size > 1 and is_prefill:
             hidden_states = self.norm(hidden_states)
             hidden_states = get_tp_group().all_gather(hidden_states, 0)
