@@ -84,14 +84,7 @@ class NPUWorker(WorkerBase):
                          is_driver_worker=is_driver_worker)
         # Bind cpu
         if get_ascend_config().enable_cpu_binding:
-            try:
-                bind_cpus(self.local_rank, ratio=1.0)
-            except RuntimeError as e:
-                logger.error(f"{e} in {self.local_rank}")
-            except ValueError as e:
-                logger.error(f"{e} in {self.local_rank}")
-            except Exception:
-                logger.info("Skip binding cpu.")
+            bind_cpus(self.local_rank, ratio=1.0)
         # Try to import mindie_turbo to accelerate vLLM inference.
         try_register_lib(
             "mindie_turbo",
