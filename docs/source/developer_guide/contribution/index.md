@@ -4,7 +4,7 @@
 It's recommended to set up a local development environment to build and test
 before you submit a PR.
 
-### Prepare environment and build
+### Setup development environment
 
 Theoretically, the vllm-ascend build is only supported on Linux because
 `vllm-ascend` dependency `torch_npu` only supports Linux.
@@ -12,73 +12,65 @@ Theoretically, the vllm-ascend build is only supported on Linux because
 But you can still set up dev env on Linux/Windows/macOS for linting and basic
 test as following commands:
 
+#### Run lint locally
+
 ```bash
 # Choose a base dir (~/vllm-project/) and set up venv
 cd ~/vllm-project/
 python3 -m venv .venv
 source ./.venv/bin/activate
 
-# Clone vllm code and install
-git clone https://github.com/vllm-project/vllm.git
+# Clone vllm-ascend and install
+git clone https://github.com/vllm-project/vllm-ascend.git
+cd vllm-ascend
+
+# Install lint requirement and enable pre-commit hook
+pip install -r requirements-lint.txt
+
+# Run lint (You need install pre-commits deps via proxy network at first time)
+bash format.sh
+```
+
+#### Run CI locally
+
+After complete "Run lint" setup, you can run CI locally:
+
+```{code-block} bash
+   :substitutions:
+
+cd ~/vllm-project/
+
+# Run CI need vLLM installed
+git clone --branch |vllm_version| https://github.com/vllm-project/vllm.git
 cd vllm
 pip install -r requirements/build.txt
 VLLM_TARGET_DEVICE="empty" pip install .
 cd ..
 
-# Clone vllm-ascend and install
-git clone https://github.com/vllm-project/vllm-ascend.git
+# Install requirements
 cd vllm-ascend
-# install system requirement
-apt install -y gcc g++ cmake libnuma-dev
-# install project requirement
+# For Linux:
 pip install -r requirements-dev.txt
+# For non Linux:
+cat requirements-dev.txt | grep -Ev '^#|^--|^$|^-r' | while read PACKAGE; do pip install "$PACKAGE"; done
+cat requirements.txt | grep -Ev '^#|^--|^$|^-r' | while read PACKAGE; do pip install "$PACKAGE"; done
 
-# Then you can run lint and mypy test
-bash format.sh
+# Run ci:
+bash format.sh ci
+```
 
-# Build:
-# - only supported on Linux (torch_npu available)
-# pip install -e .
-# - build without deps for debugging in other OS
-# pip install -e . --no-deps
-# - build without custom ops
-# COMPILE_CUSTOM_KERNELS=0 pip install -e .
+#### Submit the commit
 
+```bash
 # Commit changed files using `-s`
 git commit -sm "your commit info"
 ```
 
-### Testing
+🎉 Congratulations! You have completed the development environment setup.
 
-Although vllm-ascend CI provide integration test on [Ascend](https://github.com/vllm-project/vllm-ascend/blob/main/.github/workflows/vllm_ascend_test.yaml), you can run it
-locally. The simplest way to run these integration tests locally is through a container:
+### Test locally
 
-```bash
-# Under Ascend NPU environment
-git clone https://github.com/vllm-project/vllm-ascend.git
-cd vllm-ascend
-
-export IMAGE=vllm-ascend-dev-image
-export CONTAINER_NAME=vllm-ascend-dev
-export DEVICE=/dev/davinci1
-
-# The first build will take about 10 mins (10MB/s) to download the base image and packages
-docker build -t $IMAGE -f ./Dockerfile .
-# You can also specify the mirror repo via setting VLLM_REPO to speedup
-# docker build -t $IMAGE -f ./Dockerfile . --build-arg VLLM_REPO=https://gitee.com/mirrors/vllm
-
-docker run --rm --name $CONTAINER_NAME --network host --device $DEVICE \
-           --device /dev/davinci_manager --device /dev/devmm_svm \
-           --device /dev/hisi_hdc -v /usr/local/dcmi:/usr/local/dcmi \
-           -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \
-           -v /usr/local/Ascend/driver/lib64/:/usr/local/Ascend/driver/lib64/ \
-           -ti $IMAGE bash
-
-cd vllm-ascend
-pip install -r requirements-dev.txt
-
-pytest tests/
-```
+You can refer to [Testing](./testing.md) doc to help you setup testing environment and running tests locally.
 
 ## DCO and Signed-off-by
 
@@ -111,3 +103,9 @@ If the PR spans more than one category, please include all relevant prefixes.
 
 You may find more information about contributing to vLLM Ascend backend plugin on [<u>docs.vllm.ai</u>](https://docs.vllm.ai/en/latest/contributing/overview.html).
 If you find any problem when contributing, you can feel free to submit a PR to improve the doc to help other developers.
+
+:::{toctree}
+:caption: Index
+:maxdepth: 1
+testing
+:::
