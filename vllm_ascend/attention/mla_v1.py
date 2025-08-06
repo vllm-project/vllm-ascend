@@ -817,7 +817,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
         q_pe = query[..., self.qk_nope_head_dim:]
         q_nope = query[..., :self.qk_nope_head_dim]
-        mask = attn_metadata.prefill.attn_mask.unsqueeze(0).repeat(attn_metadata.num_prefills, 1, 1)
+        mask = attn_metadata.prefill.attn_mask.unsqueeze(0).repeat(
+            attn_metadata.num_prefills, 1, 1)
         print(f"mask:{mask},type:{mask.dtype},device:{mask.device}")
         torch_npu.atb.npu_ring_mla(q_nope=q_nope,
                                    q_rope=q_pe,
