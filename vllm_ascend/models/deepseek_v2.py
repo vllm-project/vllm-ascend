@@ -905,6 +905,8 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+            if "module" in name:
+                continue
 
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is not None:
