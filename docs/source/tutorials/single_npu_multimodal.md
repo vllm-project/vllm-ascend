@@ -103,13 +103,11 @@ outputs = llm.generate([llm_inputs], sampling_params=sampling_params)
 generated_text = outputs[0].outputs[0].text
 
 print(generated_text)
-
 ```
 
 If you run this script successfully, you can see the info shown below:
 
 ```bash
-Processed prompts: 100%|███████████████| 1/1 [00:11<00:00, 11.29s/it, est. speed input: 9.48 toks/s, output: 20.55 toks/s]
 The image displays a logo consisting of two main elements: a stylized geometric design and a pair of text elements.
 
 1. **Geometric Design**: On the left side of the image, there is a blue geometric design that appears to be made up of interconnected shapes. These shapes resemble a network or a complex polygonal structure, possibly hinting at a technological or interconnected theme. The design is monochromatic and uses only blue as its color, which could be indicative of a specific brand or company.
@@ -144,7 +142,10 @@ docker run --rm \
 -e VLLM_USE_MODELSCOPE=True \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
 -it $IMAGE \
-vllm serve Qwen/Qwen2.5-VL-7B-Instruct --dtype bfloat16 --max_model_len 16384 --max-num-batched-tokens 16384
+vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
+--dtype bfloat16 \
+--max_model_len 16384 \
+--max-num-batched-tokens 16384 
 ```
 
 :::{note}

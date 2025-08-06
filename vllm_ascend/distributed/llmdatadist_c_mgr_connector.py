@@ -1,4 +1,5 @@
 import contextlib
+import copy
 import json
 import math
 import os
@@ -183,6 +184,7 @@ class LLMDataDistCMgrConnectorScheduler():
         self.port = dp_rank_local * tp_size + envs.VLLM_LLMDD_RPC_PORT if dp_rank_local is not None else tp_size + envs.VLLM_LLMDD_RPC_PORT
 
         self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
+        self._reqs_need_send: dict[str, float] = {}
 
     def get_num_new_matched_tokens(
             self, request: "Request",
@@ -247,7 +249,12 @@ class LLMDataDistCMgrConnectorScheduler():
             meta.add_new_req(request_id=req_id,
                              local_block_ids=block_ids,
                              kv_transfer_params=req.kv_transfer_params)
+
+        meta.reqs_to_send = copy.deepcopy(self._reqs_need_send)
+
+        # Clear the list once workers start the transfers
         self._reqs_need_recv.clear()
+        self._reqs_need_send.clear()
 
         return meta
 
@@ -271,9 +278,14 @@ class LLMDataDistCMgrConnectorScheduler():
         # note: there might be some issue on this, check it if there is any unexpected result
         computed_block_ids = block_ids
         delay_free_blocks = len(computed_block_ids) > 0
+
         if delay_free_blocks:
             logger.info("Delaying free of %d blocks for request %s",
                         len(computed_block_ids), request.request_id)
+            # Prefill request on remote. It will be read from D upon completion
+            self._reqs_need_send[request.request_id] = time.perf_counter(
+            ) + envs.VLLM_LLMDD_ABORT_REQUEST_TIMEOUT
+
         return delay_free_blocks, dict(
             do_remote_prefill=True,
             do_remote_decode=False,
@@ -296,9 +308,9 @@ class LLMDataDistCMgrConnectorWorker():
         logger.info("Initialize the LLMDataDistCMgrConnectorWorker")
         # we assume the local node only contains dp and tp, and tp will not communicate inter-node.
         # for any scenario beyond this scope, the functionality of this connector is not guaranteed.
+        dp_size_local = vllm_config.parallel_config.data_parallel_size_local if not envs.VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED else envs.VLLM_DP_SIZE_LOCAL
         self.local_rank_on_node = get_world_group().rank % (
-            vllm_config.parallel_config.data_parallel_size_local *
-            vllm_config.parallel_config.tensor_parallel_size)
+            dp_size_local * vllm_config.parallel_config.tensor_parallel_size)
         self.local_rank = get_world_group().local_rank
         self.local_dp_rank = vllm_config.parallel_config.data_parallel_rank_local
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -340,6 +352,7 @@ class LLMDataDistCMgrConnectorWorker():
         os.environ["HCCL_DETERMINISTIC"] = "true"
         self.done_receiving_counts: defaultdict[str,
                                                 set[int]] = defaultdict(set)
+        self.reqs_to_send: dict[str, float] = {}
 
     def listen_for_agent_metadata_req(self, event: threading.Event):
         assert self.local_agent_metadata is not None
@@ -383,7 +396,9 @@ class LLMDataDistCMgrConnectorWorker():
                             logger.debug(
                                 f"LLMDataDistCMgrConnectorWorker: Receiving request {finished_req_id} finished"
                             )
-                            self.finished_reqs.add(finished_req_id)
+                            if finished_req_id in self.reqs_to_send:
+                                self.finished_reqs.add(finished_req_id)
+                                del self.reqs_to_send[finished_req_id]
                     sock.send_multipart(
                         (identity, b"", b"receiving decode finished"))
                 else:
@@ -606,6 +621,7 @@ class LLMDataDistCMgrConnectorWorker():
 
         for future in futures:
             future.add_done_callback(handle_exception)
+        self.reqs_to_send.update(metadata.reqs_to_send)
 
     def add_remote_agent(self, metadata: LLMDataDistCMgrAgentMetadata) -> int:
         assert self.local_agent_metadata is not None
@@ -860,8 +876,20 @@ class LLMDataDistCMgrConnectorWorker():
         self, finished_req_ids: set[str]
     ) -> tuple[Optional[set[str]], Optional[set[str]]]:
         """Get the finished recving and sending requuests."""
-        import copy
+        now = time.perf_counter()
+
         with self.thread_lock:
+            while self.reqs_to_send:
+                req_id, expires = next(iter(self.reqs_to_send.items()))
+                if now < expires:
+                    break
+                logger.warning(
+                    "Some requests in prefill node fail to receive KV Cache transfer done signal. "
+                    "If a greater mean TTFT is acceptable, you can 'export VLLM_LLMDD_ABORT_REQUEST_TIMEOUT=600' (10 minutes) to relax the timeout condition. "
+                )
+                if req_id in self.reqs_to_send:
+                    self.finished_reqs.add(req_id)
+                    del self.reqs_to_send[req_id]
             req_ids_to_ret = copy.deepcopy(self.finished_reqs)
             self.finished_reqs.clear()
         if self.llm_datadist_role == LLMRole.PROMPT:

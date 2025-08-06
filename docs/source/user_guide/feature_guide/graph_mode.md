@@ -1,17 +1,18 @@
 # Graph Mode Guide
 
-
+```{note}
 This feature is currently experimental. In future versions, there may be behavioral changes around configuration, coverage, performance improvement.
+```
 
-This guide provides instructions for using Ascend Graph Mode with vLLM Ascend. Please note that graph mode is only available on V1 Engine. And only Qwen, DeepSeek series models are well tested in 0.9.0rc1. We'll make it stable and generalize in the next release.
+This guide provides instructions for using Ascend Graph Mode with vLLM Ascend. Please note that graph mode is only available on V1 Engine. And only Qwen, DeepSeek series models are well tested from 0.9.0rc1. We'll make it stable and generalize in the next release.
 
 ## Getting Started
 
-From v0.9.0rc1 with V1 Engine, vLLM Ascend will run models in graph mode by default to keep the same behavior with vLLM. If you hit any issues, please feel free to open an issue on GitHub and fallback to eager mode temporarily by set `enforce_eager=True` when initializing the model.
+From v0.9.1rc1 with V1 Engine, vLLM Ascend will run models in graph mode by default to keep the same behavior with vLLM. If you hit any issues, please feel free to open an issue on GitHub and fallback to eager mode temporarily by set `enforce_eager=True` when initializing the model.
 
 There are two kinds for graph mode supported by vLLM Ascend:
-- **ACLGraph**: This is the default graph mode supported by vLLM Ascend. In v0.9.0rc1, only Qwen series models are well tested.
-- **TorchAirGraph**: This is the GE graph mode. In v0.9.0rc1, only DeepSeek series models are supported.
+- **ACLGraph**: This is the default graph mode supported by vLLM Ascend. In v0.9.1rc1, only Qwen series models are well tested.
+- **TorchAirGraph**: This is the GE graph mode. In v0.9.1rc1, only DeepSeek series models are supported.
 
 ## Using ACLGraph
 ACLGraph is enabled by default. Take Qwen series models as an example, just set to use V1 Engine is enough.
@@ -22,8 +23,6 @@ offline example:
 import os
 
 from vllm import LLM
-
-os.environ["VLLM_USE_V1"] = "1"
 
 model = LLM(model="Qwen/Qwen2-7B-Instruct")
 outputs = model.generate("Hello, how are you?")
@@ -45,8 +44,6 @@ offline example:
 import os
 from vllm import LLM
 
-os.environ["VLLM_USE_V1"] = "1"
-
 # TorchAirGraph is only work without chunked-prefill now
 model = LLM(model="deepseek-ai/DeepSeek-R1-0528", additional_config={"torchair_graph_config": {"enabled": True},"ascend_scheduler_config": {"enabled": True,}})
 outputs = model.generate("Hello, how are you?")
@@ -55,10 +52,10 @@ outputs = model.generate("Hello, how are you?")
 online example:
 
 ```shell
-vllm serve Qwen/Qwen2-7B-Instruct --additional-config='{"torchair_graph_config": {"enabled": True},"ascend_scheduler_config": {"enabled": True,}}'
+vllm serve Qwen/Qwen2-7B-Instruct --additional-config='{"torchair_graph_config": {"enabled": true},"ascend_scheduler_config": {"enabled": true,}}'
 ```
 
-You can find more detail about additional config [here](./additional_config.md)
+You can find more detail about additional config [here](../configuration/additional_config.md).
 
 ## Fallback to Eager Mode
 
@@ -69,8 +66,6 @@ offline example:
 ```python
 import os
 from vllm import LLM
-
-os.environ["VLLM_USE_V1"] = "1"
 
 model = LLM(model="someother_model_weight", enforce_eager=True)
 outputs = model.generate("Hello, how are you?")

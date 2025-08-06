@@ -1,5 +1,68 @@
 # Release note
 
+## v0.9.2rc1 - 2025.07.11
+
+This is the 1st release candidate of v0.9.2 for vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to get started. From this release, V1 engine will be enabled by default, there is no need to set `VLLM_USE_V1=1` any more. And this release is the last version to support V0 engine, V0 code will be clean up in the future.
+
+### Highlights
+- Pooling model works with V1 engine now. You can take a try with Qwen3 embedding model [#1359](https://github.com/vllm-project/vllm-ascend/pull/1359).
+- The performance on Atlas 300I series has been improved. [#1591](https://github.com/vllm-project/vllm-ascend/pull/1591)
+- aclgraph mode works with Moe models now. Currently, only Qwen3 Moe is well tested. [#1381](https://github.com/vllm-project/vllm-ascend/pull/1381)
+
+### Core
+- Ascend PyTorch adapter (torch_npu) has been upgraded to `2.5.1.post1.dev20250619`. Don’t forget to update it in your environment. [#1347](https://github.com/vllm-project/vllm-ascend/pull/1347)
+- The **GatherV3** error has been fixed with **aclgraph** mode. [#1416](https://github.com/vllm-project/vllm-ascend/pull/1416)
+- W8A8 quantization works on Atlas 300I series now. [#1560](https://github.com/vllm-project/vllm-ascend/pull/1560)
+- Fix the accuracy problem with deploy models with parallel parameters. [#1678](https://github.com/vllm-project/vllm-ascend/pull/1678)
+- The pre-built wheel package now requires lower version of glibc. Users can use it by `pip install vllm-ascend` directly. [#1582](https://github.com/vllm-project/vllm-ascend/pull/1582)
+
+## Other
+- Official doc has been updated for better read experience. For example, more deployment tutorials are added, user/developer docs are updated. More guide will coming soon.
+- Fix accuracy problem for deepseek V3/R1 models with torchair graph in long sequence predictions. [#1331](https://github.com/vllm-project/vllm-ascend/pull/1331)
+- A new env variable `VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP` has been added. It enables the fused allgather-experts kernel for Deepseek V3/R1 models. The default value is `0`. [#1335](https://github.com/vllm-project/vllm-ascend/pull/1335)
+- A new env variable `VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION` has been added to improve the performance of topk-topp sampling. The default value is 0, we'll consider to enable it by default in the future[#1732](https://github.com/vllm-project/vllm-ascend/pull/1732)
+- A batch of bugs have been fixed for Data Parallelism case [#1273](https://github.com/vllm-project/vllm-ascend/pull/1273) [#1322](https://github.com/vllm-project/vllm-ascend/pull/1322) [#1275](https://github.com/vllm-project/vllm-ascend/pull/1275) [#1478](https://github.com/vllm-project/vllm-ascend/pull/1478)
+- The DeepSeek performance has been improved. [#1194](https://github.com/vllm-project/vllm-ascend/pull/1194) [#1395](https://github.com/vllm-project/vllm-ascend/pull/1395) [#1380](https://github.com/vllm-project/vllm-ascend/pull/1380)
+- Ascend scheduler works with prefix cache now. [#1446](https://github.com/vllm-project/vllm-ascend/pull/1446)
+- DeepSeek now works with prefix cache now. [#1498](https://github.com/vllm-project/vllm-ascend/pull/1498)
+- Support prompt logprobs to recover ceval accuracy in V1 [#1483](https://github.com/vllm-project/vllm-ascend/pull/1483)
+
+## v0.9.1rc1 - 2025.06.22
+
+This is the 1st release candidate of v0.9.1 for vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to get started.
+
+### Highlights
+
+- Atlas 300I series is experimental supported in this release. [#1333](https://github.com/vllm-project/vllm-ascend/pull/1333) After careful consideration, this feature **will NOT be included in v0.9.1-dev branch** taking into account the v0.9.1 release quality and the feature rapid iteration to improve performance on Atlas 300I series. We will improve this from 0.9.2rc1 and later.
+- Support EAGLE-3 for speculative decoding. [#1032](https://github.com/vllm-project/vllm-ascend/pull/1032)
+
+### Core
+- Ascend PyTorch adapter (torch_npu) has been upgraded to `2.5.1.post1.dev20250528`. Don’t forget to update it in your environment. [#1235](https://github.com/vllm-project/vllm-ascend/pull/1235)
+- Support Atlas 300I series container image. You can get it from [quay.io](https://quay.io/repository/vllm/vllm-ascend)
+- Fix token-wise padding mechanism to make multi-card graph mode work. [#1300](https://github.com/vllm-project/vllm-ascend/pull/1300)
+- Upgrade vllm to 0.9.1 [#1165]https://github.com/vllm-project/vllm-ascend/pull/1165
+
+### Other Improvements
+- Initial support Chunked Prefill for MLA. [#1172](https://github.com/vllm-project/vllm-ascend/pull/1172)
+- An example of best practices to run DeepSeek with ETP has been added. [#1101](https://github.com/vllm-project/vllm-ascend/pull/1101)
+- Performance improvements for DeepSeek using the TorchAir graph. [#1098](https://github.com/vllm-project/vllm-ascend/pull/1098), [#1131](https://github.com/vllm-project/vllm-ascend/pull/1131)
+- Supports the speculative decoding feature with AscendScheduler. [#943](https://github.com/vllm-project/vllm-ascend/pull/943)
+- Improve `VocabParallelEmbedding` custom op performance. It will be enabled in the next release. [#796](https://github.com/vllm-project/vllm-ascend/pull/796)
+- Fixed a device discovery and setup bug when running vLLM Ascend on Ray [#884](https://github.com/vllm-project/vllm-ascend/pull/884)
+- DeepSeek with [MC2](https://www.hiascend.com/document/detail/zh/canncommercial/81RC1/developmentguide/opdevg/ascendcbestP/atlas_ascendc_best_practices_10_0043.html) (Merged Compute and Communication) now works properly. [#1268](https://github.com/vllm-project/vllm-ascend/pull/1268)
+- Fixed log2phy NoneType bug with static EPLB feature. [#1186](https://github.com/vllm-project/vllm-ascend/pull/1186)
+- Improved performance for DeepSeek with DBO enabled. [#997](https://github.com/vllm-project/vllm-ascend/pull/997), [#1135](https://github.com/vllm-project/vllm-ascend/pull/1135)
+- Refactoring AscendFusedMoE [#1229](https://github.com/vllm-project/vllm-ascend/pull/1229)
+- Add initial user stories page (include LLaMA-Factory/TRL/verl/MindIE Turbo/GPUStack) [#1224](https://github.com/vllm-project/vllm-ascend/pull/1224)
+- Add unit test framework [#1201](https://github.com/vllm-project/vllm-ascend/pull/1201)
+
+### Known Issues
+- In some cases, the vLLM process may crash with a **GatherV3** error when **aclgraph** is enabled. We are working on this issue and will fix it in the next release. [#1038](https://github.com/vllm-project/vllm-ascend/issues/1038)
+- Prefix cache feature does not work with the Ascend Scheduler but without chunked prefill enabled. This will be fixed in the next release. [#1350](https://github.com/vllm-project/vllm-ascend/issues/1350)
+
+### Full Changelog
+https://github.com/vllm-project/vllm-ascend/compare/v0.9.0rc2...v0.9.1rc1
+
 ## v0.9.0rc2 - 2025.06.10
 
 This release contains some quick fixes for v0.9.0rc1. Please use this release instead of v0.9.0rc1.
@@ -14,14 +77,14 @@ This is the 1st release candidate of v0.9.0 for vllm-ascend. Please follow the [
 
 ### Highlights
 
-- DeepSeek works with graph mode now. Follow the [official doc](https://vllm-ascend.readthedocs.io/en/latest/user_guide/graph_mode.html) to take a try. [#789](https://github.com/vllm-project/vllm-ascend/pull/789)
+- DeepSeek works with graph mode now. Follow the [official doc](https://vllm-ascend.readthedocs.io/en/latest/user_guide/feature_guide/graph_mode.html) to take a try. [#789](https://github.com/vllm-project/vllm-ascend/pull/789)
 - Qwen series models works with graph mode now. It works by default with V1 Engine. Please note that in this release, only Qwen series models are well tested with graph mode. We'll make it stable and generalize in the next release. If you hit any issues, please feel free to open an issue on GitHub and fallback to eager mode temporarily by set `enforce_eager=True` when initializing the model.
 
 ### Core
 
 - The performance of multi-step scheduler has been improved. Thanks for the contribution from China Merchants Bank. [#814](https://github.com/vllm-project/vllm-ascend/pull/814)
 - LoRA、Multi-LoRA And Dynamic Serving is supported for V1 Engine now. Thanks for the contribution from China Merchants Bank. [#893](https://github.com/vllm-project/vllm-ascend/pull/893)
-- prefix cache and chunked prefill feature works now [#782](https://github.com/vllm-project/vllm-ascend/pull/782) [#844](https://github.com/vllm-project/vllm-ascend/pull/844)
+- Prefix cache and chunked prefill feature works now [#782](https://github.com/vllm-project/vllm-ascend/pull/782) [#844](https://github.com/vllm-project/vllm-ascend/pull/844)
 - Spec decode and MTP features work with V1 Engine now. [#874](https://github.com/vllm-project/vllm-ascend/pull/874) [#890](https://github.com/vllm-project/vllm-ascend/pull/890)
 - DP feature works with DeepSeek now. [#1012](https://github.com/vllm-project/vllm-ascend/pull/1012)
 - Input embedding feature works with V0 Engine now. [#916](https://github.com/vllm-project/vllm-ascend/pull/916)
@@ -95,7 +158,7 @@ We are excited to announce the release of 0.7.3 for vllm-ascend. This is the fir
 
 ## v0.8.5rc1 - 2025.05.06
 
-This is the 1st release candidate of v0.8.5 for vllm-ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to start the journey. Now you can enable V1 egnine by setting the environment variable `VLLM_USE_V1=1`, see the feature support status of vLLM Ascend in [here](https://vllm-ascend.readthedocs.io/en/latest/user_guide/suppoted_features.html).
+This is the 1st release candidate of v0.8.5 for vllm-ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to start the journey. Now you can enable V1 egnine by setting the environment variable `VLLM_USE_V1=1`, see the feature support status of vLLM Ascend in [here](https://vllm-ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_features.html).
 
 ### Highlights
 - Upgrade CANN version to 8.1.RC1 to support chunked prefill and automatic prefix caching (`--enable_prefix_caching`) when V1 is enabled [#747](https://github.com/vllm-project/vllm-ascend/pull/747)
@@ -138,11 +201,11 @@ This is the second release candidate of v0.8.4 for vllm-ascend. Please follow th
 
 ## v0.8.4rc1 - 2025.04.18
 
-This is the first release candidate of v0.8.4 for vllm-ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to start the journey. From this version, vllm-ascend will follow the newest version of vllm and release every two weeks. For example, if vllm releases v0.8.5 in the next two weeks, vllm-ascend will release v0.8.5rc1 instead of v0.8.4rc2. Please find the detail from the [official documentation](https://vllm-ascend.readthedocs.io/en/latest/developer_guide/versioning_policy.html#release-window).
+This is the first release candidate of v0.8.4 for vllm-ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to start the journey. From this version, vllm-ascend will follow the newest version of vllm and release every two weeks. For example, if vllm releases v0.8.5 in the next two weeks, vllm-ascend will release v0.8.5rc1 instead of v0.8.4rc2. Please find the detail from the [official documentation](https://vllm-ascend.readthedocs.io/en/latest/community/versioning_policy.html#release-window).
 
 ### Highlights
 
-- vLLM V1 engine experimental support is included in this version. You can visit [official guide](https://docs.vllm.ai/en/latest/getting_started/v1_user_guide.html) to get more detail. By default, vLLM will fallback to V0 if V1 doesn't work, please set `VLLM_USE_V1=1` environment if you want to use V1 forcely. 
+- vLLM V1 engine experimental support is included in this version. You can visit [official guide](https://docs.vllm.ai/en/latest/getting_started/v1_user_guide.html) to get more detail. By default, vLLM will fallback to V0 if V1 doesn't work, please set `VLLM_USE_V1=1` environment if you want to use V1 forcely.
 - LoRA、Multi-LoRA And Dynamic Serving is supported now. The performance will be improved in the next release. Please follow the [official doc](https://docs.vllm.ai/en/latest/features/lora.html) for more usage information. Thanks for the contribution from China Merchants Bank. [#521](https://github.com/vllm-project/vllm-ascend/pull/521).
 - Sleep Mode feature is supported. Currently it's only work on V0 engine. V1 engine support will come soon. [#513](https://github.com/vllm-project/vllm-ascend/pull/513)
 
