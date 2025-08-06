@@ -35,16 +35,6 @@ def _get_torchair_current_work_dir(file_name=None):
     return os.path.join(TORCHAIR_CACHE_DIR, file_name)
 
 
-def check_torchair_cache_exist():
-    res = False
-    torch_air_abs_path = _get_torchair_current_work_dir()
-    if os.path.exists(torch_air_abs_path):
-        file_list = os.listdir(torch_air_abs_path)
-        if len(file_list) != 0:
-            res = True
-    return res
-
-
 def check_kv_cache_bytes_cache_exist():
     res = False
     kv_cache_bytes_cache_abs_path = _get_torchair_current_work_dir(
@@ -96,3 +86,13 @@ def npu_wait_tensor(self: torch.Tensor,
                     *,
                     enabled: bool = True):
     return _npu_wait_tensor(self, dependency) if enabled else self
+
+
+def check_torchair_cache_exist():
+    res = False
+    torch_air_abs_path = _get_torchair_current_work_dir()
+    if os.path.exists(torch_air_abs_path):
+        file_list = os.listdir(torch_air_abs_path)
+        if len(file_list) != 0:
+            res = True
+    return res
