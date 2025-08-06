@@ -90,11 +90,11 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-:::{note}
-Before launch the inference server, ensure some environment variables are set for multi node communication
-:::
-
 Run the following scripts on two nodes respectively
+
+:::{note}
+Before launch the inference server, ensure the following environment variables are set for multi node communication
+:::
 
 **node0**
 
@@ -178,7 +178,7 @@ vllm serve /root/.cache/ds_v3 \
 ```
 
 The Deployment view looks like:
-![alt text](../assets/multi_node_dp.png)
+![alt text](../assets/multi_node_dp_deepseek.png)
 
 Once your server is started, you can query the model with input prompts:
 
