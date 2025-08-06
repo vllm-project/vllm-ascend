@@ -383,7 +383,6 @@ class CustomQwen3DBOMoEModel(Qwen3MoeModel):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
-        enable_eplb = parallel_config.enable_eplb
         self.num_redundant_experts = parallel_config.num_redundant_experts
 
         self.padding_idx = config.pad_token_id
