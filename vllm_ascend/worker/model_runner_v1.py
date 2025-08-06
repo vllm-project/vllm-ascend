@@ -619,7 +619,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         ]:
             return False
         # considering the case that one dp rank may enable dbo while others may not
-        if not self.vllm_config.model_config.use_mla or not envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+        if not envs_ascend.VLLM_ASCEND_ENABLE_DBO:
             return False
         # TODO: remove it if token-level microbatch is enabled
         [token_index,
