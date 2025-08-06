@@ -50,7 +50,6 @@ from vllm.sequence import IntermediateTensors
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.ops.sequence_parallel import (MetadataForPadding,
                                                init_metadata_for_sp)
-from vllm_ascend.platform import VllmConfig
 
 
 class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
