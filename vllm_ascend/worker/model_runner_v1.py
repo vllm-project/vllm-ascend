@@ -637,10 +637,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.torchair_graph_batch_sizes
         ) == 1 and not self.in_profile_run:
             with_prefill_tensor = torch.tensor([with_prefill],
-                                               device="cpu",
+                                               device="npu",
                                                dtype=torch.bool)
             dist.all_reduce(with_prefill_tensor,
-                            group=get_dp_group().cpu_group,
+                            group=get_dp_group().device_group,
                             op=dist.ReduceOp.MAX)
             if not with_prefill_tensor.item():
                 max_num_decode_tokens = self.torchair_graph_batch_sizes[0]
