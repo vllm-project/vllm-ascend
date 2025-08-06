@@ -239,7 +239,7 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
                 hidden_states, _metadata_for_padding=_metadata_for_padding)
         else:
             hidden_states = self.mlp(hidden_states)
- 
+
         return hidden_states, residual
 
 
