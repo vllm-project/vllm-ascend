@@ -617,12 +617,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.dp_size == 1:
             return num_tokens, None, with_prefill, enable_dbo
 
-        if self.is_kv_producer and not envs_ascend.VLLM_ASCEND_ENABLE_CHUNK_MC2:
-            num_tokens_across_dp = torch.tensor([num_tokens] * self.dp_size,
-                                                device="cpu",
-                                                dtype=torch.int32)
-            return num_tokens, num_tokens_across_dp, True, enable_dbo
-
         if self.is_kv_consumer and self.torchair_graph_enabled and len(
                 self.torchair_graph_batch_sizes
         ) == 1 and not self.in_profile_run:
