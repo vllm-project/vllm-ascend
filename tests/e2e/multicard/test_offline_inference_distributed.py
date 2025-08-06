@@ -255,5 +255,6 @@ def test_sp_for_qwen3_moe() -> None:
                     "enable_sequence_parallelism": True
                 }
             },
+            enable_expert_parallel=True,
     ) as vllm_model:
         vllm_model.generate(example_prompts, sampling_params)
