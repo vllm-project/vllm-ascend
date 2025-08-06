@@ -46,6 +46,28 @@
 #       Need a PR to vllm to support get port from environment.
 #    Future Plan:
 #       Remove those patch when vllm merged them
+#   2. `vllm.config.ParallelConfig.ParallelConfig.stateless_init_dp_group`
+#    Why:
+#       vLLM use gloo backend by default to initialize stateless dp process gourp, but we want to use hccl here to
+#       get better performance
+#    How：
+#       adopt hccl backend to init process group.(Now use VLLM_ASCEND_ENABLE_HCCL_ALLREDUCE
+#       environment variable to enable this patch)
+#    Related PR (if no, explain why):
+#       Need a PR to vllm to support more backend.
+#    Future Plan:
+#       Remove those patch when vllm merged them
+#   3. `vllm.config.ParallelConfig.ParallelConfig.has_unfinished_dp`
+#    Why:
+#       vLLM use gloo backend by default to initialize stateless dp process gourp, but we want to use hccl here to
+#       get better performance in has_unfinished_dp function
+#    How：
+#       adopt hccl backend to init process group.(Now use VLLM_ASCEND_ENABLE_HCCL_ALLREDUCE
+#       environment variable to enable this patch)
+#    Related PR (if no, explain why):
+#       Need a PR to vllm to support more backend.
+#    Future Plan:
+#       Remove those patch when vllm merged them
 #
 # * Worker Patch:
 # ===============

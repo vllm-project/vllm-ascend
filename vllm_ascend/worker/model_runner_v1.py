@@ -2172,6 +2172,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         else:
             # Generate a new forward proxy code object to prevent the invalidation of
             # compilation cache caused by dynamo retracing
+            # Detailed introduction is as follows:
+            # https://www.hiascend.com/document/detail/zh/Pytorch/710/modthirdparty/torchairuseguide/torchair_00016.html
             forward_proxy_name = f"{self.model.__class__.__name__}_forward_with_batch_size_{batch_size}"
             forward_fn = self.model.forward
             code = forward_fn.__code__
