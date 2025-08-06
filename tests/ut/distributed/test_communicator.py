@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import MagicMock, patch, Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import torch
 import torch.distributed as dist
@@ -116,12 +116,14 @@ class TestNPUCommunicator(unittest.TestCase):
         mock_dispatch_result = (torch.randn(2, 4, 8), torch.randn(2, 4, 2))
         comm.all2all_manager.dispatch.return_value = mock_dispatch_result
 
-        result_hidden, result_logits = comm.dispatch(hidden_states, router_logits)
+        result_hidden, result_logits = comm.dispatch(hidden_states,
+                                                     router_logits)
 
         assert torch.allclose(result_hidden, mock_dispatch_result[0])
         assert torch.allclose(result_logits, mock_dispatch_result[1])
 
-        comm.all2all_manager.dispatch.assert_called_once_with(hidden_states, router_logits)
+        comm.all2all_manager.dispatch.assert_called_once_with(
+            hidden_states, router_logits)
 
 
     @patch("vllm.config.get_current_vllm_config", return_value=None)
