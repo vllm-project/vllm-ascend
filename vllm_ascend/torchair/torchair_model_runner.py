@@ -1,5 +1,6 @@
 #
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# Copyright 2023 The vLLM team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,15 +14,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
+# Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+import torch
+from vllm.config import VllmConfig
 
-def register():
-    """Register the NPU platform."""
-
-    return "vllm_ascend.platform.NPUPlatform"
+from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
 
-def register_model():
-    from .models import register_model
-    register_model()
+class NPUTorchairModelRunner(NPUModelRunner):
+
+    def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        super().__init__(vllm_config, device)

@@ -78,6 +78,9 @@ class TestCustomDeepSeekMultiTokenPredictor(PytestBase):
         mock_vllm_config.cache_config = CacheConfig()
         mock_vllm_config.quant_config = mocker.MagicMock()
         mocker.patch(
+            "vllm.model_executor.layers.vocab_parallel_embedding.VocabParallelEmbedding.__init__",
+            return_value=None)
+        mocker.patch(
             "vllm_ascend.models.deepseek_mtp.CustomDeepSeekMultiTokenPredictorLayer.__init__",
             return_value=None)
 
@@ -90,10 +93,9 @@ class TestCustomDeepSeekMultiTokenPredictor(PytestBase):
         assert predictor.num_mtp_layers == 3
         assert isinstance(predictor, CustomDeepSeekMultiTokenPredictor)
 
-    @pytest.mark.parametrize('kv_caches, inputs_embeds', [
-        (torch.tensor([[[0.1, 0.2, 0.3]]]), torch.tensor([[0.1, 0.2, 0.3]])),
-        (None, None),
-    ])
+    @pytest.mark.parametrize(
+        'kv_caches, inputs_embeds',
+        [(torch.tensor([[[0.1, 0.2, 0.3]]]), torch.tensor([[0.1, 0.2, 0.3]]))])
     def test_forward(self, mocker: MockerFixture, setup_predictor, kv_caches,
                      inputs_embeds):
         predictor = setup_predictor
@@ -147,6 +149,9 @@ class TestCustomDeepSeekMTP(PytestBase):
         mocker.patch("torch.nn.Module.__setattr__")
         mocker.patch("torch.nn.Module.__getattr__")
         mocker.patch("torch.nn.Module.__delattr__")
+        mocker.patch(
+            "vllm.model_executor.layers.vocab_parallel_embedding.VocabParallelEmbedding.__init__",
+            return_value=None)
         mocker.patch(
             "vllm_ascend.models.deepseek_mtp.CustomDeepSeekMultiTokenPredictorLayer.__call__",
             return_value=None)

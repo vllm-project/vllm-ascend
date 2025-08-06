@@ -90,7 +90,8 @@ jobs:
           --exclude libc10.so \
           --exclude libc_sec.so \
           --exclude "libascend*.so" \
-          --exclude "libtorch*.so"
+          --exclude "libtorch*.so" \
+          --exclude "liberror_manager.so"
         done
         rm -f dist/*.whl
         mv dist/repaired/*.whl dist/
