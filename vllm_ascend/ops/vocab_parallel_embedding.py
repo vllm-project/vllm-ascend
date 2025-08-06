@@ -32,13 +32,20 @@ def get_masked_input_and_mask(
     # into a single kernel, making it very fast
     org_vocab_mask = (input_ >= org_vocab_start_index) & (
         input_ < org_vocab_end_index)
-    added_vocab_mask = (input_ >= added_vocab_start_index) & (
-        input_ < added_vocab_end_index)
-    added_offset = added_vocab_start_index - (
-        org_vocab_end_index - org_vocab_start_index) - num_org_vocab_padding
-    valid_offset = (org_vocab_start_index *
-                    org_vocab_mask) + (added_offset * added_vocab_mask)
-    vocab_mask = org_vocab_mask | added_vocab_mask
+    # Adapt: avoid create added_vocab_mask when added_vocab_start_index == added_vocab_end_index.
+    if added_vocab_start_index == added_vocab_end_index:
+        valid_offset = (org_vocab_start_index * org_vocab_mask)
+        vocab_mask = org_vocab_mask
+    else:
+        added_vocab_mask = (input_ >= added_vocab_start_index) & (
+            input_ < added_vocab_end_index)
+        added_offset = added_vocab_start_index - (
+            org_vocab_end_index -
+            org_vocab_start_index) - num_org_vocab_padding
+        valid_offset = (org_vocab_start_index *
+                        org_vocab_mask) + (added_offset * added_vocab_mask)
+        vocab_mask = org_vocab_mask | added_vocab_mask
+    # Adapt end.
     input_ = vocab_mask * (input_ - valid_offset)
     return input_, ~vocab_mask
 

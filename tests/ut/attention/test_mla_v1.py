@@ -188,6 +188,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         runner.chunked_prefill_enabled = False
         runner.device = "cpu"
         runner.block_size = 16
+        runner.decode_token_per_req = 1
 
         ascend_config = MagicMock()
         ascend_config.torchair_graph_config = MagicMock()
@@ -206,6 +207,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
     def test_reorder_batch_with_torchair_graph(self, ascend_config):
         runner = MagicMock()
         runner.chunked_prefill_enabled = False
+        runner.decode_token_per_req = 1
         ascend_config.torchair_graph_config = MagicMock()
         ascend_config.torchair_graph_config.enabled = True
 
@@ -238,6 +240,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         ascend_config = MagicMock()
         runner = MagicMock()
         runner.chunked_prefill_enabled = False
+        runner.decode_token_per_req = 1
         ascend_config.torchair_graph_config = MagicMock()
         ascend_config.torchair_graph_config.enabled = False
         with patch("vllm_ascend.attention.mla_v1.get_ascend_config",
@@ -275,6 +278,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         runner = MagicMock()
         runner.graph_block_tables = torch.zeros((8, 64), dtype=torch.int32)
         runner.chunked_prefill_enabled = False
+        runner.decode_token_per_req = 1
         builder = AscendMLAMetadataBuilder(runner=runner)
         block_tables = torch.randint(0, 100, (3, 10), dtype=torch.int32)
 
@@ -291,6 +295,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         runner = MagicMock()
         runner.graph_block_tables = torch.zeros((8, 4), dtype=torch.int32)
         runner.chunked_prefill_enabled = False
+        runner.decode_token_per_req = 1
         builder = AscendMLAMetadataBuilder(runner=runner)
         block_tables = torch.randint(0, 100, (3, 10), dtype=torch.int32)
 
@@ -308,6 +313,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         runner = MagicMock()
         runner.graph_block_tables = np.zeros((8, 64), dtype=np.int32)
         runner.chunked_prefill_enabled = False
+        runner.decode_token_per_req = 1
         builder = AscendMLAMetadataBuilder(runner=runner)
 
         block_tables = torch.randint(0, 100, (3, 10), dtype=torch.int32)
@@ -332,6 +338,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
         runner.attn_mask = torch.zeros((1, 1), dtype=torch.bool)
         runner.spec_attn_mask = torch.zeros((1, 1), dtype=torch.bool)
         runner.dtype = torch.float16
+        runner.decode_token_per_req = 1
 
         builder = AscendMLAMetadataBuilder(runner=runner,
                                            metadata_cls=AscendMLAMetadata)

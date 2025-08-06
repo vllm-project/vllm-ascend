@@ -156,7 +156,7 @@ class AscendAttentionTorchairMetadataBuilder:
             self, num_seqs: int, block_tables: torch.Tensor) -> torch.Tensor:
 
         max_batch_size, max_blocks = self.runner.graph_block_tables.shape
-        assert max_batch_size >= num_seqs
+        assert max_batch_size >= num_seqs, f"max_batch_size: {max_batch_size} should be bigger than cur_num_seqs: {num_seqs}"
 
         if isinstance(self.runner.graph_block_tables, np.ndarray):
             graph_block_tables = torch.zeros((max_batch_size, max_blocks),
@@ -259,26 +259,34 @@ class AscendAttentionTorchairMetadataBuilder:
             if use_torchair_graph and self.runner.attn_state in [
                     AscendAttentionState.DecodeOnly,
             ]:
+                num_reqs_pad_size = 0
+                num_token_pad_size = 0
+                if graph_pad_size != 0:
+                    pad_value = 0
+                    num_token_pad_size = graph_pad_size - num_actual_tokens
+                    num_reqs_pad_size = (
+                        graph_pad_size // self.runner.decode_token_per_req -
+                        num_reqs)
                 pad_value = 1
                 padded_seq_lens = seq_lens.tolist() + [pad_value
-                                                       ] * graph_pad_size
+                                                       ] * num_reqs_pad_size
 
                 seq_lens = torch.from_numpy(
                     np.array(padded_seq_lens).astype(np.int32))
-                padding = torch.full((graph_pad_size, ),
+                padding = torch.full((num_token_pad_size, ),
                                      PAD_SLOT_ID,
                                      dtype=slot_mapping.dtype,
                                      device=slot_mapping.device)
                 slot_mapping = torch.cat([slot_mapping, padding])
                 block_table_padding = torch.zeros(
-                    (graph_pad_size, ) + block_table.shape[1:],
+                    (num_reqs_pad_size, ) + block_table.shape[1:],
                     dtype=block_table.dtype,
                     device=block_table.device)
                 block_table = torch.cat([block_table, block_table_padding],
                                         dim=0)
                 block_table = self._get_graph_runner_block_tables(
-                    num_seqs + graph_pad_size, block_table)
-                padding_0 = torch.zeros(graph_pad_size,
+                    num_seqs + num_reqs_pad_size, block_table)
+                padding_0 = torch.zeros(num_token_pad_size,
                                         dtype=input_positions.dtype,
                                         device=input_positions.device)
                 input_positions = torch.cat([input_positions, padding_0])
