@@ -27,9 +27,14 @@ from vllm.model_executor.models.utils import (AutoWeightsLoader,
                                               PPMissingLayer, maybe_prefix)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
+from vllm.model_executor.layers.activation import SiluAndMul
 
 import vllm_ascend.envs as ascend_envs
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+
+
+from vllm_ascend.ops.linear import (AttnRowParallelLinear,
+                                    ATTNMergedColumnParallelLinear)
 
 
 def all_gather_and_maybe_unpad(
@@ -51,6 +56,55 @@ def maybe_pad_and_reduce_scatter(
     hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
     return hidden_states
 
+class CustomQwen2MLP(nn.Module):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        self.gate_up_proj = ATTNMergedColumnParallelLinear(
+            hidden_size,
+            [intermediate_size] * 2,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+        self.down_proj = AttnRowParallelLinear(
+            intermediate_size,
+            hidden_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.down_proj",
+        )
+        # self.gate_up_proj = MergedColumnParallelLinear(
+        #     hidden_size,
+        #     [intermediate_size] * 2,
+        #     bias=False,
+        #     quant_config=quant_config,
+        #     prefix=f"{prefix}.gate_up_proj",
+        # )
+        # self.down_proj = RowParallelLinear(
+        #     intermediate_size,
+        #     hidden_size,
+        #     bias=False,
+        #     quant_config=quant_config,
+        #     prefix=f"{prefix}.down_proj",
+        # )
+        # if hidden_act != "silu":
+        #     raise ValueError(f"Unsupported activation: {hidden_act}. "
+        #                      "Only silu is supported for now.")
+        self.act_fn = SiluAndMul()
+
+    def forward(self, x):
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
 
 class CustomQwen2Attention(Qwen2Attention):
 
@@ -144,7 +198,7 @@ class CustomQwen2DecoderLayer(nn.Module):
             attn_type=attn_type,
             dual_chunk_attention_config=dual_chunk_attention_config,
         )
-        self.mlp = Qwen2MLP(
+        self.mlp = CustomQwen2MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
