@@ -5,7 +5,7 @@
 referring to [multi_node.md](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html#verification-process)
 
 ## Run with docker
-Assume you have two Atlas 800 A3(64G*16) nodes, and want to deploy the `Kimi-K2-Instruct-W8A8` quantitative model across multi-node.
+Assume you have two Atlas 800 A3(64G*16) nodes(or 4 *A2* 8), and want to deploy the `Kimi-K2-Instruct-W8A8` quantitative model across multi-node.
 
 ```{code-block} bash
    :substitutions:
@@ -47,11 +47,11 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-:::{note}
-Before launch the inference server, ensure some environment variables are set for multi node communication
-:::
-
 Run the following scripts on two nodes respectively
+
+:::{note}
+Before launch the inference server, ensure the following environment variables are set for multi node communication
+:::
 
 **node0**
 

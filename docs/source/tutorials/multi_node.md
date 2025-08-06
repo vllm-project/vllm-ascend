@@ -90,11 +90,11 @@ docker run --rm \
 -it $IMAGE bash
 ```
 
-:::{note}
-Before launch the inference server, ensure some environment variables are set for multi node communication
-:::
-
 Run the following scripts on two nodes respectively
+
+:::{note}
+Before launch the inference server, ensure the following environment variables are set for multi node communication
+:::
 
 **node0**
 
