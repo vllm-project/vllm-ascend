@@ -128,6 +128,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION":
     lambda: bool(
         int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION", '1'))),
+    "VLLM_ASCEND_ENABLE_CHUNK_MC2":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_CHUNK_MC2", '0'))),
 
     # `LLMDataDistCMgrConnector` required variable. `DISAGGREGATED_PREFILL_RANK_TABLE_PATH` is
     # used for llmdatadist to build the communication topology for kv cache transfer, it is
