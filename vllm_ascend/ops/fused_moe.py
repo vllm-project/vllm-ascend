@@ -902,6 +902,7 @@ def select_experts(
         if not use_grouped_topk and custom_routing_function is None:
             topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k_softmax(
                 x=router_logits, finished=None, k=top_k)
+            topk_ids = topk_ids.to(torch.int32)
             topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
             return topk_weights, topk_ids
 
