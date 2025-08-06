@@ -26,7 +26,7 @@ import types
 import weakref
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Union, cast
+from typing import TYPE_CHECKING, Dict, List, Optional, Type, Union, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -80,9 +80,8 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
 from vllm_ascend.attention.attention_v1_torchair import AscendTorchairMetadata
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
 from vllm_ascend.distributed.moe_comm_method import (AllGatherCommImpl,
-                                                     AllReduceCommImpl,
+                                                     NativeAllGatherCommImpl,
                                                      DummyCommImpl,
-                                                     MC2CommImpl,
                                                      MoECommMethod)
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
@@ -380,6 +379,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
             self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
 
+        self.reserved_mc2_mask = torch.zeros(
+            512,
+            dtype=torch.bool,
+            device=self.device,
+        )
+
+        self.moe_comm_method = AllGatherCommImpl
+
     def check_batch_sizes_consistency(self) -> None:
         if not dist.is_initialized():
             return
@@ -401,18 +408,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 f"Sum over ranks:     {gathered_graph_batch_size.tolist()}\n"
                 f"Expected if all equal: {[v * self.dp_size for v in local.tolist()]}"
             )
-
-        self.reserved_mc2_mask = torch.zeros(
-            512,
-            dtype=torch.bool,
-            device=self.device,
-        )
-
-        if self.parallel_config.enable_expert_parallel:
-            # self.moe_comm_method = AllGatherCommImpl
-            self.moe_comm_method = MC2CommImpl
-        else:
-            self.moe_comm_method = AllReduceCommImpl
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -1894,7 +1889,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         skip_attn: bool = True,
         with_prefill: bool = False,
         is_torchair_compile: bool = False,
-        moe_comm_method: MoECommMethod = DummyCommImpl,
+        moe_comm_method: Type[MoECommMethod] = DummyCommImpl,
     ) -> torch.Tensor:
         # Padding for DP
         (num_tokens, num_tokens_across_dp, with_prefill,

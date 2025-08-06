@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 
 import torch
 import torch_npu
-from vllm.distributed.parallel_state import get_tp_group
+from vllm.distributed.parallel_state import get_ep_group, get_tp_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import direct_register_custom_op
 
@@ -34,13 +34,30 @@ class MoECommMethod(ABC):
         expert_map: torch.Tensor,
         num_experts: int,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
-        """Pre-process before MLP."""
+        """Pre-process before MLP.
+        Args:
+            hidden_states: Tensor of shape (num_tokens, hidden_size)
+            topk_ids: Tensor of shape (num_tokens, top_k_num)
+            topk_weights: Tensor of shape (num_tokens, top_k_num)
+            expert_map: Tensor mapping global expert IDs to local IDs
+            num_experts: Number of local experts
+        Returns:
+            permuted_hidden_states: Tensor of shape (num_tokens * top_k_num, hidden_size)
+            expert_tokens: Tensor of shape (num_experts,)
+            group_list_type: Argument for grouped matmul
+        """
         pass
 
     @abstractmethod
     def _post_process(self, mlp_output: torch.Tensor,
                       hidden_states: torch.Tensor) -> None:
-        """Post-process after MLP."""
+        """Post-process after MLP.
+        Args:
+            mlp_output: Tensor of shape (num_tokens * top_k_num, hidden_size)
+            hidden_states: Tensor of shape (num_tokens, hidden_size)
+        Returns:
+            None: This method mutates hidden_states in-place.
+        """
         pass
 
 
@@ -63,9 +80,8 @@ class DummyCommImpl(MoECommMethod):
         pass
 
 
-class AllGatherCommImpl(MoECommMethod):
-    """This implementation is for the scenarios listed below:
-    1. `enable_expert_parallel=True`.
+class NativeAllGatherCommImpl(MoECommMethod):
+    """This implementation should be compatible with all scenarios.
 
     Note that this implementation purely consists of native PyTorch ops
     and does not use any NPU-specific ops. So the performance may not be optimal.
@@ -80,7 +96,6 @@ class AllGatherCommImpl(MoECommMethod):
         expert_map: torch.Tensor,
         num_experts: int,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
-        print("Using AllGatherCommImpl for MoE communication.")
         num_tokens = hidden_states.shape[0]
 
         # Generate token indices and flatten
@@ -98,6 +113,9 @@ class AllGatherCommImpl(MoECommMethod):
 
         # Filter valid token-expert pairs
         mask = local_experts_flat != -1
+        # FIXME: npu_grouped_matmul output random values at [num_valid_tokens:, ...]
+        # So we need to filter out invalid tokens by zeroing their weights.
+        # This is a workaround and should be removed after the issue is fixed
         filtered_weights = torch.where(mask, weights_flat,
                                        torch.zeros_like(weights_flat)).to(
                                            self.dtype)
@@ -106,7 +124,6 @@ class AllGatherCommImpl(MoECommMethod):
             local_experts_flat,
             torch.full_like(local_experts_flat, num_experts),
         ).to(topk_ids.dtype)
-        self.mask = mask
 
         # Sort by local expert IDs
         sort_indices = torch.argsort(filtered_experts.view(torch.float32))
@@ -121,39 +138,27 @@ class AllGatherCommImpl(MoECommMethod):
                                    dtype=torch.int64)
         ones = torch.ones_like(filtered_experts, dtype=torch.int64)
         token_counts.scatter_add_(0, filtered_experts.to(torch.int64), ones)
-        token_counts = token_counts[:num_experts]
-        expert_tokens = torch.cumsum(token_counts, dim=0, dtype=torch.int64)
+        expert_tokens = token_counts[:num_experts]
 
         # Rearrange hidden_states
         permuted_hidden_states = hidden_states[self.sorted_token_indices]
 
-        group_list_type = 0
+        group_list_type = 1  # `count` mode
 
         return permuted_hidden_states, expert_tokens, group_list_type
 
     def _post_process(self, mlp_output: torch.Tensor,
                       hidden_states: torch.Tensor) -> None:
-        weighted_down_out = mlp_output * self.sorted_weights.unsqueeze(1)
+        mlp_output = mlp_output * self.sorted_weights.unsqueeze(1)
 
         final_hidden_states = torch.zeros_like(hidden_states)
-
-        # TODO: npu_grouped_matmul output random values at [num_valid_tokens:, ...]
-        # This created multiple NaN and index_add_ will mix them up which harms accuracy
-        # remove this mask and filter after it being fixed
-        num_valid_tokens = self.mask.sum()
-        valid_token_mask = (torch.arange(
-            0, self.sorted_token_indices.shape[0],
-            device=self.device).unsqueeze(1) < num_valid_tokens)
-        valid_output = torch.where(valid_token_mask, weighted_down_out,
-                                   torch.zeros_like(weighted_down_out)).to(
-                                       self.dtype)
         final_hidden_states.index_add_(0, self.sorted_token_indices,
-                                       valid_output)
+                                       mlp_output)
 
         hidden_states[:] = final_hidden_states
 
 
-class AllReduceCommImpl(MoECommMethod):
+class AllGatherCommImpl(MoECommMethod):
     """This implementation is for the scenarios listed below:
     1. `enable_expert_parallel=False`.
     2. If `npu_moe_init_routing_v2` is available, we will support `enable_expert_parallel=True`,
@@ -169,70 +174,48 @@ class AllReduceCommImpl(MoECommMethod):
         expert_map: torch.Tensor,  # noqa: F841
         num_experts: int,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
-        print("Using AllReduceCommImpl for MoE communication.")
         num_tokens = hidden_states.shape[0]
 
         self.topk_weights = topk_weights
         self.topk_ids = topk_ids
 
-        # 1. Prepare row indices for routing
-        row_idx_len = num_tokens * self.top_k_num
-        row_idx = torch.arange(row_idx_len,
-                               dtype=torch.int32,
-                               device=self.device)
-        row_idx = row_idx.view(self.top_k_num, -1).permute(1, 0).contiguous()
+        first_expert_idx = 0
+        if expert_map is not None:
+            # FIXME: npu_grouped_matmul output random values at [num_valid_tokens:, ...]
+            # So we need to filter out invalid tokens by zeroing their weights.
+            # This is a workaround and should be removed after the issue is fixed
+            mask = expert_map[topk_ids] != -1
+            # NOTE: This is equivalent to self.topk_weights[~mask] = 0.0,
+            # but ~mask will dispatch to aclnnNonzeroV2, which is not supported in ACL Graph
+            self.topk_weights = torch.where(mask, topk_weights, 0.0)
 
-        # 2. Initial routing to expand tokens and experts
-        permuted_hidden_states, expanded_row_idx, expanded_expert_idx = (
-            torch_npu.npu_moe_init_routing(
+            first_expert_idx = get_ep_group().rank_in_group * num_experts
+        last_expert_idx = first_expert_idx + num_experts
+
+        permuted_hidden_states, expanded_row_idx, expert_tokens, _ = (
+            torch_npu.npu_moe_init_routing_v2(
                 hidden_states,
-                row_idx=row_idx,
-                expert_idx=topk_ids,
-                active_num=num_tokens,
+                topk_ids,
+                active_num=num_tokens * self.top_k_num,
+                expert_num=self.global_num_experts,
+                expert_tokens_num_type=1,  # Only support `count` mode now
+                expert_tokens_num_flag=True,  # Output `expert_tokens`
+                active_expert_range=[first_expert_idx, last_expert_idx],
+                quant_mode=-1,
             ))
-        # NOTE: Currently, V2 produces incorrect accuracy and weaker performance than V1
-        # first_expert_idx = 0
-        # if expert_map is not None:
-        #     first_expert_idx = torch.nonzero(expert_map != -1, as_tuple=False)[0].item()
-        # last_expert_idx = first_expert_idx + num_experts
-        # permuted_hidden_states, expanded_row_idx, expert_tokens, _ = (
-        #     torch_npu.npu_moe_init_routing_v2(
-        #         hidden_states,
-        #         topk_ids,
-        #         active_num=num_tokens * self.top_k_num,
-        #         expert_num=self.global_num_experts,
-        #         expert_tokens_num_type=1,  # Only support `count` mode now
-        #         expert_tokens_num_flag=True,  # Output `expert_tokens`
-        #         active_expert_range=[first_expert_idx, last_expert_idx],
-        #         quant_mode=-1,
-        #     )
-        # )
         self.expanded_row_idx = expanded_row_idx
         permuted_hidden_states = permuted_hidden_states
 
-        # 3. Compute expert tokens
-        expert_tokens = torch_npu.npu_moe_compute_expert_tokens(
-            expanded_expert_idx, num_experts).to(torch.int64)
-        # NOTE: This is also for npu_moe_init_routing_v2
-        # expert_tokens = torch.cumsum(expert_tokens, 0)
-
-        group_list_type = 0
+        group_list_type = 1  # `count` mode
 
         return permuted_hidden_states, expert_tokens, group_list_type
 
     def _post_process(self, mlp_output: torch.Tensor,
                       hidden_states: torch.Tensor) -> None:
-        hidden_states[:] = torch_npu.npu_moe_finalize_routing(
-            mlp_output,
-            skip1=None,
-            skip2=None,
-            bias=None,
-            scales=self.topk_weights,
-            expanded_src_to_dst_row=self.expanded_row_idx,
-            export_for_source_row=self.topk_ids,
-            # NOTE: For npu_moe_init_routing_v2
-            # drop_pad_mode=2,
-        )
+        hidden_states[:] = torch_npu.npu_moe_token_unpermute(
+            permuted_tokens=mlp_output,
+            sorted_indices=self.expanded_row_idx,
+            probs=self.topk_weights)
 
 
 class MC2CommImpl(MoECommMethod):
@@ -288,9 +271,26 @@ class MC2CommImpl(MoECommMethod):
         num_experts: int,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         # Store tensors needed for post_process
-        self.topk_ids = topk_ids.clone()
-        self.topk_weights = topk_weights
+        self.topk_ids = topk_ids
+        self.topk_weights = topk_weights.to(torch.float32)
         self.mc2_mask = get_forward_context().mc2_mask
+
+        # tp_size = get_tensor_model_parallel_world_size()
+        # self.chunked_hidden_states = torch.tensor_split(hidden_states,
+        #                                             tp_size,
+        #                                             dim=0)
+        # chunked_topk_ids = torch.tensor_split(self.topk_ids,
+        #                                             tp_size,
+        #                                             dim=0)
+        # chunked_topk_weights = torch.tensor_split(self.topk_weights,
+        #                                             tp_size,
+        #                                             dim=0)
+        # chunked_mc2_mask = torch.tensor_split(self.mc2_mask, tp_size, dim=0)
+        # tp_rank = get_tensor_model_parallel_rank()
+        # hidden_states = self.chunked_hidden_states[tp_rank]
+        # self.topk_ids = chunked_topk_ids[tp_rank]
+        # self.topk_weights = chunked_topk_weights[tp_rank]
+        # self.mc2_mask = chunked_mc2_mask[tp_rank]
 
         dispatch_kwargs = {
             "x": hidden_states,
@@ -326,7 +326,7 @@ class MC2CommImpl(MoECommMethod):
             expert_tokens,
             self.ep_recv_counts,
             self.tp_recv_counts,
-        ) = torch_npu.npu_moe_distribute_dispatch_v2(**dispatch_kwargs)[:6]
+        ) = dispatch(**dispatch_kwargs)[:6]
 
         group_list_type = 1
 
@@ -337,7 +337,7 @@ class MC2CommImpl(MoECommMethod):
         combine_kwargs = {
             "expand_x": mlp_output,
             "expert_ids": self.topk_ids,
-            "expert_scales": self.topk_weights.to(torch.float32),
+            "expert_scales": self.topk_weights,
             "expert_shard_type": 0,
             "shared_expert_rank_num": 0,
             "moe_expert_num": self.global_num_experts,
@@ -366,12 +366,17 @@ class MC2CommImpl(MoECommMethod):
                 "x_active_mask": self.mc2_mask,
             })
 
-        if self.enable_dispatch_v2:
-            hidden_states[:] = torch_npu.npu_moe_distribute_combine_v2(
-                **combine_kwargs)
-        else:
-            hidden_states[:] = torch_npu.npu_moe_distribute_combine(
-                **combine_kwargs)
+        combine = torch_npu.npu_moe_distribute_combine_v2 if self.enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine
+
+        hidden_states[:] = combine(**combine_kwargs)
+
+        # final_hidden_states = combine(**combine_kwargs)
+
+        # dist.all_gather(list(self.chunked_hidden_states), final_hidden_states, get_tp_group().device_group)
+
+        # final_hidden_states = torch.cat(self.chunked_hidden_states, dim=0)
+
+        # hidden_states[:] = final_hidden_states
 
 
 def moe_comm_pre_process(

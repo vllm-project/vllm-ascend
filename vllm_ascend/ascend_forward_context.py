@@ -11,7 +11,6 @@ from vllm.forward_context import get_forward_context, set_forward_context
 
 import vllm_ascend.envs as envs
 from vllm_ascend.distributed.moe_comm_method import MoECommMethod
-from vllm_ascend.platform import NPUPlatform
 
 
 class FusedMoEState(Enum):
