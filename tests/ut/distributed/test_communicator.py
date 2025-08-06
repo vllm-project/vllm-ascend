@@ -51,7 +51,6 @@ class TestNPUCommunicator(unittest.TestCase):
 
         assert output.tolist() == [10, 20, 50, 60]
 
-
     @patch("vllm.config.get_current_vllm_config", return_value=None)
     @patch("torch.npu.current_device", return_value=MagicMock())
     @patch("torch.npu.set_device", return_value=MagicMock())
@@ -89,7 +88,6 @@ class TestNPUCommunicator(unittest.TestCase):
 
         assert output.tolist() == [[10, 20], [50, 60]]
 
-
     @patch("vllm.config.get_current_vllm_config", return_value=None)
     @patch("torch.npu.current_device", return_value=MagicMock())
     @patch("torch.npu.set_device", return_value=MagicMock())
@@ -124,7 +122,6 @@ class TestNPUCommunicator(unittest.TestCase):
 
         comm.all2all_manager.dispatch.assert_called_once_with(
             hidden_states, router_logits)
-
 
     @patch("vllm.config.get_current_vllm_config", return_value=None)
     @patch("torch.npu.current_device", return_value=MagicMock())
