@@ -337,15 +337,17 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 assert attn_metadata is not None
                 assert attn_metadata.attn_mask is not None
                 mask = attn_metadata.attn_mask
-                torch_npu._npu_flash_attention(query=query,
-                                               key=key,
-                                               value=value,
-                                               mask=mask,
-                                               seq_len=attn_metadata.seq_lens,
-                                               scale_value=self.scale,
-                                               num_heads=self.num_heads,
-                                               num_kv_heads=self.num_kv_heads,
-                                               out=output)
+                torch_npu.atb._npu_flash_attention_v2(
+                    query=query,
+                    key=key,
+                    value=value,
+                    mask=mask,
+                    mask_type=3,
+                    seq_len=attn_metadata.seq_lens,
+                    scale_value=self.scale,
+                    num_heads=self.num_heads,
+                    num_kv_heads=self.num_kv_heads,
+                    out=output)
             elif attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
                 assert attn_metadata is not None
                 assert attn_metadata.attn_mask is not None
