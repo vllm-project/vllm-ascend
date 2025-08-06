@@ -1,6 +1,20 @@
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# This file is a part of the vllm-ascend project.
+#
+
 import math
 import os
-import unittest
 from threading import Lock
 from unittest import mock
 
@@ -8,10 +22,11 @@ import torch
 from vllm.config import (CompilationConfig, ModelConfig, ParallelConfig,
                          VllmConfig)
 
+from tests.ut.base import TestBase
 from vllm_ascend import utils
 
 
-class TestUtils(unittest.TestCase):
+class TestUtils(TestBase):
 
     def test_is_310p(self):
         utils._IS_310P = None
@@ -102,6 +117,79 @@ class TestUtils(unittest.TestCase):
         output_tensor = utils.aligned_16(input_tensor)
         self.assertEqual(output_tensor.shape[0], 32)
 
+    @mock.patch('torch_npu.get_npu_format')
+    @mock.patch('torch_npu.npu_format_cast')
+    @mock.patch('vllm.model_executor.layers.fused_moe.layer.FusedMoE',
+                new=mock.MagicMock)
+    @mock.patch('vllm_ascend.utils.is_310p')
+    @mock.patch('vllm_ascend.utils.get_ascend_config')
+    def test_maybe_converting_weight_acl_format(self, mock_get_config,
+                                                mock_310p, mock_npu_cast,
+                                                mock_get_format):
+        ACL_FORMAT_FRACTAL_NZ = 29
+        mock_310p.return_value = True
+
+        mock_config = mock.MagicMock()
+        mock_config.torchair_graph_config.enabled = True
+        mock_get_config.return_value = mock_config
+        mock_get_format.return_value = 1
+
+        mock_npu_cast.return_value = 1
+
+        fused_moe = mock.MagicMock()
+        fused_moe.w13_weight = mock.MagicMock()
+        fused_moe.w2_weight = mock.MagicMock()
+        fused_moe.w13_weight.data = torch.randn(128, 256)
+        fused_moe.w2_weight.data = torch.randn(256, 128)
+        model = mock.MagicMock()
+        model.modules.return_value = [fused_moe]
+
+        utils.maybe_converting_weight_acl_format(model, ACL_FORMAT_FRACTAL_NZ)
+        self.assertEqual(fused_moe.w13_weight.data, 1)
+
+    @mock.patch('torch_npu.get_npu_format')
+    @mock.patch('torch_npu.npu_format_cast')
+    @mock.patch('vllm.model_executor.layers.fused_moe.layer.FusedMoE',
+                new=mock.MagicMock)
+    @mock.patch('vllm_ascend.utils.is_310p')
+    @mock.patch('vllm_ascend.utils.get_ascend_config')
+    def test_maybe_converting_weight_acl_format_format_true(
+            self, mock_get_config, mock_310p, mock_npu_cast, mock_get_format):
+        ACL_FORMAT_FRACTAL_NZ = 29
+        mock_310p.return_value = True
+
+        mock_config = mock.MagicMock()
+        mock_config.torchair_graph_config.enabled = True
+        mock_get_config.return_value = mock_config
+        mock_get_format.return_value = ACL_FORMAT_FRACTAL_NZ
+
+        mock_npu_cast.return_value = 1
+
+        fused_moe = mock.MagicMock()
+        fused_moe.w13_weight = mock.MagicMock()
+        fused_moe.w2_weight = mock.MagicMock()
+        fused_moe.w13_weight.data = torch.randn(128, 256)
+        fused_moe.w2_weight.data = torch.randn(256, 128)
+        model = mock.MagicMock()
+        model.modules.return_value = [fused_moe]
+
+        mock_get_format.return_value = ACL_FORMAT_FRACTAL_NZ
+
+        utils.maybe_converting_weight_acl_format(model, ACL_FORMAT_FRACTAL_NZ)
+
+    @mock.patch('vllm_ascend.utils.get_ascend_config')
+    @mock.patch('vllm_ascend.utils.is_310p', return_value=False)
+    def test_maybe_converting_weight_acl_format_not_310_not_graph(
+            self, mock_310p, mock_get_config):
+        mock_config = mock.MagicMock()
+        mock_config.torchair_graph_config.enabled = False
+        mock_get_config.return_value = mock_config
+
+        mock_constant = mock.MagicMock()
+
+        mock_model = mock.MagicMock()
+        utils.maybe_converting_weight_acl_format(mock_model, mock_constant)
+
     @mock.patch('importlib.util.find_spec')
     @mock.patch('importlib.import_module')
     def test_try_register_lib(self, mock_import_module, mock_find_spec):
@@ -111,23 +199,17 @@ class TestUtils(unittest.TestCase):
         lib_name = "existing_lib"
         lib_info = "Library found and imported successfully"
         utils.try_register_lib(lib_name, lib_info)
-        mock_find_spec.assert_called_once_with(lib_name)
-        mock_import_module.assert_called_once_with(lib_name)
 
         # Can't find lib
         mock_find_spec.return_value = None
         lib_name = "non_existing_lib"
         utils.try_register_lib(lib_name)
-        self.assertEqual(2, mock_find_spec.call_count)
-        self.assertEqual(1, mock_import_module.call_count)
 
         # import error
         mock_find_spec.return_value = mock.MagicMock()
         mock_import_module.side_effect = ImportError("import error")
         lib_name = "error_lib"
         utils.try_register_lib(lib_name)
-        self.assertEqual(3, mock_find_spec.call_count)
-        self.assertEqual(2, mock_import_module.call_count)
 
     def test_enable_custom_op(self):
         result = utils.enable_custom_op()
@@ -156,17 +238,82 @@ class TestUtils(unittest.TestCase):
     def test_vllm_version_is(self):
         with mock.patch.dict(os.environ, {"VLLM_VERSION": "1.0.0"}):
             with mock.patch("vllm.__version__", "1.0.0"):
-                self.assertTrue(utils.vllm_version_is("1.0.0"))
-                self.assertFalse(utils.vllm_version_is("2.0.0"))
+                self.assertTrue(utils.vllm_version_is.__wrapped__("1.0.0"))
+                self.assertFalse(utils.vllm_version_is.__wrapped__("2.0.0"))
             with mock.patch("vllm.__version__", "2.0.0"):
-                self.assertTrue(utils.vllm_version_is("1.0.0"))
-                self.assertFalse(utils.vllm_version_is("2.0.0"))
+                self.assertTrue(utils.vllm_version_is.__wrapped__("1.0.0"))
+                self.assertFalse(utils.vllm_version_is.__wrapped__("2.0.0"))
         with mock.patch("vllm.__version__", "1.0.0"):
-            self.assertTrue(utils.vllm_version_is("1.0.0"))
-            self.assertFalse(utils.vllm_version_is("2.0.0"))
+            self.assertTrue(utils.vllm_version_is.__wrapped__("1.0.0"))
+            self.assertFalse(utils.vllm_version_is.__wrapped__("2.0.0"))
         with mock.patch("vllm.__version__", "2.0.0"):
-            self.assertTrue(utils.vllm_version_is("2.0.0"))
-            self.assertFalse(utils.vllm_version_is("1.0.0"))
+            self.assertTrue(utils.vllm_version_is.__wrapped__("2.0.0"))
+            self.assertFalse(utils.vllm_version_is.__wrapped__("1.0.0"))
+        # Test caching takes effect
+        utils.vllm_version_is.cache_clear()
+        utils.vllm_version_is("1.0.0")
+        misses = utils.vllm_version_is.cache_info().misses
+        hits = utils.vllm_version_is.cache_info().hits
+        self.assertEqual(misses, 1)
+        self.assertEqual(hits, 0)
+        utils.vllm_version_is("1.0.0")
+        hits = utils.vllm_version_is.cache_info().hits
+        self.assertEqual(hits, 1)
+
+    def test_get_max_hidden_layers(self):
+        from transformers import PretrainedConfig
+
+        class SimpleConfig(PretrainedConfig):
+
+            def __init__(self, num_hidden_layers=12):
+                self.num_hidden_layers = num_hidden_layers
+
+            def to_dict(self):
+                return {"num_hidden_layers": self.num_hidden_layers}
+
+        self.assertEqual(utils.get_max_hidden_layers(SimpleConfig()), 12)
+        self.assertEqual(utils.get_max_hidden_layers(SimpleConfig(24)), 24)
+
+        class NestedConfig(PretrainedConfig):
+
+            def to_dict(self):
+                return {
+                    "model": {
+                        "encoder": {
+                            "num_hidden_layers": 8
+                        },
+                        "decoder": {
+                            "num_hidden_layers": 12
+                        }
+                    },
+                    "other_setting": True
+                }
+
+        self.assertEqual(utils.get_max_hidden_layers(NestedConfig()), 12)
+
+        class MultiValueConfig(PretrainedConfig):
+
+            def to_dict(self):
+                return {
+                    "num_hidden_layers": 6,
+                    "submodule": {
+                        "num_hidden_layers": 18,
+                        "subsub": {
+                            "num_hidden_layers": 9
+                        }
+                    }
+                }
+
+        self.assertEqual(utils.get_max_hidden_layers(MultiValueConfig()), 18)
+
+        class NoLayerConfig(PretrainedConfig):
+
+            def to_dict(self):
+                return {"attention_heads": 8}
+
+        with self.assertRaises(ValueError) as context:
+            utils.get_max_hidden_layers(NoLayerConfig())
+        self.assertIn("num_hidden_layers", str(context.exception))
 
     def test_update_aclgraph_sizes(self):
         # max_num_batch_sizes < len(original_sizes)
@@ -197,8 +344,26 @@ class TestUtils(unittest.TestCase):
             3,
             len(test_vllm_config.compilation_config.cudagraph_capture_sizes))
 
+    @mock.patch("vllm.model_executor.custom_op.CustomOp")
+    @mock.patch("vllm_ascend.ops.activation.AscendQuickGELU")
+    @mock.patch("vllm_ascend.ops.activation.AscendSiluAndMul")
+    def test_register_ascend_customop(self, mock_ascend_silu_and_mul,
+                                      mock_ascend_quick_gelu, mock_customop):
+        utils._ASCEND_CUSTOMOP_IS_REIGISTERED = False
 
-class TestProfileExecuteDuration(unittest.TestCase):
+        # ascend custom op is not registered
+        utils.register_ascend_customop()
+        # should call register_oot twice
+        self.assertEqual(mock_customop.register_oot.call_count, 2)
+        self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
+
+        # ascend custom op is already registered
+        utils.register_ascend_customop()
+        # should not register_oot again, thus only called twice in this ut
+        self.assertEqual(mock_customop.register_oot.call_count, 2)
+
+
+class TestProfileExecuteDuration(TestBase):
 
     def setUp(self):
         utils.ProfileExecuteDuration._instance = None

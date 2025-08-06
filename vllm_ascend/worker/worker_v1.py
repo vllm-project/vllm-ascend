@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py
 #
 
+import copy
 from typing import Optional
 
 import torch
@@ -27,21 +28,28 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
-from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
+from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
+                                          has_kv_transfer_group)
+from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
+from vllm.sequence import IntermediateTensors
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import sleep_mode_enabled, try_register_lib
+from vllm_ascend.utils import (init_ascend_soc_version, sleep_mode_enabled,
+                               try_register_lib, vllm_version_is)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
+
+if not vllm_version_is("0.10.0"):
+    from vllm.tasks import SupportedTask
 
 
 class NPUWorker(WorkerBase):
@@ -63,8 +71,10 @@ class NPUWorker(WorkerBase):
         from vllm_ascend import ops
         ops.register_dummy_fusion_op()
         _register_atb_extensions()
-        # init ascend config
+
+        # init ascend config and soc version
         init_ascend_config(vllm_config)
+        init_ascend_soc_version()
 
         super().__init__(vllm_config=vllm_config,
                          local_rank=local_rank,
@@ -120,17 +130,19 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
-    def init_device(self):
+    def _init_device(self):
         device = torch.device(f"npu:{self.local_rank}")
         NPUPlatform.set_device(device)
         NPUPlatform.empty_cache()
         self.init_npu_memory = NPUPlatform.mem_get_info()[0]
-
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
         # Set random seed.
         NPUPlatform.seed_everything(self.model_config.seed)
+        return device
 
+    def init_device(self):
+        device = self._init_device()
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = NPUModelRunner(self.vllm_config, device)
 
@@ -167,17 +179,60 @@ class NPUWorker(WorkerBase):
         non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
         if non_torch_allocations > 0:
             peak_memory += non_torch_allocations
-        available_kv_cache_memory = (
+        available_kv_cache_memory = int(
             total_npu_memory * self.cache_config.gpu_memory_utilization -
             peak_memory)
-        return int(available_kv_cache_memory)
+        available_kv_cache_memory = int(max(available_kv_cache_memory, 0))
+        logger.info(
+            f"Available memory: {available_kv_cache_memory}, total memory: {total_npu_memory}"
+        )
+        return available_kv_cache_memory
 
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> Optional[ModelRunnerOutput]:
-        output = self.model_runner.execute_model(scheduler_output)
-        return output if self.is_driver_worker else None
+        intermediate_tensors = None
+        if not get_pp_group().is_first_rank:
+            intermediate_tensors = IntermediateTensors(
+                get_pp_group().recv_tensor_dict(
+                    all_gather_group=get_tp_group()))
+
+        output = self.model_runner.execute_model(scheduler_output,
+                                                 intermediate_tensors)
+        parallel_config = self.vllm_config.parallel_config
+        if parallel_config.distributed_executor_backend != "external_launcher" \
+            and not get_pp_group().is_last_rank:
+            assert isinstance(output, IntermediateTensors)
+            get_pp_group().send_tensor_dict(output.tensors,
+                                            all_gather_group=get_tp_group())
+            if not has_kv_transfer_group():
+                return None
+
+            is_legacy = vllm_version_is("0.10.0")
+
+            if is_legacy:
+                finished_sending = output.finished_sending
+                finished_recving = output.finished_recving
+            else:
+                kv_connector_output = output.kv_connector_output
+                finished_sending = kv_connector_output.finished_sending
+                finished_recving = kv_connector_output.finished_recving
+
+            if not finished_sending and not finished_recving:
+                return EMPTY_MODEL_RUNNER_OUTPUT
+
+            new_output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+
+            if is_legacy:
+                new_output.finished_sending = finished_sending
+                new_output.finished_recving = finished_recving
+            else:
+                new_output.kv_connector_output = kv_connector_output
+            return new_output
+
+        assert isinstance(output, ModelRunnerOutput)
+        return output
 
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
@@ -246,33 +301,17 @@ class NPUWorker(WorkerBase):
         return self.model_runner.pin_lora(lora_id)
 
     def execute_dummy_batch(self) -> None:
-        runner = self.model_runner
-        max_num_tokens = 1
-        with_prefill = False
-        if runner.dp_size > 1:
-            max_num_tokens, with_prefill = runner._get_forward_metadata_across_dp(
-                max_num_tokens, with_prefill)
-        if runner.torchair_graph_enabled and not with_prefill:
-            max_num_tokens = runner.select_torchair_padded_batch_size(
-                max_num_tokens)
-        runner._dummy_run(max_num_tokens,
-                          is_compile=False,
-                          with_prefill=with_prefill)
+        self.model_runner._dummy_run(1)
 
     def _init_worker_distributed_environment(self) -> None:
         """Initialize the distributed environment."""
-        parallel_config = self.vllm_config.parallel_config
         init_distributed_environment(self.parallel_config.world_size,
                                      self.rank, self.distributed_init_method,
                                      self.local_rank, "hccl")
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
-        init_ascend_model_parallel(
-            parallel_config.expert_parallel_size,
-            parallel_config.expert_tensor_parallel_size,
-            parallel_config.world_size_across_dp,
-        )
+        init_ascend_model_parallel(self.parallel_config)
         ensure_kv_transfer_initialized(self.vllm_config)
 
     def _init_profiler(self):
@@ -308,3 +347,9 @@ class NPUWorker(WorkerBase):
                     torch_profiler_trace_dir))
         else:
             return None
+
+    def get_supported_pooling_tasks(self):
+        return self.model_runner.get_supported_pooling_tasks()
+
+    def get_supported_tasks(self) -> "tuple[SupportedTask, ...]":
+        return self.model_runner.get_supported_tasks()

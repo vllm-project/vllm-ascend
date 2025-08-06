@@ -95,7 +95,7 @@ class AscendQwen2VisionAttention(Qwen2VisionAttention):
             for x in (q, k, v)
         ]
 
-        context_layer = torch.torch.empty_like(q)
+        context_layer = torch.empty_like(q)
 
         # operator requires pta version >= 2.5.1
         torch_npu._npu_flash_attention_unpad(
@@ -342,7 +342,7 @@ class AscendQwen2VisionTransformer(Qwen2VisionTransformer):
 class AscendQwen2VLForConditionalGeneration(Qwen2VLForConditionalGeneration):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config)
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
         self.visual = AscendQwen2VisionTransformer(
             self.config.vision_config,
             norm_eps=getattr(self.config, "rms_norm_eps", 1e-6),

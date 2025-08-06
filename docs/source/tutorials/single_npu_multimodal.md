@@ -29,9 +29,6 @@ docker run --rm \
 Setup environment variables:
 
 ```bash
-# Use vllm v1 engine
-export VLLM_USE_V1=1
-
 # Load model from ModelScope to speed up download
 export VLLM_USE_MODELSCOPE=True
 
@@ -60,7 +57,6 @@ llm = LLM(
     model=MODEL_PATH,
     max_model_len=16384,
     limit_mm_per_prompt={"image": 10},
-    enforce_eager=True,
 )
 
 sampling_params = SamplingParams(
@@ -143,15 +139,13 @@ docker run --rm \
 -v /etc/ascend_install.info:/etc/ascend_install.info \
 -v /root/.cache:/root/.cache \
 -p 8000:8000 \
--e VLLM_USE_V1=1 \
 -e VLLM_USE_MODELSCOPE=True \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
 -it $IMAGE \
 vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
 --dtype bfloat16 \
 --max_model_len 16384 \
---max-num-batched-tokens 16384 \
---enforce-eager
+--max-num-batched-tokens 16384 
 ```
 
 :::{note}

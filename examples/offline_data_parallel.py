@@ -54,12 +54,19 @@ Multi-node:
                     --master-port=13345
 """
 
+import contextlib
+import gc
 import os
 from time import sleep
 
+import torch
 from vllm import LLM, SamplingParams
+from vllm.distributed.parallel_state import (  # noqa E402
+    destroy_distributed_environment, destroy_model_parallel)
 from vllm.utils import get_open_port
 
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 def parse_args():
     import argparse
@@ -107,6 +114,15 @@ def parse_args():
     return parser.parse_args()
 
 
+def cleanup_env_and_memory():
+    destroy_model_parallel()
+    destroy_distributed_environment()
+    with contextlib.suppress(AssertionError):
+        torch.distributed.destroy_process_group()
+    gc.collect()
+    torch.npu.empty_cache()
+    torch.npu.reset_peak_memory_stats()
+
 def main(
     model,
     dp_size,
@@ -120,7 +136,6 @@ def main(
     trust_remote_code,
 ):
     # DP only support on V1 engine
-    os.environ["VLLM_USE_V1"] = "1"
     os.environ["VLLM_DP_RANK"] = str(global_dp_rank)
     os.environ["VLLM_DP_RANK_LOCAL"] = str(local_dp_rank)
     os.environ["VLLM_DP_SIZE"] = str(dp_size)
@@ -183,8 +198,9 @@ def main(
               f"Generated text: {generated_text!r}")
 
     # Give engines time to pause their processing loops before exiting.
-    sleep(1)
-
+    sleep(5)
+    del llm
+    cleanup_env_and_memory()
 
 if __name__ == "__main__":
     args = parse_args()

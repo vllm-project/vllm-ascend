@@ -1,0 +1,71 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
+"Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.17.0\n"
+
+#: ../../tutorials/multi_npu_qwen3_moe.md:1
+msgid "Multi-NPU (Qwen3-30B-A3B)"
+msgstr "多NPU（Qwen3-30B-A3B）"
+
+#: ../../tutorials/multi_npu_qwen3_moe.md:3
+msgid "Run vllm-ascend on Multi-NPU with Qwen3 MoE"
+msgstr "在多NPU上运行带有Qwen3 MoE的vllm-ascend"
+
+#: ../../tutorials/multi_npu_qwen3_moe.md:5
+msgid "Run docker container:"
+msgstr "运行 docker 容器："
+
+#: ../../tutorials/multi_npu_qwen3_moe.md:30
+msgid "Setup environment variables:"
+msgstr "设置环境变量："
+
+#: ../../tutorials/multi_npu_qwen3_moe.md:40
+msgid "Online Inference on Multi-NPU"
+msgstr "多NPU的在线推理"
+
+#: ../../tutorials/multi_npu_qwen3_moe.md:42
+msgid "Run the following script to start the vLLM server on Multi-NPU:"
+msgstr "运行以下脚本以在多NPU上启动 vLLM 服务器："
+
+#: ../../tutorials/multi_npu_qwen3_moe.md:44
+msgid ""
+"For an Atlas A2 with 64GB of NPU card memory, tensor-parallel-size should be"
+" at least 2, and for 32GB of memory, tensor-parallel-size should be at least"
+" 4."
+msgstr ""
+"对于拥有64GB NPU卡内存的Atlas A2，tensor-parallel-size 至少应为2；对于32GB内存的NPU卡，tensor-"
+"parallel-size 至少应为4。"
+
+#: ../../tutorials/multi_npu_qwen3_moe.md:50
+msgid ""
+"Once your server is started, you can query the model with input prompts"
+msgstr "一旦服务器启动，就可以通过输入提示词来查询模型。"
+
+#: ../../tutorials/multi_npu_qwen3_moe.md:65
+msgid "Offline Inference on Multi-NPU"
+msgstr "多NPU离线推理"
+
+#: ../../tutorials/multi_npu_qwen3_moe.md:67
+msgid "Run the following script to execute offline inference on multi-NPU:"
+msgstr "运行以下脚本以在多NPU上执行离线推理："
+
+#: ../../tutorials/multi_npu_qwen3_moe.md:104
+msgid "If you run this script successfully, you can see the info shown below:"
+msgstr "如果你成功运行此脚本，你可以看到如下所示的信息："

@@ -7,17 +7,15 @@ from vllm.attention.layer import Attention
 from vllm.config import (CompilationLevel, VllmConfig,
                          get_layers_from_vllm_config)
 from vllm.distributed.parallel_state import get_pp_group
-from vllm.forward_context import set_forward_context
-from vllm.logger import init_logger
+from vllm.logger import logger
 from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.v1.sample.metadata import SamplingMetadata
 
-from vllm_ascend.attention.attention import AttentionMaskBuilder
+from vllm_ascend.ascend_forward_context import set_ascend_forward_context
+from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-
-logger = init_logger(__name__)
 
 PADDING_SLOT_ID = -1
 
@@ -74,8 +72,8 @@ class EagleProposer:
         mask_len = os.getenv("PAGED_ATTENTION_MASK_LEN", 10000)
         self.attn_mask_len = min(self.model_config.max_model_len,
                                  int(mask_len))
-        self.attn_mask_builder = AttentionMaskBuilder.initialize_from_len(
-            self.attn_mask_len, self.dtype)
+        self.attn_mask_builder = AttentionMaskBuilder(self.attn_mask_len,
+                                                      self.dtype)
 
     def _make_attention_mask(
         self,
@@ -132,7 +130,6 @@ class EagleProposer:
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
-            common_prefix_len=0,
         )
         if self.use_cuda_graph and \
             num_tokens <= self.cudagraph_batch_sizes[-1]:
@@ -143,9 +140,9 @@ class EagleProposer:
         self.positions[:num_tokens] = target_positions.to(device)
         self.hidden_states[:num_tokens] = target_hidden_states
         attn_metadata.block_tables = block_table.to(device)
-        with set_forward_context(attn_metadata,
-                                 self.vllm_config,
-                                 num_tokens=num_input_tokens):
+        with set_ascend_forward_context(attn_metadata,
+                                        self.vllm_config,
+                                        num_tokens=num_input_tokens):
             last_hidden_states, hidden_states = self.model(
                 input_ids=self.input_ids[:num_input_tokens],
                 positions=self.positions[:num_input_tokens],
@@ -240,9 +237,9 @@ class EagleProposer:
             attn_metadata.attn_mask = attn_mask
             attn_metadata.block_tables = block_table.to(device)
             # Run the model.
-            with set_forward_context(attn_metadata,
-                                     self.vllm_config,
-                                     num_tokens=input_batch_size):
+            with set_ascend_forward_context(attn_metadata,
+                                            self.vllm_config,
+                                            num_tokens=input_batch_size):
 
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:input_batch_size],
@@ -345,8 +342,9 @@ class EagleProposer:
         self,
         num_tokens: int,
     ) -> None:
-        with set_forward_context(None, self.vllm_config,
-                                 num_tokens=num_tokens):
+        with set_ascend_forward_context(None,
+                                        self.vllm_config,
+                                        num_tokens=num_tokens):
             self.model(
                 input_ids=self.input_ids[:num_tokens],
                 positions=self.positions[:num_tokens],
@@ -384,46 +382,3 @@ def prepare_eagle_input_sequential(out_tensor: torch.Tensor,
                    (target_indices < end_pos) & \
                    (offset_tensor < num_tokens)
             out_tensor[target_indices[mask]] = values_to_store[mask]
-
-
-# NOTE(woosuk): Currently, the below code is not used and we always use argmax
-# to sample the draft tokens. We will use this after we find a way to manage
-# the draft prob tensor.
-# Refer to https://github.com/vllm-project/vllm/pull/16899 for the details.
-# FIXME(woosuk): The logic here is duplicated with the main sampling code.
-# We should refactor this to reuse the same sampling implementation.
-def compute_probs_and_sample_next_token(
-    logits: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if sampling_metadata.all_greedy:
-        # For greedy requests, draft_probs is not used in rejection sampling.
-        # Therefore, we can just return the logits.
-        probs = logits
-        next_token_ids = logits.argmax(dim=-1)
-        return next_token_ids, probs
-
-    is_greedy = sampling_metadata.temperature == -1
-    temperature = torch.where(is_greedy, 1.0, sampling_metadata.temperature)
-    logits.div_(temperature.view(-1, 1))
-    probs = logits.softmax(dim=-1, dtype=torch.float32)
-
-    # NOTE(woosuk): Currently, we ignore most of the sampling parameters in
-    # generating the draft tokens. We only use the temperature. While this
-    # could degrade the acceptance rate, it does not affect the distribution
-    # of the generated tokens after rejection sampling.
-
-    # TODO(woosuk): Consider seeds.
-    q = torch.empty_like(probs)
-    q.exponential_()
-    # NOTE(woosuk): We shouldn't use `probs.div_(q)` because the draft_probs
-    # will be used later for rejection sampling.
-    next_token_ids = probs.div(q).argmax(dim=-1).view(-1)
-    if not sampling_metadata.all_random:
-        greedy_token_ids = probs.argmax(dim=-1)
-        next_token_ids = torch.where(
-            is_greedy,
-            greedy_token_ids,
-            next_token_ids,
-        )
-    return next_token_ids, probs

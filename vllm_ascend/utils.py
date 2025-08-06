@@ -18,8 +18,9 @@
 #
 
 import atexit
+import functools
 import math
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from enum import Enum
 from threading import Lock
 from typing import TYPE_CHECKING, List, Tuple
@@ -31,14 +32,7 @@ from torch_npu.npu.streams import Event
 from vllm.logger import logger
 
 import vllm_ascend.envs as envs
-
-try:
-    # Recent release of torchair has moved these ops to `.scope`.
-    from torchair.scope import npu_stream_switch as _npu_stream_switch
-    from torchair.scope import npu_wait_tensor as _npu_wait_tensor
-except ImportError:
-    from torchair.ops import NpuStreamSwitch as _npu_stream_switch
-    from torchair.ops import npu_wait_tensor as _npu_wait_tensor
+from vllm_ascend.ascend_config import get_ascend_config
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -62,6 +56,7 @@ _CUSTOM_OP_ENABLED = None
 _IS_310P = None
 _SLEEP_MODE_ENABLED = None
 _CURRENT_STREAM = None
+_ASCEND_CUSTOMOP_IS_REIGISTERED = False
 
 
 def is_310p():
@@ -175,6 +170,28 @@ def aligned_16(tensor: torch.Tensor):
     return new_tensor
 
 
+def maybe_converting_weight_acl_format(model, format=ACL_FORMAT_FRACTAL_NZ):
+    # currently, there are some operations which do not support ACL_FORMAT_FRACTAL_NZ
+    # in eager mode but support it in torchair graph mode. since ACL_FORMAT_FRACTAL_NZ
+    # is much more preferred than ACL_FORMAT_FRACTAL_ND on 300I Duo, we add this
+    # conversion when using torchair graph mode on 300I Duo platform.
+    # TODO: we will remove this conversion if npu_quant_grouped_matmul_dequant
+    # accepts weight format of ACL_FORMAT_FRACTAL_NZ in eager mode.
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+    use_torchair = get_ascend_config().torchair_graph_config.enabled
+    if not is_310p() or not use_torchair:
+        return
+    for module in model.modules():
+        if isinstance(module, FusedMoE):
+            if torch_npu.get_npu_format(module.w13_weight.data) == format:
+                return
+            module.w13_weight.data = torch_npu.npu_format_cast(
+                module.w13_weight.data, format)
+            module.w2_weight.data = torch_npu.npu_format_cast(
+                module.w2_weight.data, format)
+
+
 def try_register_lib(lib_name: str, lib_info: str = ""):
     import importlib
     import importlib.util
@@ -254,6 +271,7 @@ def adapt_patch(is_global_patch: bool = False):
         from vllm_ascend.patch import worker  # noqa: F401
 
 
+@functools.cache
 def vllm_version_is(target_vllm_version: str):
     if envs.VLLM_VERSION is not None:
         vllm_version = envs.VLLM_VERSION
@@ -270,6 +288,24 @@ def vllm_version_is(target_vllm_version: str):
             "format of x.y.z.")
 
 
+def get_max_hidden_layers(hf_config) -> int:
+    cfg_dict = hf_config.to_dict()
+    layer_counts = []
+
+    def _rec_find(d):
+        if isinstance(d, dict):
+            for k, v in d.items():
+                if k == "num_hidden_layers" and isinstance(v, int):
+                    layer_counts.append(v)
+                else:
+                    _rec_find(v)
+
+    _rec_find(cfg_dict)
+    if not layer_counts:
+        raise ValueError("Not found num_hidden_layers in model config.")
+    return max(layer_counts)
+
+
 def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
     """Update ACL graph capture sizes based on hardware limitations"""
     # Store original configuration and temporarily clear it
@@ -278,15 +314,17 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         compilation_config.cudagraph_capture_sizes, None
 
     # Calculate parallel configuration factor
-    num_hidden_layers = vllm_config.model_config.hf_config.num_hidden_layers
+    hf_config = vllm_config.model_config.hf_config
+    if hasattr(hf_config, 'num_hidden_layers'):
+        num_hidden_layers = hf_config.num_hidden_layers
+    else:
+        num_hidden_layers = get_max_hidden_layers(hf_config)
     parallel_config = vllm_config.parallel_config
 
     # TODO: Find out whether we need to take into account the pp_size
     parallel_factor = 1 + sum(size > 1 for size in [
         parallel_config.data_parallel_size_local,
         parallel_config.tensor_parallel_size,
-        parallel_config.expert_parallel_size,
-        parallel_config.expert_tensor_parallel_size,
     ])
 
     # Calculate maximum supported batch sizes considering model architecture
@@ -378,38 +416,92 @@ class ProfileExecuteDuration:
 
 
 # TODO(wxy): Move to ops module
-def npu_stream_switch(tag: str, priority: int, *, enabled: bool = True):
-    return _npu_stream_switch(tag, priority) if enabled else nullcontext()
+def npu_prefetch(input: torch.Tensor,
+                 dependency: torch.Tensor,
+                 max_size: int = 0,
+                 *,
+                 enabled: bool = True):
+    if not enabled:
+        return
+    input_size = input.element_size() * input.numel()
+    if max_size <= 0 or max_size > input_size:
+        max_size = input_size
+    torch_npu.npu_prefetch(input, dependency, max_size)
 
 
-# TODO(wxy): Move to ops module
-def npu_wait_tensor(self: torch.Tensor,
-                    dependency: torch.Tensor,
-                    *,
-                    enabled: bool = True):
-    return _npu_wait_tensor(self, dependency) if enabled else self
+# TODO(ttanzhiqiang): rm_router_logits
+# dp>1 will trigger
+# In theory, this solution is only applicable to AllGather and AllGatherEP, because in the dp scenario, the previous operation was gate + two communications, and now it is changed to one communication + gate operation, which can save some communication time. In theory, all moe AllGather and AllGatherEP solutions can follow this logic, but now other moe models (qwen3-235b) dp solutions are not adjusted, so use the switch to control it to prevent code errors.
+def get_rm_router_logits_state(ep_size: int, dp_size: int,
+                               is_deepseek_v3_r1: bool):
+    # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
+    # only supports deepseek v3/r1
+    if dp_size > 1:
+        if (envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
+                and is_deepseek_v3_r1):
+            return True
+        elif ep_size == 1 and is_deepseek_v3_r1:
+            return True
+    return False
 
 
-# TODO(zzzzwwjj): move this into forward_context
-class FusedMoEState(Enum):
-    AllGather = 0
-    All2All = 1
-    MC2 = 2
-    AllGatherEP = 3
-
-
-# TODO(zzzzwwjj): add soc_version to choose branch
-def get_fused_moe_state(ep_size: int, with_prefill: bool,
-                        is_deepseek_v3_r1: bool):
+# TODO(ttanzhiqiang): all_reduce merge
+# When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
+# Currently, all_reduce_merge is enabled by default in the AllGather, AllGatherEP and NaiveMulticast scenarios of the deepseek model.
+def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
     # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
     # only supports deepseek v3/r1
     if (envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
             and is_deepseek_v3_r1):
-        return FusedMoEState.AllGatherEP
-    elif ep_size == 1:
-        return FusedMoEState.AllGather
-    # NOTE: mc2 need ep_size >= 16 & all2all can't use in torchair graph.
-    elif ep_size < 16 or with_prefill:
-        return FusedMoEState.All2All
+        return True
+    elif ep_size == 1 and is_deepseek_v3_r1:
+        return True
+    return False
+
+
+def register_ascend_customop():
+    """Register Ascend CustomOP
+
+    NOTE: if the register branch requires model type, please use `vllm.config.get_current_vllm_config`, 
+    and ensure this will execute after model config is initilazed.
+    """
+    global _ASCEND_CUSTOMOP_IS_REIGISTERED
+    if _ASCEND_CUSTOMOP_IS_REIGISTERED:
+        return
+    from vllm.model_executor.custom_op import CustomOp
+
+    from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
+    CustomOp.register_oot(_decorated_op_cls=AscendQuickGELU, name="QuickGELU")
+    CustomOp.register_oot(_decorated_op_cls=AscendSiluAndMul,
+                          name="SiluAndMul")
+
+    # NOTE: Keep this at last to ensure all custom actions are registered
+    _ASCEND_CUSTOMOP_IS_REIGISTERED = True
+
+
+# TODO(zzzzwwjj): Currently there is no clear SOC_VERSION policy for A2 and A3 in CANN.
+# So we get the version dynamically. In the future, we should get the version info from _build_info like 310p does.
+class AscendSocVersion(Enum):
+    A2 = 0
+    A3 = 1
+    UNDEFINED = 2
+
+
+_ascend_soc_version = None
+
+
+def init_ascend_soc_version():
+    soc_version = torch_npu.npu.get_soc_version()
+    global _ascend_soc_version
+    if 220 <= soc_version <= 225:
+        _ascend_soc_version = AscendSocVersion.A2
+    elif 250 <= soc_version <= 255:
+        _ascend_soc_version = AscendSocVersion.A3
     else:
-        return FusedMoEState.MC2
+        _ascend_soc_version = AscendSocVersion.UNDEFINED
+
+
+def get_ascend_soc_version():
+    global _ascend_soc_version
+    assert _ascend_soc_version is not None
+    return _ascend_soc_version

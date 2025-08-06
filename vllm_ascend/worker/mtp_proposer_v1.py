@@ -2,51 +2,13 @@ import torch
 from vllm.attention.layer import Attention
 from vllm.config import (VllmConfig, get_layers_from_vllm_config,
                          set_current_vllm_config)
-from vllm.forward_context import set_forward_context
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.utils import (
     process_weights_after_loading, set_default_torch_dtype)
 from vllm.v1.sample.metadata import SamplingMetadata
 
-from vllm_ascend.attention.mla_v1 import CommonAttentionMetadata
+from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
-
-
-# FIXME(woosuk): The logic here is duplicated with the main sampling code.
-# We should refactor this to reuse the same sampling implementation.
-def compute_probs_and_sample_next_token(
-    logits: torch.Tensor,
-    sampling_metadata: SamplingMetadata,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    if sampling_metadata.all_greedy:
-        # For greedy requests, draft_probs is not used in rejection sampling.
-        # Therefore, we can just return the logits.
-        probs = logits
-        next_token_ids = logits.argmax(dim=-1)
-        return next_token_ids, probs
-
-    is_greedy = sampling_metadata.temperature == -1
-    temperature = torch.where(is_greedy, 1.0, sampling_metadata.temperature)
-    logits.div_(temperature.view(-1, 1))
-    probs = logits.softmax(dim=-1, dtype=torch.float32)
-
-    # NOTE(woosuk): Currently, we ignore most of the sampling parameters in
-    # generating the draft tokens. We only use the temperature. While this
-    # could degrade the acceptance rate, it does not affect the distribution
-    # of the generated tokens after rejection sampling.
-
-    # TODO(woosuk): Consider seeds.
-    q = torch.empty_like(probs)
-    q.exponential_()
-    next_token_ids = probs.div_(q).argmax(dim=-1).view(-1)
-    if not sampling_metadata.all_random:
-        greedy_token_ids = probs.argmax(dim=-1)
-        next_token_ids = torch.where(
-            is_greedy,
-            greedy_token_ids,
-            next_token_ids,
-        )
-    return next_token_ids, probs
 
 
 class MtpProposer:
@@ -121,7 +83,7 @@ class MtpProposer:
         # [batch_size, max_num_blocks_per_req]
         block_table: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         num_tokens = target_token_ids.shape[0]
         batch_size = next_token_ids.shape[0]
         last_token_indices = cu_num_tokens[1:] - 1
@@ -136,11 +98,6 @@ class MtpProposer:
 
         query_lens = cu_num_tokens[1:] - cu_num_tokens[:-1]
         max_query_len = query_lens.max().item()
-
-        seq_lens = (target_positions[last_token_indices] + 1)
-
-        common_attn_metadata = CommonAttentionMetadata(
-            query_start_loc=cu_num_tokens, seq_lens=seq_lens)
 
         # FIXME: reorder_batch() needs to be called before build()
         # because fields of attn_metadata_builder needs to be updated.
@@ -157,11 +114,10 @@ class MtpProposer:
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
+            query_start_loc=cu_num_tokens,
         )
 
-        with set_forward_context(attn_metadata, self.vllm_config):
+        with set_ascend_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
                 input_ids=input_ids,
                 positions=target_positions,

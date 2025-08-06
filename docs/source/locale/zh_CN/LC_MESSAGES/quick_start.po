@@ -1,0 +1,149 @@
+# SOME DESCRIPTIVE TITLE.
+# Copyright (C) 2025, vllm-ascend team
+# This file is distributed under the same license as the vllm-ascend
+# package.
+# FIRST AUTHOR <EMAIL@ADDRESS>, 2025.
+#
+#, fuzzy
+msgid ""
+msgstr ""
+"Project-Id-Version: vllm-ascend\n"
+"Report-Msgid-Bugs-To: \n"
+"POT-Creation-Date: 2025-07-18 09:01+0800\n"
+"PO-Revision-Date: 2025-07-18 10:09+0800\n"
+"Last-Translator: \n"
+"Language-Team: zh_CN <LL@li.org>\n"
+"Language: zh_CN\n"
+"MIME-Version: 1.0\n"
+"Content-Type: text/plain; charset=utf-8\n"
+"Content-Transfer-Encoding: 8bit\n"
+"Plural-Forms: nplurals=1; plural=0;\n"
+"Generated-By: Babel 2.17.0\n"
+"X-Generator: Poedit 3.5\n"
+
+#: ../../quick_start.md:1
+msgid "Quickstart"
+msgstr "快速入门"
+
+#: ../../quick_start.md:3
+msgid "Prerequisites"
+msgstr "先决条件"
+
+#: ../../quick_start.md:5
+msgid "Supported Devices"
+msgstr "支持的设备"
+
+#: ../../quick_start.md:6
+msgid ""
+"Atlas A2 Training series (Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 "
+"Box16, Atlas 300T A2)"
+msgstr ""
+"Atlas A2 训练系列（Atlas 800T A2，Atlas 900 A2 PoD，Atlas 200T A2 Box16，"
+"Atlas 300T A2）"
+
+#: ../../quick_start.md:7
+msgid "Atlas 800I A2 Inference series (Atlas 800I A2)"
+msgstr "Atlas 800I A2 推理系列（Atlas 800I A2）"
+
+#: ../../quick_start.md:9
+msgid "Setup environment using container"
+msgstr "使用容器设置环境"
+
+#: ../../quick_start.md
+msgid "Ubuntu"
+msgstr "Ubuntu"
+
+#: ../../quick_start.md
+msgid "openEuler"
+msgstr "openEuler"
+
+#: ../../quick_start.md:69
+msgid ""
+"The default workdir is `/workspace`, vLLM and vLLM Ascend code are placed "
+"in `/vllm-workspace` and installed in [development mode](https://setuptools."
+"pypa.io/en/latest/userguide/development_mode.html)(`pip install -e`) to "
+"help developer immediately take place changes without requiring a new "
+"installation."
+msgstr ""
+"默认的工作目录是 `/workspace`，vLLM 和 vLLM Ascend 代码被放置在 `/vllm-"
+"workspace`，并以[开发模式](https://setuptools.pypa.io/en/latest/userguide/"
+"development_mode.html)（`pip install -e`）安装，以便开发者能够即时生效更改，"
+"而无需重新安装。"
+
+#: ../../quick_start.md:71
+msgid "Usage"
+msgstr "用法"
+
+#: ../../quick_start.md:73
+msgid "You can use Modelscope mirror to speed up download:"
+msgstr "你可以使用 Modelscope 镜像来加速下载："
+
+#: ../../quick_start.md:80
+msgid "There are two ways to start vLLM on Ascend NPU:"
+msgstr "在昇腾 NPU 上启动 vLLM 有两种方式："
+
+#: ../../quick_start.md
+msgid "Offline Batched Inference"
+msgstr "离线批量推理"
+
+#: ../../quick_start.md:86
+msgid ""
+"With vLLM installed, you can start generating texts for list of input "
+"prompts (i.e. offline batch inferencing)."
+msgstr ""
+"安装了 vLLM 后，您可以开始为一系列输入提示生成文本（即离线批量推理）。"
+
+#: ../../quick_start.md:88
+msgid ""
+"Try to run below Python script directly or use `python3` shell to generate "
+"texts:"
+msgstr ""
+"尝试直接运行下面的 Python 脚本，或者使用 `python3` 交互式命令行来生成文本："
+
+#: ../../quick_start.md
+msgid "OpenAI Completions API"
+msgstr "OpenAI Completions API"
+
+#: ../../quick_start.md:114
+msgid ""
+"vLLM can also be deployed as a server that implements the OpenAI API "
+"protocol. Run the following command to start the vLLM server with the [Qwen/"
+"Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) "
+"model:"
+msgstr ""
+"vLLM 也可以作为实现 OpenAI API 协议的服务器进行部署。运行以下命令，使用 "
+"[Qwen/Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-"
+"Instruct) 模型启动 vLLM 服务器："
+
+#: ../../quick_start.md:124
+msgid "If you see log as below:"
+msgstr "如果你看到如下日志："
+
+#: ../../quick_start.md:132
+msgid "Congratulations, you have successfully started the vLLM server!"
+msgstr "恭喜，你已经成功启动了 vLLM 服务器！"
+
+#: ../../quick_start.md:134
+msgid "You can query the list the models:"
+msgstr "你可以查询模型列表："
+
+#: ../../quick_start.md:141
+msgid "You can also query the model with input prompts:"
+msgstr "你也可以通过输入提示来查询模型："
+
+#: ../../quick_start.md:155
+msgid ""
+"vLLM is serving as background process, you can use `kill -2 $VLLM_PID` to "
+"stop the background process gracefully, it's equal to `Ctrl-C` to stop "
+"foreground vLLM process:"
+msgstr ""
+"vLLM 正作为后台进程运行，你可以使用 `kill -2 $VLLM_PID` 来优雅地停止后台进"
+"程，这等同于使用 `Ctrl-C` 停止前台 vLLM 进程："
+
+#: ../../quick_start.md:164
+msgid "You will see output as below:"
+msgstr "你将会看到如下输出："
+
+#: ../../quick_start.md:172
+msgid "Finally, you can exit container by using `ctrl-D`."
+msgstr "最后，你可以通过按 `ctrl-D` 退出容器。"

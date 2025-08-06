@@ -5,6 +5,9 @@ import torch
 import torch_npu  # noqa: F401
 
 import vllm_ascend.platform  # noqa: F401
+from vllm_ascend.utils import enable_custom_op
+
+enable_custom_op()
 
 # Test parameters
 DTYPES = [torch.int32]
@@ -21,8 +24,8 @@ def get_masked_input_and_mask_ref(
         added_vocab_start_index: int,
         added_vocab_end_index: int) -> Tuple[torch.Tensor, torch.Tensor]:
     """Reference implementation for verification"""
-    org_vocab_mask = (input_ >= org_vocab_start_index) & (input_ <
-                                                          org_vocab_end_index)
+    org_vocab_mask = (input_ >= org_vocab_start_index) & (
+        input_ < org_vocab_end_index)
     added_vocab_mask = (input_ >= added_vocab_start_index) & (
         input_ < added_vocab_end_index)
     added_offset = added_vocab_start_index - (

@@ -3,9 +3,10 @@ import time
 
 from vllm import LLM, SamplingParams
 
+os.environ["VLLM_USE_MODELSCOPE"] = "True"
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 # enable dual-batch overlap for vllm ascend
 os.environ["VLLM_ASCEND_ENABLE_DBO"] = "1"
-os.environ["VLLM_USE_V1"] = "1"
 
 # Sample prompts.
 prompts = ["The president of the United States is"] * 41
@@ -20,6 +21,7 @@ def main():
               tensor_parallel_size=2,
               max_model_len=4096,
               trust_remote_code=True,
+              enable_expert_parallel=True,
               additional_config={
                   "torchair_graph_config": {
                       "enabled": False
@@ -27,7 +29,6 @@ def main():
                   "ascend_scheduler_config": {
                       "enabled": True
                   },
-                  "expert_tensor_parallel_size": 1
               })
 
     # Generate texts from the prompts. The output is a list of RequestOutput

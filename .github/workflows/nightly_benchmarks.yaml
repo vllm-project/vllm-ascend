@@ -20,9 +20,10 @@ name: 'Benchmarks / Performance'
 
 on:
   schedule:
-    # Run at 02:00 everyday
-    - cron: '00 18 * * *'
-  
+    # Run benchmarks at 20:00 and 03:00 Beijing time (UTC+8)
+    - cron: "0 12 * * *"
+    - cron: "0 19 * * *"
+
   workflow_dispatch:
     # Allow manual triggering of the workflow
 
@@ -50,12 +51,12 @@ jobs:
     strategy:
       matrix:
         include:
-          - vllm_branch: v0.9.1
+          - vllm_branch: v0.10.0
             vllm_ascend_branch: main
             vllm_use_v1: 1
       max-parallel: 1
     container:
-      image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
       volumes:
         - /usr/local/dcmi:/usr/local/dcmi
         - /usr/local/bin/npu-smi:/usr/local/bin/npu-smi
@@ -69,8 +70,7 @@ jobs:
         --device /dev/devmm_svm
         --device /dev/hisi_hdc
       env:
-        HF_ENDPOINT: https://hf-mirror.com
-        HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        VLLM_USE_MODELSCOPE: True
         ES_OM_DOMAIN: ${{ secrets.ES_OM_DOMAIN }}
         ES_OM_AUTHORIZATION: ${{ secrets.ES_OM_AUTHORIZATION }}
         VLLM_USE_V1: ${{ matrix.vllm_use_v1 }}
@@ -82,6 +82,8 @@ jobs:
 
       - name: Config mirrors
         run: |
+          # keep using tuna's proxy since linux-arm64-npu-static-8 is in another region
+          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
           pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 
       - name: Install system dependencies
@@ -197,7 +199,7 @@ jobs:
             --commit_title "$commit_title" \
             --created_at "$commit_time_no_tz" \
             --res_dir ./benchmarks/results \
-            --error $ERROR_MSG \
+            --error "$ERROR_MSG" \
             --extra_feat '{"VLLM_USE_V1": "${{ matrix.vllm_use_v1 }}"}'
             rm -rf ./benchmarks/results
             cd -

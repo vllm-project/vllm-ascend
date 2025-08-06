@@ -12,14 +12,25 @@ requires = [
     "scipy",
     "setuptools>=64",
     "setuptools-scm>=8",
-    "torch-npu==2.5.1.post1.dev20250619",
-    "torch>=2.5.1",
-    "torchvision<0.21.0",
+    "torch-npu==2.7.1.dev20250724",
+    "torch>=2.7.1",
+    "torchvision",
     "wheel",
     "msgpack",
     "quart",
     "numba",
-    # Remove after https://github.com/vllm-project/vllm-ascend/issues/1470
-    "transformers<4.53.0",
+    # Remove after https://github.com/vllm-project/vllm-ascend/issues/2034
+    "transformers<4.54.0",
 ]
 build-backend = "setuptools.build_meta"
+
+[tool.pymarkdown]
+plugins.md004.style = "sublist" # ul-style
+plugins.md007.indent = 4 # ul-indent
+plugins.md007.start_indented = true # ul-indent
+plugins.md013.enabled = false # line-length
+plugins.md041.enabled = false # first-line-h1
+plugins.md033.enabled = false # inline-html
+plugins.md046.enabled = false # code-block-style
+plugins.md024.allow_different_nesting = true # no-duplicate-headers
+plugins.md029.enabled = false # ol-prefix

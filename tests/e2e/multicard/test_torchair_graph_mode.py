@@ -22,9 +22,7 @@ Run `pytest tests/multicard/test_torchair_graph_mode.py`.
 import os
 from typing import Dict
 
-import pytest
-
-from tests.conftest import VllmRunner
+from tests.e2e.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
@@ -32,7 +30,8 @@ os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 def _deepseek_torchair_test_fixture(
     additional_config: Dict,
     *,
-    tensor_parallel_size=4,
+    tensor_parallel_size=2,
+    use_v1_schduler=False,
 ):
     example_prompts = [
         "Hello, my name is",
@@ -40,14 +39,14 @@ def _deepseek_torchair_test_fixture(
         "The capital of France is",
         "The future of AI is",
     ]
-
-    # torchair is only work without chunked-prefill now
-    kwargs = {
-        "ascend_scheduler_config": {
-            "enabled": True,
-        },
-        "refresh": True,
-    }
+    kwargs = {}
+    if not use_v1_schduler:
+        kwargs = {
+            "ascend_scheduler_config": {
+                "enabled": True,
+            },
+            "refresh": True,
+        }
     additional_config.update(**kwargs)
 
     with VllmRunner(
@@ -66,10 +65,10 @@ def _deepseek_torchair_test_fixture(
     # inaccurate. This will only change if accuracy improves with the
     # official weights of DeepSeek-V3.
     golden_results = [
-        'Hello, my name is feasibility伸 spazio debtor添',
-        'The president of the United States is begg"""\n杭州风和 bestimm',
-        'The capital of France is frequentlyশามalinkAllowed',
-        'The future of AI is deleting俯احت怎么样了حراف',
+        'Hello, my name is下载早点向前很有่อง',
+        'The president of the United States isSender)## physiological Albany',
+        'The capital of France is Rocky转角 hospitalizedinterval sparked',
+        'The future of AI is её asegο BIOS一扫',
     ]
 
     assert len(golden_results) == len(vllm_output)
@@ -78,8 +77,6 @@ def _deepseek_torchair_test_fixture(
         print(f"Generated text: {vllm_output[i][1]!r}")
 
 
-@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
-                    reason="torchair graph is not supported on v0")
 def test_e2e_deepseekv3_with_torchair():
     additional_config = {
         "torchair_graph_config": {
@@ -89,8 +86,6 @@ def test_e2e_deepseekv3_with_torchair():
     _deepseek_torchair_test_fixture(additional_config)
 
 
-@pytest.mark.skipif(os.getenv("VLLM_USE_V1") == "0",
-                    reason="torchair graph is not supported on v0")
 def test_e2e_deepseekv3_with_torchair_ms_mla():
     additional_config = {
         "torchair_graph_config": {
@@ -99,3 +94,71 @@ def test_e2e_deepseekv3_with_torchair_ms_mla():
         },
     }
     _deepseek_torchair_test_fixture(additional_config)
+
+
+def test_e2e_deepseekv3_with_torchair_v1scheduler():
+    additional_config = {
+        "torchair_graph_config": {
+            "enabled": True,
+        },
+    }
+    _deepseek_torchair_test_fixture(additional_config, use_v1_schduler=True)
+
+
+def _pangu_torchair_test_fixture(
+    additional_config: Dict,
+    *,
+    tensor_parallel_size=2,
+):
+    example_prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
+    # torchair is only work without chunked-prefill now
+    kwargs = {
+        "ascend_scheduler_config": {
+            "enabled": True,
+        },
+        "refresh": True,
+    }
+    additional_config.update(**kwargs)
+
+    with VllmRunner(
+            "vllm-ascend/pangu-pro-moe-pruing",
+            dtype="half",
+            tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend="mp",
+            enforce_eager=False,
+            additional_config=additional_config,
+            enable_expert_parallel=True,
+    ) as vllm_model:
+        # use greedy sampler to make sure the generated results are fix
+        vllm_output = vllm_model.generate_greedy(example_prompts, 5)
+
+    # NOTE: vllm-ascend/pangu-pro-moe-pruing is only part of PanguProMoE
+    # with 2 hidden layers, thus the golden results seems inaccurate.
+    # This will only change if accuracy changes with the official weights
+    # of PanguProMoE.
+    golden_results = [
+        'Hello, my name is Remempondeprecatedmiot忱',
+        'The president of the United States is Remem下的一个 rever ceremoni Segnali',
+        'The capital of France is Rememvoud administrativ Remem投',
+        'The future of AI isotope Segnali Zoeken精细化 supus',
+    ]
+
+    assert len(golden_results) == len(vllm_output)
+    for i in range(len(vllm_output)):
+        assert golden_results[i] == vllm_output[i][1]
+        print(f"Generated text: {vllm_output[i][1]!r}")
+
+
+def test_e2e_pangu_with_torchair():
+    additional_config = {
+        "torchair_graph_config": {
+            "enabled": True,
+        },
+    }
+    _pangu_torchair_test_fixture(additional_config)

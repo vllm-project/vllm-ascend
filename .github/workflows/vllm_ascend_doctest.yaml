@@ -48,9 +48,9 @@ jobs:
       matrix:
         vllm_verison: [v0.9.1-dev, v0.9.1-dev-openeuler, main, main-openeuler]
     name: vLLM Ascend test
-    runs-on: linux-arm64-npu-1
+    runs-on: linux-aarch64-a2-1
     container:
-      image: m.daocloud.io/quay.io/ascend/vllm-ascend:${{ matrix.vllm_verison }}
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/vllm-ascend:${{ matrix.vllm_verison }}
     steps:
       - name: Check NPU/CANN and git info
         run: |
@@ -75,7 +75,9 @@ jobs:
           echo "Replacing /vllm-workspace/vllm-ascend/tests/e2e ..."
           rm -rf /vllm-workspace/vllm-ascend/tests/e2e
           mkdir -p /vllm-workspace/vllm-ascend/tests
+          # Overwrite e2e and examples
           cp -r tests/e2e /vllm-workspace/vllm-ascend/tests/
+          cp -r examples /vllm-workspace/vllm-ascend/
 
           # Simulate container to enter directory
           cd /workspace

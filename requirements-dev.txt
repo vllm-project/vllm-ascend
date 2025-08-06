@@ -5,10 +5,16 @@ openai
 pytest >= 6.0
 pytest-asyncio
 pytest-mock
-lm-eval
-ray
+lm-eval==0.4.8
 types-jsonschema
 xgrammar
 zmq
 types-psutil
 pytest-cov
+regex
+sentence_transformers
+ray>=2.47.1
+protobuf>3.20.0
+librosa 
+soundfile
+pytest_mock

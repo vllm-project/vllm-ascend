@@ -19,38 +19,12 @@ name: 'test'
 
 on:
   push:
-    # Enable merged test per commit
     branches:
       - 'main'
-    paths:
-      - '*.txt'
-      - '**/*.py'
-      - '.github/workflows/vllm_ascend_test.yaml'
-      - '!docs/**'
-      - 'pytest.ini'
-      - '!benchmarks/**'
-      - 'tools/mypy.sh'
-      - 'mypy.ini'
-      - '.github/workflows/*.ya?ml'
-      - '.github/workflows/actionlint.*'
-      - '.github/workflows/matchers/actionlint.json'
   pull_request:
     branches:
       - 'main'
       - '*-dev'
-    paths:
-      - '*.txt'
-      - '**/*.py'
-      - '.github/workflows/vllm_ascend_test.yaml'
-      - '!docs/**'
-      - '!examples/**'
-      - 'pytest.ini'
-      - '!benchmarks/**'
-      - 'tools/mypy.sh'
-      - 'mypy.ini'
-      - '.github/workflows/*.ya?ml'
-      - '.github/workflows/actionlint.*'
-      - '.github/workflows/matchers/actionlint.json'
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -67,84 +41,47 @@ concurrency:
 
 jobs:
   lint:
-    # Only trigger lint on pull request
-    if: ${{ github.event_name == 'pull_request' }}
+    uses: ./.github/workflows/pre-commit.yml
+
+  changes:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.10"]
+    outputs:
+      e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
+      ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
         with:
-          python-version: ${{ matrix.python-version }}
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-lint.txt
-      - name: Run codespell check
-        run: |
-          CODESPELL_EXCLUDES=('--skip' 'tests/prompts/**,./benchmarks/sonnet.txt,*tests/lora/data/**,build/**,./vllm_ascend.egg-info/**')
-          CODESPELL_IGNORE_WORDS=('-L' 'CANN,cann,NNAL,nnal,ASCEND,ascend,EnQue,CopyIn')
-
-          codespell --toml pyproject.toml "${CODESPELL_EXCLUDES[@]}" "${CODESPELL_IGNORE_WORDS[@]}"
-      - name: Analysing the code with ruff
-        run: |
-          echo "::add-matcher::.github/workflows/matchers/ruff.json"
-          ruff check --output-format github .
-      - name: Run isort
-        run: |
-          isort . --check-only
-      - name: Running yapf
-        run: |
-          python -m pip install --upgrade pip
-          pip install toml
-          pip install yapf==0.32.0
-          yapf --diff --recursive .
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements-dev.txt --extra-index-url https://download.pytorch.org/whl/cpu
-
-      - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v4
-        with:
-          repository: vllm-project/vllm
-          path: vllm-empty
-
-      - name: Actionlint Check
-        env:
-          SHELLCHECK_OPTS: --exclude=SC2046,SC2006,SC2086
-        run: |
-          echo "::add-matcher::.github/workflows/matchers/actionlint.json"
-          tools/actionlint.sh -color
-
-      - name: Install vllm-project/vllm from source
-        working-directory: vllm-empty
-        run: |
-          pip install -r requirements/build.txt --extra-index-url https://download.pytorch.org/whl/cpu
-          VLLM_TARGET_DEVICE=empty pip install .
-
-      - name: Mypy Check
-        run: |
-          echo "::add-matcher::.github/workflows/matchers/mypy.json"
-          tools/mypy.sh 1 ${{ matrix.python-version }}
-
+          filters: |
+            e2e_tracker:
+              - '.github/workflows/vllm_ascend_test.yaml'
+              - 'vllm_ascend/**'
+              - 'csrc/**'
+              - 'cmake/**'
+              - 'tests/e2e/**'
+              - 'CMakeLists.txt'
+              - 'setup.py'
+              - 'requirements.txt'
+              - 'requirements-dev.txt'
+              - 'requirements-lint.txt'
+              - 'packages.txt'
+            ut_tracker:
+              - 'tests/ut/**'
   ut:
-    needs: [lint]
+    needs: [lint, changes]
     name: unit test
-    # only trigger e2e test on [pull request after lint passed] and [merged commit]
-    if: ${{ needs.lint.result == 'success' || github.event_name == 'push' }}
+    # only trigger unit test after lint passed and the change is e2e and ut related.
+    if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
     runs-on: ubuntu-latest
     container:
-      image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
+      image: quay.io/ascend/cann:8.2.rc1-910b-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
     strategy:
       matrix:
-        vllm_version: [main, v0.9.1]
+        vllm_version: [main, v0.10.0]
     steps:
       - name: Install packages
         run: |
@@ -174,9 +111,8 @@ jobs:
           python3 -m pip install -r requirements-dev.txt --extra-index https://download.pytorch.org/whl/cpu/
           python3 -m pip install -v . --extra-index https://download.pytorch.org/whl/cpu/
 
-      - name: Run unit test for V1 Engine
+      - name: Run unit test
         env:
-          VLLM_USE_V1: 1
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           TORCH_DEVICE_BACKEND_AUTOLOAD: 0
         run: |
@@ -194,115 +130,18 @@ jobs:
           verbose: true
 
   e2e:
-    needs: [lint]
-    # only trigger e2e test on pull request after lint passed
-    if: ${{ needs.lint.result == 'success' && github.event_name == 'pull_request' }}
+    needs: [lint, changes]
+    # only trigger e2e test after lint passed and the change is e2e related with pull request.
+    if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' }}
     strategy:
       max-parallel: 2
       matrix:
-        os: [linux-arm64-npu-1]
-        vllm_version: [main, v0.9.1]
+        os: [linux-aarch64-a2-1]
+        vllm_version: [main, v0.10.0]
     name: singlecard e2e test
     runs-on: ${{ matrix.os }}
     container:
-      # TODO(yikun): Remove m.daocloud.io prefix when infra proxy ready
-      image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
-      env:
-        VLLM_LOGGING_LEVEL: ERROR
-    steps:
-      - name: Check npu and CANN info
-        run: |
-          npu-smi info
-          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
-
-      - name: Config mirrors
-        run: |
-          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
-          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
-          apt-get update -y
-          apt install git -y
-          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
-
-      - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v4
-
-      - name: Install system dependencies
-        run: |
-          apt-get -y install `cat packages.txt`
-          apt-get -y install gcc g++ cmake libnuma-dev
-
-      - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v4
-        with:
-          repository: vllm-project/vllm
-          ref: ${{ matrix.vllm_version }}
-          path: ./vllm-empty
-
-      - name: Install vllm-project/vllm from source
-        working-directory: ./vllm-empty
-        run: |
-          VLLM_TARGET_DEVICE=empty pip install -e .
-
-      - name: Install vllm-project/vllm-ascend
-        env:
-          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
-        run: |
-          pip install -r requirements-dev.txt
-          pip install -v -e .
-
-      - name: Run e2e test for V1 Engine
-        env:
-          VLLM_USE_V1: 1
-          VLLM_WORKER_MULTIPROC_METHOD: spawn
-          VLLM_USE_MODELSCOPE: True
-        run: |
-          pytest -sv tests/e2e/singlecard/test_offline_inference.py
-          # TODO: switch hf to modelscope
-          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
-            pytest -sv tests/e2e/singlecard/test_ilama_lora.py
-          pytest -sv tests/e2e/singlecard/test_guided_decoding.py
-          pytest -sv tests/e2e/singlecard/test_camem.py
-          pytest -sv tests/e2e/singlecard/ \
-          --ignore=tests/e2e/singlecard/test_offline_inference.py \
-          --ignore=tests/e2e/singlecard/test_ilama_lora.py \
-          --ignore=tests/e2e/singlecard/test_guided_decoding.py \
-          --ignore=tests/e2e/singlecard/test_camem.py
-
-      - name: Run e2e test on V0 engine
-        if: ${{ github.event_name == 'schedule' }}
-        env:
-          VLLM_USE_V1: 0
-          VLLM_USE_MODELSCOPE: True
-        run: |
-          pytest -sv tests/e2e/singlecard/test_offline_inference.py
-          # TODO: switch hf to modelscope
-          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
-            pytest -sv tests/e2e/singlecard/test_ilama_lora.py
-          pytest -sv tests/e2e/singlecard/test_guided_decoding.py
-          pytest -sv tests/e2e/singlecard/test_camem.py
-          pytest -sv tests/e2e/singlecard/test_prompt_embedding.py
-          pytest -sv tests/e2e/singlecard/ \
-            --ignore=tests/e2e/singlecard/test_offline_inference.py \
-            --ignore=tests/e2e/singlecard/test_ilama_lora.py \
-            --ignore=tests/e2e/singlecard/test_guided_decoding.py \
-            --ignore=tests/e2e/singlecard/test_camem.py \
-            --ignore=tests/e2e/singlecard/test_prompt_embedding.py \
-            --ignore=tests/e2e/singlecard/core/test_ascend_scheduler.py \
-            --ignore=tests/e2e/singlecard/core/test_ascend_scheduler_e2e.py
-
-  e2e-4-cards:
-    needs: [e2e]
-    if: ${{ needs.e2e.result == 'success' }}
-    strategy:
-      max-parallel: 1
-      matrix:
-        os: [linux-arm64-npu-4]
-        vllm_version: [main, v0.9.1]
-    name: multicard e2e test
-    runs-on: ${{ matrix.os }}
-    container:
-      # TODO(yikun): Remove m.daocloud.io prefix when infra proxy ready
-      image: m.daocloud.io/quay.io/ascend/cann:8.1.rc1-910b-ubuntu22.04-py3.10
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
       env:
         VLLM_LOGGING_LEVEL: ERROR
         VLLM_USE_MODELSCOPE: True
@@ -314,11 +153,11 @@ jobs:
 
       - name: Config mirrors
         run: |
-          sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
-          pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
           apt-get update -y
           apt install git -y
-          git config --global url."https://gh-proxy.test.osinfra.cn/https://github.com/".insteadOf https://github.com/
 
       - name: Checkout vllm-project/vllm-ascend repo
         uses: actions/checkout@v4
@@ -347,45 +186,106 @@ jobs:
           pip install -r requirements-dev.txt
           pip install -v -e .
 
-      - name: Run vllm-project/vllm-ascend test for V1 Engine
+      - name: Run e2e test
         env:
-          VLLM_USE_V1: 1
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
         run: |
-          # TODO: switch hf to modelscope
-          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
-            pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
+          pytest -sv tests/e2e/singlecard/test_offline_inference.py
+          pytest -sv tests/e2e/singlecard/test_ilama_lora.py
+          pytest -sv tests/e2e/singlecard/test_guided_decoding.py
+          pytest -sv tests/e2e/singlecard/test_camem.py
+          pytest -sv tests/e2e/singlecard/test_embedding.py
+
+          # ------------------------------------ v1 spec decode test ------------------------------------ #
+          pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_correctness.py
+          # TODO: revert me when test_v1_spec_decode.py::test_ngram_correctness is fixed
+          pytest -sv tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py
+
+          # All other tests, ignore: 310p test, accuracy test.
+          pytest -sv tests/e2e/singlecard/ \
+          --ignore=tests/e2e/singlecard/test_offline_inference.py \
+          --ignore=tests/e2e/singlecard/test_ilama_lora.py \
+          --ignore=tests/e2e/singlecard/test_guided_decoding.py \
+          --ignore=tests/e2e/singlecard/test_camem.py \
+          --ignore=tests/e2e/singlecard/test_embedding.py \
+          --ignore=tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_correctness.py \
+          --ignore=tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py \
+          --ignore=tests/e2e/singlecard/test_offline_inference_310p.py \
+          --ignore=tests/e2e/singlecard/models/test_lm_eval_correctness.py
+  e2e-2-cards:
+    needs: [e2e]
+    if: ${{ needs.e2e.result == 'success' }}
+    strategy:
+      max-parallel: 2
+      matrix:
+        os: [linux-aarch64-a2-2]
+        vllm_version: [main, v0.10.0]
+    name: multicard e2e test
+    runs-on: ${{ matrix.os }}
+    container:
+      image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
+      env:
+        VLLM_LOGGING_LEVEL: ERROR
+        VLLM_USE_MODELSCOPE: True
+    steps:
+      - name: Check npu and CANN info
+        run: |
+          npu-smi info
+          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+
+      - name: Config mirrors
+        run: |
+          sed -Ei 's@(ports|archive).ubuntu.com@cache-service.nginx-pypi-cache.svc.cluster.local:8081@g' /etc/apt/sources.list
+          pip config set global.index-url http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+          pip config set global.trusted-host cache-service.nginx-pypi-cache.svc.cluster.local
+          apt-get update -y
+          apt install git -y
+
+      - name: Checkout vllm-project/vllm-ascend repo
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          apt-get -y install `cat packages.txt`
+          apt-get -y install gcc g++ cmake libnuma-dev
+
+      - name: Checkout vllm-project/vllm repo
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          ref: ${{ matrix.vllm_version }}
+          path: ./vllm-empty
+
+      - name: Install vllm-project/vllm from source
+        working-directory: ./vllm-empty
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
+
+      - name: Install vllm-project/vllm-ascend
+        env:
+          PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
+        run: |
+          pip install -r requirements-dev.txt
+          pip install -v -e .
+
+      - name: Run vllm-project/vllm-ascend test
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+          VLLM_USE_MODELSCOPE: True
+        run: |
+          pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
           # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py will raise error.
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_topk
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_dbo
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeekV3_dbo
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_alltoallv
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_Qwen3_W4A8DYNAMIC
+          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W4A8DYNAMIC
           pytest -sv tests/e2e/multicard/test_data_parallel.py
           pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_ilama_lora_tp2.py \
             --ignore=tests/e2e/multicard/test_offline_inference_distributed.py \
-            --ignore=tests/e2e/multicard/test_data_parallel.py
-
-      - name: Run vllm-project/vllm-ascend test on V0 engine
-        if: ${{ github.event_name == 'schedule' }}
-        env:
-          VLLM_USE_V1: 0
-          VLLM_USE_MODELSCOPE: True
-        run: |
-          # TODO: switch hf to modelscope
-          VLLM_USE_MODELSCOPE=False HF_ENDPOINT=https://hf-mirror.com \
-            pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
-          # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py will raise error.
-          # To avoid oom, we need to run the test in a single process.
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_QwQ
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_topk
-          pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_W8A8
-          pytest -sv tests/e2e/multicard/test_data_parallel.py
-          pytest -sv tests/e2e/multicard/ --ignore=tests/e2e/multicard/test_ilama_lora_tp2.py \
-            --ignore=tests/e2e/multicard/test_offline_inference_distributed.py \
-            --ignore=tests/e2e/multicard/test_data_parallel.py
+            --ignore=tests/e2e/multicard/test_data_parallel.py \
+            --ignore=tests/e2e/multicard/test_offline_inference_310p.py

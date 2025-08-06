@@ -30,7 +30,6 @@ from typing import Any, Dict, Iterable, List, Optional, Union
 import torch
 import torch.distributed as dist
 import torch_npu  # noqa: F401
-import vllm.envs as envs
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
@@ -76,9 +75,8 @@ from vllm_ascend.multistream.layers import (MultiStreamPostTransformerLayer,
 from vllm_ascend.multistream.metadata import (MultiStreamConfig,
                                               MultiStreamStepMetadata,
                                               make_multistream_metadata_ds)
-from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
-from vllm_ascend.utils import dispose_tensor, vllm_version_is
+from vllm_ascend.utils import dispose_tensor
 
 VLLM_ASCEND_ENABLE_DBO: bool = envs_ascend.VLLM_ASCEND_ENABLE_DBO
 
@@ -175,20 +173,12 @@ class CustomDeepseekDBOMoE(nn.Module):
             self,
             hidden_states: torch.Tensor,
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
-        if attn_metadata is None:
-            attn_metadata = get_forward_context().attn_metadata
+        forward_context = get_forward_context()
         # when profile runs, force experts to load balanced tokens
         # to avoid high memory consumption on a single rank.
-        # TODO: need a better flag to indicate whether in profile run or not.
-        if attn_metadata is None:
-            # for profile run
-            is_prefill = True
-            enable_force_load_balance = True
-        else:
-            is_prefill = attn_metadata.num_prefills > 0
-            enable_force_load_balance = False
-            if hasattr(attn_metadata, 'with_prefill_across_dp'):
-                is_prefill = is_prefill or attn_metadata.with_prefill_across_dp
+        enable_force_load_balance = forward_context.in_profile_run
+
+        is_prefill = forward_context.with_prefill
 
         old_hidden_states = hidden_states.clone()
 
@@ -397,20 +387,17 @@ class CustomDeepseekDBOMLAAttention(DeepseekV2MLAAttention):
             hidden_states_or_q_c = hidden_states
         if self.torchair_graph_enabled:
             forward_kwargs = {}
-            if envs.VLLM_USE_V1:
-                output_shape = hidden_states.shape
-                output = torch.empty(output_shape,
-                                     dtype=hidden_states_or_q_c.dtype,
-                                     device=hidden_states_or_q_c.device)
-                forward_kwargs['output'] = output
-
+            output_shape = hidden_states.shape
+            output = torch.empty(output_shape,
+                                 dtype=hidden_states_or_q_c.dtype,
+                                 device=hidden_states_or_q_c.device)
+            forward_kwargs['output'] = output
             output = self.mla_attn.impl.forward(self.mla_attn,
                                                 hidden_states_or_q_c,
                                                 hidden_states, None, kv_cache,
                                                 attn_metadata,
                                                 **forward_kwargs)
-            if envs.VLLM_USE_V1:
-                output = output.view(-1, output_shape[-1])
+            output = output.view(-1, output_shape[-1])
             return output
         else:
             kv_c, k_pe = self.kv_a_proj_with_mqa(hidden_states)[0].split(
@@ -884,24 +871,9 @@ class CustomDeepseekDBOModel(nn.Module):
 
     def can_run_ms(self):
         attn_metadata = get_forward_context().attn_metadata
-        # support mla attention and V1 engine at present
-        if not self.use_mla or not envs.VLLM_USE_V1:
-            return False
         # enable prefill overlap
-        if attn_metadata is None or attn_metadata.num_prefills == 0:
-            return False
-        else:
-            [token_index, seq_index
-             ] = compute_split_seq_index(attn_metadata.query_lens,
-                                         attn_metadata.attn_state,
-                                         attn_metadata.num_decode_tokens)
-            if token_index == 0 or seq_index == 0 or seq_index == len(
-                    attn_metadata.query_lens):
-                return False
-        # check whether the total tokens exceed the threshold
-        if self.multistream_config is None or attn_metadata.num_actual_tokens < self.multistream_config.min_total_tokens_to_split:
-            return False
-        return True
+        return not (attn_metadata is None or attn_metadata.num_prefills == 0
+                    or not attn_metadata.enable_dbo_across_dp)
 
     def _forward_ms_layers(
         self,
@@ -1032,19 +1004,12 @@ class CustomDeepseekDBOForCausalLM(DeepseekV2ForCausalLM):
 
                     param = params_dict[name]
                     weight_loader = param.weight_loader
-                    if vllm_version_is("0.9.1"):
-                        weight_loader(param,
-                                      loaded_weight,
-                                      name,
-                                      shard_id=shard_id,
-                                      expert_id=expert_id)
-                    else:
-                        weight_loader(param,
-                                      loaded_weight,
-                                      name,
-                                      shard_id=shard_id,
-                                      expert_id=expert_id,
-                                      return_success=False)
+                    weight_loader(param,
+                                  loaded_weight,
+                                  name,
+                                  shard_id=shard_id,
+                                  expert_id=expert_id,
+                                  return_success=False)
                     break
                 else:
                     # Skip loading extra bias for GPTQ models.

@@ -50,8 +50,6 @@ Run the following script to execute offline inference on a single NPU:
 import os
 from vllm import LLM, SamplingParams
 
-os.environ["VLLM_USE_V1"] = "1"
-
 prompts = [
     "Hello, my name is",
     "The future of AI is",
@@ -68,6 +66,7 @@ for output in outputs:
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
+
 ::::
 
 ::::{tab-item} Eager Mode
@@ -76,8 +75,6 @@ for output in outputs:
    :substitutions:
 import os
 from vllm import LLM, SamplingParams
-
-os.environ["VLLM_USE_V1"] = "1"
 
 prompts = [
     "Hello, my name is",
@@ -96,6 +93,7 @@ for output in outputs:
     generated_text = output.outputs[0].text
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
+
 ::::
 :::::
 
@@ -133,8 +131,9 @@ docker run --rm \
 -e VLLM_USE_MODELSCOPE=True \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
 -it $IMAGE \
-VLLM_USE_V1=1 vllm serve Qwen/Qwen3-8B --max_model_len 26240
+vllm serve Qwen/Qwen3-8B --max_model_len 26240
 ```
+
 ::::
 
 ::::{tab-item} Eager Mode
@@ -158,8 +157,9 @@ docker run --rm \
 -e VLLM_USE_MODELSCOPE=True \
 -e PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256 \
 -it $IMAGE \
-VLLM_USE_V1=1 vllm serve Qwen/Qwen3-8B --max_model_len 26240 --enforce-eager
+vllm serve Qwen/Qwen3-8B --max_model_len 26240 --enforce-eager
 ```
+
 ::::
 :::::
 

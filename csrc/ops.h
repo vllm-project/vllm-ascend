@@ -60,16 +60,32 @@ namespace vllm_ascend {
     auto new_tensor = at_npu::native::from_blob(data_ptr, sizes, strides, options);
     return new_tensor;
   }
-    extern void launch_advance_step_flashattn(
-        void* stream,
-        int64_t num_seqs,
-        int64_t num_queries,
-        int64_t block_size,
-        int64_t* input_tokens_ptr,
-        int64_t* sampled_token_ids_ptr,
-        int64_t* input_positions_ptr,
-        int32_t* seq_lens_ptr,
-        int32_t* slot_mapping_ptr,
-        int32_t* block_tables_ptr,
-        int64_t block_tables_stride);
+
+  extern void bgmv_shrink_impl(
+        AscendType type,
+        void *stream,
+        void *x,
+        void *weight,
+        void *indices,
+        void *y, 
+        uint32_t batch_size,
+        uint32_t num_tokens_per_core,
+        uint32_t input_hidden_dim,
+        uint32_t lora_rank,
+        float scale);
+
+    extern void bgmv_expand_impl(
+        AscendType type,
+        void *stream,
+        void *x,
+        void *weight,
+        void *indices,
+        void *y,
+        void *y_out,
+        uint32_t batch_size,
+        uint32_t num_tokens_per_core,
+        uint32_t lora_rank,
+        uint32_t output_hidden_dim,
+        uint32_t slice_offset,
+        uint32_t output_full_dim);
 }

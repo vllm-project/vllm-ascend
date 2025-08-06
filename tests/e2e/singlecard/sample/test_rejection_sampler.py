@@ -4,6 +4,7 @@ from typing import Any, Optional
 import pytest
 import torch
 import torch.nn.functional as F
+from vllm.v1.sample.logits_processor import LogitsProcessorManager
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
@@ -50,26 +51,22 @@ def create_sampling_metadata(
     else:
         assert temperature is not None
 
-    return SamplingMetadata(
-        temperature=temperature,
-        all_greedy=all_greedy,
-        all_random=not all_greedy,
-        top_p=top_p,
-        top_k=top_k,
-        min_p=torch.empty(1, ),
-        generators=generators,
-        max_num_logprobs=0,
-        no_penalties=False,
-        prompt_token_ids=None,
-        frequency_penalties=torch.tensor([]),
-        presence_penalties=torch.tensor([]),
-        repetition_penalties=torch.tensor([]),
-        output_token_ids=[],
-        min_tokens={},
-        logit_bias=[None],
-        allowed_token_ids_mask=None,
-        bad_words_token_ids={},
-    )
+    return SamplingMetadata(temperature=temperature,
+                            all_greedy=all_greedy,
+                            all_random=not all_greedy,
+                            top_p=top_p,
+                            top_k=top_k,
+                            generators=generators,
+                            max_num_logprobs=0,
+                            no_penalties=False,
+                            prompt_token_ids=None,
+                            frequency_penalties=torch.tensor([]),
+                            presence_penalties=torch.tensor([]),
+                            repetition_penalties=torch.tensor([]),
+                            output_token_ids=[],
+                            allowed_token_ids_mask=None,
+                            bad_words_token_ids={},
+                            logitsprocs=LogitsProcessorManager())
 
 
 ########################### Tests for Greedy Sampling ###################
@@ -397,8 +394,8 @@ def test_rejection_sampling_approximates_target_distribution():
         distance_wrt_reference)
 
     expected_improvement_multiplier = 20
-    assert (relative_change_in_distance_wrt_target >
-            relative_change_in_distance_wrt_reference *
+    assert (relative_change_in_distance_wrt_target
+            > relative_change_in_distance_wrt_reference *
             expected_improvement_multiplier)
 
 
