@@ -48,9 +48,7 @@ export GLOO_SOCKET_IFNAME="xxxxxx"
 export TP_SOCKET_IFNAME="xxxxxx"
 export HCCL_SOCKET_IFNAME="xxxxxx"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export MOONCAKE_CONFIG_PATH="/xxxxx/mooncake.json"
 export VLLM_USE_V1=1
-export VLLM_BASE_PORT=9700
 
 vllm serve "/xxxxx/DeepSeek-V2-Lite-Chat" \
   --host localhost \
@@ -92,7 +90,6 @@ Set `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` to the co
 `ASCEND_RT_VISIBLE_DEVICES` specifies the cards on which the node run resides. The total number of cards equals `dp_size*tp_size`.<br>
 `BUDGET_CONFIG_PATH` specifies the path of the mooncake.json file.<br>
 Set `VLLM_USE_V1` to 1.<br>
-`VLLM_BASE_PORT` Configuring the Basic Port of the vLLM<br>
 `/xxxxx/DeepSeek-V2-Lite-Chat` is configured as a model that requires run.<br>
 `--host`: indicates the IP address of the node to be started.<br>
 `--port`: indicates the port to be started, which corresponds to the port in step 4.<br>
@@ -122,9 +119,7 @@ export GLOO_SOCKET_IFNAME="xxxxxx"
 export TP_SOCKET_IFNAME="xxxxxx"
 export HCCL_SOCKET_IFNAME="xxxxxx"
 export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
-export MOONCAKE_CONFIG_PATH="/xxxxx/mooncake.json"
 export VLLM_USE_V1=1
-export VLLM_BASE_PORT=9700
 
 vllm serve "/xxxxx/DeepSeek-V2-Lite-Chat" \
   --host localhost \
