@@ -667,7 +667,7 @@ class QuantizedTokenDispatcherWithFusedExpertsAllGather(TokenDispatcherWithFused
         return hidden_states, expert_tokens
 
     def token_unpermutation(self, hidden_states: torch.Tensor, topk_weights: torch.Tensor, topk_ids: torch.Tensor,
-                            w1_scale: torch.Tensor, w2: torch.Tensor, w2_scale: torch.Tensor, expert_tokens: torch.Tensor):
+                            pertoken_scale: torch.Tensor, w2: torch.Tensor, w2_scale: torch.Tensor, expert_tokens: torch.Tensor):
         sorted_topk_weight = torch.index_select(topk_weights.view(-1), 0,
                                             self.expanded_x_idx)
         row_index = self.expanded_x_idx // topk_ids.shape[-1]
@@ -675,19 +675,6 @@ class QuantizedTokenDispatcherWithFusedExpertsAllGather(TokenDispatcherWithFused
         share_input = torch.zeros((self.batch_size, self.hidden_size),
                                 dtype=torch.bfloat16,
                                 device="npu")
-
-        # act_fn: swiglu
-        hidden_states, pertoken_scale = torch_npu.npu_dequant_swiglu_quant(
-            x=hidden_states,
-            weight_scale=w1_scale.to(torch.float32),
-            activation_scale=pertoken_scale,
-            bias=None,
-            quant_scale=None,
-            quant_offset=None,
-            group_index=expert_tokens,
-            activate_left=True,
-            quant_mode=1,
-        )
 
         final_hidden_states = torch_npu.npu_grouped_matmul_finalize_routing(
             hidden_states,
