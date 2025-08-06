@@ -4,6 +4,7 @@ import shutil
 from contextlib import contextmanager, nullcontext
 
 import torch
+import torch_npu
 
 try:
     # Recent release of torchair has moved these ops to `.scope`.
@@ -33,16 +34,6 @@ def _get_torchair_current_work_dir(file_name=None):
     if file_name is None:
         return TORCHAIR_CACHE_DIR
     return os.path.join(TORCHAIR_CACHE_DIR, file_name)
-
-
-def check_torchair_cache_exist():
-    res = False
-    torch_air_abs_path = _get_torchair_current_work_dir()
-    if os.path.exists(torch_air_abs_path):
-        file_list = os.listdir(torch_air_abs_path)
-        if len(file_list) != 0:
-            res = True
-    return res
 
 
 def check_kv_cache_bytes_cache_exist():
@@ -96,3 +87,32 @@ def npu_wait_tensor(self: torch.Tensor,
                     *,
                     enabled: bool = True):
     return _npu_wait_tensor(self, dependency) if enabled else self
+
+
+def check_torchair_cache_exist():
+    res = False
+    torch_air_abs_path = _get_torchair_current_work_dir()
+    if os.path.exists(torch_air_abs_path):
+        file_list = os.listdir(torch_air_abs_path)
+        if len(file_list) != 0:
+            res = True
+    return res
+
+
+def converting_weight_acl_format(model, format):
+    # currently, there are some operations which do not support ACL_FORMAT_FRACTAL_NZ
+    # in eager mode but support it in torchair graph mode. since ACL_FORMAT_FRACTAL_NZ
+    # is much more preferred than ACL_FORMAT_FRACTAL_ND on 300I Duo, we add this
+    # conversion when using torchair graph mode on 300I Duo platform.
+    # TODO: we will remove this conversion if npu_quant_grouped_matmul_dequant
+    # accepts weight format of ACL_FORMAT_FRACTAL_NZ in eager mode.
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
+
+    for module in model.modules():
+        if isinstance(module, FusedMoE):
+            if torch_npu.get_npu_format(module.w13_weight.data) == format:
+                return
+            module.w13_weight.data = torch_npu.npu_format_cast(
+                module.w13_weight.data, format)
+            module.w2_weight.data = torch_npu.npu_format_cast(
+                module.w2_weight.data, format)
