@@ -161,14 +161,14 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
         layer_idx = extract_layer_index(prefix)
         mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
                            config.mlp_only_layers)
-        use_aclgraph = (vllm_config is not None
+        self.use_aclgraph = (vllm_config is not None
                         and vllm_config.compilation_config.level
                         == CompilationLevel.PIECEWISE
                         and not vllm_config.model_config.enforce_eager)
         if (layer_idx not in mlp_only_layers) and (
                 config.num_experts > 0 and
             (layer_idx + 1) % config.decoder_sparse_step == 0):
-            if not use_aclgraph:
+            if not self.use_aclgraph:
                 # FIXME: custom sparse moe block doesn't work with aclgraph.
                 self.mlp = CustomSparseMoeBlock(config=config,
                                                 quant_config=quant_config,
@@ -234,9 +234,12 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
 
-        hidden_states = self.mlp(hidden_states,
-                                 _metadata_for_padding=_metadata_for_padding)
-
+        if not self.use_aclgraph:
+            hidden_states = self.mlp(hidden_states,
+                                     _metadata_for_padding=_metadata_for_padding)
+        else:
+            hidden_states = self.mlp(Hidden_states)
+ 
         return hidden_states, residual
 
 
