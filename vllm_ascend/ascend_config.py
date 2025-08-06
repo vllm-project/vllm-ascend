@@ -48,8 +48,8 @@ class AscendConfig:
         self.chunked_prefill_for_mla = additional_config.get(
             "chunked_prefill_for_mla", False)
         self.enable_shared_expert_dp = additional_config.get(
-            "enable_shared_expert_dp",
-            True) and not self.torchair_graph_config.enabled
+            "enable_shared_expert_dp", True
+        ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel
 
 
 class TorchairGraphConfig:
