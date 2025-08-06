@@ -17,7 +17,7 @@ from typing import Optional
 
 from vllm.logger import logger
 
-TORCHAIR_MODEL_LIST = ["deepseek", "pangu"]
+TORCHAIR_MODEL_LIST = ["deepseek", "pangu", "kimi_k2"]
 
 
 def _check_torchair_supported(model_type: str):
