@@ -68,8 +68,8 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer, is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.sequence import IntermediateTensors
-import vllm_ascend.envs as envs_ascend 
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
@@ -615,7 +615,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 hidden_states_or_q_c, kv_c_normed, k_pe = torch.split(qkv, [
                     self.q_lora_rank, self.kv_lora_rank, self.qk_rope_head_dim
                 ],
-                                                                        dim=-1)
+                                                                      dim=-1)
             B = hidden_states_or_q_c.shape[0]
             H = hidden_states.shape[1]
 
@@ -715,7 +715,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 hidden_states = output
                 if self.layer_idx == 0:
                     residual = nn.functional.pad(residual,
-                                                (0, 0, 0, num_padding_tokens))
+                                                 (0, 0, 0, num_padding_tokens))
                     residual_parts = torch.chunk(residual, self.tp_size, dim=0)
                     residual = residual_parts[self.tp_rank]
                 hidden_states, residual = self.post_attention_layernorm(
