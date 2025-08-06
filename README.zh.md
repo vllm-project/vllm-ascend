@@ -52,6 +52,7 @@ vLLM 昇腾插件 (`vllm-ascend`) 是一个由社区维护的让vLLM在Ascend NP
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
 |v0.9.2rc1| 最新RC版本 |请查看[快速开始](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html)和[安装指南](https://vllm-ascend.readthedocs.io/en/latest/installation.html)了解更多|
+|v0.9.1rc2| 下一个正式/稳定版 |[快速开始](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/quick_start.html) and [安装指南](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/installation.html)了解更多|
 |v0.7.3.post1| 最新正式/稳定版本 |请查看[快速开始](https://vllm-ascend.readthedocs.io/en/stable/quick_start.html)和[安装指南](https://vllm-ascend.readthedocs.io/en/stable/installation.html)了解更多|
 
 ## 贡献
