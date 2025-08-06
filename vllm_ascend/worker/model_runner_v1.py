@@ -80,6 +80,7 @@ from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import \
     AscendCommonAttentionMetadata as CommonAttentionMetadata
+from vllm_ascend.distributed.utils import is_lmhead_tp
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
@@ -1199,6 +1200,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_draft_tokens, cu_num_tokens)
             sample_indices = spec_decode_metadata.logits_indices
 
+        if is_lmhead_tp():
+            if not with_prefill:
+                padded_num_indices = padded_num_tokens_across_dp
+            else:
+                padded_num_indices = self.max_num_reqs
+            sample_indices = nn.functional.pad(
+                sample_indices,
+                (0, padded_num_indices - sample_indices.shape[0]))
+
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
                 total_num_scheduled_tokens, sample_indices, finished_sending,
                 finished_recving)
@@ -1402,11 +1412,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Sample the next token and get logprobs if needed.
             sampling_metadata = self.input_batch.sampling_metadata
             if spec_decode_metadata is None:
+                if is_lmhead_tp():
+                    logits = logits[:self.input_batch.num_reqs]
+
                 sampler_output = self.sampler(
                     logits=logits,
                     sampling_metadata=sampling_metadata,
                 )
             else:
+                if is_lmhead_tp():
+                    logits = logits[:len(spec_decode_metadata.logits_indices)]
+
                 # When indexing with a tensor (bonus_logits_indices), PyTorch
                 # creates a new tensor with separate storage from the original
                 # logits tensor. This means any in-place operations on bonus_logits
@@ -1775,6 +1791,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         intermediate_tensors=intermediate_tensors,
                         inputs_embeds=inputs_embeds,
                         **model_kwargs)
+
+            if not self.in_profile_run and is_lmhead_tp():
+                # lmhead_tp introduces additional communication across
+                # dp when computing logits. Hence we need to add it
+                # in profile_run.
+                if not with_prefill:
+                    padded_num_indices = num_tokens
+                else:
+                    padded_num_indices = max_num_reqs
+                dummy_indices = torch.zeros(padded_num_indices,
+                                            device=hidden_states.device,
+                                            dtype=torch.int32)
+                model.compute_logits(hidden_states[dummy_indices], None)
+
             if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
                 assert isinstance(self.drafter, MtpProposer)
                 self.drafter.dummy_run(
@@ -1783,6 +1813,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     skip_attn=skip_attn,
                     num_reqs=num_reqs,
                     num_tokens_across_dp=num_tokens_across_dp)
+
+                if not self.in_profile_run and is_lmhead_tp():
+                    if not with_prefill:
+                        padded_num_indices = num_reqs
+                    else:
+                        padded_num_indices = max_num_reqs
+                    dummy_indices = torch.zeros(padded_num_indices,
+                                                device=hidden_states.device,
+                                                dtype=torch.int32)
+                    model.compute_logits(hidden_states[dummy_indices], None)
 
             if self.in_profile_run and self.dynamic_eplb:
                 self.model.clear_all_moe_loads()
