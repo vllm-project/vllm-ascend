@@ -327,6 +327,9 @@ def test_capture_rotary_embedding_in_aclgraph(
     static_positions.copy_(random_filled_positions)
     static_hidden_states.copy_(random_filled_hidden_states)
 
+    # The first graph seems will have some accuracy issue when directly run pytest on the ops folder,
+    # add a warmup graph replay for workaround
+    aclgraph.replay()
     aclgraph.replay()
     output_reference = model(static_positions, static_hidden_states)
     torch.testing.assert_close(static_output,
