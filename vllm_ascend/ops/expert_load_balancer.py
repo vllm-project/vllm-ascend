@@ -74,6 +74,7 @@ class ExpertLoadBalancer(object):
                                  dtype=torch.int32)
         num_experts = torch.ones(self.global_expert_num, dtype=torch.int32)
         # self.update_expert_map(result_dict, log2phy_map, max_num_experts, rank_id)
+        # self.update_expert_loc_map_v1(result_dict, rank_id)
         for log_ids, phy_ids in result_dict.items():
             log2phy_map[log_ids, :len(phy_ids)] = torch.tensor(phy_ids)
             num_experts[log_ids] = len(phy_ids)
@@ -108,6 +109,54 @@ class ExpertLoadBalancer(object):
             tmp_expert_loc_map[: len(expert_loc[i])] = torch.tensor(expert_loc[i], dtype=torch.int32)
 
             log2phy_map[i] = tmp_expert_loc_map
+
+    def update_expert_loc_map_v1(self, expert_loc, current_rank):
+        experts_per_device = n_total_experts // self.ranks_num
+        device_per_host = 16
+        ep_size = get_ep_group().world_size
+        current_node, current_rank_in_node = current_rank // device_per_host, current_rank % device_per_host
+        redundancy_shared_expert_num = self.get_global_redundant_expert_num()
+        n_total_experts = self.global_expert_num + redundancy_shared_expert_num
+        experts_per_device = n_total_experts // ep_size
+        num_hosts = self.ranks_num // device_per_host
+        for i in range(self.global_expert_num):
+            same_rank_candidates, same_node_candidates, all_candidates = [], [], []
+            phy_list, num_replicas = expert_loc[i], len(expert_loc[i])
+
+            for phy in phy_list:
+                phy_device = phy // experts_per_device
+                if phy_device == current_device:
+                    same_rank_candidates.append(phy)
+                elif (phy_device // device_per_host) == (current_device // device_per_host):
+                    same_node_candidates.append(phy)
+                else:
+                    all_candidates.append(phy)
+
+            is_imbalanced = False
+            if num_replicas > num_hosts and num_replicas % num_hosts != 0:
+                replica_per_node = {}
+                for phy in phy_list:
+                    phy_device = phy // experts_per_device
+                    phy_node = phy_device // device_per_host
+                    local_rank = phy_device % device_per_host
+                    if phy_node not in replica_per_node:
+                        replica_per_node[phy_node] = []
+                    replica_per_node[phy_node].append(local_rank)
+                base_replicas_per_host = num_replicas // num_hosts
+                if len(replica_per_node[current_node]) == base_replicas_per_host:
+                    available_ranks = list(set(range(device_per_host)) - set(replica_per_node[current_node]))
+                    expected_load = round(device_per_host / (base_replicas_per_host + 1))
+                    if current_rank_in_node in available_ranks:
+                        if available_ranks.index(current_rank_in_node) >= (expected_load - 1) * base_replicas_per_host:
+                            is_imbalanced = True
+
+            if same_rank_candidates:
+                expert_loc[i] = same_rank_candidates
+            elif same_node_candidates and not is_imbalanced:
+                expert_loc[i] = same_node_candidates
+
+        return expert_loc
+
 
     def get_rank_placement_map(self, layer_id, rank_id):
         expert_placement_map = self.generate_expert_placement_map()
