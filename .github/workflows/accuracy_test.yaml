@@ -201,8 +201,7 @@ jobs:
           echo "markdown_name=$markdown_name" >> $GITHUB_OUTPUT
           mkdir -p ./benchmarks/accuracy
           pytest -sv ./tests/e2e/singlecard/models/test_lm_eval_correctness.py \
-          --config ./tests/e2e/singlecard/models/configs/${{ matrix.model_name }}.yaml \
-          --report_output ./benchmarks/accuracy/${model_base_name}.md 
+          --config ./tests/e2e/singlecard/models/configs/${{ matrix.model_name }}.yaml
 
       - name: Generate step summary
         if: ${{ always() }}
