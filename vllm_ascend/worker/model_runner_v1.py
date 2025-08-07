@@ -1310,10 +1310,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens_across_dp=num_tokens_across_dp,
                 with_prefill=with_prefill,
                 reserved_mc2_mask=self.reserved_mc2_mask,
-                moe_comm_method=moe_comm_method(
-                    self.device, self.dtype,
-                    self.model_config.hf_config.num_experts_per_tok,
-                    self.model_config.hf_config.num_experts),
+                moe_comm_method=moe_comm_method(self.device, self.dtype,
+                                                self.model_config.hf_config),
                 num_actual_tokens=total_num_scheduled_tokens):
             with ProfileExecuteDuration().capture_async("forward"):
                 self.maybe_setup_kv_connector(scheduler_output)
@@ -1992,9 +1990,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     in_profile_run=self.in_profile_run,
                     reserved_mc2_mask=self.reserved_mc2_mask,
                     moe_comm_method=moe_comm_method(
-                        self.device, self.dtype,
-                        self.model_config.hf_config.num_experts_per_tok,
-                        self.model_config.hf_config.num_experts),
+                        self.device, self.dtype, self.model_config.hf_config),
                     num_actual_tokens=0,
             ):
                 hidden_states = self._generate_dummy_run_hidden_states(
