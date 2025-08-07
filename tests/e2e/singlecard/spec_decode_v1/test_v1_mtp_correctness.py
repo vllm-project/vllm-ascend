@@ -66,24 +66,23 @@ def test_mtp_correctness(
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
 
-    spec_llm = LLM(model=model_name,
-                   tensor_parallel_size=1,
-                   max_num_seqs=256,
-                   gpu_memory_utilization=0.5,
-                   distributed_executor_backend="mp",
-                   enable_expert_parallel=True,
-                   speculative_config={
-                       "method": "deepseek_mtp",
-                       "num_speculative_tokens": 1,
-                   },
-                   trust_remote_code=True,
-                   enforce_eager=True,
-                   max_model_len=2000,
-                   additional_config={
-                       "ascend_scheduler_config": {
-                           "enabled": True
-                       }
-                   })
+    spec_llm = LLM(
+        model=model_name,
+        tensor_parallel_size=1,
+        max_num_seqs=256,
+        gpu_memory_utilization=0.5,
+        distributed_executor_backend="mp",
+        enable_expert_parallel=True,
+        speculative_config={
+            "method": "deepseek_mtp",
+            "num_speculative_tokens": 1,
+        },
+        trust_remote_code=True,
+        enforce_eager=True,
+        max_model_len=2000,
+        additional_config={"ascend_scheduler_config": {
+            "enabled": True
+        }})
 
     spec_outputs = spec_llm.chat(test_prompts, sampling_config)
     matches = 0
