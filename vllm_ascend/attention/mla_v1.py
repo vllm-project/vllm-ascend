@@ -808,53 +808,41 @@ class AscendMLAImpl(MLAAttentionImpl):
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim).split(
                 [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
-        if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-            key = torch.cat((k_nope, k_pe), dim=-1)
-            torch_npu._npu_flash_attention(
-                query=query,
-                key=key,
-                value=value,
-                mask=attn_metadata.attn_mask,
-                seq_len=attn_metadata.prefill.context_lens,
-                scale_value=self.scale,
-                num_heads=self.num_heads,
-                num_kv_heads=self.num_heads,
-                out=attn_output)
-        else:
-            attn_lse = torch.empty(self.num_heads,
-                                   num_tokens,
-                                   dtype=torch.float32,
-                                   device=query.device)
-            q_pe = query[..., self.qk_nope_head_dim:]
-            q_nope = query[..., :self.qk_nope_head_dim]
-            mask = torch.triu(
-                torch.ones(512, 512, device=query.device, dtype=query.dtype),
-                1)  # 512: mask only support 512
-            if attn_metadata.num_prefills > 1:
-                mask = mask.unsqueeze(0).repeat(attn_metadata.num_prefills, 1,
-                                                1)
-            torch_npu.atb.npu_ring_mla(
-                q_nope=q_nope,
-                q_rope=q_pe,
-                k_nope=k_nope,
-                k_rope=k_pe,
-                value=value,
-                mask=mask,
-                seqlen=torch.tensor(attn_metadata.prefill.query_lens,
-                                    dtype=torch.int32),
-                head_num=self.num_heads,
-                kv_head_num=self.num_heads,
-                pre_out=None,
-                prev_lse=None,
-                qk_scale=self.scale,
-                kernel_type="kernel_type_high_precision",
-                mask_type="mask_type_triu",
-                input_layout="type_bsnd",
-                calc_type="calc_type_first_ring",
-                output=attn_output,
-                softmax_lse=attn_lse)
-            attn_output, attn_lse = self._compute_prefill_context( \
-                query, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse)
+       
+        attn_lse = torch.empty(self.num_heads,
+                                num_tokens,
+                                dtype=torch.float32,
+                                device=query.device)
+        q_pe = query[..., self.qk_nope_head_dim:]
+        q_nope = query[..., :self.qk_nope_head_dim]
+        mask = torch.triu(
+            torch.ones(512, 512, device=query.device, dtype=query.dtype),
+            1)  # 512: mask only support 512
+        if attn_metadata.num_prefills > 1:
+            mask = mask.unsqueeze(0).repeat(attn_metadata.num_prefills, 1,
+                                            1)
+        torch_npu.atb.npu_ring_mla(
+            q_nope=q_nope,
+            q_rope=q_pe,
+            k_nope=k_nope,
+            k_rope=k_pe,
+            value=value,
+            mask=mask,
+            seqlen=torch.tensor(attn_metadata.prefill.query_lens,
+                                dtype=torch.int32),
+            head_num=self.num_heads,
+            kv_head_num=self.num_heads,
+            pre_out=None,
+            prev_lse=None,
+            qk_scale=self.scale,
+            kernel_type="kernel_type_high_precision",
+            mask_type="mask_type_triu",
+            input_layout="type_bsnd",
+            calc_type="calc_type_first_ring",
+            output=attn_output,
+            softmax_lse=attn_lse)
+        attn_output, attn_lse = self._compute_prefill_context( \
+            query, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse)
 
         attn_output = attn_output.reshape(
             [num_tokens, self.num_heads * self.v_head_dim])
