@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 
 import torch
 import torch_npu
+from transformers.configuration_utils import PretrainedConfig
 from vllm.distributed.parallel_state import get_ep_group, get_tp_group
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import direct_register_custom_op
@@ -17,13 +18,19 @@ class MoECommMethod(ABC):
         self,
         device: torch.device,
         dtype: torch.dtype,
-        top_k_num: int,
-        global_num_experts: int,
+        hf_config: PretrainedConfig,
     ):
         self.device = device
         self.dtype = dtype
-        self.top_k_num = top_k_num
-        self.global_num_experts = global_num_experts
+        self.top_k_num = getattr(hf_config, "num_experts_per_tok", 0)
+        # global_num_experts may be called num_experts or n_routed_experts in different models.
+        possible_keys = ["num_experts", "n_routed_experts"]
+        for key in possible_keys:
+            if hasattr(hf_config, key):
+                self.global_num_experts = getattr(hf_config, key)
+                break
+        else:
+            self.global_num_experts = 0
 
     @abstractmethod
     def _pre_process(
@@ -232,10 +239,9 @@ class MC2CommImpl(MoECommMethod):
         self,
         device: torch.device,
         dtype: torch.dtype,
-        top_k_num: int,
-        global_num_experts: int,
+        hf_config: PretrainedConfig,
     ):
-        super().__init__(device, dtype, top_k_num, global_num_experts)
+        super().__init__(device, dtype, hf_config)
 
         # Shared communication configurations
         ep_group = get_mc2_group()
