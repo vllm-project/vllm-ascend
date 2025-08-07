@@ -1470,7 +1470,7 @@ class AscendFusedMoE(FusedMoE):
         return self.expert_map
 
     def get_log2phy_map(self):
-        return self.log2phy
+        return self.log2phy[0]
 
     def clear_moe_load(self):
         if self.moe_load is not None:
