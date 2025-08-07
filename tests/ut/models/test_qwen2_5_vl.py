@@ -286,6 +286,18 @@ class TestAscendQwen2_5_VisionTransformer(PytestBase):
             "vllm_ascend.models.qwen2_5_vl.parallel_state.get_tensor_model_parallel_world_size",
             return_value=2,
         )
+        mocker.patch(
+            "vllm_ascend.ops.linear.divide",
+            return_value=2,
+        )
+
+        mock_group = mocker.MagicMock()
+        mock_group.rank_in_group = 0
+        mock_group.world_size = 2
+        mocker.patch(
+            "vllm_ascend.ops.linear.get_tp_group",
+            return_value=mock_group,
+        )
 
         vision_transformer = AscendQwen2_5_VisionTransformer(
             vision_config,
