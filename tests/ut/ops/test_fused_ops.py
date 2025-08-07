@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 import torch_npu
 from pytest_mock import MockerFixture
+from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 
 from vllm_ascend.ascend_forward_context import _get_fused_moe_state
 from vllm_ascend.ops.fused_moe import (AscendFusedMoE,
@@ -59,6 +60,7 @@ def mock_dist_env(mocker: MockerFixture):
          patch('vllm_ascend.ops.fused_moe.get_tp_group', return_value=mock_dp_and_tp_group(mocker)), \
          patch('vllm.distributed.parallel_state.get_tp_group', return_value=mock_dp_and_tp_group(mocker)), \
          patch('vllm_ascend.ops.fused_moe.get_dp_group', return_value=mock_dp_and_tp_group(mocker)), \
+         patch('vllm.model_executor.layers.fused_moe.layer.get_dp_group', return_value=mock_dp_and_tp_group(mocker)), \
          patch('torch.distributed.all_gather', return_value=MagicMock(return_value=torch.randn(10,32))), \
          patch('torch.distributed.all_to_all_single', return_value=torch.randn(8, 32)), \
          patch('vllm_ascend.ops.fused_moe.tensor_model_parallel_all_reduce',
@@ -180,6 +182,18 @@ class MockQuantMethod(nn.Module):
             self.apply = MagicMock(return_value=(torch.randn(num_tokens, 32)))
 
 
+class MockFusedMoEMethod(FusedMoEMethodBase):
+
+    def create_weights(self, layer: torch.nn.Module, num_experts: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
+                       params_dtype: torch.dtype, **extra_weight_attrs):
+        pass
+
+    def apply(self, hidden_states: torch.Tensor,
+              expert_weights: torch.Tensor) -> torch.Tensor:
+        pass
+
+
 class TestAscendFusedMoe:
 
     def test_init_no_quant(self, mock_dist_env, default_moe_config):
@@ -213,7 +227,7 @@ class TestAscendFusedMoe:
 
     def test_init_with_quant(self, mock_dist_env, default_moe_config):
         mock_quant_config = MagicMock()
-        mock_quant_method = MagicMock()
+        mock_quant_method = MockFusedMoEMethod()
         mock_quant_config.get_quant_method.return_value = mock_quant_method
 
         moe = AscendFusedMoE(**default_moe_config,
