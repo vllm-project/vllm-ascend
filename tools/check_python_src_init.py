@@ -20,7 +20,8 @@ import os
 import sys
 
 VLLM_ASCEND_SRC = "vllm_ascend"
-VLLM_SRC = "vllm-empty/vllm"
+# TODO: Re-enable this after upstream fixed
+# VLLM_SRC = "vllm-empty/vllm"
 
 
 def check_init_file_in_package(directory):
@@ -56,7 +57,7 @@ def find_missing_init_dirs(src_dir):
 def main():
     all_missing = set()
 
-    for src in [VLLM_ASCEND_SRC, VLLM_SRC]:
+    for src in [VLLM_ASCEND_SRC]:
         missing = find_missing_init_dirs(src)
         all_missing.update(missing)
 
