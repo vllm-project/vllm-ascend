@@ -7,6 +7,7 @@ single_npu
 single_npu_multimodal
 single_npu_audio
 single_npu_qwen3_embedding
+single_npu_qwen3_quantization
 multi_npu
 multi_npu_moge
 multi_npu_qwen3_moe
