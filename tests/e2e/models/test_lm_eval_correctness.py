@@ -66,6 +66,11 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
     model_args = build_model_args(eval_config, tp_size)
 
     report_content = template.render(
+        pretrained=model_args["pretrained"],
+        tensor_parallel_size=model_args["tensor_parallel_size"],
+        dtype=model_args["dtype"],
+        trust_remote_code=model_args["trust_remote_code"],
+        max_model_len=model_args["max_model_len"],
         vllm_version=env_config.vllm_version,
         vllm_commit=env_config.vllm_commit,
         vllm_ascend_version=env_config.vllm_ascend_version,
