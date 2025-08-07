@@ -49,12 +49,6 @@ function install_binary_test() {
     pip install vllm=="$(get_version pip_vllm_version)"
     pip install vllm-ascend=="$(get_version pip_vllm_ascend_version)"
 
-    # TODO(yikun): Remove this when 0.9.1rc2 is released
-    # https://github.com/vllm-project/vllm-ascend/issues/2046
-    if [ "$PIP_VLLM_ASCEND_VERSION" == "0.9.1rc1" ] || [ "$PIP_VLLM_ASCEND_VERSION" == "0.9.0rc2" ] ; then
-        pip install "transformers<4.53.0"
-    fi
-
     pip list | grep vllm
 
     # Verify the installation
