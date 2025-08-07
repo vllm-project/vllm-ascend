@@ -65,6 +65,10 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
     template = env.get_template("report_template.md")
     model_args = build_model_args(eval_config, tp_size)
 
+    parallel_mode = f"TP{model_args.get('tensor_parallel_size', 1)}"
+    if model_args.get('enable_expert_parallel', False):
+        parallel_mode += " + EP"
+
     report_content = template.render(
         pretrained=model_args["pretrained"],
         tensor_parallel_size=model_args["tensor_parallel_size"],
@@ -88,7 +92,7 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
         batch_size="auto",
         num_fewshot=eval_config.get("num_fewshot", "N/A"),
         rows=report_data["rows"],
-        parallel_mode=eval_config.get("parallel_mode", "TP1"))
+        parallel_mode=parallel_mode)
 
     report_output = os.path.join(
         report_dir, f"{os.path.basename(eval_config['model_name'])}.md")
