@@ -1054,10 +1054,10 @@ class AscendMLAImpl(MLAAttentionImpl):
             # KvRmsNormRopeCache and SingleRope.
             npu_wait_tensor(decode_q_c,
                             cos,
-                            enabled=self.enable_multistream_mla)
+                            enabled=enable_multistream_mla)
             npu_wait_tensor(decode_q_c,
                             sin,
-                            enabled=self.enable_multistream_mla)
+                            enabled=enable_multistream_mla)
             decode_ql_nope, decode_q_pe = \
                 self._q_proj_and_k_up_proj(decode_q_c)
             decode_slots = attn_metadata.slot_mapping[:num_decode_tokens]
@@ -1067,7 +1067,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 npu_wait_tensor(hidden_states,
                                 ckq,
                                 enabled=enable_multistream_mla)
-                decode_k_pe, decode_k_nope = self.exec_kv(
+                decode_k_pe, decode_k_nope, _ = self.exec_kv(
                     decode_hs, cos, sin, kv_cache,
                     decode_slots)
                 npu_wait_tensor(decode_q_pe,
