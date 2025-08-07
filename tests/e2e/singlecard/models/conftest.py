@@ -55,7 +55,7 @@ def report_dir(pytestconfig):
 
 def pytest_generate_tests(metafunc):
     if "config_filename" in metafunc.fixturenames:
-        
+
         if metafunc.config.getoption("--config-list-file"):
             rel_path = metafunc.config.getoption("--config-list-file")
             config_list_file = Path(rel_path).resolve()
