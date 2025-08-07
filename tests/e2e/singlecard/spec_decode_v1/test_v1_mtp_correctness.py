@@ -62,7 +62,8 @@ def test_mtp_correctness(
     ref_llm = LLM(model=model_name,
                   gpu_memory_utilization=0.5,
                   max_model_len=256,
-                  enforce_eager=True)
+                  enforce_eager=True,
+                  quantization="ascend")
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
 
@@ -79,6 +80,7 @@ def test_mtp_correctness(
         },
         trust_remote_code=True,
         enforce_eager=True,
+        quantization="ascend",
         max_model_len=2000,
         additional_config={"ascend_scheduler_config": {
             "enabled": True
