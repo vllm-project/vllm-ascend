@@ -2,12 +2,12 @@
 
 - **vLLM Version**: vLLM: {{ vllm_version }} ([{{ vllm_commit[:7] }}](https://github.com/vllm-project/vllm/commit/{{ vllm_commit }})),
 - **vLLM Ascend Version**: {{ vllm_ascend_version }} ([{{ vllm_ascend_commit[:7] }}](https://github.com/vllm-project/vllm-ascend/commit/{{ vllm_ascend_commit }}))  
-- **Software Environment**: 
+- **Software Environment**:
   - **CANN**: {{ cann_version }}
   - **PyTorch**: {{ torch_version }}
   - **torch-npu**: {{ torch_npu_version }}  
 - **Hardware Environment**: Atlas A2 Series  
-- **vLLM args**: 
+- **vLLM args**:
   - **pretrained**: {{ pretrained }}
   - **tensor_parallel_size**: {{ tensor_parallel_size }}
   - **dtype**: {{ dtype  }}
