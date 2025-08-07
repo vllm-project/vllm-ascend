@@ -6,8 +6,9 @@ vLLM-Ascend now supports Data Parallel (DP) deployment, enabling model weights t
 Each DP rank is deployed as a separate “core engine” process which communicates with front-end process(es) via ZMQ sockets. Data Parallel can be combined with Tensor Parallel, in which case each DP engine owns a number of per-NPU worker processes equal to the TP size.
 
 For Mixture-of-Experts (MoE) models — especially advanced architectures like DeepSeek that utilize Multi-head Latent Attention (MLA) — a hybrid parallelism approach is recommended:
-    - Use **Data Parallelism (DP)** for attention layers, which are replicated across devices and handle separate batches.
-    - Use **Expert or Tensor Parallelism (EP/TP)** for expert layers, which are sharded across devices to distribute the computation.
+
+- Use **Data Parallelism (DP)** for attention layers, which are replicated across devices and handle separate batches.
+- Use **Expert or Tensor Parallelism (EP/TP)** for expert layers, which are sharded across devices to distribute the computation.
 
 This division enables attention layers to be replicated across Data Parallel (DP) ranks, enabling them to process different batches independently. Meanwhile, expert layers are partitioned (sharded) across devices using Expert or Tensor Parallelism(DP*TP), maximizing hardware utilization and efficiency.
 
