@@ -7,7 +7,6 @@ This is the 1st release candidate of v0.10.0 for vLLM Ascend. Please follow the 
 ### Highlights
 * Disaggregate prefill works with V1 engine now. You can take a try with DeepSeek model [#950](https://github.com/vllm-project/vllm-ascend/pull/950), following this [tutorial](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html).
 * W4A8 quantization method is supported for dense and MoE model now. [#2060](https://github.com/vllm-project/vllm-ascend/pull/2060) [#2172](https://github.com/vllm-project/vllm-ascend/pull/2172)
-* MTP support torchair graph mode now [#2145](https://github.com/vllm-project/vllm-ascend/pull/2145)
 
 ### Core
 * Ascend PyTorch adapter (torch_npu) has been upgraded to `2.7.1.dev20250724`. [#1562](https://github.com/vllm-project/vllm-ascend/pull/1562) And CANN hase been upgraded to `8.2.RC1`. [#1653](https://github.com/vllm-project/vllm-ascend/pull/1653) Don’t forget to update them in your environment or using the latest images.
@@ -16,10 +15,11 @@ This is the 1st release candidate of v0.10.0 for vLLM Ascend. Please follow the 
 * Pipeline Parallelism is supported in V1 now. [#1800](https://github.com/vllm-project/vllm-ascend/pull/1800)
 * Prefix cache feature now work with the Ascend Scheduler. [#1446](https://github.com/vllm-project/vllm-ascend/pull/1446)
 * Torchair graph mode works with tp > 4 now. [#1508](https://github.com/vllm-project/vllm-ascend/issues/1508)
+* MTP support torchair graph mode now [#2145](https://github.com/vllm-project/vllm-ascend/pull/2145)
 
 ## Other
 
-* Some fixes:
+* Bug fixes:
     * Fix functional problem of multi-modality models like Qwen2-audio with Aclgraph. [#1803](https://github.com/vllm-project/vllm-ascend/pull/1803)
     * Fix the process group creating error with external launch scenario. [#1681](https://github.com/vllm-project/vllm-ascend/pull/1681)
     * Fix the functional problem with guided decoding. [#2022](https://github.com/vllm-project/vllm-ascend/pull/2022)
@@ -53,8 +53,8 @@ This is the 1st release candidate of v0.10.0 for vLLM Ascend. Please follow the 
 * Aclgraph could not work with DP + EP currently, the mainly gap is the number of npu stream that Aclgraph needed to capture graph is not enough. [#2229](https://github.com/vllm-project/vllm-ascend/issues/2229)
 * There is an accuracy issue on W8A8 dynamic quantized DeepSeek with multistream enabled. This will be fixed in the next release. [#2232](https://github.com/vllm-project/vllm-ascend/issues/2232)
 * In Qwen3 MoE, SP cannot be incorporated into the Aclgraph. [#2246](https://github.com/vllm-project/vllm-ascend/issues/2246)
-* MTP not support V1 scheduler currently, will fix it in Q3. [#2254](https://github.com/vllm-project/vllm-ascend/pull/2254)
-* When running MTP with DP > 1, we need to disable metrics logger due to some issue on vLLM. [#2254](https://github.com/vllm-project/vllm-ascend/pull/2254)
+* MTP not support V1 scheduler currently, will fix it in Q3. [#2254](https://github.com/vllm-project/vllm-ascend/issues/2254)
+* When running MTP with DP > 1, we need to disable metrics logger due to some issue on vLLM. [#2254](https://github.com/vllm-project/vllm-ascend/issues/2254)
 
 ## v0.9.1rc2 - 2025.08.04
 This is the 2nd release candidate of v0.9.1 for vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/) to get started.
