@@ -128,7 +128,7 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_output,
         for metric in task["metrics"]:
             metric_name = metric["name"]
             ground_truth = metric["value"]
-            measured_value = float(f"{task_result[metric_name]:.4f}")  
+            measured_value = round(task_result[metric_name], 4)
             task_success = bool(
                 np.isclose(ground_truth, measured_value, rtol=RTOL))
             success = success and task_success
