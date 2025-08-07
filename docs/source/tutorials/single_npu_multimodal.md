@@ -43,7 +43,7 @@ export PYTORCH_NPU_ALLOC_CONF=max_split_size_mb:256
 Run the following script to execute offline inference on a single NPU:
 
 ```bash
-pip install torchvision==0.20.1 qwen_vl_utils --extra-index-url https://download.pytorch.org/whl/cpu/
+pip install qwen_vl_utils --extra-index-url https://download.pytorch.org/whl/cpu/
 ```
 
 ```python
