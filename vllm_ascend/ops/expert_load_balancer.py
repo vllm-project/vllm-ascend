@@ -111,7 +111,7 @@ class ExpertLoadBalancer(object):
             log2phy_map[i] = tmp_expert_loc_map
 
     def update_expert_loc_map_v1(self, expert_loc, current_rank):
-        experts_per_device = n_total_experts // self.ranks_num
+
         device_per_host = 16
         ep_size = get_ep_group().world_size
         current_node, current_rank_in_node = current_rank // device_per_host, current_rank % device_per_host
@@ -125,9 +125,9 @@ class ExpertLoadBalancer(object):
 
             for phy in phy_list:
                 phy_device = phy // experts_per_device
-                if phy_device == current_device:
+                if phy_device == current_rank:
                     same_rank_candidates.append(phy)
-                elif (phy_device // device_per_host) == (current_device // device_per_host):
+                elif (phy_device // device_per_host) == (current_rank // device_per_host):
                     same_node_candidates.append(phy)
                 else:
                     all_candidates.append(phy)
