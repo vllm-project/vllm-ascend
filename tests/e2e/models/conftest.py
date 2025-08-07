@@ -28,7 +28,7 @@ def pytest_addoption(parser):
         "--report-dir",
         action="store",
         default="./benchmarks/accuracy",
-        help="Directory to store report files when using config list",
+        help="Directory to store report files",
     )
 
 
