@@ -38,6 +38,21 @@ from vllm_ascend.distributed.parallel_state import (
     get_mlp_tensor_model_parallel_world_size, get_mlp_tp_group)
 
 
+from typing import Optional
+
+import torch
+import torch.distributed as dist
+from torch.nn.parameter import Parameter
+from vllm.distributed import divide, split_tensor_along_last_dim
+from vllm.distributed.parallel_state import GroupCoordinator, get_tp_group
+from vllm.model_executor.layers.linear import (WEIGHT_LOADER_V2_SUPPORTED,
+                                               LinearBase, RowParallelLinear,
+                                               set_weight_attrs)
+from vllm.model_executor.layers.quantization.base_config import \
+    QuantizationConfig
+
+
+
 class AscendMlpColumnParallelLinear(ColumnParallelLinear):
     """Linear layer with column parallelism.
 
@@ -307,3 +322,153 @@ class AscendMlpMergedColumnParallelLinear(MergedColumnParallelLinear):
         if not self.return_bias:
             return output
         return output, output_bias
+
+
+
+
+
+
+class CustomRowParallelLinear(RowParallelLinear):
+    """Support custom communication group and the linear layer with row parallelism.
+
+    The linear layer is defined as Y = XA + b. A is parallelized along
+    its first dimension and X along its second dimension as:
+               -   -
+              | A_1 |
+              | .   |
+          A = | .   |        X = [X_1, ..., X_p]
+              | .   |
+              | A_p |
+               -   -
+    Arguments:
+        input_size: first dimension of matrix A.
+        output_size: second dimension of matrix A.
+        bias: If true, add bias. Note that bias is not parallelized.
+        input_is_parallel: If true, we assume that the input is already
+                           split across the GPUs and we do not split
+                           again.
+        skip_bias_add: This was added to enable performance optimization where
+                       bias can be fused with other element-wise operations.
+                       We skip adding bias but instead return it.
+        params_dtype: Data type for the parameters.
+        reduce_results: If true, call all-reduce on output and make Y available
+                       to all GPUs, otherwise, every GPU will have its output
+                       which is Y = X_iA_i
+        quant_config: Quantization configure.
+        custom_comm_group: custom communication parallel group
+        prefix: The name of the layer in the state dict, including all parents
+                        (e.g. model.layers.0.down_proj)
+        return_bias: If true, return bias together with outputs in forward pass.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        bias: bool = True,
+        input_is_parallel: bool = True,
+        skip_bias_add: bool = False,
+        params_dtype: Optional[torch.dtype] = None,
+        reduce_results: bool = True,
+        quant_config: Optional[QuantizationConfig] = None,
+        custom_comm_group: Optional[GroupCoordinator] = None,
+        prefix: str = "",
+        *,
+        return_bias: bool = True,
+    ):
+        self.comm_group = custom_comm_group or get_tp_group()
+        self.tp_rank = custom_comm_group.rank_in_group
+        self.tp_size = custom_comm_group.world_size
+        # Divide the weight matrix along the first dimension.
+        self.input_size_per_partition = divide(input_size, self.tp_size)
+        self.output_size_per_partition = output_size
+        self.output_partition_sizes = [output_size]
+
+        LinearBase.__init__(self,
+                            input_size,
+                            output_size,
+                            skip_bias_add,
+                            params_dtype,
+                            quant_config,
+                            prefix,
+                            return_bias=return_bias)
+
+        self.input_is_parallel = input_is_parallel
+        self.reduce_results = reduce_results
+
+        assert self.quant_method is not None
+        self.quant_method.create_weights(
+            layer=self,
+            input_size_per_partition=self.input_size_per_partition,
+            output_partition_sizes=self.output_partition_sizes,
+            input_size=self.input_size,
+            output_size=self.output_size,
+            params_dtype=self.params_dtype,
+            weight_loader=(
+                self.weight_loader_v2 if self.quant_method.__class__.__name__
+                in WEIGHT_LOADER_V2_SUPPORTED else self.weight_loader))
+        if not reduce_results and (bias and not skip_bias_add):
+            raise ValueError("When not reduce the results, adding bias to the "
+                             "results can lead to incorrect results")
+
+        if bias:
+            self.bias = Parameter(
+                torch.empty(self.output_size, dtype=params_dtype))
+            set_weight_attrs(self.bias, {
+                "output_dim": 0,
+                "weight_loader": self.weight_loader,
+            })
+        else:
+            self.register_parameter("bias", None)
+
+
+class OprojCustomRowParallelLinear(CustomRowParallelLinear):
+    # support o_proj TP in pure DP scenario and graph mode
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            tp_rank = self.tp_rank
+            splitted_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size)
+            input_parallel = splitted_input[tp_rank].contiguous()
+
+        # Prepare tensors for all-to-all communication
+        local_batch_size = input_parallel.size(0)
+        chunk_size = self.input_size_per_partition
+        total_batch_size = local_batch_size * self.tp_size
+
+        # Reshape tensor for efficient cross-device transfer:
+        # [batch, dim] -> [tp_size, batch, chunk] -> flattened
+        send_buf = (input_parallel.reshape(-1,
+                                           self.tp_size, chunk_size).transpose(
+                                               0, 1).contiguous().view(-1))
+
+        # Create receive buffer
+        recv_buf = torch.empty(total_batch_size * chunk_size,
+                               dtype=input_parallel.dtype,
+                               device=input_.device)
+
+        # Perform all-to-all communication
+        dist.all_to_all_single(recv_buf,
+                               send_buf,
+                               group=self.comm_group.device_group)
+        input_parallel = recv_buf.view(total_batch_size, chunk_size)
+
+        # Matrix multiply with quantized method
+        assert self.quant_method is not None
+        # Only fuse bias add for rank 0 to avoid duplicate bias addition in TP>1
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        output_parallel = self.quant_method.apply(self,
+                                                  input_parallel,
+                                                  bias=bias_)
+
+        # otp-specific: Combine partial results across devices
+        output = self.comm_group.reduce_scatter(output_parallel, dim=0)
+
+        # Handle bias return based on configuration
+        output_bias = self.bias if self.skip_bias_add else None
+        if not self.return_bias:
+            return output
+        return output, output_bias
+

@@ -225,12 +225,10 @@ class AscendLinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if isinstance(layer, RowParallelLinear):
-            tp_rank = get_tensor_model_parallel_rank()  
-        elif isinstance(layer, Oproj_RowParallelLinear):
             if get_ascend_config().oproj_tensor_parallel_size is not None:
                 tp_rank = get_otp_group().rank_in_group
             else:
-                tp_rank = get_tensor_model_parallel_rank() 
+                tp_rank = get_tensor_model_parallel_rank()
         else:
             tp_rank = 0
         
