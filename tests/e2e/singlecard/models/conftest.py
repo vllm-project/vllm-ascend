@@ -86,5 +86,3 @@ def pytest_generate_tests(metafunc):
         single_config = metafunc.config.getoption("--config")
         config_path = Path(single_config).resolve()
         metafunc.parametrize("config_filename", [config_path])
-        
-
