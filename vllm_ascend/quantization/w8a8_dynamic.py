@@ -837,7 +837,7 @@ class AscendW8A8DynamicFusedMoEMethod:
         from vllm.config import get_current_vllm_config
         vllm_config = get_current_vllm_config()
         self.max_token_nums = vllm_config.scheduler_config.max_num_batched_tokens
-        self.token_selector = torch.arange(0, self.max_token_nums, dtype=torch.int32)
+        self.token_selector = torch.arange(0, self.max_token_nums, dtype=torch.int32).view(-1, 1)
         self.enable_weight_nz_layout = ascend_config.enable_weight_nz_layout
 
         try:

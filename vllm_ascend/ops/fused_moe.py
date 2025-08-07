@@ -1200,7 +1200,7 @@ class AscendFusedMoE(FusedMoE):
                 expert_load_balancer.get_rank_placement_map(
                     self.moe_instance_id, self.ep_rank))
             self.log2phy = expert_load_balancer.get_rank_log2phy_map(
-                self.moe_instance_id).npu()
+                self.moe_instance_id, get_ep_group().rank_in_group).npu()
             self.global_redundant_expert_num = (
                 expert_load_balancer.get_global_redundant_expert_num())
         else:
