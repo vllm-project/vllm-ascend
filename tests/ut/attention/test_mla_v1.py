@@ -664,6 +664,7 @@ class TestAscendMLAImpl(TestBase):
     def test_forward_decode_without_graph(self, mock_page_attention_mla,
                                           mock_up_proj):
         self.impl.running_in_graph = False
+        self.impl.running_chunkprefilll_with_torchair = False
         num_tokens = 100
         num_blocks = 256
         block_size = 4
