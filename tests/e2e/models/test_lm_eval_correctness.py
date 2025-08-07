@@ -87,7 +87,9 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
         limit=eval_config.get("limit", None),
         batch_size="auto",
         num_fewshot=eval_config.get("num_fewshot", "N/A"),
-        rows=report_data["rows"])
+        rows=report_data["rows"],
+        parallel_mode=eval_config.get("parallel_mode", "TP1")
+    )
 
     report_output = os.path.join(
         report_dir, f"{os.path.basename(eval_config['model_name'])}.md")
