@@ -67,18 +67,15 @@ class ExpertLoadBalancer(object):
                 result_dict[key] = []
             result_dict[key].append(idx)
 
-        log2phy_map = torch.full((self.ranks_num, self.global_expert_num),
-                                 -1,
+        max_num_experts = max(len(locs) for locs in result_dict.values())
+        log2phy_map = torch.full((self.global_expert_num, max_num_experts),
+                                 0,
                                  dtype=torch.int32)
-        for rank in range(self.ranks_num):
-            for key in result_dict:
-                indices_in_concat = result_dict[key]
-                if key in rank_expert_to_global[rank]:
-                    log2phy_map[rank][key] = rank_expert_to_global[rank][key]
-                else:
-                    chosen_index = random.choice(indices_in_concat)
-                    log2phy_map[rank][key] = chosen_index
-        return log2phy_map
+        num_experts = torch.ones(self.global_expert_num, 1, dtype=torch.int32)
+        for log_ids, phy_ids in result_dict.items():
+            log2phy_map[log_ids, :len(phy_ids)] = torch.tensor(phy_ids)
+            num_experts[log_ids] = len(phy_ids)
+        return log2phy_map, num_experts
 
     def get_rank_placement_map(self, layer_id, rank_id):
         expert_placement_map = self.generate_expert_placement_map()
@@ -88,9 +85,9 @@ class ExpertLoadBalancer(object):
         rank_local_expert_num = torch.sum(torch.ne(rank_expert_map, -1)).item()
         return rank_local_expert_num, rank_expert_map
 
-    def get_rank_log2phy_map(self, layer_id, rank_id):
+    def get_rank_log2phy_map(self, layer_id):
         layer_log2phy_map = self.generate_log2phy_expert_map(layer_id)
-        return layer_log2phy_map[rank_id]
+        return layer_log2phy_map
 
     def get_global_redundant_expert_num(self):
         global_redundant_expert_num = (
