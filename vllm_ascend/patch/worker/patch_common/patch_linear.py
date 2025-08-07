@@ -25,6 +25,7 @@ from torch.nn.parameter import Parameter
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               split_tensor_along_last_dim)
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.logger import logger
 from vllm.model_executor.layers.linear import RowParallelLinear
 
 from vllm_ascend import envs
@@ -142,4 +143,5 @@ class AscendRowParallelLinear(RowParallelLinear):
 
 
 if envs.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE:
+    logger.info("AscendRowParallelLinear: Matmul all-reduce is enabled. ")
     vllm.model_executor.layers.linear.RowParallelLinear = AscendRowParallelLinear
