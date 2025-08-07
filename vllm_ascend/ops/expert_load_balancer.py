@@ -73,12 +73,13 @@ class ExpertLoadBalancer(object):
                                  0,
                                  dtype=torch.int32)
         num_experts = torch.ones(self.global_expert_num, dtype=torch.int32)
+        # self.update_expert_map(result_dict, log2phy_map, max_num_experts, rank_id)
         for log_ids, phy_ids in result_dict.items():
             log2phy_map[log_ids, :len(phy_ids)] = torch.tensor(phy_ids)
             num_experts[log_ids] = len(phy_ids)
         return log2phy_map, num_experts
 
-    def update_expert_map(self, expert_loc, log2phy_map, max_num_dups, ep_size, rank_id):
+    def update_expert_map(self, expert_loc, log2phy_map, max_num_dups, rank_id):
         ep_size = get_ep_group().world_size
         redundancy_shared_expert_num = self.get_global_redundant_expert_num()
         n_total_experts = self.global_expert_num + redundancy_shared_expert_num
@@ -88,13 +89,13 @@ class ExpertLoadBalancer(object):
             same_node_candidates = []
             experts_per_device = n_total_experts // ep_size
             all_candidates = []
-            phy_list = experts_loc[i]
+            phy_list = expert_loc[i]
             current_device = rank_id
             for phy in phy_list:
                 phy_device = phy // experts_per_device
                 if phy_device == current_device:
                     same_rank_candidates.append(phy)
-                elif (phy_device // self.ranks_num) == (current_rank // self.ranks_num):
+                elif (phy_device // self.ranks_num) == (current_device // self.ranks_num):
                     same_node_candidates.append(phy)
                 else:
                     all_candidates.append(phy)
