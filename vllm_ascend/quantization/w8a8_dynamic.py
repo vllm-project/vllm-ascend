@@ -226,7 +226,7 @@ def fused_experts_with_mc2(
     assert mc2_mask is not None
     if log2phy is not None:
         log2phy_map, num_experts = log2phy
-        topk_ids = log2phy_map[topk_ids, token_selector[: topk_ids.shape[0], None] % num_experts[topk_ids].squeeze(-1)]
+        topk_ids = log2phy_map[topk_ids, token_selector[: topk_ids.shape[0]] % num_experts[topk_ids]]
     quant_mode = 2
     ep_group = get_mc2_group()
     ep_rank_id = ep_group.rank_in_group
@@ -502,7 +502,7 @@ def fused_experts_with_all2all(hidden_states: torch.Tensor,
 							   token_selector: torch.Tensor = None,):
     if log2phy is not None:
         log2phy_map, num_experts = log2phy
-        topk_ids = log2phy_map[topk_ids, token_selector[: topk_ids.shape[0], None] % num_experts[topk_ids].squeeze(-1)]
+        topk_ids = log2phy_map[topk_ids, token_selector[: topk_ids.shape[0]] % num_experts[topk_ids]]
     original_shape = hidden_states.shape
     if len(original_shape) == 3:
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
