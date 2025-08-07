@@ -72,8 +72,6 @@ from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import dispose_tensor
-from vllm_ascend.utils import dispose_tensor, npu_prefetch
-from vllm_ascend.ops.linear import Oproj_RowParallelLinear
 
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
@@ -510,7 +508,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                 quant_config=quant_config,
                 prefix=f"{prefix}.o_proj")
         else:
-            self.o_proj = Oproj_RowParallelLinear(
+            self.o_proj = CustomDeepseekV2RowParallelLinear(
                 self.num_heads * self.v_head_dim,
                 self.hidden_size,
                 bias=False,

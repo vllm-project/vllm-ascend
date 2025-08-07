@@ -18,27 +18,25 @@ limitations under the License.
 from typing import Optional, Union
 
 import torch
+import torch.distributed as dist
 from torch.nn.parameter import Parameter
-from vllm.distributed import (divide, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              split_tensor_along_last_dim,
-                              tensor_model_parallel_all_gather,
-                              tensor_model_parallel_all_reduce)
+from vllm.distributed import divide, split_tensor_along_last_dim
+from vllm.distributed.parallel_state import get_tp_group
+from vllm.lora.utils import LinearBase
 from vllm.model_executor.layers.linear import (WEIGHT_LOADER_V2_SUPPORTED,
                                                ColumnParallelLinear,
-                                               LinearBase,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization.base_config import \
     QuantizationConfig
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.distributed.parallel_state import (
-    get_mlp_tensor_model_parallel_rank,
-    get_mlp_tensor_model_parallel_world_size, get_mlp_tp_group)
+from vllm_ascend.distributed.parallel_state import (get_mlp_tp_group,
+                                                    get_otp_group)
+from vllm_ascend.utils import mlp_tp_enable, oproj_tp_enable
 
 
-class AscendMlpColumnParallelLinear(ColumnParallelLinear):
+class AscendColumnParallelLinear(ColumnParallelLinear):
     """Linear layer with column parallelism.
 
     Use the MLP tensor parallelism group in the MLP module,
@@ -60,14 +58,15 @@ class AscendMlpColumnParallelLinear(ColumnParallelLinear):
         return_bias: bool = True,
     ):
         # Divide the weight matrix along the last dimension.
-        if prefix.find("gate_up_proj") != -1:
-            self.tp_size = get_mlp_tensor_model_parallel_world_size()
-            self.tp_rank = get_mlp_tensor_model_parallel_rank()
-            self.enable_mlp_optimze = True
+        self.comm_group = None
+        if prefix.find("gate_up_proj") != -1 and mlp_tp_enable():
+            self.comm_group = get_mlp_tp_group()
         else:
-            self.tp_size = get_tensor_model_parallel_world_size()
-            self.tp_rank = get_tensor_model_parallel_rank()
-            self.enable_mlp_optimze = False
+            self.comm_group = get_tp_group()
+
+        self.tp_size = self.comm_group.world_size
+        self.tp_rank = self.comm_group.rank_in_group
+
         self.input_size_per_partition = input_size
         self.output_size_per_partition = divide(output_size, self.tp_size)
         self.output_partition_sizes = [self.output_size_per_partition]
@@ -114,7 +113,7 @@ class AscendMlpColumnParallelLinear(ColumnParallelLinear):
             self.register_parameter("bias", None)
 
 
-class AscendMlpRowParallelLinear(RowParallelLinear):
+class AscendRowParallelLinear(RowParallelLinear):
     """Linear layer with row parallelism.
     Use the MLP tensor parallelism group in the MLP module,
     and the original TP group in other modules.
@@ -134,14 +133,21 @@ class AscendMlpRowParallelLinear(RowParallelLinear):
         *,
         return_bias: bool = True,
     ):
-        if prefix.find("down_proj") != -1:
-            self.tp_size = get_mlp_tensor_model_parallel_world_size()
-            self.tp_rank = get_mlp_tensor_model_parallel_rank()
-            self.enable_mlp_optimze = True
+
+        if prefix.find("down_proj") != -1 and mlp_tp_enable():
+            comm_group = get_mlp_tp_group()
+            self.forward_type = "mlp_tp"
+        elif prefix.find("o_proj") != -1 and oproj_tp_enable():
+            comm_group = get_otp_group()
+            self.forward_type = "oproj_tp"
         else:
-            self.tp_size = get_tensor_model_parallel_world_size()
-            self.tp_rank = get_tensor_model_parallel_rank()
-            self.enable_mlp_optimze = False
+            comm_group = get_tp_group()
+            self.forward_type = "normal"
+        self.comm_group = comm_group
+
+        self.tp_size = self.comm_group.world_size
+        self.tp_rank = self.comm_group.rank_in_group
+
         # Divide the weight matrix along the first dimension.
         self.input_size_per_partition = divide(input_size, self.tp_size)
         self.output_size_per_partition = output_size
@@ -187,58 +193,91 @@ class AscendMlpRowParallelLinear(RowParallelLinear):
     def forward(
         self,
         input_,
+        is_prefill: bool = True,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
-        if self.enable_mlp_optimze:
-            tp_rank = get_mlp_tensor_model_parallel_rank()
-            if self.input_is_parallel:
-                input_parallel = input_
-            else:
-                tp_rank = get_mlp_tensor_model_parallel_rank()
-                splitted_input = split_tensor_along_last_dim(
-                    input_, num_partitions=self.tp_size)
-                input_parallel = splitted_input[tp_rank].contiguous()
-            # Matrix multiply.
-            assert self.quant_method is not None
-            # Only fuse bias add into GEMM for rank 0 (this ensures that
-            # bias will not get added more than once in TP>1 case)
-            bias_ = None if (self.tp_rank > 0
-                             or self.skip_bias_add) else self.bias
-            output_parallel = self.quant_method.apply(self,
-                                                      input_parallel,
-                                                      bias=bias_)
-            output = get_mlp_tp_group().reduce_scatter(output_parallel, 0)
-            # output = output[:num_tokens,:]
-            # dispose_tensor(output_parallel)
+        # Choose different forward function according to the type of TP group
+        if self.forward_type == "oproj_tp":
+            return self._forward_oproj_tp(input_)
+        elif self.forward_type == "mlp_tp":
+            return self._forward_mlp_tp(input_)
         else:
-            if self.input_is_parallel:
-                input_parallel = input_
-            else:
-                tp_rank = get_tensor_model_parallel_rank()
-                splitted_input = split_tensor_along_last_dim(
-                    input_, num_partitions=self.tp_size)
-                input_parallel = splitted_input[tp_rank].contiguous()
+            return super().forward(input_)
 
-            # Matrix multiply.
-            assert self.quant_method is not None
-            # Only fuse bias add into GEMM for rank 0 (this ensures that
-            # bias will not get added more than once in TP>1 case)
-            bias_ = None if (self.tp_rank > 0
-                             or self.skip_bias_add) else self.bias
-            output_parallel = self.quant_method.apply(self,
-                                                      input_parallel,
-                                                      bias=bias_)
-            if self.reduce_results and self.tp_size > 1:
-                output = tensor_model_parallel_all_reduce(output_parallel)
-            else:
-                output = output_parallel
+    # enable custom MLP tensor parallel
+    def _forward_mlp_tp(self, input_: torch.Tensor) -> torch.Tensor:
+
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            splitted_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size)
+            input_parallel = splitted_input[self.tp_rank].contiguous()
+
+        assert self.quant_method is not None
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        output_parallel = self.quant_method.apply(self,
+                                                  input_parallel,
+                                                  bias=bias_)
+        output = self.comm_group.reduce_scatter(output_parallel, 0)
+
         output_bias = self.bias if self.skip_bias_add else None
+        if not self.return_bias:
+            return output
+        return output, output_bias
 
+    # enable custom Oproj tensor parallel
+    def _forward_oproj_tp(
+        self,
+        input_: torch.Tensor,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            splitted_input = split_tensor_along_last_dim(
+                input_, num_partitions=self.tp_size)
+            input_parallel = splitted_input[self.tp_rank].contiguous()
+
+        # Prepare tensors for all-to-all communication
+        local_batch_size = input_parallel.size(0)
+        chunk_size = self.input_size_per_partition
+        total_batch_size = local_batch_size * self.tp_size
+
+        # Reshape tensor for efficient cross-device transfer:
+        # [batch, dim] -> [tp_size, batch, chunk] -> flattened
+        send_buf = (input_parallel.reshape(-1,
+                                           self.tp_size, chunk_size).transpose(
+                                               0, 1).contiguous().view(-1))
+
+        # Create receive buffer
+        recv_buf = torch.empty(total_batch_size * chunk_size,
+                               dtype=input_parallel.dtype,
+                               device=input_parallel.device)
+
+        # Perform all-to-all communication
+        dist.all_to_all_single(recv_buf,
+                               send_buf,
+                               group=self.comm_group.device_group)
+        input_parallel = recv_buf.view(total_batch_size, chunk_size)
+
+        # Only fuse bias add for rank 0 to avoid duplicate bias addition in TP>1
+        bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
+        assert self.quant_method is not None
+        output_parallel = self.quant_method.apply(self,
+                                                  input_parallel,
+                                                  bias=bias_)
+
+        # otp-specific: Combine partial results across devices
+        output = self.comm_group.reduce_scatter(output_parallel, dim=0)
+
+        # Handle bias return based on configuration
+        output_bias = self.bias if self.skip_bias_add else None
         if not self.return_bias:
             return output
         return output, output_bias
 
 
-class AscendMlpMergedColumnParallelLinear(MergedColumnParallelLinear):
+class AscendMergedColumnParallelLinear(MergedColumnParallelLinear):
     """Packed linear layers with column parallelism.
 
     Similar to ColumnParallelLinear, but the weight matrix is concatenated
@@ -262,46 +301,50 @@ class AscendMlpMergedColumnParallelLinear(MergedColumnParallelLinear):
         *,
         return_bias: bool = True,
     ):
-        self.output_sizes = output_sizes
-        if prefix.find("gate_up_proj") != -1:
-            self.tp_size = get_mlp_tensor_model_parallel_world_size()
-            self.tp_rank = get_mlp_tensor_model_parallel_rank()
-            self.enable_mlp_optimze = True
+
+        # Divide the weight matrix along the last dimension.
+        self.comm_group = None
+        if prefix.find("gate_up_proj") != -1 and mlp_tp_enable():
+            self.comm_group = get_mlp_tp_group()
+            self.forward_type = "mlp_tp"
         else:
-            self.tp_size = get_tensor_model_parallel_world_size()
-            self.tp_rank = get_tensor_model_parallel_rank()
-            self.enable_mlp_optimze = False
+            self.comm_group = get_tp_group()
+            self.forward_type = "normal_tp"
+        self.tp_rank = self.comm_group.rank_in_group
+        self.tp_size = self.comm_group.world_size
+
+        self.output_sizes = output_sizes
         assert all(output_size % self.tp_size == 0
                    for output_size in output_sizes)
-        AscendMlpColumnParallelLinear.__init__(self,
-                                               input_size=input_size,
-                                               output_size=sum(output_sizes),
-                                               bias=bias,
-                                               gather_output=gather_output,
-                                               skip_bias_add=skip_bias_add,
-                                               params_dtype=params_dtype,
-                                               quant_config=quant_config,
-                                               prefix=prefix,
-                                               return_bias=return_bias)
+        AscendColumnParallelLinear.__init__(self,
+                                            input_size=input_size,
+                                            output_size=sum(output_sizes),
+                                            bias=bias,
+                                            gather_output=gather_output,
+                                            skip_bias_add=skip_bias_add,
+                                            params_dtype=params_dtype,
+                                            quant_config=quant_config,
+                                            prefix=prefix,
+                                            return_bias=return_bias)
 
     def forward(
         self,
         input_,
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
+        if self.forward_type == "mlp_tp":
+            return self._forward_mlp_tp(input_)
+        else:
+            return super().forward(input_)
+
+    def _forward_mlp_tp(
+        self,
+        input_: torch.Tensor,
+    ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         bias = self.bias if not self.skip_bias_add else None
-        # self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
         # Matrix multiply.
         assert self.quant_method is not None
-        if self.enable_mlp_optimze:
-            input2_ = get_mlp_tp_group().all_gather(input_, 0)
-            output = self.quant_method.apply(self, input2_, bias)
-        else:
-            output_parallel = self.quant_method.apply(self, input_, bias)
-            if self.gather_output:
-                # All-gather across the partitions.
-                output = tensor_model_parallel_all_gather(output_parallel)
-            else:
-                output = output_parallel
+        input_parallel = get_mlp_tp_group().all_gather(input_, 0)
+        output = self.quant_method.apply(self, input_parallel, bias)
 
         output_bias = self.bias if self.skip_bias_add else None
         if not self.return_bias:

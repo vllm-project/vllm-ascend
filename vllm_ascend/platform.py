@@ -132,21 +132,6 @@ class NPUPlatform(Platform):
             "kv_cache_dtype", None)
         if kv_cache_dtype is not None:
             vllm_config.cache_config.cache_dtype = kv_cache_dtype
-        parallel_config = vllm_config.parallel_config
-
-        parallel_config.oproj_tensor_parallel_size = (
-            ascend_config.oproj_tensor_parallel_size
-        )
-        if parallel_config.oproj_tensor_parallel_size is not None:
-            logger.info(f"Enable oproj_tensor_parallel_size={ascend_config.oproj_tensor_parallel_size} \
-                            in pure DP scenario")
-            assert(
-                parallel_config.tensor_parallel_size == 1
-            ),"oproj_tensor_parallel_size can only be used in the pure DP (distributed processing) scenario"
-            assert(
-                ascend_config.torchair_graph_config.enabled == True
-            ), "oproj_tensor_parallel_size can only be used in graph mode"
-            
         if model_config is None:
             logger.warning("Model config is missing. This may indicate "
                            "that we are running a test case")

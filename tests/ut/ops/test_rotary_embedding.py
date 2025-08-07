@@ -3,11 +3,12 @@ import unittest
 from unittest.mock import MagicMock, PropertyMock, patch
 
 import torch
-from vllm.model_executor.layers.rotary_embedding import (
-    DeepseekScalingRotaryEmbedding, RotaryEmbedding)
+from vllm.model_executor.layers.rotary_embedding import \
+    DeepseekScalingRotaryEmbedding
 
 from tests.ut.base import TestBase
-from vllm_ascend.ops.rotary_embedding import _custom_rotary_embedding_enabled
+from vllm_ascend.ops.rotary_embedding import (AscendRotaryEmbedding,
+                                              custom_rotary_embedding_enabled)
 
 
 class TestCustomRotaryEmbeddingEnabled(unittest.TestCase):
@@ -78,9 +79,16 @@ class TestAscendRotaryEmbedding(unittest.TestCase):
         self.rope_theta = 10000
         self.is_neox_style = True
         self.cos_sin_cache = torch.randn(3, 1, 32)
-        self.layer = RotaryEmbedding(self.head_size, self.rotary_dim,
-                                     self.max_position, self.rope_theta,
-                                     self.is_neox_style, torch.float16)
+        with patch('vllm_ascend.ops.rotary_embedding.get_ascend_config'
+                   ) as mock_get_ascend_config:
+            mock_config = MagicMock()
+            mock_config.torchair_graph_config.enabled = False
+            mock_get_ascend_config.return_value = mock_config
+            self.layer = AscendRotaryEmbedding(self.head_size, self.rotary_dim,
+                                               self.max_position,
+                                               self.rope_theta,
+                                               self.is_neox_style,
+                                               torch.float16)
 
         # Mock self object for rope_forward_oot
         self.mock_self = MagicMock()
