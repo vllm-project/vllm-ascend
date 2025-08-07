@@ -81,6 +81,7 @@ def pytest_generate_tests(metafunc):
                     if line.strip() and not line.startswith("#")
                 ]
             metafunc.parametrize("config_filename", configs)
+            return
 
         single_config = metafunc.config.getoption("--config")
         config_path = Path(single_config).resolve()
