@@ -105,8 +105,11 @@ class DynamicEplb(EplbPolicy):
             min_box_index = -1
             for i in range(card_num):
                 host_id = i // card_per_host
-                if (expert_in_hosts[item_id][host_id] >  expert_in_hosts[item_id][check_pair[host_id][0]]
-                    or expert_in_hosts[item_id][host_id] >  expert_in_hosts[item_id][check_pair[host_id][1]]
+                max_count = max(expert_in_hosts[item_id])
+                min_count = min(expert_in_hosts[item_id])
+                if (expert_in_hosts[item_id][host_id] > expert_in_hosts[item_id][check_pair[host_id][0]]
+                    or expert_in_hosts[item_id][host_id] > expert_in_hosts[item_id][check_pair[host_id][1]]
+                    or (max_count != min_count and expert_in_hosts[item_id][host_id] != min_count)
                     or item_id in boxes[i]):
                     continue
                 # Only choose boxes that still have space (box_counts[i] < items_per_box)

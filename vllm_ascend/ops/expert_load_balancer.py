@@ -74,7 +74,7 @@ class ExpertLoadBalancer(object):
                                  dtype=torch.int32)
         num_experts = torch.ones(self.global_expert_num, dtype=torch.int32)
         # self.update_expert_map(result_dict, log2phy_map, max_num_experts, rank_id)
-        # self.update_expert_loc_map_v1(result_dict, rank_id)
+        self.update_expert_loc_map_v1(result_dict, rank_id)
         for log_ids, phy_ids in result_dict.items():
             log2phy_map[log_ids, :len(phy_ids)] = torch.tensor(phy_ids)
             num_experts[log_ids] = len(phy_ids)
