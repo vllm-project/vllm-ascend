@@ -22,7 +22,7 @@
  {% if num_fewshot is defined and num_fewshot != "N/A" %} - **num_fewshot**: {{ num_fewshot }} {% endif %}
   - **limit**: {{ limit }}
   - **batch_size**: {{ batch_size}}
-- **Parallel Mode**: TP1
+- **Parallel Mode**: {{ parallel_mode }}
 - **Execution Mode**: ACLGraph  
 
 **Command**:  

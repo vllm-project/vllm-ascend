@@ -88,7 +88,9 @@ def generate_report(tp_size, eval_config, report_data, report_output,
         limit=eval_config.get("limit", None),
         batch_size="auto",
         num_fewshot=eval_config.get("num_fewshot", "N/A"),
-        rows=report_data["rows"])
+        rows=report_data["rows"],
+        parallel_mode=eval_config.get("parallel_mode", "TP1")
+    )
 
     os.makedirs(os.path.dirname(report_output), exist_ok=True)
     with open(report_output, 'w', encoding='utf-8') as f:
