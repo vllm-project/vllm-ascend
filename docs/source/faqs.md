@@ -4,7 +4,6 @@
 
 - [[v0.7.3.post1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1007)
 - [[v0.9.1rc2] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1487)
-- [[v0.9.2rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1742)
 - [[v0.10.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/2217)
 
 ## General FAQs
@@ -17,7 +16,7 @@ Currently, **ONLY** Atlas A2 series(Ascend-cann-kernels-910b)，Atlas A2 series(
 - Atlas 800I A2 Inference series (Atlas 800I A2)
 - Atlas A3 Training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
 - Atlas 800I A3 Inference series (Atlas 800I A3)
-- Atlas 300I Inference series (Atlas 300I Duo)
+- [Experimental] Atlas 300I Inference series (Atlas 300I Duo)
 
 Below series are NOT supported yet:
 - Atlas 200I A2 (Ascend-cann-kernels-310b) unplanned yet

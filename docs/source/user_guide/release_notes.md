@@ -5,7 +5,7 @@
 This is the 1st release candidate of v0.10.0 for vLLM Ascend. Please follow the [official doc](https://vllm-ascend.readthedocs.io/en/) to get started. V0 is completely removed from this version.
 
 ### Highlights
-* Disaggregate prefill works with V1 engine now. You can take a try with DeepSeek model [#950](https://github.com/vllm-project/vllm-ascend/pull/950), following this [tutorial](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html).
+* Disaggregate prefill works with V1 engine now. You can take a try with DeepSeek model [#950](https://github.com/vllm-project/vllm-ascend/pull/950), following this [tutorial](https://github.com/vllm-project/vllm-ascend/blob/main/examples/disaggregated_prefill_v1/README.md).
 * W4A8 quantization method is supported for dense and MoE model now. [#2060](https://github.com/vllm-project/vllm-ascend/pull/2060) [#2172](https://github.com/vllm-project/vllm-ascend/pull/2172)
 
 ### Core

@@ -37,7 +37,7 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
 
 ## Prerequisites
 
-- Hardware: Atlas 800I A2 Inference series, Atlas A2 Training series, Atlas 800I A3 Inference series, Atlas A3 Training series, Atlas 300I Duo
+- Hardware: Atlas 800I A2 Inference series, Atlas A2 Training series, Atlas 800I A3 Inference series, Atlas A3 Training series, Atlas 300I Duo (Experimental)
 - OS: Linux
 - Software:
   * Python >= 3.9, < 3.12

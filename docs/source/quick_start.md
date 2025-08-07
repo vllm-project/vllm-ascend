@@ -7,7 +7,7 @@
 - Atlas 800I A2 Inference series (Atlas 800I A2)
 - Atlas A3 Training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
 - Atlas 800I A3 Inference series (Atlas 800I A3)
-- Atlas 300I Inference series (Atlas 300I Duo)
+- [Experimental] Atlas 300I Inference series (Atlas 300I Duo)
 
 ## Setup environment using container
 
