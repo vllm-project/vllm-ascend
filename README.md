@@ -37,7 +37,7 @@ By using vLLM Ascend plugin, popular open-source models, including Transformer-l
 
 ## Prerequisites
 
-- Hardware: Atlas 800I A2 Inference series, Atlas A2 Training series
+- Hardware: Atlas 800I A2 Inference series, Atlas A2 Training series, Atlas 800I A3 Inference series, Atlas A3 Training series, Atlas 300I Duo (Experimental)
 - OS: Linux
 - Software:
   * Python >= 3.9, < 3.12
@@ -51,7 +51,7 @@ Please use the following recommended versions to get started quickly:
 
 | Version    | Release type | Doc                                  |
 |------------|--------------|--------------------------------------|
-|v0.9.2rc1|Latest release candidate|[QuickStart](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/latest/installation.html) for more details|
+|v0.10.0rc1|Latest release candidate|[QuickStart](https://vllm-ascend.readthedocs.io/en/latest/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/latest/installation.html) for more details|
 |v0.9.1rc2|Next stable release|[QuickStart](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/v0.9.1-dev/installation.html) for more details|
 |v0.7.3.post1|Latest stable version|[QuickStart](https://vllm-ascend.readthedocs.io/en/stable/quick_start.html) and [Installation](https://vllm-ascend.readthedocs.io/en/stable/installation.html) for more details|
 
@@ -73,7 +73,7 @@ Below is maintained branches:
 
 | Branch     | Status       | Note                                 |
 |------------|--------------|--------------------------------------|
-| main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.9.x branch   |
+| main       | Maintained   | CI commitment for vLLM main branch and vLLM 0.10.x branch   |
 | v0.7.1-dev | Unmaintained | Only doc fixed is allowed |
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version, only bug fix is allowed and no new release tag any more. |
 | v0.9.1-dev | Maintained   | CI commitment for vLLM 0.9.1 version |
