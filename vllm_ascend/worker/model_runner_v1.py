@@ -43,7 +43,7 @@ from vllm.distributed.kv_transfer import (get_kv_transfer_group,
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 from vllm.distributed.parallel_state import (get_dp_group, get_pp_group,
                                              get_tp_group)
-from vllm.forward_context import get_forward_context
+from vllm.forward_context import DPMetadata, get_forward_context
 from vllm.logger import logger
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -80,7 +80,6 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
 from vllm_ascend.attention.attention_v1_torchair import AscendTorchairMetadata
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
 from vllm_ascend.distributed.moe_comm_method import (AllGatherCommImpl,
-                                                     NativeAllGatherCommImpl,
                                                      DummyCommImpl,
                                                      MoECommMethod)
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
@@ -1015,6 +1014,32 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 mm_embeds.append(mm_embeds_item)
         return mm_embeds
 
+    def get_dp_padding(self,
+                       num_tokens: int) -> tuple[int, Optional[torch.Tensor]]:
+        """This implementation is derived from vLLM's `GPUModelRunner.get_dp_padding`.
+        Please note that vLLM may refactor or modify this function over time,
+        at present, we are using the version introduced in PR #18935.
+        """
+        dp_size = self.vllm_config.parallel_config.data_parallel_size
+        dp_rank = self.vllm_config.parallel_config.data_parallel_rank
+
+        # For DP: Don't pad when setting enforce_eager.
+        # This lets us set enforce_eager on the prefiller in a P/D setup and
+        # still use ACL graphs (enabled by this padding) on the decoder.
+
+        if dp_size == 1 or self.vllm_config.model_config.enforce_eager:
+            # Early exit.
+            return 0, None
+
+        num_tokens_across_dp = DPMetadata.num_tokens_across_dp(
+            num_tokens, dp_size, dp_rank)
+        max_tokens_across_dp_cpu = torch.max(num_tokens_across_dp).item()
+        num_tokens_after_padding = torch.tensor([max_tokens_across_dp_cpu] *
+                                                dp_size,
+                                                device="cpu",
+                                                dtype=torch.int32)
+        return max_tokens_across_dp_cpu - num_tokens, num_tokens_after_padding
+
     def _process_reqs(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1036,6 +1061,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         else:
             # Eager mode.
             num_input_tokens = total_num_scheduled_tokens
+
+        # Padding for DP
+        num_pad, num_tokens_across_dp_native = self.get_dp_padding(
+            num_input_tokens)
+        num_input_tokens += num_pad
 
         modified_batch = self.attn_metadata_builder.reorder_batch(
             self.input_batch, scheduler_output)
@@ -1266,8 +1296,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # NOTE: Currently this padding logic is really messy,
         # MC2 may not be available in eager mode
+        # TODO: Unify the padding logic between TorchAir and ACL Graph ASAP
         if not self.use_aclgraph or self.torchair_graph_enabled:
             num_input_tokens = padded_num_tokens_across_dp
+        else:
+            num_tokens_across_dp = num_tokens_across_dp_native
 
         # Run forward pass
         with set_ascend_forward_context(
