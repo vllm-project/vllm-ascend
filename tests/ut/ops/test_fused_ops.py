@@ -112,7 +112,7 @@ def mock_moe_env(mocker: MockerFixture):
                 torch.randn(16, 2)
         )), \
         patch("torch_npu.npu_grouped_matmul", return_value=(
-                (torch.randn(8, 2), torch.randn(8, 2))
+                [torch.randn(16, 2)]
         )), \
         patch("torch_npu.npu_swiglu", return_value=(
                 torch.randn(16, 2)
