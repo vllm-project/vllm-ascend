@@ -21,7 +21,7 @@ def pytest_addoption(parser):
     parser.addoption(
         "--config",
         action="store",
-        default="./tests/e2e/singlecard/models/configs/Qwen3-8B-Base.yaml",
+        default="./tests/e2e/models/configs/Qwen3-8B-Base.yaml",
         help="Path to the model config YAML file",
     )
     parser.addoption(
