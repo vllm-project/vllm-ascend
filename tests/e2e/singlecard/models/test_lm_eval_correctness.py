@@ -89,8 +89,7 @@ def generate_report(tp_size, eval_config, report_data, report_output,
         batch_size="auto",
         num_fewshot=eval_config.get("num_fewshot", "N/A"),
         rows=report_data["rows"],
-        parallel_mode=eval_config.get("parallel_mode", "TP1")
-    )
+        parallel_mode=eval_config.get("parallel_mode", "TP1"))
 
     os.makedirs(os.path.dirname(report_output), exist_ok=True)
     with open(report_output, 'w', encoding='utf-8') as f:
@@ -129,7 +128,7 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_output,
         for metric in task["metrics"]:
             metric_name = metric["name"]
             ground_truth = metric["value"]
-            measured_value = task_result[metric_name]
+            measured_value = float(f"{task_result[metric_name]:.4f}")  
             task_success = bool(
                 np.isclose(ground_truth, measured_value, rtol=RTOL))
             success = success and task_success
