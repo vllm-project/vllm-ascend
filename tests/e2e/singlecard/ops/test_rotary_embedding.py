@@ -248,9 +248,12 @@ class ModelwithRotaryEmbedding(nn.Module):
         o = self.o_proj(query)
         return o
 
+
 # The first graph seems will have some accuracy issue when directly run pytest on the ops folder,
 # add a warmup graph replay for workaround
 ACL_GRPAH_FIRST_RUN = True
+
+
 @pytest.mark.parametrize("is_neox_style", IS_NEOX_STYLE)
 @pytest.mark.parametrize("num_tokens", BATCH_SIZES)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -330,10 +333,10 @@ def test_capture_rotary_embedding_in_aclgraph(
     static_hidden_states.copy_(random_filled_hidden_states)
 
     aclgraph.replay()
-    aclgraph.replay()
+    global ACL_GRPAH_FIRST_RUN
     if ACL_GRPAH_FIRST_RUN:
         ACL_GRPAH_FIRST_RUN = False
-        return 
+        return
     output_reference = model(static_positions, static_hidden_states)
     torch.testing.assert_close(static_output,
                                output_reference,
