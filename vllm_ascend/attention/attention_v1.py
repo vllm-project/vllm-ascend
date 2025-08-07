@@ -151,6 +151,7 @@ class AscendMetadata:
     slot_mapping: torch.Tensor = None
 
     enable_dbo_across_dp: bool = False
+    is_only_prefill: bool = False
 
 
 class AscendAttentionMetadataBuilder:
@@ -166,7 +167,8 @@ class AscendAttentionMetadataBuilder:
               num_reqs,
               num_actual_tokens,
               max_query_len,
-              enable_dbo_across_dp: bool = False):
+              enable_dbo_across_dp: bool = False,
+              is_only_prefill: bool = False):
 
         block_table = self.runner.input_batch.block_table[0].get_device_tensor(
         )
@@ -203,7 +205,8 @@ class AscendAttentionMetadataBuilder:
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
             attn_state=attn_state,
-            enable_dbo_across_dp=enable_dbo_across_dp)
+            enable_dbo_across_dp=enable_dbo_across_dp,
+            is_only_prefill=is_only_prefill)
         return attn_metadata
 
 

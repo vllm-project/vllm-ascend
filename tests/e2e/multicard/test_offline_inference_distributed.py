@@ -234,3 +234,27 @@ def test_models_distributed_DeepSeek_W4A8DYNAMIC():
             },
     ) as vllm_model:
         vllm_model.generate_greedy(prompts, max_tokens)
+
+
+def test_sp_for_qwen3_moe() -> None:
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    sampling_params = SamplingParams(max_tokens=5,
+                                     temperature=0.0,
+                                     top_k=50,
+                                     top_p=0.9)
+
+    with VllmRunner(
+            snapshot_download("Qwen/Qwen3-30B-A3B"),
+            dtype="auto",
+            tensor_parallel_size=2,
+            distributed_executor_backend="mp",
+            compilation_config={
+                "pass_config": {
+                    "enable_sequence_parallelism": True
+                }
+            },
+            enable_expert_parallel=True,
+    ) as vllm_model:
+        vllm_model.generate(example_prompts, sampling_params)

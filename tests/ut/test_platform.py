@@ -26,6 +26,7 @@ class TestNPUPlatform(TestBase):
         self.mock_vllm_config.cache_config = MagicMock()
         self.mock_vllm_config.scheduler_config = MagicMock()
         self.mock_vllm_config.speculative_config = None
+        self.mock_vllm_config.compilation_config.pass_config.enable_sequence_parallelism = False
 
         self.mock_ascend_config = MagicMock()
         self.mock_ascend_config.torchair_graph_config.enabled = False
