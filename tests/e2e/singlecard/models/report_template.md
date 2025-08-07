@@ -7,23 +7,14 @@
   - **PyTorch**: {{ torch_version }}
   - **torch-npu**: {{ torch_npu_version }}  
 - **Hardware Environment**: Atlas A2 Series  
-- **vLLM args**:
-  - **pretrained**: {{ pretrained }}
-  - **tensor_parallel_size**: {{ tensor_parallel_size }}
-  - **dtype**: {{ dtype  }}
-  - **trust_remote_code**: {{ trust_remote_code }}
-  - **max_model_len**: {{ max_model_len }}
-- **lm-eval args**:
-  - **model**: {{ model_type }}
-  - **model_args**: vLLM args
+- **vLLM Inference Args**:
+  - **model**: {{ pretrained }}
+  - **max model len**: {{ max_model_len }}
+  - **parallel mode**: {{ parallel_mode }}
+  - **execution mode**: ACLGraph
+- **LM-eval Service Args**:
+  - **model type**: {{ model_type }}
   - **tasks**: {{ datasets }}
-  - **apply_chat_template**: {{ apply_chat_template }}
-  - **fewshot_as_multiturn**: {{ fewshot_as_multiturn }}
- {% if num_fewshot is defined and num_fewshot != "N/A" %} - **num_fewshot**: {{ num_fewshot }} {% endif %}
-  - **limit**: {{ limit }}
-  - **batch_size**: {{ batch_size}}
-- **Parallel Mode**: {{ parallel_mode }}
-- **Execution Mode**: ACLGraph  
 
 **Command**:  
 

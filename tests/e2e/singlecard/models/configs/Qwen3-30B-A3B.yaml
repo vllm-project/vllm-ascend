@@ -16,4 +16,3 @@ enable_expert_parallel: True
 tensor_parallel_size: 2
 apply_chat_template: False
 fewshot_as_multiturn: False
-parallel_mode: "TP2 + EP"
