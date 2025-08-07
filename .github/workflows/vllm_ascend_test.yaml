@@ -69,7 +69,7 @@ jobs:
             ut_tracker:
               - 'tests/ut/**'
   ut:
-    needs: [lint, changes]
+    needs: [changes]
     name: unit test
     # only trigger unit test after lint passed and the change is e2e and ut related.
     if: ${{ needs.lint.result == 'success' && (needs.changes.outputs.e2e_tracker == 'true' || needs.changes.outputs.ut_tracker == 'true') }}
@@ -130,7 +130,7 @@ jobs:
           verbose: true
 
   e2e:
-    needs: [lint, changes]
+    needs: [changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
     if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' }}
     strategy:
