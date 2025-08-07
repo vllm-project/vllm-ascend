@@ -384,6 +384,8 @@ class AscendMLAMetadataBuilder:
         graph_pad_size: int = -1,
         query_start_loc: torch.Tensor = None,
         enable_dbo_across_dp: bool = False,
+        *args,
+        **kwargs,
     ) -> AscendMLAMetadata:
         assert self._num_decodes + self._num_prefills == num_reqs
 
