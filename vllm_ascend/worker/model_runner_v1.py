@@ -108,10 +108,13 @@ import vllm.envs as envs_vllm
 
 import vllm_ascend.envs as envs_ascend
 
+<<<<<<< HEAD
 if is_310p():
     torch_npu.npu.set_compile_mode(jit_compile=False)
 
 
+=======
+>>>>>>> 14635834 ([Feat]: Add custom lmhead tensor model parallel in pure DP and graph-mode scenarios.)
 @dataclass
 class GraphCaptureContext:
     stream: torch.npu.Stream
@@ -1638,8 +1641,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                       num_scheduled_tokens_np,
                                       finished_sending, finished_recving,
                                       kv_connector_output)
-                sample_hidden_states = hidden_states[logits_indices]
-                logits = self.model.compute_logits(sample_hidden_states, None)
+                # temporary disable
+                # sample_hidden_states = hidden_states[logits_indices] 
+                # logits = self.model.compute_logits(sample_hidden_states, None)
+                if self.torchair_graph_enabled and attn_metadata.prefill is None:
+                    logits = self.model.compute_logits(hidden_states, None)
+                    logits = logits[sample_indices]
+                else:
+                    logits = self.model.compute_logits(hidden_states[sample_indices], None)
             if broadcast_pp_output:
                 model_output_broadcast_data = {
                     "logits": logits.contiguous(),
@@ -1968,6 +1977,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         inputs_embeds=None,
                         **model_kwargs,
                     )
+                    self.model.compute_logits(hidden_states, None)
                 else:
                     maybe_converting_weight_acl_format(self.model,
                                                        ACL_FORMAT_FRACTAL_ND)

@@ -47,6 +47,19 @@ class AscendConfig:
         self.expert_map_path = additional_config.get("expert_map_path", None)
         self.chunked_prefill_for_mla = additional_config.get(
             "chunked_prefill_for_mla", False)
+        self.lmhead_tensor_parallel_size = additional_config.get(
+            "lmhead_tensor_parallel_size", None)
+        if self.lmhead_tensor_parallel_size is not None:
+            logger.info(f"Enable lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size} in pure DP scenario")
+            assert(
+                vllm_config.parallel_config.tensor_parallel_size == 1
+            ),"lmhead_tensor_parallel_size is only supported in the pure DP scenario"
+            assert(
+                self.torchair_graph_config.enabled == True
+            ), "lmhead_tensor_parallel_size is only supported in graph mode"
+            assert(
+                vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
+            ),"lmhead_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
 
 
 class TorchairGraphConfig:
