@@ -69,7 +69,6 @@ class AscendRMSNorm(RMSNorm):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         import torch_npu
 
-
         if residual is not None:
             if is_310p():
                 orig_dtype = residual.dtype
