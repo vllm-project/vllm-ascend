@@ -2080,6 +2080,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 assert aclgraph_runtime_mode == _cg_mode, (
                     f"Aclgraph runtime mode mismatch at dummy_run. "
                     f"Expected {_cg_mode}, but got {aclgraph_runtime_mode}.")
+            
+            need_dummy_logits = (not self.in_profile_run and self._enable_lmhead_tp())
+            
+            if need_dummy_logits:
+                # lmhead_tp introduces additional communication across
+                # dp when computing logits. Hence we need to add it
+                # in profile_run.
+                max_num_reqs_across_dp = num_tokens if not with_prefill else self.scheduler_config.max_num_seqs
+                dummy_indices = torch.zeros(max_num_reqs_across_dp,
+                                            device=hidden_states.device,
+                                            dtype=torch.int32)
+                def dummy_compute_logits(hidden_states):
+                    return self.model.compute_logits(hidden_states[dummy_indices], None)
 
             with set_ascend_forward_context(
                     attn_metadata,
@@ -2097,6 +2110,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     with_prefill, is_torchair_compile, input_ids, positions,
                     attn_metadata, num_tokens, intermediate_tensors,
                     inputs_embeds)
+                if need_dummy_logits:
+                    dummy_compute_logits(hidden_states) 
+                
             if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
                 assert isinstance(self.drafter, MtpProposer)
                 self.drafter.dummy_run(
@@ -2105,6 +2121,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     skip_attn=True,
                     num_reqs=num_reqs,
                     num_tokens_across_dp=num_tokens_across_dp)
+                if need_dummy_logits:
+                    dummy_compute_logits(hidden_states)
+                
 
             return hidden_states
 
