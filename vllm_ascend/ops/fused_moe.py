@@ -1181,8 +1181,27 @@ class AscendFusedMoE(FusedMoE):
     ):
         # TODO: This could not initialize FusedMoE baseclass,
         # fixme and make __init__() of AscendFusedMoE more clear
-        super(FusedMoE, self).__init__()
-
+        super().__init__(
+            num_experts=num_experts,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            params_dtype=params_dtype,
+            reduce_results=reduce_results,
+            renormalize=renormalize,
+            use_grouped_topk=use_grouped_topk,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            quant_config=quant_config,
+            tp_size=tp_size,
+            ep_size=ep_size,
+            dp_size=dp_size,
+            prefix=prefix,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias,
+            activation=activation,
+        )
         AscendFusedMoE.moe_counter += 1
         self.moe_instance_id = AscendFusedMoE.moe_counter
 
