@@ -9,7 +9,7 @@ from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_world_size)
 from vllm.forward_context import get_forward_context, set_forward_context
 
-import vllm_ascend.envs as envs
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.moe_comm_method import MoECommMethod
 
 
@@ -27,7 +27,7 @@ def _get_fused_moe_state(ep_size: int, with_prefill: bool,
                          is_deepseek_v3_r1: bool):
     # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
     # only supports deepseek v3/r1
-    if (envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
+    if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
             and is_deepseek_v3_r1):
         return FusedMoEState.AllGatherEP
     elif ep_size == 1:
@@ -35,7 +35,7 @@ def _get_fused_moe_state(ep_size: int, with_prefill: bool,
             return FusedMoEState.NaiveMulticast
         else:
             return FusedMoEState.AllGather
-    elif envs.VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ:
+    elif envs_ascend.VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ:
         # MC2 Dispatch/Combine performs better than alltoall_seq in decoding stage.
         return (FusedMoEState.All2AllSeq if
                 (ep_size < 16 or with_prefill) else FusedMoEState.MC2)
