@@ -70,8 +70,6 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
         parallel_mode += " + EP"
 
     report_content = template.render(
-        pretrained=model_args["pretrained"],
-        max_model_len=model_args["max_model_len"],
         vllm_version=env_config.vllm_version,
         vllm_commit=env_config.vllm_commit,
         vllm_ascend_version=env_config.vllm_ascend_version,
