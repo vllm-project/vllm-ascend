@@ -316,7 +316,6 @@ class LLMDataDistCMgrConnectorWorker:
         self.vllm_config = vllm_config
         self.executor = ThreadPoolExecutor(1)
         self.thread_lock = threading.Lock()
-        self.cache = None  # type: ignore[has-type]
 
         self.llm_datadist_role = None
         self.llm_datadist_remote_role = None
@@ -831,12 +830,12 @@ class LLMDataDistCMgrConnectorWorker:
                 cluster_id=remote_cluster_id, model_id=1)
             logger.info("Try pull blocks from remote server")
             try:
-                self.cache_manager.pull_blocks(remote_cache_key_k_normed,
-                                               self.cache[0], remote_block_ids,
-                                               local_block_ids)
-                self.cache_manager.pull_blocks(remote_cache_key_k_pe,
-                                               self.cache[1], remote_block_ids,
-                                               local_block_ids)
+                self.cache_manager.pull_blocks(
+                    remote_cache_key_k_normed, self.cache[0], remote_block_ids,
+                    local_block_ids)  # type: ignore[has-type]
+                self.cache_manager.pull_blocks(
+                    remote_cache_key_k_pe, self.cache[1], remote_block_ids,
+                    local_block_ids)  # type: ignore[has-type]
             except (TypeError, ValueError) as e:
                 raise RuntimeError(
                     f"LLMDataDistCMgrConnectorWorker: Passing unexpected parameter to \
