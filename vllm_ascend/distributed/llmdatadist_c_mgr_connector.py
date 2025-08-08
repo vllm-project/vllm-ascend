@@ -168,7 +168,7 @@ class LLMDataDistCMgrConnector(KVConnectorBase_V1):
         pass
 
 
-class LLMDataDistCMgrConnectorScheduler():
+class LLMDataDistCMgrConnectorScheduler:
 
     def __init__(self, vllm_config: VllmConfig, engine_id: Optional[str]):
         self.vllm_config = vllm_config
@@ -181,7 +181,11 @@ class LLMDataDistCMgrConnectorScheduler():
         dp_rank_local = self.vllm_config.parallel_config.data_parallel_rank_local
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
 
-        self.port = dp_rank_local * tp_size + envs.VLLM_LLMDD_RPC_PORT if dp_rank_local is not None else tp_size + envs.VLLM_LLMDD_RPC_PORT
+        base_port = envs.VLLM_LLMDD_RPC_PORT
+        if dp_rank_local is not None:
+            self.port = dp_rank_local * tp_size + base_port
+        else:
+            self.port = tp_size + base_port
 
         self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
 
@@ -205,8 +209,8 @@ class LLMDataDistCMgrConnectorScheduler():
 
         params = request.kv_transfer_params
         logger.debug(
-            f"LLMDataDistCMgrConnector get_num_new_matched_tokens: num_computed_tokens={num_computed_tokens}, kv_transfer_params={params}"
-        )
+            f"LLMDataDistCMgrConnector get_num_new_matched_tokens: num_computed_tokens={num_computed_tokens}, \
+              kv_transfer_params={params}")
 
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
@@ -222,8 +226,8 @@ class LLMDataDistCMgrConnectorScheduler():
                                  num_externel_tokens: int):
         params = request.kv_transfer_params
         logger.debug(
-            f"LLMDataDistCMgrConnector update states num_externel_tokens: {num_externel_tokens} kv_transfer_params: {params}"
-        )
+            f"LLMDataDistCMgrConnector update states num_externel_tokens: {num_externel_tokens} \
+                kv_transfer_params: {params}")
         if params is not None and params.get("do_remote_prefill"):
             if params.get("remote_block_ids"):
                 if all(p in params for p in ("remote_engine_id", "remote_host",
@@ -287,7 +291,7 @@ class LLMDataDistCMgrConnectorScheduler():
         )
 
 
-class LLMDataDistCMgrConnectorWorker():
+class LLMDataDistCMgrConnectorWorker:
     """
   Implementation of Worker side methods
   """
@@ -323,10 +327,12 @@ class LLMDataDistCMgrConnectorWorker():
             self.llm_datadist_remote_role = LLMRole.PROMPT
         else:
             raise RuntimeError(
-                f"LLMDataDistWorker: Receive unexpected kv role in LLMDataDistWorker, this worker now only support kv_producer and kv_consumer, but receiving {vllm_config.kv_transfer_config.kv_role}"
-            )
+                f"LLMDataDistWorker: Receive unexpected kv role in LLMDataDistWorker, \
+                    this worker now only support kv_producer and kv_consumer, but receiving \
+                        {vllm_config.kv_transfer_config.kv_role}")
 
-        # linked_cluster record the cluster that already build the connection its format should be {"cluster_id": "comm_name"}
+        # linked_cluster record the cluster that already
+        # build the connection its format should be {"cluster_id": "comm_name"}
         self.linked_cluster: dict[Any, Any] = {}
         self.prefill_device_list: list[tuple[int, int]] = []
         self.decode_device_list: list[tuple[int, int]] = []
@@ -344,7 +350,8 @@ class LLMDataDistCMgrConnectorWorker():
 
     def listen_for_agent_metadata_req(self, event: threading.Event):
         assert self.local_agent_metadata is not None
-        port = envs.VLLM_LLMDD_RPC_PORT + self.local_dp_rank * self.tp_size + self.tp_rank if self.local_dp_rank is not None else envs.VLLM_LLMDD_RPC_PORT + self.tp_size + self.tp_rank
+        port = envs.VLLM_LLMDD_RPC_PORT + self.local_dp_rank * self.tp_size + self.tp_rank if self.local_dp_rank \
+              is not None else envs.VLLM_LLMDD_RPC_PORT + self.tp_size + self.tp_rank
         url = f"tcp://0.0.0.0:{port}"
         msg_encoder = msgspec.msgpack.Encoder()
         msg_decoder = msgspec.msgpack.Decoder()
@@ -353,8 +360,8 @@ class LLMDataDistCMgrConnectorWorker():
         logger.debug(
             f"The local agent metadata have {len(msg_to_send)} bytes here")
         logger.info(
-            f"LLMDataDistCMgrConnectorWorker: Cluster {self.local_agent_metadata.cluster_id} start to listen request from peers"
-        )
+            f"LLMDataDistCMgrConnectorWorker: Cluster {self.local_agent_metadata.cluster_id} \
+                start to listen request from peers")
         with zmq_ctx(zmq.ROUTER, url) as sock:  # type: ignore[attr-defined]
             event.set()
             while True:
@@ -422,7 +429,8 @@ class LLMDataDistCMgrConnectorWorker():
         self.llm_datadist.init(llm_config_options)
         self.cache_manager = self.llm_datadist.cache_manager
         logger.info(
-            f"Done initialize llm_datadist in rank {self.rank}, local rank {self.local_rank}, cluster id {self.local_agent_metadata.cluster_id}"
+            f"Done initialize llm_datadist in rank {self.rank}, local rank \
+                {self.local_rank}, cluster id {self.local_agent_metadata.cluster_id}"
         )
 
     def read_offline_rank_table(self):
@@ -430,7 +438,7 @@ class LLMDataDistCMgrConnectorWorker():
             envs.DISAGGREGATED_PREFILL_RANK_TABLE_PATH
         ), "Please set path of rank_table to env variable DISAGGREGATED_PREFILL_RANK_TABLE_PATH"
         rank_table_path = envs.DISAGGREGATED_PREFILL_RANK_TABLE_PATH
-        with open(rank_table_path, "r", encoding="utf-8") as f:
+        with open(rank_table_path, encoding="utf-8") as f:
             global_rank_table = json.load(f)
         decode_device_list = global_rank_table["decode_device_list"]
         for decode_device in decode_device_list:
@@ -492,7 +500,9 @@ class LLMDataDistCMgrConnectorWorker():
                 super_device_id=super_device_id_,
                 cluster_id=cluster_id_,
             )
-        assert agent_metadata is not None, f"Can't read the target server_id {self.local_ip} and device_rank {self.rank} from rank table"
+        assert agent_metadata is not None, f"Can't read the target server_id {self.local_ip} \
+            and device_rank {self.rank} from rank table"
+
         return agent_metadata
 
     def register_kv_caches(self, kv_caches: dict[str, Tuple[torch.Tensor]]):
@@ -545,10 +555,12 @@ class LLMDataDistCMgrConnectorWorker():
                     self.cache_desc[1], self.cache_addr[1], self.cache_key[1])
                 self.cache = (cache_k_normed, cache_k_pe)
                 logger.info("LLMDataDistWorker: End of register Paged Cache.")
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as e:
                 raise RuntimeError(
-                    f"LLMDataDistCMgrConnectorWorker: Passing unexpected parameter to register_block_cache, receiving [cache_desc: {self.cache_desc}, cache_addr: {self.cache_addr}, cache_key: {self.cache_key}]"
-                )
+                    f"LLMDataDistCMgrConnectorWorker: Passing unexpected parameter \
+                        to register_block_cache, receiving [cache_desc: {self.cache_desc}, \
+                            cache_addr: {self.cache_addr}, cache_key: {self.cache_key}]"
+                ) from e
         else:
             for cache_or_caches in kv_caches.values():
                 for cache in cache_or_caches:
@@ -562,18 +574,20 @@ class LLMDataDistCMgrConnectorWorker():
             self.cache_key = BlocksCacheKey(
                 cluster_id=int(self.local_agent_metadata.cluster_id))
             logger.info(
-                f"num of cache: {len(self.cache_addr)}, size of cache: {[*cache.shape]}, real size of cache: {first_kv_cache.shape}"
-            )
+                f"num of cache: {len(self.cache_addr)}, size of cache: {[*cache.shape]}, \
+                    real size of cache: {first_kv_cache.shape}")
             try:
                 self.cache = self.cache_manager.register_blocks_cache(
                     self.cache_desc, self.cache_addr, self.cache_key)
                 logger.info(
                     "LLMDataDistCMgrConnectorWorker: End of register Paged Cache."
                 )
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as e:
                 raise RuntimeError(
-                    f"LLMDataDistCMgrConnectorWorker: Passing unexpected parameter to register_block_cache, receiving [cache_desc: {self.cache_desc}, cache_addr: {self.cache_addr}, cache_key: {self.cache_key}]"
-                )
+                    f"LLMDataDistCMgrConnectorWorker: Passing unexpected parameter \
+                        to register_block_cache, \receiving [cache_desc: {self.cache_desc}, \
+                            cache_addr: {self.cache_addr}, cache_key: {self.cache_key}]"
+                ) from e
         self.ready_event = threading.Event()
         self.metadata_agent_listener_t = threading.Thread(
             target=self.listen_for_agent_metadata_req,
@@ -611,8 +625,8 @@ class LLMDataDistCMgrConnectorWorker():
         remote_cluster_id = metadata.cluster_id
         if remote_cluster_id in self.linked_cluster:
             logger.debug(
-                f"LLMDataDistCMgrConnectorWorker: remote cluster_id: {metadata.cluster_id} already linked with this server, skip the connection"
-            )
+                f"LLMDataDistCMgrConnectorWorker: remote cluster_id: {metadata.cluster_id} \
+                    already linked with this server, skip the connection")
             return remote_cluster_id
         remote_super_pod_id = metadata.super_pod_id
         remote_server_id = metadata.server_id
@@ -736,16 +750,16 @@ class LLMDataDistCMgrConnectorWorker():
     def remove_remote_agent(self, cluster_id: int):
         if cluster_id not in self.linked_cluster:
             logger.warning(
-                f"LLMDataDistCMgrConnectorWorker: Warning! Can't remove remote client with cluster id {cluster_id} for its not exist in linked_cluster list"
-            )
+                f"LLMDataDistCMgrConnectorWorker: Warning! Can't remove remote client with cluster id \
+                    {cluster_id} for its not exist in linked_cluster list")
         comm_id = self.linked_cluster[cluster_id]
         try:
             self.llm_datadist.unlink(comm_id)
             self.linked_cluster.pop(cluster_id)
         except LLMException:
             logger.error(
-                f"Try to remove remote client with cluster id {cluster_id} failed!, program won't terminate, but please carefully check your environment"
-            )
+                f"Try to remove remote client with cluster id {cluster_id} failed!, program won't terminate, \
+                    but please carefully check your environment")
         logger.info(
             f"Successfully remove remote client with cluster id {cluster_id} !"
         )
@@ -826,14 +840,20 @@ class LLMDataDistCMgrConnectorWorker():
                     self.cache[1],  # type: ignore[has-type]    
                     remote_block_ids,
                     local_block_ids)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as e:
                 raise RuntimeError(
-                    f"LLMDataDistCMgrConnectorWorker: Passing unexpected parameter to pull_blocks remote_cache_key: {remote_cache_key_k_normed} {remote_cache_key_k_pe}, cache: {self.cache}, local_block_ids: {local_block_ids}, remote_block_ids: {remote_block_ids}"  # type: ignore[has-type]
-                )
-            except LLMException:
+                    f"LLMDataDistCMgrConnectorWorker: Passing unexpected parameter to \
+                        pull_blocks remote_cache_key: {remote_cache_key_k_normed} {remote_cache_key_k_pe}, \
+                            cache: {self.cache}, local_block_ids: {local_block_ids}, \
+                                remote_block_ids: {remote_block_ids}"
+
+                    # type: ignore[has-type]
+                ) from e
+            except LLMException as e:
                 raise RuntimeError(
-                    "LLMDataDistCMgrConnectorWorker: Timeout during pull_blocks, you can try to increase the sync_kv_timeout config or checking your connect status"
-                )
+                    "LLMDataDistCMgrConnectorWorker: Timeout during pull_blocks, \
+                        you can try to increase the sync_kv_timeout config or checking your connect status"
+                ) from e
         else:
             remote_cache_key = BlocksCacheKey(cluster_id=remote_cluster_id)
             logger.info("Try pull blocks from remote server")
@@ -843,14 +863,20 @@ class LLMDataDistCMgrConnectorWorker():
                     self.cache,  # type: ignore[has-type]
                     remote_block_ids,
                     local_block_ids)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError) as e:
                 raise RuntimeError(
-                    f"LLMDataDistCMgrConnectorWorker: Passing unexpected parameter to pull_blocks remote_cache_key: {remote_cache_key}, cache: {self.cache}, local_block_ids: {local_block_ids}, remote_block_ids: {remote_block_ids}"  # type: ignore[has-type]
-                )
-            except LLMException:
+                    f"LLMDataDistCMgrConnectorWorker: Passing unexpected \
+                        parameter to pull_blocks remote_cache_key: {remote_cache_key}, \
+                            cache: {self.cache}, local_block_ids: {local_block_ids}, \
+                                remote_block_ids: {remote_block_ids}"
+
+                    # type: ignore[has-type]
+                ) from e
+            except LLMException as e:
                 raise RuntimeError(
-                    "LLMDataDistCMgrConnectorWorker: Timeout during pull_blocks, you can try to increase the sync_kv_timeout config or checking your connect status"
-                )
+                    "LLMDataDistCMgrConnectorWorker: Timeout during pull_blocks, you can \
+                        try to increase the sync_kv_timeout config or checking your connect status"
+                ) from e
         self.send_finish_to_remote(remote_ip, remote_port, request_id)
         with self.thread_lock:
             self.finished_reqs.add(request_id)
@@ -869,7 +895,8 @@ class LLMDataDistCMgrConnectorWorker():
             return None, req_ids_to_ret
 
 
-# adopt this from  https://github.com/vllm-project/vllm/blob/main/vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
+# adopt this from
+# https://github.com/vllm-project/vllm/blob/main/vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any,
             addr: str) -> Iterator[zmq.Socket]:  # type: ignore[name-defined]

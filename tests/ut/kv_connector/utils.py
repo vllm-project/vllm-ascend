@@ -148,10 +148,9 @@ def create_request(
     max_tokens = 1 if do_remote_decode else max_tokens
     sampling_params = SamplingParams(max_tokens=max_tokens)
 
-    if use_all_1s_for_prompt_tokens:
-        prompt_token_ids = [1] * num_tokens
-    else:
-        prompt_token_ids = [i * request_id for i in range(num_tokens)]
+    prompt_token_ids = [1] * num_tokens if use_all_1s_for_prompt_tokens else [
+        i * request_id for i in range(num_tokens)
+    ]
 
     req = Request(
         request_id=f"id-{request_id}",
@@ -188,8 +187,8 @@ def create_model_runner_output(
     # Make output data structure.
     extra_args = {}
     if not vllm_version_is("0.10.0"):
-        from vllm.v1.worker.kv_connector_model_runner_mixin import \
-            KVConnectorOutput  # type: ignore  # noqa
+        from vllm.v1.worker.kv_connector_model_runner_mixin import (  # type: ignore  # noqa
+            KVConnectorOutput)
         kv_connector_output = KVConnectorOutput(
             finished_sending=finished_sending,
             finished_recving=finished_recving)

@@ -25,8 +25,8 @@ from vllm.distributed.parallel_state import (get_world_group,
 from vllm.utils import update_environment_variables
 
 from tests.e2e.conftest import cleanup_dist_env_and_memory
-from vllm_ascend.distributed.device_communicators.pyhccl import \
-    PyHcclCommunicator
+from vllm_ascend.distributed.device_communicators.pyhccl import (
+    PyHcclCommunicator)
 
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 

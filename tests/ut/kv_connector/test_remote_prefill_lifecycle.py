@@ -94,8 +94,8 @@ def test_basic_lifecycle():
     if vllm_version_is("0.10.0"):
         model_runner_output.finished_recving = [request_id]
     else:
-        from vllm.v1.worker.kv_connector_model_runner_mixin import \
-            KVConnectorOutput  # type: ignore  # noqa
+        from vllm.v1.worker.kv_connector_model_runner_mixin import (  # type: ignore  # noqa
+            KVConnectorOutput)
         model_runner_output.kv_connector_output = KVConnectorOutput(
             finished_recving=[request_id])
 
@@ -214,8 +214,8 @@ def test_full_block_prompt():
     if vllm_version_is("0.10.0"):
         model_runner_output.finished_recving = [request_id]
     else:
-        from vllm.v1.worker.kv_connector_model_runner_mixin import \
-            KVConnectorOutput  # type: ignore  # noqa
+        from vllm.v1.worker.kv_connector_model_runner_mixin import (  # type: ignore  # noqa
+            KVConnectorOutput)
         model_runner_output.kv_connector_output = KVConnectorOutput(
             finished_recving=[request_id])
     scheduler.update_from_output(scheduler_output, model_runner_output)
