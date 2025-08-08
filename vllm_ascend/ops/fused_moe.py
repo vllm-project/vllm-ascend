@@ -324,35 +324,6 @@ def apply_mlp(
 
     return hidden_states
 
-    w1 = w1.transpose(1, 2)
-
-    group_list = expert_token_nums.to(torch.int64)
-    gate_up_out_list = torch_npu.npu_grouped_matmul(
-        x=[expand_x],
-        weight=[w1],
-        split_item=2,
-        # 1 means count mode, to avoid cumulative operation of the group list
-        group_list_type=1,
-        group_type=0,
-        group_list=group_list,
-    )
-
-    # TODO: Remove this in the future.
-    gate_up_out = torch.cat(gate_up_out_list, dim=0)
-    gate_up_out = torch_npu.npu_swiglu(gate_up_out)
-
-    w2 = w2.transpose(1, 2)
-    down_out_list = torch_npu.npu_grouped_matmul(
-        x=[gate_up_out],
-        weight=[w2],
-        split_item=2,
-        group_list_type=1,
-        group_type=0,
-        group_list=group_list,
-    )
-
-    down_out_list = torch.cat(down_out_list, dim=0)
-
 
 # currently expert parallelism implemented with all2all
 # is under-optimized.
