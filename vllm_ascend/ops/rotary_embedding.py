@@ -305,7 +305,8 @@ def rope_forward(
     is_prefill: Optional[bool] = True,
     is_qwen_torchair: Optional[bool] = False,
 ):
-    if not get_ascend_config().torchair_graph_config.enabled or is_prefill:
+    if (not get_ascend_config().torchair_graph_config.enabled
+            or not is_qwen_torchair or is_prefill):
         return rope_forward_oot(self, positions, query, key, offsets,
                                 is_neox_style_override,
                                 is_qwen_torchair)  # type: ignore

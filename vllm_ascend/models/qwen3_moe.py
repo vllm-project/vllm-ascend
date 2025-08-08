@@ -373,9 +373,7 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
 
         if not self.use_aclgraph:
             hidden_states = self.mlp(
-                hidden_states,
-                attn_metadata,
-                _metadata_for_padding=_metadata_for_padding)
+                hidden_states, _metadata_for_padding=_metadata_for_padding)
         else:
             hidden_states = self.mlp(hidden_states)
 
