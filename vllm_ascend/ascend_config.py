@@ -29,18 +29,39 @@ class AscendConfig:
 
         torchair_graph_config = additional_config.get("torchair_graph_config",
                                                       {})
-        self.torchair_graph_config = TorchairGraphConfig(torchair_graph_config)
+        self.torchair_graph_config = TorchairGraphConfig(
+            torchair_graph_config
+        )  # The config options for torchair graph mode.
 
         ascend_scheduler_config = additional_config.get(
             "ascend_scheduler_config", {})
         self.ascend_scheduler_config = AscendSchedulerConfig(
-            ascend_scheduler_config)
+            ascend_scheduler_config
+        )  # The config options for ascend scheduler.
 
-        self.expert_map_path = additional_config.get("expert_map_path", None)
-        self.chunked_prefill_for_mla = additional_config.get(
-            "chunked_prefill_for_mla", False)
+        self.expert_map_path = additional_config.get(
+            "expert_map_path", None
+        )  # When using expert load balancing for the MOE model, an expert map path needs to be passed in
+        self.dynamic_eplb = additional_config.get(
+            "dynamic_eplb",
+            False)  # Whether to enable dynamic expert load balancing
+        self.num_iterations_eplb_update = additional_config.get(
+            "num_iterations_eplb_update", 400
+        )  # Frenquency (in iterations) at which EPLB recalculates and redistributes expert loads
+        self.gate_eplb = additional_config.get(
+            "gate_eplb", False
+        )  # If set to True, the EPLB process will run only once; If False, it will execute periodically
+        self.num_wait_worker_iterations = additional_config.get(
+            "num_wait_worker_iterations", 30
+        )  # Number of iterations to wait before applying a redistribution plan
         self.enable_weight_nz_layout = additional_config.get(
-            "enable_weight_nz_layout", False)
+            "enable_weight_nz_layout", False
+        )  # Whether to convert quantized weights to NZ format to accelerate matrix multiplication
+        self.enable_prefill_optimizations = additional_config.get(
+            "enable_prefill_optimizations",
+            False)  # Whether to enable DeepSeek models' prefill optimizations
+        self.enable_cpu_binding = additional_config.get(  # Whether to enable the cpu binding
+            "enable_cpu_binding", False)
 
 
 class TorchairGraphConfig:
@@ -49,20 +70,30 @@ class TorchairGraphConfig:
     """
 
     def __init__(self, torchair_graph_config):
-        self.enabled = torchair_graph_config.get("enabled", False)
+        self.enabled = torchair_graph_config.get(
+            "enabled", False
+        )  # Whether to enable torchair graph mode. Currently only DeepSeek series models and PanguProMoE are supported to use torchair graph mode
         self.use_cached_graph = torchair_graph_config.get(
-            "use_cached_graph", False)
+            "use_cached_graph", False)  # Whether to use cached graph
         self.graph_batch_sizes = torchair_graph_config.get(
-            "graph_batch_sizes", [])
+            "graph_batch_sizes", [])  # The batch size for torchair graph cache
         self.graph_batch_sizes_init = torchair_graph_config.get(
-            "graph_batch_sizes_init", False)
+            "graph_batch_sizes_init", False
+        )  # Init graph batch size dynamically if graph_batch_sizes is empty
         self.enable_multistream_mla = torchair_graph_config.get(
-            "enable_multistream_mla", False)
+            "enable_multistream_mla", False
+        )  # Whether to put vector ops of MLA to another stream. This option only takes effects on models using MLA(e.g., DeepSeek)
         self.enable_multistream_moe = torchair_graph_config.get(
-            "enable_multistream_moe", False)
+            "enable_multistream_moe", False
+        )  # Whether to enable multistream shared expert. This option only takes effects on DeepSeek moe models
         self.enable_view_optimize = torchair_graph_config.get(
-            "enable_view_optimize", True)
-        self.enable_kv_nz = torchair_graph_config.get("enable_kv_nz", False)
+            "enable_view_optimize",
+            True)  # Whether to enable torchair view optimization
+        self.enable_kv_nz = torchair_graph_config.get(
+            "enable_kv_nz", False
+        )  # Whether to enable kvcache NZ layout. This option only takes effects on models using MLA(e.g., DeepSeek)
+        self.enable_super_kernel = torchair_graph_config.get(
+            "enable_super_kernel", False)  # Whether to enable super kernel
 
         if not isinstance(self.graph_batch_sizes, list):
             raise TypeError("graph_batch_sizes must be list[int]")
@@ -94,6 +125,15 @@ class TorchairGraphConfig:
             if self.enable_kv_nz:
                 raise RuntimeError(
                     "enable_kv_nz is valid only when Torchair graph mode is enabled"
+                )
+            if self.enable_super_kernel:
+                raise RuntimeError(
+                    "enable_super_kernel is valid only when Torchair graph mode and enable_multistream_moe is enabled"
+                )
+        if not self.enable_multistream_moe:
+            if self.enable_super_kernel:
+                raise RuntimeError(
+                    "enable_super_kernel is valid only when Torchair graph mode and enable_multistream_moe is enabled"
                 )
 
 

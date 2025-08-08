@@ -233,7 +233,7 @@ class AscendW4A8DynamicFusedMoEMethod:
         log2phy: torch.Tensor = None,
         global_redundant_expert_num: int = 0,
         shared_experts: Optional[Any] = None,
-        quantized_x_for_share: Optional[Any] = None,
+        hidden_states_for_share: Optional[Any] = None,
         dynamic_scale_for_share: Optional[Any] = None,
         **kwargs,
     ) -> torch.Tensor:
@@ -273,9 +273,9 @@ class AscendW4A8DynamicFusedMoEMethod:
         shared_gate_up, shared_dequant_scale = None, None
         if shared_experts is not None and fused_moe_state == FusedMoEState.MC2:
             with npu_stream_switch("moe_secondary", 0):
-                npu_wait_tensor(quantized_x_for_share, router_logits)
+                npu_wait_tensor(hidden_states_for_share, router_logits)
                 share_up_out, _ = shared_experts.gate_up_proj(
-                    (quantized_x_for_share, dynamic_scale_for_share))
+                    (hidden_states_for_share, dynamic_scale_for_share))
                 shared_gate_up, shared_dequant_scale = share_up_out[
                     0], share_up_out[1]
 
@@ -306,7 +306,7 @@ class AscendW4A8DynamicFusedMoEMethod:
                 global_redundant_expert_num=global_redundant_expert_num,
                 shared_experts=shared_experts,
                 is_torchair=self.torchair_graph_enabled,
-                quantized_x_for_share=shared_gate_up,
+                hidden_states_for_share=shared_gate_up,
                 dynamic_scale_for_share=shared_dequant_scale,
                 mc2_mask=kwargs.get("mc2_mask", None))
         else:

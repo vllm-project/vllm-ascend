@@ -30,6 +30,9 @@ def register_model():
     import vllm_ascend.patch.worker.patch_common.patch_utils  # noqa: F401
 
     from .models import register_model
-    if envs.VLLM_USE_V1:
+
+    import vllm_ascend.envs as envs_ascend  # isort: skip  # noqa: F401
+    if envs.VLLM_USE_V1 and \
+        envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM != 0:
         import vllm_ascend.patch.platform.patch_0_9_1.patch_decorator  # isort: skip  # noqa: F401
     register_model()

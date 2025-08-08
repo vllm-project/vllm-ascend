@@ -35,7 +35,7 @@ docker pull m.daocloud.io/quay.io/ascend/vllm-ascend:$TAG
 
 ### 3. What models does vllm-ascend supports?
 
-Find more details [<u>here</u>](https://vllm-ascend.readthedocs.io/en/latest/user_guide/supported_models.html).
+Find more details [<u>here</u>](https://vllm-ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_models.html).
 
 ### 4. How to get in touch with our community?
 
@@ -48,7 +48,7 @@ There are many channels that you can communicate with our community developers /
 
 ### 5. What features does vllm-ascend V1 supports?
 
-Find more details [<u>here</u>](https://github.com/vllm-project/vllm-ascend/issues/414).
+Find more details [<u>here</u>](https://vllm-ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_features.html).
 
 ### 6. How to solve the problem of "Failed to infer device type" or "libatb.so: cannot open shared object file"?
 
@@ -69,7 +69,7 @@ If all above steps are not working, feel free to submit a GitHub issue.
 
 ### 7. How does vllm-ascend perform?
 
-Currently, only some models are improved. Such as `Qwen2 VL`, `Deepseek  V3`. Others are not good enough. From 0.9.0rc2, Qwen and Deepseek works with graph mode to play a good performance. What's more, you can install `mindie-turbo` with `vllm-ascend v0.7.3` to speed up the inference as well.
+Currently, only some models are improved. Such as `Qwen2.5 VL`, `Qwen3`, `Deepseek  V3`. Others are not good enough. From 0.9.0rc2, Qwen and Deepseek works with graph mode to play a good performance. What's more, you can install `mindie-turbo` with `vllm-ascend v0.7.3` to speed up the inference as well.
 
 ### 8. How vllm-ascend work with vllm?
 vllm-ascend is a plugin for vllm. Basically, the version of vllm-ascend is the same as the version of vllm. For example, if you use vllm 0.7.3, you should use vllm-ascend 0.7.3 as well. For main branch, we will make sure `vllm-ascend` and `vllm` are compatible by each commit.
@@ -84,9 +84,9 @@ Currently, w8a8 quantization is already supported by vllm-ascend originally on v
 
 ### 11. How to run w8a8 DeepSeek model?
 
-Please following the [quantization inferencing tutorail](https://vllm-ascend.readthedocs.io/en/main/tutorials/multi_npu_quantization.html) and replace model to DeepSeek.
+Please following the [inferencing tutorail](https://vllm-ascend.readthedocs.io/en/latest/tutorials/multi_node.html) and replace model to DeepSeek.
 
-### 12. There is not output in log when loading models using vllm-ascend, How to solve it?
+### 12. There is no output in log when loading models using vllm-ascend, How to solve it?
 
 If you're using vllm 0.7.3 version, this is a known progress bar display issue in VLLM, which has been resolved in [this PR](https://github.com/vllm-project/vllm/pull/12428), please cherry-pick it locally by yourself. Otherwise, please fill up an issue.
 
@@ -94,9 +94,9 @@ If you're using vllm 0.7.3 version, this is a known progress bar display issue i
 
 vllm-ascend is tested by functional test, performance test and accuracy test.
 
-- **Functional test**: we added CI, includes portion of vllm's native unit tests and vllm-ascend's own unit tests，on vllm-ascend's test, we test basic functionality、popular models availability and [supported features](https://vllm-ascend.readthedocs.io/en/latest/user_guide/suppoted_features.html) via e2e test
+- **Functional test**: we added CI, includes portion of vllm's native unit tests and vllm-ascend's own unit tests，on vllm-ascend's test, we test basic functionality、popular models availability and [supported features](https://vllm-ascend.readthedocs.io/en/latest/user_guide/support_matrix/supported_features.html) via e2e test
 
-- **Performance test**: we provide [benchmark](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks) tools for end-to-end performance benchmark which can easily to re-route locally, we'll publish a perf website like [vllm](https://simon-mo-workspace.observablehq.cloud/vllm-dashboard-v0/perf) does to show the performance test results for each pull request
+- **Performance test**: we provide [benchmark](https://github.com/vllm-project/vllm-ascend/tree/main/benchmarks) tools for end-to-end performance benchmark which can easily to re-route locally, we'll publish a perf website to show the performance test results for each pull request
 
 - **Accuracy test**: we're working on adding accuracy test to CI as well.
 
@@ -126,3 +126,44 @@ And if you're using DeepSeek-V3 or DeepSeek-R1, please make sure after the tenso
 
 ### 17. Failed to reinstall vllm-ascend from source after uninstalling vllm-ascend?
 You may encounter the problem of C compilation failure when reinstalling vllm-ascend from source using pip. If the installation fails, it is recommended to use `python setup.py install` to install, or use `python setup.py clean` to clear the cache.
+
+### 18. How to generate determinitic results when using vllm-ascend?
+There are several factors that affect output certainty:
+
+1. Sampler Method: using **Greedy sample** by setting `temperature=0` in `SamplingParams`, e.g.:
+
+```python
+from vllm import LLM, SamplingParams
+
+prompts = [
+    "Hello, my name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+]
+
+# Create a sampling params object.
+sampling_params = SamplingParams(temperature=0)
+# Create an LLM.
+llm = LLM(model="Qwen/Qwen2.5-0.5B-Instruct")
+
+# Generate texts from the prompts.
+outputs = llm.generate(prompts, sampling_params)
+for output in outputs:
+    prompt = output.prompt
+    generated_text = output.outputs[0].text
+    print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+```
+
+2. Set the following enveriments parameters:
+
+```bash
+export LCCL_DETERMINISTIC = 1
+export HCCL_DETERMINISTIC = 1
+export ATB_MATMUL_SHUFFLE_K_ENABLE = 0
+export ATB_LLM_LCOC_ENABLE = 0
+```
+
+### 19. How to fix the error "ImportError: Please install vllm[audio] for audio support" for Qwen2.5-Omni model？
+The `Qwen2.5-Omni` model requires the `librosa` package to be installed, you need to install the `qwen-omni-utils` package to ensure all dependencies are met `pip install qwen-omni-utils`,
+this package will install `librosa` and its related dependencies, resolving the `ImportError: No module named 'librosa'` issue and ensuring audio processing functionality works correctly.

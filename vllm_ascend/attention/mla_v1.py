@@ -21,7 +21,6 @@ from vllm_ascend.attention.utils import \
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
-from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
 from vllm_ascend.utils import npu_prefetch, npu_stream_switch, npu_wait_tensor
 
 if TYPE_CHECKING:
@@ -94,7 +93,7 @@ class AscendMLADecodeMetadata:
     seq_lens: torch.Tensor
     max_seq_lens: int
     seq_lens_list: list[int]
-    actual_seq_q_lens: Optional[list[int]] = None
+    actual_seq_lengths_q: Optional[list[int]] = None
     attn_mask: Optional[torch.Tensor] = None
     sin: torch.Tensor = None
     cos: torch.Tensor = None
@@ -131,7 +130,6 @@ class AscendMLAMetadata:
     num_input_tokens: int = 0  # Number of tokens including padding.
 
     enable_dbo_across_dp: bool = False
-    is_mtp_model: bool = False
 
     query_lens: Optional[list[int]] = None
     # The dimension of the attention heads
@@ -212,6 +210,9 @@ class AscendMLAMetadataBuilder:
         self.rope_dim = self.runner.model_config.hf_text_config.qk_rope_head_dim
         self.cos_cache = None
         self.sin_cache = None
+        self.prefill_attn_mask = torch.triu(
+            torch.ones(512, 512, device=runner.device, dtype=runner.dtype),
+            1)  # 512: mask only support 512
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -313,7 +314,6 @@ class AscendMLAMetadataBuilder:
         self,
         num_reqs: int,
         num_actual_tokens: int,
-        is_mtp_model: bool = False,
     ) -> AscendMLAMetadata:
         device = self.runner.device
         _, max_blocks = self.runner.graph_block_tables.shape
@@ -337,7 +337,7 @@ class AscendMLAMetadataBuilder:
                                      dtype=torch.int32,
                                      device=device)
         if self.runner.speculative_config is not None and\
-            self.runner.speculative_config.method == 'deepseek_mtp' and not is_mtp_model:
+            self.runner.speculative_config.method == 'deepseek_mtp':
             attn_state = AscendAttentionState.SpecDecoding
             num_decode_tokens = 2
         else:
@@ -362,7 +362,7 @@ class AscendMLAMetadataBuilder:
             seq_lens_list=seq_lens_list,
             max_seq_lens=1,
             attn_mask=self.runner.spec_attn_mask,
-            actual_seq_q_lens=self.runner.actual_seq_q_lens[:num_reqs],
+            actual_seq_lengths_q=self.runner.actual_seq_lengths_q[:num_reqs],
             sin=sin,
             cos=cos)
         return self.metadata_cls(  # type: ignore
@@ -380,7 +380,6 @@ class AscendMLAMetadataBuilder:
             query_start_loc=query_start_loc,
             seq_lens=seq_lens,
             block_tables=block_table,
-            is_mtp_model=is_mtp_model,
         )
 
     def build(
@@ -393,7 +392,8 @@ class AscendMLAMetadataBuilder:
         num_token_pad_size: int = -1,
         num_reqs_pad_size: int = 0,
         enable_dbo_across_dp: bool = False,
-        is_mtp_model: bool = False,
+        *args,
+        **kwargs,
     ) -> AscendMLAMetadata:
         assert self._num_decodes + self._num_prefills == num_reqs
 
@@ -481,7 +481,7 @@ class AscendMLAMetadataBuilder:
                 prefill_input_positions].unsqueeze(  # type: ignore
                     1).unsqueeze(2)
             prefill_metadata = AscendMLAPrefillMetadata(
-                attn_mask=self.runner.attn_mask,
+                attn_mask=self.prefill_attn_mask,
                 query_lens=query_lens[tokens_start:],
                 seq_lens=seq_lens,
                 context_lens=seq_lens[tokens_start:],
@@ -498,7 +498,7 @@ class AscendMLAMetadataBuilder:
         decode_metadata = None
         use_torchair_graph = num_token_pad_size != -1
         if self._num_decodes > 0:
-            actual_seq_q_lens = query_start_loc[1:].tolist()
+            actual_seq_lengths_q = query_start_loc[1:].tolist()
             max_seq_lens = seq_lens[:self._num_decodes].max().item()
             seq_lens = seq_lens[:self._num_decode_tokens]
             input_positions = input_positions[:self._num_decode_tokens]
@@ -534,16 +534,16 @@ class AscendMLAMetadataBuilder:
                                         dtype=input_positions.dtype,
                                         device=input_positions.device)
                 input_positions = torch.cat([input_positions, padding_0])
-                actual_seq_q_lens = query_start_loc[1:].tolist(
-                ) + self.runner.actual_seq_q_lens[num_reqs:num_reqs +
-                                                  num_reqs_pad_size]
-                # mtp torchair + PD scenario, last element of actual_seq_q_lens must equal to num_padded_token_size
-                num_padded_token_size = slot_mapping.size(0)
-                if actual_seq_q_lens[-1] != num_padded_token_size \
-                    and self.runner.attn_state == AscendAttentionState.SpecDecoding:
-                    actual_seq_q_lens[-1] = num_padded_token_size
+                actual_seq_lengths_q = query_start_loc[1:].tolist(
+                ) + self.runner.actual_seq_lengths_q[num_reqs:num_reqs +
+                                                     num_reqs_pad_size]
             else:
                 seq_lens_list = seq_lens.tolist()
+            # mtp torchair + PD scenario, last element of actual_seq_lengths_q must equal to batch_size(num_tokens)
+            batch_size = slot_mapping.size(0)
+            if actual_seq_lengths_q[-1] != batch_size \
+                and self.runner.attn_state == AscendAttentionState.SpecDecoding:
+                actual_seq_lengths_q[-1] = batch_size
 
             cos = self.cos_cache[input_positions].unsqueeze(  # type: ignore
                 1).unsqueeze(2)
@@ -557,7 +557,7 @@ class AscendMLAMetadataBuilder:
                 seq_lens_list=seq_lens_list,
                 max_seq_lens=max_seq_lens,
                 attn_mask=self.runner.spec_attn_mask,
-                actual_seq_q_lens=actual_seq_q_lens,
+                actual_seq_lengths_q=actual_seq_lengths_q,
                 sin=sin,
                 cos=cos)
 
@@ -577,7 +577,6 @@ class AscendMLAMetadataBuilder:
             block_tables=block_table,
             seq_lens=seq_lens,
             enable_dbo_across_dp=enable_dbo_across_dp,
-            is_mtp_model=is_mtp_model,
         )
 
 
@@ -640,6 +639,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         x = torch.bmm(x, self.W_UV)
         # Convert from (N, B, V) to (B, N * V)
         x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+        if not self.running_in_graph:
+            return x
         MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024  # 16MB
         npu_prefetch(self.o_proj.weight,
                      x,
@@ -768,16 +769,13 @@ class AscendMLAImpl(MLAAttentionImpl):
             k_nope, v = kv_nope\
                 .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
-            mask = torch.triu(
-                torch.ones(512, 512, device=query.device, dtype=query.dtype),
-                1)
             torch_npu.atb.npu_ring_mla(
                 q_nope=q_nope,
                 q_rope=q_pe,
                 k_nope=k_nope,
                 k_rope=k_pe,
                 value=v,
-                mask=mask,
+                mask=prefill_metadata.attn_mask,
                 seqlen=seq_len,
                 head_num=self.num_heads,
                 kv_head_num=self.num_heads,
@@ -809,109 +807,41 @@ class AscendMLAImpl(MLAAttentionImpl):
                                   self.v_head_dim,
                                   dtype=query.dtype,
                                   device=query.device)
+        attn_lse = torch.empty(self.num_heads,
+                               num_tokens,
+                               dtype=torch.float32,
+                               device=query.device)
         k_nope, value = self.kv_b_proj(kv_c_normed)[0].view(
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim).split(
                 [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
         k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
-        # Here is only 2 possibility of input, ChunkedPrefill or PrefillNoCache
-        ascend_config = get_ascend_config()
-
-        if attn_metadata.attn_state in [
-                AscendAttentionState.ChunkedPrefill,
-                AscendAttentionState.SpecDecoding,
-                AscendAttentionState.PrefillCacheHit
-        ] and not ascend_config.chunked_prefill_for_mla:
-            attn_output_torch = torch.empty(num_tokens,
-                                            self.num_heads * self.v_head_dim,
-                                            dtype=query.dtype,
-                                            device=query.device)
-            # current requests is chunked in prefill, disable flash attention with chunked prefill
-            vanilla_chunked_prefill_mla(
-                output=attn_output_torch,
-                query=query,
-                kv_cache=kv_c_and_k_pe_cache,
-                block_tables=attn_metadata.prefill.block_table,
-                query_lens=attn_metadata.prefill.query_lens,
-                context_lens=attn_metadata.prefill.context_lens,
-                kv_b_proj=self.kv_b_proj,
-                max_query_len=attn_metadata.prefill.max_query_len,
-                max_context_len=attn_metadata.prefill.max_seq_lens,
-                nope_dim=self.qk_nope_head_dim,
-                rope_dim=self.qk_rope_head_dim,
-                v_head_dim=self.v_head_dim,
-                scale=self.scale,
-                alibi_slopes=None,
-                causal=True)
-        elif attn_metadata.attn_state in [
-                AscendAttentionState.ChunkedPrefill,
-                AscendAttentionState.SpecDecoding,
-                AscendAttentionState.PrefillCacheHit
-        ]:
-            attn_lse = torch.empty(self.num_heads,
-                                   num_tokens,
-                                   dtype=torch.float32,
-                                   device=query.device)
-            q_pe = query[..., self.qk_nope_head_dim:]
-            q_nope = query[..., :self.qk_nope_head_dim]
-            mask = torch.triu(
-                torch.ones(512, 512, device=query.device, dtype=query.dtype),
-                1)  # 512: mask only support 512
-            if attn_metadata.num_prefills > 1:
-                mask = mask.unsqueeze(0).repeat(attn_metadata.num_prefills, 1,
-                                                1)
-            torch_npu.atb.npu_ring_mla(
-                q_nope=q_nope,
-                q_rope=q_pe,
-                k_nope=k_nope,
-                k_rope=k_pe,
-                value=value,
-                mask=mask,
-                seqlen=torch.tensor(attn_metadata.prefill.query_lens,
-                                    dtype=torch.int32),
-                head_num=self.num_heads,
-                kv_head_num=self.num_heads,
-                pre_out=None,
-                prev_lse=None,
-                qk_scale=self.scale,
-                kernel_type="kernel_type_high_precision",
-                mask_type="mask_type_triu",
-                input_layout="type_bsnd",
-                calc_type="calc_type_first_ring",
-                output=attn_output,
-                softmax_lse=attn_lse)
-            attn_output, attn_lse = self._compute_prefill_context( \
-                query, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse)
-
-        elif attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
-            key = torch.cat((k_nope, k_pe), dim=-1)
-            torch_npu._npu_flash_attention(
-                query=query,
-                key=key,
-                value=value,
-                mask=attn_metadata.attn_mask,
-                seq_len=attn_metadata.prefill.context_lens,
-                scale_value=self.scale,
-                num_heads=self.num_heads,
-                num_kv_heads=self.num_heads,
-                out=attn_output)
-            attn_output = attn_output.view(-1, self.num_heads, self.v_head_dim)
+        q_pe = query[..., self.qk_nope_head_dim:]
+        q_nope = query[..., :self.qk_nope_head_dim]
+        torch_npu.atb.npu_ring_mla(q_nope=q_nope,
+                                   q_rope=q_pe,
+                                   k_nope=k_nope,
+                                   k_rope=k_pe,
+                                   value=value,
+                                   mask=attn_metadata.prefill.attn_mask,
+                                   seqlen=torch.tensor(
+                                       attn_metadata.prefill.query_lens,
+                                       dtype=torch.int32),
+                                   head_num=self.num_heads,
+                                   kv_head_num=self.num_heads,
+                                   pre_out=None,
+                                   prev_lse=None,
+                                   qk_scale=self.scale,
+                                   kernel_type="kernel_type_high_precision",
+                                   mask_type="mask_type_triu",
+                                   input_layout="type_bsnd",
+                                   calc_type="calc_type_first_ring",
+                                   output=attn_output,
+                                   softmax_lse=attn_lse)
+        attn_output, attn_lse = self._compute_prefill_context( \
+            query, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse)
         attn_output = attn_output.reshape(
             [num_tokens, self.num_heads * self.v_head_dim])
-        if attn_metadata.attn_state in [
-                AscendAttentionState.ChunkedPrefill,
-                AscendAttentionState.SpecDecoding,
-                AscendAttentionState.PrefillCacheHit
-        ] and not ascend_config.chunked_prefill_for_mla:
-            attn_output = attn_output_torch
-
-        current_ms_metadata = get_multistream_comm_context()
-        if current_ms_metadata is None:
-            return self.o_proj(attn_output)[0]
-        else:
-            current_ms_metadata.before_comm_event.record()
-            with torch.npu.stream(current_ms_metadata.comm_stream):
-                current_ms_metadata.before_comm_event.wait()
-                return self.o_proj(attn_output)[0]
+        return attn_output
 
     def exec_kv(
         self,
@@ -1017,16 +947,13 @@ class AscendMLAImpl(MLAAttentionImpl):
 
             if attn_metadata.attn_state == AscendAttentionState.SpecDecoding:
                 assert num_tokens % self.spec_token_num == 0
-                if self.enable_kv_nz:
-                    input_layout = "TND_NTD"
-                else:
-                    input_layout = "TND"
+                input_layout = "TND"
                 # [bs * q_seq_len, num_heads_per_rank, dim]
                 q_nope = q_nope.view(num_tokens, self.num_heads, -1)
                 q_pe = q_pe.view(num_tokens, self.num_heads, -1)
                 sparse_mode = 3
                 spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
-                actual_seq_lengths = decode_meta.actual_seq_q_lens
+                actual_seq_lengths = decode_meta.actual_seq_lengths_q
             else:
                 if self.enable_kv_nz:
                     q_nope = q_nope.view(num_tokens, 1, self.num_heads, -1)
@@ -1110,8 +1037,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output
-        # mtp model is not support for graph mode yet
-        self.torchair_graph_enabled = self.torchair_graph_enabled and not attn_metadata.is_mtp_model
         self.running_in_graph = self.torchair_graph_enabled and attn_metadata.attn_state in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
@@ -1234,6 +1159,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                 key_cache=kv_cache[0],
                 value_cache=kv_cache[1],
                 slot_indices=attn_metadata.slot_mapping)
+        if not self.running_in_graph:
+            o_proj_input_shape = (num_actual_toks,
+                                  self.num_heads * self.v_head_dim)
+            o_proj_input = torch.empty(o_proj_input_shape,
+                                       dtype=hidden_states_or_q_c.dtype,
+                                       device=hidden_states_or_q_c.device)
         if has_prefill:
             # FIX: aicore move should be also placed on the comm stream in dbo,
             # otherwise it may affect the accuracy
@@ -1244,11 +1175,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                                                    attn_metadata)
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
+                current_ms_metadata.before_comm_event.record()
                 with torch.npu.stream(current_ms_metadata.comm_stream):
-                    output[num_decode_tokens:] = output_prefill
-                    current_ms_metadata.after_comm_event.record()
+                    current_ms_metadata.before_comm_event.wait()
+                    o_proj_input[num_decode_tokens:] = output_prefill
             else:
-                output[num_decode_tokens:] = output_prefill
+                o_proj_input[num_decode_tokens:] = output_prefill
 
         if has_decode:
             if self.running_in_graph:
@@ -1265,9 +1197,25 @@ class AscendMLAImpl(MLAAttentionImpl):
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
                 with torch.npu.stream(current_ms_metadata.comm_stream):
-                    output[:num_decode_tokens] = output_decode
-                    current_ms_metadata.after_comm_event.record()
+                    o_proj_input[:num_decode_tokens] = output_decode
             else:
-                output[:num_decode_tokens] = output_decode
+                o_proj_input[:num_decode_tokens] = output_decode
 
+        current_ms_metadata = get_multistream_comm_context()
+        MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024
+        if current_ms_metadata is None:
+            npu_prefetch(self.o_proj.weight,
+                         o_proj_input,
+                         max_size=MAX_O_PROJ_PREFETCH_SIZE,
+                         enabled=enable_multistream_mla)
+            output[...] = self.o_proj(o_proj_input)[0]
+        else:
+            with torch.npu.stream(current_ms_metadata.comm_stream):
+                npu_prefetch(self.o_proj.weight,
+                             o_proj_input,
+                             max_size=MAX_O_PROJ_PREFETCH_SIZE,
+                             enabled=enable_multistream_mla)
+                output[...] = self.o_proj(o_proj_input)[0]
+                current_ms_metadata.after_comm_event.record()
+        del o_proj_input
         return output_padded

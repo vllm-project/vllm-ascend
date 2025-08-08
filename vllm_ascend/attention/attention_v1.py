@@ -169,6 +169,7 @@ class AscendAttentionMetadataBuilder:
               max_query_len,
               common_attn_metadata: CommonAttentionMetadata,
               enable_dbo_across_dp: bool = False,
+              is_only_prefill: bool = False,
               *args,
               **kwargs):
 
@@ -200,7 +201,8 @@ class AscendAttentionMetadataBuilder:
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
             attn_state=attn_state,
-            enable_dbo_across_dp=enable_dbo_across_dp)
+            enable_dbo_across_dp=enable_dbo_across_dp,
+            is_only_prefill=is_only_prefill)
         return attn_metadata
 
     def build_dummy_metadata(self, num_actual_tokens, num_reqs,

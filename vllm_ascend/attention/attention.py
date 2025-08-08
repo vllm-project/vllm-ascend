@@ -612,6 +612,8 @@ class AscendMetadataBuilder(CommonMetadataBuilder[AscendMetadata]):
         seq_lens: List[int],
         query_lens: List[int],
         graph_pad_size: int,
+        *args,
+        **kwargs,
     ):
         """Build attention metadata with on-device tensors.
 

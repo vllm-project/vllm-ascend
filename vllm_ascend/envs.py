@@ -133,6 +133,12 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # remote worker.
     "VLLM_LLMDD_RPC_PORT":
     lambda: int(os.getenv("VLLM_LLMDD_RPC_PORT", 5557)),
+    # `LLMDataDistCMgrConnector` required variable. Time (in seconds) after which the KV cache on the producer side is
+    # automatically cleared if no READ notification is received from the consumer.
+    # `VLLM_LLMDD_ABORT_REQUEST_TIMEOUT` is only applicable when using LLMDataDistCMgrConnector in a
+    # disaggregated decode-prefill setup.
+    "VLLM_LLMDD_ABORT_REQUEST_TIMEOUT":
+    lambda: int(os.getenv("VLLM_LLMDD_ABORT_REQUEST_TIMEOUT", 300)),
     # Whether to enable mla_pa for deepseek mla decode, this flag will be removed after its available torch_npu is public accessible
     # and the mla_pa will be the default path of deepseek decode path.
     "VLLM_ASCEND_MLA_PA":
@@ -150,7 +156,19 @@ env_variables: Dict[str, Callable[[], Any]] = {
     lambda: int(os.getenv("VLLM_ASCEND_FUSED_MOE_MC2_CHUNK_SIZE", "128")),
     # FlashComm optimization: Enable v1 and v2 by setting this flag to 1 or 2 respectively
     "VLLM_ASCEND_ENABLE_FLASHCOMM":
-    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))
+    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0')),
+    # The tolerance of the kv cache size, if the difference between the
+    # actual kv cache size and the cached kv cache size is less than this value,
+    # then the cached kv cache size will be used.
+    "VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE":
+    lambda: int(
+        os.getenv("VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE", '0')),
+    # VLLM_DP_SIZE_LOCAL: used for external data parallelism in vllm-ascend to specify the local parallel size of current node, 0.9.1 specific.
+    "VLLM_DP_SIZE_LOCAL":
+    lambda: int(os.getenv("VLLM_DP_SIZE_LOCAL", '0')),
+    # VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED: used for external distributed data parallelism in vllm-ascend, 0.9.1 specific.
+    "VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_EXTERNAL_DP_LB_ENABLED", '0'))),
 }
 
 # end-env-vars-definition

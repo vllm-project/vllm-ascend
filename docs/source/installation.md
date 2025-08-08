@@ -11,8 +11,8 @@ This document describes how to install vllm-ascend manually.
 
     | Software      | Supported version                | Note                                      |
     |---------------|----------------------------------|-------------------------------------------|
-    | CANN          | >= 8.1.RC1                       | Required for vllm-ascend and torch-npu    |
-    | torch-npu     | >= 2.5.1.post1.dev20250619       | Required for vllm-ascend                  |
+    | CANN          | >= 8.2.RC1                       | Required for vllm-ascend and torch-npu    |
+    | torch-npu     | >= 2.5.1.post1                   | Required for vllm-ascend, No need to install manually, it will be auto installed in below steps |
     | torch         | >= 2.5.1                         | Required for torch-npu and vllm           |
 
 You have 2 way to install:
@@ -78,19 +78,18 @@ source vllm-ascend-env/bin/activate
 pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple attrs 'numpy<2.0.0' decorator sympy cffi pyyaml pathlib2 psutil protobuf scipy requests absl-py wheel typing_extensions
 
 # Download and install the CANN package.
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.1.RC1/Ascend-cann-toolkit_8.1.RC1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-toolkit_8.1.RC1_linux-"$(uname -i)".run
-./Ascend-cann-toolkit_8.1.RC1_linux-"$(uname -i)".run --full
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.2.RC1/Ascend-cann-toolkit_8.2.RC1_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-toolkit_8.2.RC1_linux-"$(uname -i)".run
+./Ascend-cann-toolkit_8.2.RC1_linux-"$(uname -i)".run --full
 
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.2.RC1/Ascend-cann-kernels-910b_8.2.RC1_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-kernels-910b_8.2.RC1_linux-"$(uname -i)".run
+./Ascend-cann-kernels-910b_8.2.RC1_linux-"$(uname -i)".run --install
 
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.1.RC1/Ascend-cann-kernels-910b_8.1.RC1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-kernels-910b_8.1.RC1_linux-"$(uname -i)".run
-./Ascend-cann-kernels-910b_8.1.RC1_linux-"$(uname -i)".run --install
-
-wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.1.RC1/Ascend-cann-nnal_8.1.RC1_linux-"$(uname -i)".run
-chmod +x ./Ascend-cann-nnal_8.1.RC1_linux-"$(uname -i)".run
-./Ascend-cann-nnal_8.1.RC1_linux-"$(uname -i)".run --install
+wget --header="Referer: https://www.hiascend.com/" https://ascend-repo.obs.cn-east-2.myhuaweicloud.com/CANN/CANN%208.2.RC1/Ascend-cann-nnal_8.2.RC1_linux-"$(uname -i)".run
+chmod +x ./Ascend-cann-nnal_8.2.RC1_linux-"$(uname -i)".run
+./Ascend-cann-nnal_8.2.RC1_linux-"$(uname -i)".run --install
 
 source /usr/local/Ascend/nnal/atb/set_env.sh
 ```
@@ -116,17 +115,23 @@ Once it's done, you can start to set up `vllm` and `vllm-ascend`.
 :selected:
 :sync: pip
 
-First install system dependencies:
+First install system dependencies and config pip mirror:
 
 ```bash
-apt update  -y
-apt install -y gcc g++ cmake libnuma-dev wget git
+# Using apt-get with mirror
+sed -i 's|ports.ubuntu.com|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+apt-get update -y && apt-get install -y gcc g++ cmake libnuma-dev wget git curl jq
+# Or using yum
+# yum update -y && yum install -y gcc g++ cmake numactl-devel wget git curl jq
+# Config pip mirror
+pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 ```
 
-**[Optional]** Config the extra-index of `pip` if you are working on a **x86** machine, so that the torch with cpu could be found:
+**[Optional]** Then config the extra-index of `pip` if you are working on a x86 machine or using torch-npu dev version:
 
 ```bash
-pip config set global.extra-index-url https://download.pytorch.org/whl/cpu/
+# For torch-npu dev version or x86 machine
+pip config set global.extra-index-url "https://download.pytorch.org/whl/cpu/ https://mirrors.huaweicloud.com/ascend/repos/pypi"
 ```
 
 Then you can install `vllm` and `vllm-ascend` from **pre-built wheel**:
@@ -156,7 +161,6 @@ cd ..
 # Install vLLM Ascend
 git clone  --depth 1 --branch |vllm_ascend_version| https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
-export PIP_EXTRA_INDEX_URL=https://mirrors.huaweicloud.com/ascend/repos/pypi
 pip install -v -e .
 cd ..
 ```
@@ -185,6 +189,7 @@ git clone https://github.com/vllm-project/vllm-ascend.git
 cd vllm-ascend
 docker build -t vllm-ascend-dev-image:latest -f ./Dockerfile .
 ```
+
 :::
 
 ```{code-block} bash
@@ -246,7 +251,8 @@ for output in outputs:
 Then run:
 
 ```bash
-# export VLLM_USE_MODELSCOPE=true to speed up download if huggingface is not reachable.
+# Try `export VLLM_USE_MODELSCOPE=true` and `pip install modelscope`
+# to speed up download if huggingface is not reachable.
 python example.py
 ```
 

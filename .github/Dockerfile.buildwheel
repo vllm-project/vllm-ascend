@@ -14,7 +14,7 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-ARG PY_VERSION=3.10
+ARG PY_VERSION=3.11
 FROM quay.io/ascend/manylinux:8.0.0-910b-manylinux_2_28-py${PY_VERSION}
 
 ARG COMPILE_CUSTOM_KERNELS=1

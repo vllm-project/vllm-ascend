@@ -65,7 +65,9 @@ def _ascend_support_torch_compile(
         # e.g. TPU has the compilation logic in model runner, so we don't
         # need to compile the model inside.
         attn_metadata = get_forward_context().attn_metadata
-        if attn_metadata is not None and attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
+        if attn_metadata is not None and \
+            hasattr(attn_metadata, 'attn_state') and \
+            attn_metadata.attn_state != AscendAttentionState.DecodeOnly:
             return self.forward(*args, **kwargs)
 
         if self.do_not_compile or torch.compiler.is_compiling():
