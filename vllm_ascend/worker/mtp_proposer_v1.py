@@ -105,7 +105,8 @@ class MtpProposer:
             target_positions = positions[token_indices]
             target_hidden_states = hidden_states[token_indices]
             target_slot_mapping = slot_mapping[token_indices]
-        return cu_num_tokens, token_indices, target_token_ids, target_positions, target_hidden_states, target_slot_mapping
+        return (cu_num_tokens, token_indices, target_token_ids,
+                target_positions, target_hidden_states, target_slot_mapping)
 
     def propose(
             self,
@@ -200,31 +201,31 @@ class MtpProposer:
                 with_prefill=with_prefill,
                 num_tokens_across_dp=num_tokens_across_dp,
                 in_profile_run=self.runner.in_profile_run,
-                num_actual_tokens=num_tokens):
-            with ProfileExecuteDuration().capture_async('mtp_forward'):
-                model_kwargs = {}
-                model_kwargs["attn_metadata"] = attn_metadata
-                if self.runner.torchair_graph_enabled:
-                    model_kwargs["kv_caches"] = self.runner.kv_caches[-1:]
-                if is_running_torchair:
-                    torchair_compiled_model = self._get_torchair_lazy_compiled_model(
-                        num_input_tokens)
-                    hidden_states = torchair_compiled_model(
-                        input_ids=self.input_ids[:num_input_tokens],
-                        positions=self.positions[:num_input_tokens],
-                        previous_hidden_states=self.
-                        hidden_states[:num_input_tokens],
-                        inputs_embeds=None,
-                        intermediate_tensors=None,
-                        spec_step_idx=0,
-                        **model_kwargs)
-                else:
-                    hidden_states = self.model(
-                        input_ids=self.input_ids[:num_input_tokens],
-                        positions=self.positions[:num_input_tokens],
-                        previous_hidden_states=self.
-                        hidden_states[:num_input_tokens],
-                        kv_caches=self.runner.kv_caches[-1:])
+                num_actual_tokens=num_tokens), ProfileExecuteDuration(
+                ).capture_async('mtp_forward'):
+            model_kwargs = {}
+            model_kwargs["attn_metadata"] = attn_metadata
+            if self.runner.torchair_graph_enabled:
+                model_kwargs["kv_caches"] = self.runner.kv_caches[-1:]
+            if is_running_torchair:
+                torchair_compiled_model = self._get_torchair_lazy_compiled_model(
+                    num_input_tokens)
+                hidden_states = torchair_compiled_model(
+                    input_ids=self.input_ids[:num_input_tokens],
+                    positions=self.positions[:num_input_tokens],
+                    previous_hidden_states=self.
+                    hidden_states[:num_input_tokens],
+                    inputs_embeds=None,
+                    intermediate_tensors=None,
+                    spec_step_idx=0,
+                    **model_kwargs)
+            else:
+                hidden_states = self.model(
+                    input_ids=self.input_ids[:num_input_tokens],
+                    positions=self.positions[:num_input_tokens],
+                    previous_hidden_states=self.
+                    hidden_states[:num_input_tokens],
+                    kv_caches=self.runner.kv_caches[-1:])
         sample_hidden_states = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
         draft_token_ids = logits.argmax(dim=-1)

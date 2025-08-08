@@ -334,7 +334,8 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
             )
             return permutated_local_input_tokens, reversed_local_input_permutation_mapping, tokens_per_expert
 
-        permutated_local_input_tokens, reversed_local_input_permutation_mapping, tokens_per_expert = alltoall_token_permutation1(
+        permutated_local_input_tokens, reversed_local_input_permutation_mapping, tokens_per_expert = \
+            alltoall_token_permutation1(
             hidden_states, routing_map)
         self.reversed_local_input_permutation_mapping = reversed_local_input_permutation_mapping
         # permute 1

@@ -156,7 +156,8 @@ class AscendAttentionTorchairMetadataBuilder:
             self, num_seqs: int, block_tables: torch.Tensor) -> torch.Tensor:
 
         max_batch_size, max_blocks = self.runner.graph_block_tables.shape
-        assert max_batch_size >= num_seqs, f"max_batch_size: {max_batch_size} should be bigger than cur_num_seqs: {num_seqs}"
+        assert max_batch_size >= num_seqs, f"max_batch_size: {max_batch_size} \
+            should be bigger than cur_num_seqs: {num_seqs}"
 
         if isinstance(self.runner.graph_block_tables, np.ndarray):
             graph_block_tables = torch.zeros((max_batch_size, max_blocks),

@@ -146,7 +146,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # remote worker.
     "VLLM_LLMDD_RPC_PORT":
     lambda: int(os.getenv("VLLM_LLMDD_RPC_PORT", 5557)),
-    # Whether to enable mla_pa for deepseek mla decode, this flag will be removed after its available torch_npu is public accessible
+    # Whether to enable mla_pa for deepseek mla decode, this flag will be removed
+    # after its available torch_npu is public accessible
     # and the mla_pa will be the default path of deepseek decode path.
     "VLLM_ASCEND_MLA_PA":
     lambda: int(os.getenv("VLLM_ASCEND_MLA_PA", 0)),
@@ -154,7 +155,8 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # this feature is supported in A2, and eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", '0'))),
-    # Whether to enable the alltoall_seq flag, this provides a basic framework on the basis of alltoall for easy expansion.
+    # Whether to enable the alltoall_seq flag, this provides a basic framework on
+    # the basis of alltoall for easy expansion.
     #   0: default, normal init.
     #   1: enable moe all2all seq.
     "VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ":
