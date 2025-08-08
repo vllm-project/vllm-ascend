@@ -843,16 +843,16 @@ class LLMDataDistCMgrConnectorWorker:
             except (TypeError, ValueError) as e:
                 raise RuntimeError(
                     f"LLMDataDistCMgrConnectorWorker: Passing unexpected parameter to \
-                        pull_blocks remote_cache_key: {remote_cache_key_k_normed} {remote_cache_key_k_pe}, \
-                            cache: {self.cache}, local_block_ids: {local_block_ids}, \
-                                remote_block_ids: {remote_block_ids}"
+                    pull_blocks remote_cache_key: {remote_cache_key_k_normed} {remote_cache_key_k_pe}, \
+                    cache: {self.cache}, local_block_ids: {local_block_ids}, \
+                    remote_block_ids: {remote_block_ids}"
 
                     # type: ignore[has-type]
                 ) from e
             except LLMException as e:
                 raise RuntimeError(
                     "LLMDataDistCMgrConnectorWorker: Timeout during pull_blocks, \
-                        you can try to increase the sync_kv_timeout config or checking your connect status"
+                    you can try to increase the sync_kv_timeout config or checking your connect status"
                 ) from e
         else:
             remote_cache_key = BlocksCacheKey(cluster_id=remote_cluster_id)

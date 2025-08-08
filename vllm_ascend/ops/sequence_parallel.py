@@ -102,10 +102,7 @@ def init_metadata_for_sp(input_ids, enable_sequence_parallelism):
             lengths_sum_unpadding = input_ids.shape[0]
             lengths_sum_padding = (
                 (lengths_sum_unpadding + tp_size - 1) // tp_size) * tp_size
-            if lengths_sum_unpadding == lengths_sum_padding:
-                padding_flag = False
-            else:
-                padding_flag = True
+            padding_flag = lengths_sum_unpadding != lengths_sum_padding
             pad_size = lengths_sum_padding - lengths_sum_unpadding
             _metadata_for_padding = MetadataForPadding(
                 lengths_sum_unpadding=lengths_sum_unpadding,

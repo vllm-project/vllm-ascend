@@ -1119,10 +1119,11 @@ class AscendMLAImpl(MLAAttentionImpl):
         ]
         num_actual_toks = attn_metadata.num_actual_tokens
         if k_pe is None and not self.running_in_graph:
-            kv_c, k_pe = self.kv_a_proj_with_mqa(
+            kv_c, k_pe = self.kv_a_proj_with_mqa(  # type: ignore[misc]
                 hidden_states_or_kv_c_normed)[0].split(
                     [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-            kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
+            kv_c_normed = self.kv_a_layernorm(
+                kv_c.contiguous())  # type: ignore[misc]
         else:
             kv_c_normed = hidden_states_or_kv_c_normed
         assert attn_metadata.num_decodes is not None and \
