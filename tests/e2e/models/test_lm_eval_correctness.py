@@ -48,7 +48,7 @@ def build_model_args(eval_config, tp_size):
     }
     for s in [
             "max_images", "gpu_memory_utilization", "enable_expert_parallel",
-            "tensor_parallel_size"
+            "tensor_parallel_size", "enforce_eager"
     ]:
         val = eval_config.get(s, None)
         if val is not None:
@@ -60,8 +60,7 @@ def build_model_args(eval_config, tp_size):
     return model_args
 
 
-def generate_report(tp_size, eval_config, report_data, report_output,
-                    env_config):
+def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
     env = Environment(loader=FileSystemLoader(TEST_DIR))
     template = env.get_template("report_template.md")
     model_args = build_model_args(eval_config, tp_size)
@@ -85,12 +84,14 @@ def generate_report(tp_size, eval_config, report_data, report_output,
         num_fewshot=eval_config.get("num_fewshot", "N/A"),
         rows=report_data["rows"])
 
+    report_output = os.path.join(
+        report_dir, f"{os.path.basename(eval_config['model_name'])}.md")
     os.makedirs(os.path.dirname(report_output), exist_ok=True)
     with open(report_output, 'w', encoding='utf-8') as f:
         f.write(report_content)
 
 
-def test_lm_eval_correctness_param(config_filename, tp_size, report_output,
+def test_lm_eval_correctness_param(config_filename, tp_size, report_dir,
                                    env_config):
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
     model_args = build_model_args(eval_config, tp_size)
@@ -143,6 +144,5 @@ def test_lm_eval_correctness_param(config_filename, tp_size, report_output,
                     metric_name.replace(',', '_stderr,') if metric_name ==
                     "acc,none" else metric_name.replace(',', '_stderr,')]
             })
-    generate_report(tp_size, eval_config, report_data, report_output,
-                    env_config)
+    generate_report(tp_size, eval_config, report_data, report_dir, env_config)
     assert success
