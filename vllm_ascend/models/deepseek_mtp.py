@@ -32,16 +32,16 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.deepseek_mtp import (
     DeepSeekMTP, DeepSeekMultiTokenPredictor, DeepSeekMultiTokenPredictorLayer,
     SharedHead)
 from vllm.model_executor.models.utils import maybe_prefix
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
-from .deepseek_v2 import (
-    CustomDeepseekV2DecoderLayer, get_spec_layer_idx_from_weight_name)
+from .deepseek_v2 import (CustomDeepseekV2DecoderLayer,
+                          get_spec_layer_idx_from_weight_name)
 
 
 class CustomDeepSeekShareHead(SharedHead):
@@ -296,3 +296,4 @@ class CustomDeepSeekMTP(DeepSeekMTP):
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
+    
