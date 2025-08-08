@@ -30,7 +30,7 @@ from tests.e2e.conftest import VllmRunner
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
 
-GuidedDecodingBackend = ["xgrammar", "guidance"]
+GuidedDecodingBackend = ["xgrammar", "guidance", "outlines"]
 
 
 @pytest.fixture(scope="module")
