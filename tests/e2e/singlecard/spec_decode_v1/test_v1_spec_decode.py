@@ -127,7 +127,7 @@ def test_eagle_correctness(
         enable_chunked_prefill=True,
         max_num_seqs=1,
         max_num_batched_tokens=2048,
-        gpu_memory_utilization=0.5,
+        gpu_memory_utilization=0.6,
         speculative_config={
             "method": "eagle3" if use_eagle3 else "eagle",
             "model": spec_model_name,
