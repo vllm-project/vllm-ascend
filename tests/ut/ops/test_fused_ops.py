@@ -21,7 +21,7 @@ import torch.nn as nn
 import torch_npu
 from pytest_mock import MockerFixture
 
-from vllm_ascend.ascend_forward_context import get_fused_moe_state
+from vllm_ascend.ascend_forward_context import _get_fused_moe_state
 from vllm_ascend.ops.fused_moe import (AscendFusedMoE,
                                        AscendUnquantizedFusedMoEMethod)
 from vllm_ascend.utils import AscendSocVersion, adapt_patch  # noqa E402
@@ -112,7 +112,7 @@ def mock_moe_env(mocker: MockerFixture):
                 torch.randn(16, 2)
         )), \
         patch("torch_npu.npu_grouped_matmul", return_value=(
-                (torch.randn(8, 2), torch.randn(8, 2))
+                [torch.randn(16, 2)]
         )), \
         patch("torch_npu.npu_swiglu", return_value=(
                 torch.randn(16, 2)
@@ -297,9 +297,8 @@ class TestAscendUnquantizedFusedMoEMethod:
         assert not layer.w13_weight.requires_grad
         assert not layer.w2_weight.requires_grad
 
-    @pytest.mark.parametrize(
-        "others_param",
-        [[256, 4, False], [128, 1, False], [128, 1, True], [128, 4, False]])
+    @pytest.mark.parametrize("others_param",
+                             [[256, 4], [128, 1], [128, 1], [128, 4]])
     def test_apply_without_expert_map(self, moe_method, mock_dist_env,
                                       mock_moe_env, others_param):
         """
@@ -308,15 +307,13 @@ class TestAscendUnquantizedFusedMoEMethod:
         3 test use select_gating_topk_softmax_experts and fused_experts
         4 test use select_experts and fused_experts_with_all2all_buffer
         """
-        global_num_experts, ep_size, select_softmax = others_param
+        global_num_experts, ep_size = others_param
         is_prefill = False
         is_deepseek_v3_r1 = global_num_experts == 256
-        forward_context = MagicMock(fused_moe_state=get_fused_moe_state(
+        forward_context = MagicMock(fused_moe_state=_get_fused_moe_state(
             ep_size, is_prefill, is_deepseek_v3_r1))
-        with patch(
-                "vllm_ascend.ops.fused_moe.SELECT_GATING_TOPK_SOTFMAX_EXPERTS",
-                select_softmax), \
-             patch("vllm_ascend.ops.fused_moe.get_forward_context", return_value=forward_context):
+        with patch("vllm_ascend.ops.fused_moe.get_forward_context",
+                   return_value=forward_context):
             moe_method.ep_size = ep_size
             x = torch.randn(8, 2, 2)
             router_logits = torch.randn(8, 8)
@@ -349,7 +346,7 @@ class TestAscendUnquantizedFusedMoEMethod:
         ep_size, alltoall_buffer = others_param
         is_prefill = False
         forward_context = MagicMock(
-            fused_moe_state=get_fused_moe_state(ep_size, is_prefill, True))
+            fused_moe_state=_get_fused_moe_state(ep_size, is_prefill, True))
         with patch("vllm_ascend.ops.fused_moe.MOE_ALL2ALL_BUFFER",
                    alltoall_buffer), \
              patch("vllm_ascend.ops.fused_moe.get_forward_context", return_value=forward_context), \

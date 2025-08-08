@@ -157,6 +157,28 @@ def test_models_distributed_topk() -> None:
         vllm_model.generate(example_prompts, sampling_params)
 
 
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ": "1"})
+def test_models_distributed_alltoallv() -> None:
+    example_prompts = [
+        "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs.",
+        "Briefly describe the major milestones in the development of artificial intelligence from 1950 to 2020.",
+        "Compare and contrast artificial intelligence with human intelligence in terms of processing information.",
+    ]
+    dtype = "half"
+    sampling_params = SamplingParams(max_tokens=5,
+                                     temperature=0.0,
+                                     top_k=50,
+                                     top_p=0.9)
+
+    with VllmRunner(
+            "deepseek-ai/DeepSeek-V2-Lite",
+            dtype=dtype,
+            tensor_parallel_size=2,
+            distributed_executor_backend="mp",
+    ) as vllm_model:
+        vllm_model.generate(example_prompts, sampling_params)
+
+
 def test_models_distributed_Qwen3_W8A8():
     example_prompts = [
         "Hello, my name is",
@@ -166,9 +188,73 @@ def test_models_distributed_Qwen3_W8A8():
     with VllmRunner(
             snapshot_download("vllm-ascend/Qwen3-8B-W8A8"),
             max_model_len=8192,
-            enforce_eager=True,
             dtype="auto",
             tensor_parallel_size=2,
             quantization="ascend",
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+def test_models_distributed_Qwen3_W4A8DYNAMIC():
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+
+    with VllmRunner(
+            snapshot_download("vllm-ascend/Qwen3-8B-W4A8"),
+            max_model_len=8192,
+            dtype="auto",
+            tensor_parallel_size=2,
+            quantization="ascend",
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@patch.dict(os.environ, {"VLLM_ASCEND_MLA_PA": "1"})
+def test_models_distributed_DeepSeek_W4A8DYNAMIC():
+    prompts = [
+        "Hello, my name is",
+    ]
+    max_tokens = 5
+    with VllmRunner(
+            snapshot_download("vllm-ascend/DeepSeek-R1-w4a8-pruning"),
+            dtype="auto",
+            tensor_parallel_size=2,
+            quantization="ascend",
+            enforce_eager=True,
+            enable_expert_parallel=True,
+            additional_config={
+                "torchair_graph_config": {
+                    "enabled": False,
+                },
+                "ascend_scheduler_config": {
+                    "enabled": True,
+                }
+            },
+    ) as vllm_model:
+        vllm_model.generate_greedy(prompts, max_tokens)
+
+
+def test_sp_for_qwen3_moe() -> None:
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    sampling_params = SamplingParams(max_tokens=5,
+                                     temperature=0.0,
+                                     top_k=50,
+                                     top_p=0.9)
+
+    with VllmRunner(
+            snapshot_download("Qwen/Qwen3-30B-A3B"),
+            dtype="auto",
+            tensor_parallel_size=2,
+            distributed_executor_backend="mp",
+            compilation_config={
+                "pass_config": {
+                    "enable_sequence_parallelism": True
+                }
+            },
+            enable_expert_parallel=True,
+    ) as vllm_model:
+        vllm_model.generate(example_prompts, sampling_params)

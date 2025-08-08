@@ -153,6 +153,11 @@ class NPUPlatform(Platform):
                 "Torchair compilation enabled on NPU. Setting level to NO_COMPILATION"
             )
             compilation_config.level = CompilationLevel.NO_COMPILATION
+        elif parallel_config.distributed_executor_backend == "ray":
+            logger.warning(
+                "Ray distributed executor backend is not compatible with ACL Graph mode "
+                "right now. Setting level to NO_COMPILATION")
+            compilation_config.level = CompilationLevel.NO_COMPILATION
         else:
             logger.info(
                 "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
@@ -189,6 +194,12 @@ class NPUPlatform(Platform):
                 vllm_config.scheduler_config,
                 ascend_config.ascend_scheduler_config)
             vllm_config.scheduler_config = ascend_scheduler_config
+
+        if compilation_config.pass_config.enable_sequence_parallelism:
+            if not parallel_config.enable_expert_parallel or vllm_config.model_config.hf_config.model_type != "qwen3_moe":
+                raise NotImplementedError(
+                    "For better performance in Qwen3 MoE, SP only works exclusively with MC2, AllToAll, and AllToAllV."
+                )
 
         # register Ascend CustomOp
         register_ascend_customop()
@@ -254,16 +265,10 @@ class NPUPlatform(Platform):
 
         assert is_hccl_available()
 
-        # TODO(Yizhou): The reason we need to set options while vllm does not
-        # seems to be related to the version of PyTorch. In the latest version,
-        # there is no need to set options. While in the older version, 2.5.1
-        # specifically, we need to set options.
-        options = ProcessGroup.Options(backend=backend)
         pg: ProcessGroup = ProcessGroup(
             prefix_store,
             group_rank,
             group_size,
-            options,
         )
 
         backend_options = ProcessGroupHCCL.Options()

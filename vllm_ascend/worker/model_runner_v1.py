@@ -79,6 +79,7 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
 from vllm_ascend.attention.attention_v1_torchair import AscendTorchairMetadata
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
+from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
@@ -93,6 +94,8 @@ from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if not vllm_version_is("0.10.0"):
     from vllm.tasks import GenerationTask, SupportedTask
+    from vllm.v1.worker.kv_connector_model_runner_mixin import \
+        KVConnectorOutput
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -203,9 +206,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 dtype=self.dtype,
                 device=self.device)
 
-        self.graph_block_tables = np.zeros(
-            (self.max_num_reqs, self.max_num_blocks_per_req), dtype=np.int32)
-
         # Set up Attention
         self.attn_backend = get_attn_backend(
             0,
@@ -228,8 +228,19 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.use_eagle = False
         self.drafter: Optional[Union[NgramProposer, EagleProposer,
                                      MtpProposer]] = None
+        self.actual_seq_lengths_q = []
+        self.spec_token_num = 0
+        self.decode_token_per_req = 1
         if self.speculative_config:
             self.use_spec_decode = True
+            self.spec_token_num = self.speculative_config.num_speculative_tokens
+            assert self.spec_token_num > 0
+            self.decode_token_per_req = 1 + self.spec_token_num
+            self.actual_seq_lengths_q = [
+                len for len in
+                range(self.decode_token_per_req, self.max_num_tokens +
+                      1, self.decode_token_per_req)
+            ]
             self.spec_attn_mask = torch.triu(torch.ones(2048,
                                                         2048,
                                                         dtype=torch.bool),
@@ -250,6 +261,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                      f"{self.speculative_config.method}")
                 self.rejection_sampler = AscendRejectionSampler()
 
+        # Persistent batch.
         self.input_ids = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int32,
                                      device=self.device)
@@ -335,9 +347,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.torchair_graph_batch_sizes = ascend_config.torchair_graph_config.graph_batch_sizes
         if ascend_config.torchair_graph_config.graph_batch_sizes_init:
             self.init_torchair_graph_batch_sizes()
-        if len(self.torchair_graph_batch_sizes) == 0:
-            # TODO(zzzzwwjj): check torchair_graph_batch_sizes init code
-            self.torchair_graph_batch_sizes = [self.max_num_reqs]
+
+        self.check_torchair_graph_batch_sizes()
+
+        # graph_block_tables shape: [num_request, cell(max_model_len / block_size)]
+        self.graph_block_tables = np.zeros(
+            (self.torchair_graph_batch_sizes[-1] // self.decode_token_per_req,
+             (self.model_config.max_model_len + self.block_size - 1) //
+             self.block_size),
+            dtype=np.int32)
 
         torch._dynamo.cache_size.config.cache_size_limit += len(
             self.torchair_graph_batch_sizes)
@@ -345,13 +363,38 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         torch._logging.set_logs(
             recompiles=envs_ascend.VLLM_ASCEND_TRACE_RECOMPILES)
 
+        self.check_batch_sizes_consistency()
         # NOTE: we need to use `in_profile_run` to determine whether `enable_force_load_balance` is True
         self.in_profile_run = False
 
         # kv role
         self.is_kv_producer = False
+        self.is_kv_consumer = False
         if vllm_config.kv_transfer_config is not None:
             self.is_kv_producer = vllm_config.kv_transfer_config.is_kv_producer
+            self.is_kv_consumer = vllm_config.kv_transfer_config.is_kv_consumer
+
+    def check_batch_sizes_consistency(self) -> None:
+        if not dist.is_initialized():
+            return
+
+        local = torch.tensor(self.torchair_graph_batch_sizes,
+                             device="cpu",
+                             dtype=torch.int32)
+        gathered_graph_batch_size = local.clone()
+        dist.all_reduce(gathered_graph_batch_size,
+                        group=get_dp_group().cpu_group)
+        expected = local * self.dp_size
+
+        if not torch.equal(gathered_graph_batch_size, expected):
+            diff_idxs = (gathered_graph_batch_size != expected).nonzero(
+                as_tuple=False).flatten().tolist()
+            raise AssertionError(
+                f"[Graph BatchSize Mismatch] Found mismatches at indices {diff_idxs}.\n"
+                f"Local (rank {self.dp_rank}): {local.tolist()}\n"
+                f"Sum over ranks:     {gathered_graph_batch_size.tolist()}\n"
+                f"Expected if all equal: {[v * self.dp_size for v in local.tolist()]}"
+            )
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -530,17 +573,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     start_token_index:end_token_index] = new_token_ids
                 self.input_batch.num_tokens_no_spec[
                     req_index] = end_token_index
-                # Add spec_token_ids to token_ids_cpu.
-                spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
-                    req_id, ())
-                if spec_token_ids:
-                    start_index = end_token_index
-                    end_token_index += len(spec_token_ids)
-                    self.input_batch.token_ids_cpu[
-                        req_index,
-                        start_index:end_token_index] = spec_token_ids
-                # NOTE(woosuk): `num_tokens` here may include spec decode tokens.
-                self.input_batch.num_tokens[req_index] = end_token_index
+            # Add spec_token_ids to token_ids_cpu.
+            spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
+                req_id, ())
+            if spec_token_ids:
+                num_spec_tokens = len(spec_token_ids)
+                start_index = self.input_batch.num_tokens_no_spec[req_index]
+                end_token_index = start_index + num_spec_tokens
+                self.input_batch.token_ids_cpu[
+                    req_index, start_index:end_token_index] = spec_token_ids
+                # NOTE(woosuk): `num_tokens` here may include spec tokens.
+                self.input_batch.num_tokens[req_index] += num_spec_tokens
 
         # Check if the batch has changed. If not, we can skip copying the
         # sampling metadata from CPU to GPU.
@@ -558,6 +601,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # Append to the end.
                 req_index = None
             self.input_batch.add_request(req_state, req_index)
+            spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
+                req_id, ())
+            if spec_token_ids:
+                req_index = self.input_batch.num_reqs - 1
+                start_index = len(req_state.prompt_token_ids) + len(
+                    req_state.output_token_ids)
+                end_token_index = start_index + len(spec_token_ids)
+                self.input_batch.token_ids_cpu[
+                    req_index, start_index:end_token_index] = spec_token_ids
+                self.input_batch.num_tokens[req_index] = end_token_index
 
         # Condense the batched states if there are empty indices.
         if removed_req_indices:
@@ -567,44 +620,67 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.input_batch.refresh_sampling_metadata()
 
     def _get_forward_metadata_across_dp(
-        self,
-        maybe_padded_num_tokens: int,
-        num_tokens: int,
-        with_prefill: bool,
-        enable_dbo: bool = False,
+            self, num_tokens: int, with_prefill: bool,
+            enable_dbo: bool) -> tuple[torch.Tensor, bool, bool]:
+
+        # Compose: all_reduce metadata (num_tokens of each rank, with_prefill, enable_dbo)
+        num_tokens_across_dp = torch.zeros(self.dp_size + 2,
+                                           dtype=torch.int32,
+                                           device="cpu")
+        num_tokens_across_dp[self.dp_rank] = num_tokens
+        num_tokens_across_dp[-2] = int(with_prefill)
+        num_tokens_across_dp[-1] = int(not enable_dbo)
+        dist.all_reduce(num_tokens_across_dp, group=get_dp_group().cpu_group)
+        with_prefill = bool(num_tokens_across_dp[-2])
+        enable_dbo = not bool(num_tokens_across_dp[-1])
+        num_tokens_across_dp = num_tokens_across_dp[:-2]
+        return num_tokens_across_dp, with_prefill, enable_dbo
+
+    def _get_forward_metadata_across_dp_and_pad(
+            self, num_tokens: int, with_prefill: bool, enable_dbo: bool
     ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
         if self.dp_size == 1:
-            return maybe_padded_num_tokens, None, with_prefill, enable_dbo
+            if self.torchair_graph_enabled and not with_prefill:
+                maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
+                    num_tokens)
+                return maybe_padded_num_tokens, None, with_prefill, enable_dbo
+            return num_tokens, None, with_prefill, enable_dbo
 
-        num_tokens_across_dp = [0] * self.dp_size * 2
-        num_tokens_across_dp[self.dp_rank] = maybe_padded_num_tokens
-        num_tokens_across_dp[self.dp_size + self.dp_rank] = num_tokens
-        forward_metadata = torch.tensor(num_tokens_across_dp +
-                                        [with_prefill, not enable_dbo],
-                                        device="cpu",
-                                        dtype=torch.int32)
-        dist.all_reduce(forward_metadata, group=get_dp_group().cpu_group)
-        with_prefill = bool(forward_metadata[-2])
+        maybe_padded_num_tokens = num_tokens
+        num_tokens_across_dp, with_prefill, enable_dbo = self._get_forward_metadata_across_dp(
+            num_tokens, with_prefill, enable_dbo)
 
-        # NOTE: when with_prefill is false before all_reduce and true after all_reduce, we need to revert pad.
-        if with_prefill:
-            num_tokens_across_dp = forward_metadata[self.dp_size:self.dp_size *
-                                                    2]
-            maybe_padded_num_tokens = num_tokens
-        else:
-            num_tokens_across_dp = forward_metadata[:self.dp_size]
-
-        # NOTE: when in torchair_graph_mode, we need to pad local_num_tokens to
-        # `max_tokens_across_dp`, in other situation it is not necessary.
         if self.torchair_graph_enabled and not with_prefill:
-            maybe_padded_num_tokens = torch.max(num_tokens_across_dp).item()
-            num_tokens_across_dp = torch.tensor([maybe_padded_num_tokens] *
-                                                self.dp_size,
-                                                device="cpu",
-                                                dtype=torch.int32)
+            max_num_token = num_tokens_across_dp.max().item()
+            maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
+                max_num_token)
+            num_tokens_across_dp = torch.full((self.dp_size, ),
+                                              maybe_padded_num_tokens,
+                                              dtype=torch.int32,
+                                              device="cpu")
 
-        return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, not bool(
-            forward_metadata[-1])
+        return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, enable_dbo
+
+    def _check_dbo_is_valid(self, query_lens: torch.Tensor,
+                            attn_state: AscendAttentionState,
+                            num_tokens: int) -> bool:
+        # do the checks for dp + dbo
+        if attn_state in [
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding
+        ]:
+            return False
+        # considering the case that one dp rank may enable dbo while others may not
+        if not self.vllm_config.model_config.use_mla or not envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+            return False
+        # TODO: remove it if token-level microbatch is enabled
+        [token_index,
+         seq_index] = compute_split_seq_index(query_lens, attn_state,
+                                              num_tokens)
+        if token_index == 0 or seq_index == 0 or seq_index == len(
+                query_lens) or num_tokens < 256:
+            return False
+        return True
 
     def get_eagle_atten_dict(
         self,
@@ -1045,6 +1121,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
             attn_state = AscendAttentionState.DecodeOnly
+            if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
+                # SpecDecoding now supports seq_len=1 and seq_len=2
+                # In Prefilling Decoding Disaggregation scenario, SpecDecoding need to supports seq_len=1
+                attn_state = AscendAttentionState.SpecDecoding
         # Speculative decoding.
         elif np.all(num_valid_tokens == 1):
             if self.use_eagle:
@@ -1081,18 +1161,28 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
 
-        maybe_padded_num_tokens = total_num_scheduled_tokens
-        if self.torchair_graph_enabled and not with_prefill:
-            maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
-                total_num_scheduled_tokens)
+        is_only_prefill = bool(np.all(num_valid_tokens != 1))
+        extra_builder_kwargs['is_only_prefill'] = is_only_prefill
+
+        enable_dbo = self._check_dbo_is_valid(self.query_lens.tolist(),
+                                              attn_state,
+                                              total_num_scheduled_tokens)
+
+        enable_dbo = self._check_dbo_is_valid(self.query_lens.tolist(),
+                                              attn_state,
+                                              total_num_scheduled_tokens)
         (padded_num_tokens_across_dp, num_tokens_across_dp, with_prefill,
-         enable_dbo) = self._get_forward_metadata_across_dp(
-             maybe_padded_num_tokens, total_num_scheduled_tokens, with_prefill)
-
+         enable_dbo) = self._get_forward_metadata_across_dp_and_pad(
+             total_num_scheduled_tokens, with_prefill, enable_dbo)
+        extra_builder_kwargs['enable_dbo_across_dp'] = enable_dbo
+        self.with_prefill = with_prefill
+        self.num_tokens_across_dp = num_tokens_across_dp
         if self.torchair_graph_enabled and not with_prefill:
-            graph_pad_size = padded_num_tokens_across_dp - total_num_scheduled_tokens
-
-            extra_builder_kwargs['graph_pad_size'] = graph_pad_size
+            self.graph_pad_size = padded_num_tokens_across_dp
+            extra_builder_kwargs[
+                'graph_pad_size'] = self.graph_pad_size  # type: ignore
+        else:
+            self.graph_pad_size = -1
 
         if self.vllm_config.model_config.use_mla:
             extra_builder_kwargs[
@@ -1348,40 +1438,52 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         logits: torch.Tensor,
     ) -> torch.Tensor:
-        # Serialization of np.ndarray is much more efficient than a tensor,
-        # so we receive it in that format.
         grammar_bitmask = scheduler_output.grammar_bitmask
 
-        # We receive the structured output bitmask from the scheduler, but the
-        # indices of the requests in the batch may not match the indices of
-        # the bitmask since the scheduler doesn't know how the gpu runner is
-        # ordering the requests in the batch. We need to sort the bitmask to
-        # match the order of the requests used here.
+        # We receive the structured output bitmask from the scheduler,
+        # compacted to contain bitmasks only for structured output requests.
+        # The order of the requests in the bitmask is not guaranteed to be the
+        # same as the order of the requests in the gpu runner's batch. We need
+        # to sort the bitmask to match the order of the requests used here.
+
+        # Get the batch indices of the structured output requests.
+        # Keep track of the number of speculative tokens scheduled for every
+        # request in the batch, as the logit indices are offset by this amount.
         struct_out_req_batch_indices: dict[str, int] = {}
-        indices_match = True
-        for req_id in self.input_batch.req_ids:
-            mask_index = scheduler_output.structured_output_request_ids.get(
-                req_id)
-            if mask_index is None:
-                # not a structured output request
-                continue
-            batch_index = self.input_batch.req_id_to_index[req_id]
-            if batch_index != mask_index:
-                indices_match = False
-            struct_out_req_batch_indices[req_id] = batch_index
+        cumulative_offset = 0
+        seq = sorted(self.input_batch.req_id_to_index.items(),
+                     key=lambda x: x[1])
+        for req_id, batch_index in seq:
+            logit_index = batch_index + cumulative_offset
+            cumulative_offset += len(
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
+            if req_id in scheduler_output.structured_output_request_ids:
+                struct_out_req_batch_indices[req_id] = logit_index
 
-        if not indices_match:
-            # Sort the bitmask to match the order of the requests
-            sorted_bitmask = np.zeros_like(grammar_bitmask)
-            for req_id, batch_index in struct_out_req_batch_indices.items():
-                orig_index = scheduler_output.structured_output_request_ids[
-                    req_id]
-                sorted_bitmask[batch_index] = grammar_bitmask[orig_index]
-            grammar_bitmask = sorted_bitmask
+        out_indices = []
 
+        # Reorder the bitmask to match the order of the requests in the batch.
+        sorted_bitmask = np.zeros_like(grammar_bitmask,
+                                       shape=(logits.shape[0],
+                                              grammar_bitmask.shape[1]))
+        cumulative_index = 0
+        seq = sorted(scheduler_output.structured_output_request_ids.items(),
+                     key=lambda x: x[1])
+        for req_id, _ in seq:
+            logit_index = struct_out_req_batch_indices[req_id]
+            num_spec_tokens = len(
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
+            for i in range(1 + num_spec_tokens):
+                sorted_bitmask[logit_index + i] = \
+                    grammar_bitmask[cumulative_index + i]
+                out_indices.append(logit_index + i)
+            cumulative_index += 1 + num_spec_tokens
+        grammar_bitmask = sorted_bitmask
+
+        # Serialization of np.ndarray is much more efficient than a tensor,
+        # so we receive it in that format.
         grammar_bitmask = torch.from_numpy(grammar_bitmask)
 
-        # TODO: compatibility with spec decode.
         # NOTE:
         # 1. XGrammar bitmask applying only supports CPU and GPU.
         # 2. The logits and bitmask should be on the same device.
@@ -1391,7 +1493,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         xgr.apply_token_bitmask_inplace(
             logits,
             grammar_bitmask,
-            indices=list(struct_out_req_batch_indices.values()),
+            indices=out_indices,
         )
         return logits.to(self.device).to(logits_dtype)
 
@@ -1433,6 +1535,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         hidden_states: torch.Tensor,
         num_scheduled_tokens: int,
         num_scheduled_tokens_np: np.ndarray,
+        finished_sending: Optional[set[str]] = None,
+        finished_recving: Optional[set[str]] = None,
+        kv_connector_output: Optional["KVConnectorOutput"] = None,
     ) -> ModelRunnerOutput:
         assert self.input_batch.num_reqs ==\
             len(self.input_batch.pooling_params), \
@@ -1458,6 +1563,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 pooler_output.append(raw_output.data.cpu())
             else:
                 pooler_output.append(None)
+        extra_args = ({
+            "finished_sending": finished_sending,
+            "finished_recving": finished_recving
+        } if vllm_version_is("0.10.0") else {
+            "kv_connector_output": kv_connector_output
+        })
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -1467,6 +1578,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
+            **extra_args,
         )
 
     @torch.inference_mode()
@@ -1491,7 +1603,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
              num_scheduled_tokens_np, finished_sending,
              finished_recving) = (self._process_reqs(scheduler_output,
                                                      intermediate_tensors))
-
+        kv_connector_output = None
+        if not vllm_version_is("0.10.0"):
+            kv_connector_output = KVConnectorOutput(
+                finished_sending=finished_sending,
+                finished_recving=finished_recving)
+            finished_sending = None
+            finished_recving = None
         with ProfileExecuteDuration().capture_async("post process"):
             # Broadcast PP output for external_launcher (torchrun)
             # to make sure we are synced across pp ranks
@@ -1503,6 +1621,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if not get_pp_group().is_last_rank:
                 # For mid-pipeline stages, return the hidden states.
                 if not broadcast_pp_output:
+                    if kv_connector_output is not None:
+                        hidden_states.kv_connector_output = kv_connector_output
+                    else:
+                        #TODO: Remove this after we drop vllm v0.10.0
+                        hidden_states.finished_sending = finished_sending
+                        hidden_states.finished_recving = finished_recving
                     return hidden_states
                 assert isinstance(hidden_states, IntermediateTensors)
                 get_pp_group().send_tensor_dict(
@@ -1511,7 +1635,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             else:
                 if self.input_batch.pooling_params:
                     return self._pool(hidden_states, num_scheduled_tokens,
-                                      num_scheduled_tokens_np)
+                                      num_scheduled_tokens_np,
+                                      finished_sending, finished_recving,
+                                      kv_connector_output)
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states, None)
             if broadcast_pp_output:
@@ -1645,17 +1771,23 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if has_kv_transfer_group():
                 get_kv_transfer_group().clear_connector_metadata()
 
-            model_runner_output = ModelRunnerOutput(
-                req_ids=self.input_batch.req_ids,
-                req_id_to_index=self.input_batch.req_id_to_index,
-                sampled_token_ids=valid_sampled_token_ids,
-                spec_token_ids=spec_token_ids,
-                logprobs=logprobs_lists,
-                prompt_logprobs_dict=prompt_logprobs_dict,
-                pooler_output=[],
-                finished_sending=finished_sending,
-                finished_recving=finished_recving,
-            )
+        extra_args = ({
+            "finished_sending": finished_sending,
+            "finished_recving": finished_recving
+        } if vllm_version_is("0.10.0") else {
+            "kv_connector_output": kv_connector_output
+        })
+
+        model_runner_output = ModelRunnerOutput(
+            req_ids=self.input_batch.req_ids,
+            req_id_to_index=self.input_batch.req_id_to_index,
+            sampled_token_ids=valid_sampled_token_ids,
+            spec_token_ids=spec_token_ids,
+            logprobs=logprobs_lists,
+            prompt_logprobs_dict=prompt_logprobs_dict,
+            pooler_output=[],
+            **extra_args,
+        )
 
         durations = ProfileExecuteDuration().pop_captured_sync()
         if durations:
@@ -1720,25 +1852,27 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         with_prefill: bool = False,
         is_torchair_compile: bool = False,
     ) -> torch.Tensor:
-        maybe_padded_num_tokens = num_tokens
-        if self.torchair_graph_enabled and not with_prefill:
-            maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
-                num_tokens)
-
         # Padding for DP
         (num_tokens, num_tokens_across_dp, with_prefill,
-         enable_dbo) = self._get_forward_metadata_across_dp(
-             maybe_padded_num_tokens, num_tokens, with_prefill, False)
+         _) = self._get_forward_metadata_across_dp_and_pad(
+             num_tokens, with_prefill, False)
 
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
         assert num_tokens <= self.scheduler_config.max_num_batched_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
-        num_reqs = min(num_tokens, max_num_reqs)
+        if with_prefill:
+            num_reqs = num_tokens
+        else:
+            num_reqs = (num_tokens + self.decode_token_per_req -
+                        1) // self.decode_token_per_req
+        num_reqs = min(num_reqs, max_num_reqs)
         min_tokens_per_req = num_tokens // num_reqs
         num_scheduled_tokens_list = [min_tokens_per_req] * num_reqs
         num_scheduled_tokens_list[-1] += num_tokens % num_reqs
+        assert sum(num_scheduled_tokens_list) == num_tokens
+        assert len(num_scheduled_tokens_list) == num_reqs
         num_scheduled_tokens = np.array(num_scheduled_tokens_list,
                                         dtype=np.int32)
 
@@ -1750,7 +1884,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # we can't skip_attn, it will cause graph recompile.
         if self.torchair_graph_enabled and not with_prefill:
             attn_metadata = self.attn_metadata_builder.build_torchair_graph_dummy(
-                num_reqs=num_tokens, num_actual_tokens=1)
+                num_reqs=num_reqs, num_actual_tokens=1)
         elif skip_attn:
             attn_metadata = None
         else:
@@ -1811,6 +1945,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             torch._dynamo.mark_static(attn_metadata.decode.sin)
                             torch._dynamo.mark_static(attn_metadata.decode.cos)
                         torch._dynamo.mark_static(attn_metadata.slot_mapping)
+                        if self.speculative_config:
+                            torch._dynamo.mark_static(
+                                attn_metadata.decode.attn_mask)
                         for kv in self.kv_caches:
                             assert isinstance(
                                 kv, tuple), "kv_cache must be a tuple"
@@ -1847,6 +1984,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     if self.use_spec_decode and isinstance(
                             self.drafter, EagleProposer):
                         self.drafter.dummy_run(num_tokens)
+            if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
+                assert isinstance(self.drafter, MtpProposer)
+                self.drafter.dummy_run(
+                    num_tokens=num_tokens,
+                    with_prefill=with_prefill,
+                    skip_attn=skip_attn,
+                    num_reqs=num_reqs,
+                    num_tokens_across_dp=num_tokens_across_dp)
+
             return hidden_states
 
     @contextmanager
@@ -1969,9 +2115,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     m.consumed_memory / float(2**30))
 
     def _get_torchair_lazy_compiled_model(self, batch_size: int):
-        if batch_size < 0 or batch_size > self.max_num_reqs:
+        if batch_size < 0 or batch_size > self.torchair_graph_batch_sizes[-1]:
             raise ValueError(
-                f"Bad graph batch size:{batch_size}! max_num_reqs:{self.max_num_reqs}"
+                f"Bad graph batch size:{batch_size}! max_graph_batch_sizes:{self.torchair_graph_batch_sizes[-1]}"
             )
 
         compiled_model = self.torchair_compiled_models.get(
@@ -2435,7 +2581,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         next_token_ids = torch.tensor(next_token_ids,
                                       dtype=torch.int32,
                                       device=self.device)
-
+        accepted_token_indices = None
         if spec_decode_metadata is None:
             # input_ids can be None for multimodal models.
             target_token_ids = self.input_ids[:num_scheduled_tokens]
@@ -2455,14 +2601,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 dtype=torch.int32,
                 device=self.device,
             )
-            cu_num_tokens, token_indices = self.drafter.prepare_inputs(
+            cu_num_tokens, accepted_token_indices, target_token_ids, \
+                target_positions, target_hidden_states, target_slot_mapping = self.drafter.prepare_inputs(
                 attn_metadata.query_start_loc,
                 num_rejected_tokens,
+                self.input_ids[:num_scheduled_tokens],
+                positions[:num_scheduled_tokens],
+                hidden_states[:num_scheduled_tokens],
+                attn_metadata.slot_mapping[:num_scheduled_tokens],
+                is_torchair_graph=self.torchair_graph_enabled,
             )
-            target_token_ids = self.input_ids[token_indices]
-            target_positions = positions[token_indices]
-            target_hidden_states = hidden_states[token_indices]
-            target_slot_mapping = attn_metadata.slot_mapping[token_indices]
 
         draft_token_ids = self.drafter.propose(
             target_token_ids=target_token_ids,
@@ -2473,7 +2621,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             cu_num_tokens=cu_num_tokens,
             block_table=attn_metadata.block_tables,
             sampling_metadata=sampling_metadata,
-        )
+            token_indices=accepted_token_indices)
         spec_token_ids = draft_token_ids.tolist()
         return spec_token_ids
 
@@ -2584,11 +2732,56 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             start_graph_batch_size *= 2
 
     def select_torchair_padded_batch_size(self, batch_size: int):
-        selected_batch_size = self.max_num_reqs
         for padded_batch_size in self.torchair_graph_batch_sizes:
-            if batch_size <= padded_batch_size < selected_batch_size:
-                selected_batch_size = padded_batch_size
-        return selected_batch_size
+            if batch_size <= padded_batch_size:
+                # we treat batch_size as num of requests
+                return padded_batch_size
+        raise ValueError(
+            f"cur batch_size is invalid, torchair_graph_batch_sizes is "
+            f"{self.torchair_graph_batch_sizes}, but cur batch_size is {batch_size}."
+        )
+
+    def check_torchair_graph_batch_sizes(self):
+        # return graph_batch_sizes according to the max number of tokens
+        # first pad according to the number of requests
+        if len(self.torchair_graph_batch_sizes) == 0:
+            self.torchair_graph_batch_sizes = [1, self.max_num_reqs]
+        else:
+            self.torchair_graph_batch_sizes = sorted(
+                self.torchair_graph_batch_sizes)
+            while self.torchair_graph_batch_sizes[-1] > self.max_num_reqs:
+                self.torchair_graph_batch_sizes.pop()
+                if len(self.torchair_graph_batch_sizes) == 0:
+                    logger.warning(
+                        "torch_graph_batch_sizes is invalid, reset it to [1, max_num_seqs]"
+                    )
+                    self.torchair_graph_batch_sizes = [1, self.max_num_reqs]
+            if self.torchair_graph_batch_sizes[-1] < self.max_num_reqs:
+                self.torchair_graph_batch_sizes.append(self.max_num_reqs)
+
+        # padded max number tokens = max_num_req * decode_token_per_req
+        self.torchair_graph_batch_sizes = [
+            graph_batch_size * self.decode_token_per_req
+            for graph_batch_size in self.torchair_graph_batch_sizes
+        ]
+
+        # NOTE: when enable_expert_parallel, we need to check if `graph_batch_size` is divisible by `tp_size`
+        tp_size = self.parallel_config.tensor_parallel_size
+        if self.parallel_config.enable_expert_parallel:
+            new_graph_batch_sizes = []
+            for graph_batch_size in self.torchair_graph_batch_sizes:
+                cur_graph_batch_size = (graph_batch_size + tp_size -
+                                        1) // tp_size * tp_size
+                if cur_graph_batch_size not in new_graph_batch_sizes and \
+                    cur_graph_batch_size <= self.scheduler_config.max_num_batched_tokens:
+                    new_graph_batch_sizes.append(cur_graph_batch_size)
+                elif cur_graph_batch_size > self.scheduler_config.max_num_batched_tokens \
+                        and self.decode_token_per_req > 1:
+                    logger.warning(
+                        f"torchair_graph_batch_sizes {cur_graph_batch_size} is bigger than max_num_batched_tokens",
+                        f"{self.scheduler_config.max_num_batched_tokens} will skip this batch size."
+                    )
+            self.torchair_graph_batch_sizes = new_graph_batch_sizes
 
     def get_supported_pooling_tasks(self):
         model = self.get_model()

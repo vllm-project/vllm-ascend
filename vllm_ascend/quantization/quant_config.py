@@ -15,10 +15,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-# By using quantization case, this file is called before worker patch achieve,
-# we need to import patch_utils here first to make sure the patch is applied.
-import vllm_ascend.patch.worker.patch_common.patch_utils  # type: ignore[import]  # isort: skip  # noqa
-
 from types import MappingProxyType
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
@@ -106,7 +102,7 @@ class AscendQuantConfig(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
-                return AscendUnquantizedFusedMoEMethod()
+                return AscendUnquantizedFusedMoEMethod(layer.moe)
             return AscendFusedMoEMethod(self, prefix,
                                         self.packed_modules_mapping)
         elif isinstance(layer, VocabParallelEmbedding):
@@ -205,6 +201,17 @@ class AscendLinearMethod(LinearMethodBase):
             layer.register_parameter(perchannel_name, param)
             set_weight_attrs(param, extra_weight_attrs)
 
+        pergroup_dict = self.quant_method.get_pergroup_param(
+            input_size_per_partition, output_size_per_partition, params_dtype)
+        for pergroup_name, pergroup_param in pergroup_dict.items():
+            param = torch.nn.Parameter(pergroup_param, requires_grad=False)
+            set_weight_attrs(param, {"output_dim": 0})
+            layer.register_parameter(pergroup_name, param)
+            set_weight_attrs(param, extra_weight_attrs)
+            if "weight_scale_second" in pergroup_name or "weight_offset_second" in pergroup_name:
+                setattr(param, "input_dim", 1)
+                param.input_dim = 1
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
@@ -295,6 +302,9 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             param = torch.nn.Parameter(param_value, requires_grad=False)
             layer.register_parameter(param_key, param)
             set_weight_attrs(param, extra_weight_attrs)
+            if "weight_scale_second" in param_key or "weight_offset_second" in param_key:
+                setattr(param, "quant_method",
+                        FusedMoeWeightScaleSupported.GROUP.value)
 
     def apply(
         self,
