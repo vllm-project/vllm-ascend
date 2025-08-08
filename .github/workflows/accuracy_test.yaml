@@ -70,6 +70,8 @@ jobs:
             runner: linux-aarch64-a2-1
           - model_name: Qwen3-30B-A3B
             runner: linux-aarch64-a2-2
+          - model_name: DeepSeek-V2-Lite
+            runner: linux-aarch64-a2-2
       fail-fast: false
 
     name: ${{ matrix.model_name }} accuracy
@@ -200,9 +202,8 @@ jobs:
           markdown_name="${model_base_name}"
           echo "markdown_name=$markdown_name" >> $GITHUB_OUTPUT
           mkdir -p ./benchmarks/accuracy
-          pytest -sv ./tests/e2e/singlecard/models/test_lm_eval_correctness.py \
-          --config ./tests/e2e/singlecard/models/configs/${{ matrix.model_name }}.yaml \
-          --report_output ./benchmarks/accuracy/${model_base_name}.md 
+          pytest -sv ./tests/e2e/models/test_lm_eval_correctness.py \
+          --config ./tests/e2e/models/configs/${{ matrix.model_name }}.yaml
 
       - name: Generate step summary
         if: ${{ always() }}
@@ -312,7 +313,7 @@ jobs:
               head: `vllm-ascend-ci:${{ env.BRANCH_NAME }}`,
               base: '${{ github.event.inputs.vllm-ascend-version }}',
               title: `[Doc] Update accuracy reports for ${{ github.event.inputs.vllm-ascend-version }}`,
-              body: `The accuracy results running on NPU Altlas A2 have changed, updating reports for: All models (Qwen/Qwen3-30B-A3B, Qwen2.5-VL-7B-Instruct, Qwen3-8B-Base)
+              body: `The accuracy results running on NPU Altlas A2 have changed, updating reports for: All models (Qwen3-30B-A3B, Qwen2.5-VL-7B-Instruct, Qwen3-8B-Base, DeepSeek-V2-Lite)
             
               - [Workflow run][1]
               
