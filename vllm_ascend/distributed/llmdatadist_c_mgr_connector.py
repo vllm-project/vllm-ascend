@@ -27,7 +27,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request, RequestStatus
 
-from vllm_ascend import envs
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
 
 TORCH_DTYPE_TO_NPU_DTYPE = {
@@ -181,7 +181,7 @@ class LLMDataDistCMgrConnectorScheduler():
         dp_rank_local = self.vllm_config.parallel_config.data_parallel_rank_local
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
 
-        self.port = dp_rank_local * tp_size + envs.VLLM_LLMDD_RPC_PORT if dp_rank_local is not None else tp_size + envs.VLLM_LLMDD_RPC_PORT
+        self.port = dp_rank_local * tp_size + envs_ascend.VLLM_LLMDD_RPC_PORT if dp_rank_local is not None else tp_size + envs_ascend.VLLM_LLMDD_RPC_PORT
 
         self._reqs_need_recv: dict[str, tuple[Request, list[int]]] = {}
 
@@ -344,7 +344,7 @@ class LLMDataDistCMgrConnectorWorker():
 
     def listen_for_agent_metadata_req(self, event: threading.Event):
         assert self.local_agent_metadata is not None
-        port = envs.VLLM_LLMDD_RPC_PORT + self.local_dp_rank * self.tp_size + self.tp_rank if self.local_dp_rank is not None else envs.VLLM_LLMDD_RPC_PORT + self.tp_size + self.tp_rank
+        port = envs_ascend.VLLM_LLMDD_RPC_PORT + self.local_dp_rank * self.tp_size + self.tp_rank if self.local_dp_rank is not None else envs_ascend.VLLM_LLMDD_RPC_PORT + self.tp_size + self.tp_rank
         url = f"tcp://0.0.0.0:{port}"
         msg_encoder = msgspec.msgpack.Encoder()
         msg_decoder = msgspec.msgpack.Decoder()
@@ -427,9 +427,9 @@ class LLMDataDistCMgrConnectorWorker():
 
     def read_offline_rank_table(self):
         assert (
-            envs.DISAGGREGATED_PREFILL_RANK_TABLE_PATH
+            envs_ascend.DISAGGREGATED_PREFILL_RANK_TABLE_PATH
         ), "Please set path of rank_table to env variable DISAGGREGATED_PREFILL_RANK_TABLE_PATH"
-        rank_table_path = envs.DISAGGREGATED_PREFILL_RANK_TABLE_PATH
+        rank_table_path = envs_ascend.DISAGGREGATED_PREFILL_RANK_TABLE_PATH
         with open(rank_table_path, "r", encoding="utf-8") as f:
             global_rank_table = json.load(f)
         decode_device_list = global_rank_table["decode_device_list"]
