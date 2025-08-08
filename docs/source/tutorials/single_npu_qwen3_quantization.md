@@ -33,7 +33,8 @@ see https://www.modelscope.cn/models/vllm-ascend/Qwen3-8B-W4A8
 
 ```bash
 # Optional, this commit has been verified
-git clone https://gitee.com/ascend/msit -b f8ab35a772a6c1ee7675368a2aa4bafba3bedd1a
+git clone https://gitee.com/ascend/msit
+git checkout f8ab35a772a6c1ee7675368a2aa4bafba3bedd1a
 
 cd msit/msmodelslim
 # Install by run this script
