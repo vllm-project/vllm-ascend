@@ -11,3 +11,4 @@ tasks:
   - name: "acc,none"
     value: 0.82
 num_fewshot: 5
+tensor_parallel_size: 4
