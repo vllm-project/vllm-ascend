@@ -36,7 +36,8 @@ class TestAscendRejectionSampler(TestBase):
         output_token_ids = torch.full((batch_size, max_spec_len + 1),
                                       PLACEHOLDER_TOKEN_ID)
 
-        num_draft_tokens = torch.tensor([2, 2])
+        cu_num_draft_tokens = torch.tensor([2, 4])
+        num_draft_tokens = [2, 2]
         draft_token_ids = torch.tensor([10, 11, 20, 21])
         target_argmax = torch.tensor([10, 99, 20, 22])
         bonus_token_ids = torch.tensor([[100], [200]])
@@ -45,10 +46,11 @@ class TestAscendRejectionSampler(TestBase):
 
         rejection_greedy_sample_pytorch(
             output_token_ids,
-            num_draft_tokens,
+            cu_num_draft_tokens,
             draft_token_ids,
             target_argmax,
             bonus_token_ids,
+            num_draft_tokens,
             max_spec_len,
             is_greedy,
         )
