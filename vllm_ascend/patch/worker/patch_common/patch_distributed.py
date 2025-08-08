@@ -46,4 +46,5 @@ class GroupCoordinatorPatch(GroupCoordinator):
                                                    gather_sizes)
 
 
-vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch  # Note: check the GroupCoordinator with online serving
+# Note: check the GroupCoordinator with online serving
+vllm.distributed.parallel_state.GroupCoordinator = GroupCoordinatorPatch

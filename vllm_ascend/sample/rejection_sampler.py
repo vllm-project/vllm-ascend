@@ -140,10 +140,7 @@ def rejection_sample(
     )
     output_token_ids.fill_(PLACEHOLDER_TOKEN_ID)
 
-    if sampling_metadata.all_greedy:
-        is_greedy = None
-    else:
-        is_greedy = sampling_metadata.temperature == GREEDY_TEMPERATURE
+    is_greedy = None if sampling_metadata.all_greedy else sampling_metadata.temperature == GREEDY_TEMPERATURE
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.
         target_argmax = target_probs.argmax(dim=-1)
@@ -304,10 +301,8 @@ def rejection_greedy_sample_pytorch(
         if not is_greedy[req_idx]:
             continue
 
-        if req_idx == 0:
-            start_idx = 0
-        else:
-            start_idx = cu_num_draft_tokens[req_idx - 1].item()
+        start_idx = 0 if req_idx == 0 else cu_num_draft_tokens[req_idx -
+                                                               1].item()
         end_idx = cu_num_draft_tokens[req_idx].item()
         num_draft_tokens = end_idx - start_idx
 
@@ -347,10 +342,8 @@ def rejection_random_sample_pytorch(
         if is_greedy[req_idx]:
             continue
 
-        if req_idx == 0:
-            start_idx = 0
-        else:
-            start_idx = cu_num_draft_tokens[req_idx - 1].item()
+        start_idx = 0 if req_idx == 0 else cu_num_draft_tokens[req_idx -
+                                                               1].item()
         end_idx = cu_num_draft_tokens[req_idx].item()
         num_draft_tokens = end_idx - start_idx
 
@@ -358,13 +351,8 @@ def rejection_random_sample_pytorch(
         for pos in range(num_draft_tokens):
             if not rejected:
                 draft_token_id = draft_token_ids[start_idx + pos].item()
-
-                if IS_NGRAM:
-                    draft_prob = 1.0
-                else:
-                    draft_prob = draft_probs[start_idx + pos,
-                                             draft_token_id].item()
-
+                draft_prob = 1.0 if IS_NGRAM else draft_probs[
+                    start_idx + pos, draft_token_id].item()
                 target_prob = target_probs[start_idx + pos,
                                            draft_token_id].item()
                 uniform_prob = uniform_probs[start_idx + pos].item()

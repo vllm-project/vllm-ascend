@@ -15,8 +15,8 @@
 # limitations under the License.
 #
 
-from vllm.distributed.kv_transfer.kv_connector.factory import \
-    KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.factory import (
+    KVConnectorFactory)
 
 KVConnectorFactory.register_connector(
     "LLMDataDistCMgrConnector",

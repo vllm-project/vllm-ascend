@@ -4,7 +4,7 @@ default_install_hook_types:
 default_stages:
   - pre-commit # Run locally
   - manual # Run in CI
-exclude: 'examples/.*' # Exclude examples from all hooks by default
+exclude: '^(examples/.*|vllm-empty/.*)$' # Exclude examples from all hooks by default
 repos:
 - repo: https://github.com/codespell-project/codespell
   rev: v2.4.1
@@ -92,12 +92,11 @@ repos:
     language: system
     types: [python]
     stages: [manual] # Only run in CI
-  # FIXME: enable shellcheck
-  # - id: shellcheck
-  #   name: Lint shell scripts
-  #   entry: tools/shellcheck.sh
-  #   language: script
-  #   types: [shell]
+  - id: shellcheck
+    name: Lint shell scripts
+    entry: tools/shellcheck.sh
+    language: script
+    types: [shell]
   - id: png-lint
     name: Lint PNG exports from excalidraw
     entry: tools/png-lint.sh

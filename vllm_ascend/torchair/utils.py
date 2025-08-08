@@ -63,9 +63,9 @@ def read_kv_cache_bytes_from_file(rank) -> int:
     kv_cache_bytes_file = os.path.join(
         kv_cache_bytes_cache_abs_path,
         f"{rank}_{KV_CACHE_BYTES_CACHE_FILE_NAME}")
-    with open(kv_cache_bytes_file, "r", encoding="utf-8") as f:
-        with _file_lock(f, fcntl.LOCK_SH):
-            kv_cache_bytes = int(f.readline())
+    with open(kv_cache_bytes_file,
+              encoding="utf-8") as f, _file_lock(f, fcntl.LOCK_SH):
+        kv_cache_bytes = int(f.readline())
     return kv_cache_bytes
 
 
@@ -76,9 +76,9 @@ def write_kv_cache_bytes_to_file(rank, kv_cache_bytes):
     kv_cache_bytes_file = os.path.join(
         kv_cache_bytes_cache_abs_path,
         f"{rank}_{KV_CACHE_BYTES_CACHE_FILE_NAME}")
-    with open(kv_cache_bytes_file, "w", encoding="utf-8") as f:
-        with _file_lock(f, fcntl.LOCK_EX):
-            f.write(f"{kv_cache_bytes}")
+    with open(kv_cache_bytes_file, "w",
+              encoding="utf-8") as f, _file_lock(f, fcntl.LOCK_EX):
+        f.write(f"{kv_cache_bytes}")
 
 
 def delete_torchair_cache_file():

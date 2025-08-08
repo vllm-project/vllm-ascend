@@ -18,8 +18,8 @@
 #
 import torch
 
-from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import \
-    HCCLLibrary
+from vllm_ascend.distributed.device_communicators.pyhccl_wrapper import (
+    HCCLLibrary)
 
 
 def test_hcclGetUniqueId():

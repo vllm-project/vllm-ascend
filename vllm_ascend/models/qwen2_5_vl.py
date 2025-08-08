@@ -17,8 +17,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from collections.abc import Iterable
 from functools import partial
-from typing import Callable, Iterable, Optional, Set, Tuple, Union
+from typing import Callable, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -434,10 +435,7 @@ class AscendQwen2_5_VisionTransformer(Qwen2_5_VisionTransformer):
         # transformers
         x = x.unsqueeze(1)
         for layer_num, blk in enumerate(self.blocks):
-            if layer_num in self.fullatt_block_indexes:
-                cu_seqlens_now = cu_seqlens
-            else:
-                cu_seqlens_now = cu_window_seqlens
+            cu_seqlens_now = cu_seqlens if layer_num in self.fullatt_block_indexes else cu_window_seqlens
             x = blk(x, cu_seqlens=cu_seqlens_now, cos=cos, sin=sin)
 
         # adapter

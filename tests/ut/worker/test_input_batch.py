@@ -8,7 +8,11 @@ from tests.ut.base import TestBase
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 
-def mock_cached_request_state(req_id="1", prompt=[1, 2, 3], output=[4, 5, 6]):
+def mock_cached_request_state(req_id="1", prompt=None, output=None):
+    if prompt is None:
+        prompt = [1, 2, 3]
+    if output is None:
+        output = [4, 5, 6]
     return CachedRequestState(
         req_id=req_id,
         prompt_token_ids=prompt,

@@ -29,20 +29,16 @@ from vllm.distributed import (GroupCoordinator, get_tensor_model_parallel_rank,
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
                                              get_tp_group)
 from vllm.forward_context import get_forward_context
-from vllm.model_executor.layers.fused_moe.config import \
-    FusedMoEConfig  # isort: skip
-from vllm.model_executor.layers.fused_moe.config import \
-    FusedMoEParallelConfig  # isort: skip
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE, UnquantizedFusedMoEMethod, determine_expert_map)
-from vllm.model_executor.layers.quantization.base_config import \
-    QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
-from vllm_ascend.distributed.communication_op import \
-    data_parallel_reduce_scatter
+from vllm_ascend.distributed.communication_op import (
+    data_parallel_reduce_scatter)
 from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.ops.expert_load_balancer import ExpertLoadBalancer
 from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
@@ -53,6 +49,9 @@ from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
                                get_all_reduce_merge_state,
                                get_ascend_soc_version,
                                get_rm_router_logits_state, is_310p)
+
+from vllm.model_executor.layers.fused_moe.config import (  # isort: skip
+    FusedMoEConfig, FusedMoEParallelConfig)
 
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
 
@@ -1070,7 +1069,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 # out_flag=False, # todo new api; should the third output be output
                 # y2_flag=False, # old api; should the third output be output
                 routed_scaling_factor=1,
-                eps=float(1e-20))
+                eps=1e-20)
         else:
             topk_weights, topk_ids = select_experts(
                 hidden_states=x,
@@ -1106,7 +1105,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 expert_map=expert_map,
                 moe_all_to_all_group_name=self.moe_all_to_all_group_name,
                 shared_experts=shared_experts,
-                mc2_mask=kwargs.get("mc2_mask", None))
+                mc2_mask=kwargs.get("mc2_mask"))
         elif fused_moe_state in [
                 FusedMoEState.AllGather, FusedMoEState.NaiveMulticast
         ]:
@@ -1339,10 +1338,7 @@ class AscendFusedMoE(FusedMoE):
 
         assert self.quant_method is not None
 
-        if top_k:
-            real_top_k = top_k
-        else:
-            real_top_k = self.top_k
+        real_top_k = top_k if top_k else self.top_k
 
         num_tokens, hidden_size = hidden_states.shape
 
@@ -1351,8 +1347,8 @@ class AscendFusedMoE(FusedMoE):
         mc2_mask = forward_context.mc2_mask
         # For w8a8 dynamic we can do npu_dynamic_quant and gate in parallel.
         quantized_x_for_share, dynamic_scale_for_share = None, None
-        from vllm_ascend.quantization.w8a8_dynamic import \
-            AscendW8A8DynamicFusedMoEMethod
+        from vllm_ascend.quantization.w8a8_dynamic import (
+            AscendW8A8DynamicFusedMoEMethod)
         if self.enable_multistream_moe:
             if not self.rm_router_logits:
                 router_logits, _ = gate(hidden_states)
@@ -1364,10 +1360,11 @@ class AscendFusedMoE(FusedMoE):
                     quantized_x_for_share, dynamic_scale_for_share = torch_npu.npu_dynamic_quant(
                         hidden_states)
 
-        if shared_experts:
-            if not self.enable_multistream_moe or fused_moe_state != FusedMoEState.MC2:
-                # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
-                shared_hidden_states = shared_experts(hidden_states)
+        if shared_experts and (not self.enable_multistream_moe
+                               or fused_moe_state != FusedMoEState.MC2):
+            # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp,
+            # but waits until shared_experts+router_experts are completed before doing all_reduce
+            shared_hidden_states = shared_experts(hidden_states)
 
         mc2_mask = forward_context.mc2_mask
 
@@ -1375,7 +1372,8 @@ class AscendFusedMoE(FusedMoE):
         tp_size = get_tensor_model_parallel_world_size()
         if enable_sp:
             tp_rank = get_tensor_model_parallel_rank()
-            mc2_mask_sp = _metadata_for_padding.mc2_mask if _metadata_for_padding is not None else forward_context.mc2_mask
+            mc2_mask_sp = _metadata_for_padding.mc2_mask if _metadata_for_padding is not None \
+                else forward_context.mc2_mask
             chunk_mc2_mask = torch.tensor_split(mc2_mask_sp, tp_size, dim=0)
             mc2_mask = chunk_mc2_mask[tp_rank]
             replace_allreduce = True
@@ -1384,11 +1382,8 @@ class AscendFusedMoE(FusedMoE):
                 FusedMoEState.AllGather, FusedMoEState.AllGatherEP,
                 FusedMoEState.NaiveMulticast
         ] and not replace_allreduce):
-            if fused_moe_state in {FusedMoEState.MC2}:
-                padding_size = forward_context.padded_num_tokens
-            else:
-                # TODO: Determine if we can remove the padding
-                padding_size = tp_size
+            padding_size = (forward_context.padded_num_tokens if
+                            fused_moe_state == FusedMoEState.MC2 else tp_size)
             if num_tokens < padding_size:
                 hidden_states = nn.functional.pad(
                     hidden_states, (0, 0, 0, padding_size - num_tokens))
@@ -1464,9 +1459,8 @@ class AscendFusedMoE(FusedMoE):
             dynamic_scale_for_share=dynamic_scale_for_share,
         )
 
-        if shared_experts:
-            if isinstance(e_hidden_states, tuple):
-                e_hidden_states, shared_hidden_states = e_hidden_states
+        if shared_experts and isinstance(e_hidden_states, tuple):
+            e_hidden_states, shared_hidden_states = e_hidden_states
 
         if (fused_moe_state not in [
                 FusedMoEState.AllGather, FusedMoEState.AllGatherEP,

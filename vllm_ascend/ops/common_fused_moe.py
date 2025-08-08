@@ -19,8 +19,8 @@ from typing import Callable, Optional
 
 import torch
 from vllm.config import CompilationLevel, get_current_vllm_config
-from vllm.model_executor.layers.fused_moe.layer import \
-    UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe.layer import (
+    UnquantizedFusedMoEMethod)
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe import (fused_experts, fused_experts_moge,

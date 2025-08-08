@@ -25,7 +25,8 @@
 # # vllm-project/vllm/vllm/model_executor/models/deepseek_v2.py
 # """Inference-only DeepseekV2/DeepseekV3 model."""
 
-from typing import Any, Dict, Iterable, List, Optional, Union
+from collections.abc import Iterable
+from typing import Any, Dict, List, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -50,13 +51,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.models.deepseek_v2 import \
-    DeepseekV2ForCausalLM  # noqa: E501
-from vllm.model_executor.models.deepseek_v2 import \
-    yarn_get_mscale  # noqa: E501
-from vllm.model_executor.models.deepseek_v2 import (
-    DeepseekV2Attention, DeepseekV2DecoderLayer, DeepseekV2MLAAttention,
-    get_spec_layer_idx_from_weight_name)
+from vllm.model_executor.models.deepseek_v2 import (  # noqa: E501
+    DeepseekV2Attention, DeepseekV2DecoderLayer, DeepseekV2ForCausalLM,
+    DeepseekV2MLAAttention, get_spec_layer_idx_from_weight_name,
+    yarn_get_mscale)
 from vllm.model_executor.models.utils import (
     PPMissingLayer, is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
@@ -430,10 +428,7 @@ class CustomDeepseekDBODecoderLayer(DeepseekV2DecoderLayer):
         layer_idx = int(prefix.split(sep='.')[-1])
         self.layer_idx = layer_idx
         # TODO: enable mla in vllm-ascend
-        if model_config.use_mla:
-            attn_cls = CustomDeepseekDBOMLAAttention
-        else:
-            attn_cls = DeepseekV2Attention
+        attn_cls = CustomDeepseekDBOMLAAttention if model_config.use_mla else DeepseekV2Attention
         self.self_attn = attn_cls(
             config=config,
             hidden_size=self.hidden_size,
@@ -647,10 +642,7 @@ class CustomDeepseekDBODecoderLayer(DeepseekV2DecoderLayer):
             router_logit = self.mlp._forward_ms_op_gate(local_hidden_states)
             router_logits.append(router_logit)
 
-            if CustomDeepseekDBOMoE.top_k:
-                real_top_k = CustomDeepseekDBOMoE.top_k
-            else:
-                real_top_k = self.mlp.experts.top_k
+            real_top_k = CustomDeepseekDBOMoE.top_k if CustomDeepseekDBOMoE.top_k else self.mlp.experts.top_k
 
             hidden_states[i] = self.mlp.experts._forward_ms_fused_moe_comp(
                 local_hidden_states, router_logits[i], is_prefill, real_top_k,
@@ -827,10 +819,8 @@ class CustomDeepseekDBOModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            if inputs_embeds is not None:
-                hidden_states = inputs_embeds
-            else:
-                hidden_states = self.get_input_embeddings(input_ids)
+            hidden_states = inputs_embeds if inputs_embeds is not None else self.get_input_embeddings(
+                input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -866,8 +856,7 @@ class CustomDeepseekDBOModel(nn.Module):
                 "residual": residual
             })
 
-        hidden_states, _ = self.norm(hidden_states, residual)
-        return hidden_states
+        return self.norm(hidden_states, residual)[0]
 
     def can_run_ms(self):
         attn_metadata = get_forward_context().attn_metadata

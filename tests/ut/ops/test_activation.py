@@ -44,10 +44,8 @@ def test_SiluAndMul_forward(mock_swiglu, is_310p_return, dummy_tensor):
         layer = SiluAndMul()
         out = layer.forward(dummy_tensor)
 
-        if is_310p_return:
-            expected_arg = dummy_tensor.to(torch.float32)
-        else:
-            expected_arg = dummy_tensor
+        expected_arg = dummy_tensor.to(
+            torch.float32) if is_310p_return else dummy_tensor
 
         # assert mock_swiglu.call_count == 1
         mock_swiglu.assert_called_once()

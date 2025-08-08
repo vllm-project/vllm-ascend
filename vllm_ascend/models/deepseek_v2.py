@@ -25,7 +25,8 @@
 # # vllm-project/vllm/vllm/model_executor/models/deepseek_v2.py
 # """Inference-only DeepseekV2/DeepseekV3 model."""
 
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
+from collections.abc import Iterable
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch_npu
@@ -57,13 +58,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
-from vllm.model_executor.models.deepseek_v2 import \
-    DeepseekV2ForCausalLM  # noqa: E501
-from vllm.model_executor.models.deepseek_v2 import \
-    yarn_get_mscale  # noqa: E501
-from vllm.model_executor.models.deepseek_v2 import (
-    DeepseekV2Attention, DeepseekV2DecoderLayer, DeepseekV2MLAAttention,
-    get_spec_layer_idx_from_weight_name)
+from vllm.model_executor.models.deepseek_v2 import (  # noqa: E501
+    DeepseekV2Attention, DeepseekV2DecoderLayer, DeepseekV2ForCausalLM,
+    DeepseekV2MLAAttention, get_spec_layer_idx_from_weight_name,
+    yarn_get_mscale)
 from vllm.model_executor.models.utils import (
     PPMissingLayer, is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
@@ -411,7 +409,8 @@ class CustomDeepseekV2MoE(nn.Module):
             experts_hidden_states[0] * self.routed_scaling_factor +
             experts_hidden_states[1])
         if self.all_reduce_merge:
-            # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp, but waits until shared_experts+router_experts are completed before doing all_reduce
+            # When all_reduce_merge is in progress, shared_experts does not do all_reduce in mlp,
+            # but waits until shared_experts+router_experts are completed before doing all_reduce
             hidden_states = tensor_model_parallel_all_reduce(hidden_states)
 
         return hidden_states
@@ -630,10 +629,8 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.tp_rank = get_tp_group().rank_in_group
         ascend_config = get_ascend_config()
         # TODO: enable mla in vllm-ascend
-        if model_config.use_mla:
-            attn_cls = CustomDeepseekV2MLAAttention
-        else:
-            attn_cls = DeepseekV2Attention
+        attn_cls = CustomDeepseekV2MLAAttention if model_config.use_mla \
+            else DeepseekV2Attention
         self.self_attn = attn_cls(
             config=config,
             hidden_size=self.hidden_size,
@@ -816,10 +813,8 @@ class CustomDeepseekV2Model(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            if inputs_embeds is not None:
-                hidden_states = inputs_embeds
-            else:
-                hidden_states = self.get_input_embeddings(input_ids)
+            hidden_states = inputs_embeds if inputs_embeds is not None else self.get_input_embeddings(
+                input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None

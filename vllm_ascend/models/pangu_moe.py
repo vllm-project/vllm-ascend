@@ -15,7 +15,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from collections.abc import Iterable
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import torch
 import torch.distributed as dist
@@ -65,9 +66,7 @@ _ROUTER_SCALE = None
 
 def use_h2p():
     # only use H2P when dp_size > 1.
-    if get_dp_group().world_size > 1:
-        return True
-    return False
+    return get_dp_group().world_size > 1
 
 
 # This class is adapted from vllm.model_executor.layers.linear.MergedColumnParallelLinear.
@@ -818,10 +817,8 @@ class PanguProMoEModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            if inputs_embeds is not None:
-                hidden_states = inputs_embeds
-            else:
-                hidden_states = self.get_input_embeddings(input_ids)
+            hidden_states = inputs_embeds if inputs_embeds is not None else self.get_input_embeddings(
+                input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None

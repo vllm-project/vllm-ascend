@@ -94,8 +94,8 @@ from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
 
 if not vllm_version_is("0.10.0"):
     from vllm.tasks import GenerationTask, SupportedTask
-    from vllm.v1.worker.kv_connector_model_runner_mixin import \
-        KVConnectorOutput
+    from vllm.v1.worker.kv_connector_model_runner_mixin import (
+        KVConnectorOutput)
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -594,12 +594,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         removed_req_indices.sort(reverse=True)
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
-            if removed_req_indices:
-                # Fill the empty index.
-                req_index = removed_req_indices.pop()
-            else:
-                # Append to the end.
-                req_index = None
+            req_index = removed_req_indices.pop(
+            ) if removed_req_indices else None
             self.input_batch.add_request(req_state, req_index)
             spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
                 req_id, ())
@@ -677,10 +673,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         [token_index,
          seq_index] = compute_split_seq_index(query_lens, attn_state,
                                               num_tokens)
-        if token_index == 0 or seq_index == 0 or seq_index == len(
-                query_lens) or num_tokens < 256:
-            return False
-        return True
+        return all([
+            token_index != 0,
+            seq_index != 0,
+            seq_index != len(query_lens),
+            num_tokens >= 256,
+        ])
 
     def get_eagle_atten_dict(
         self,
@@ -1127,10 +1125,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 attn_state = AscendAttentionState.SpecDecoding
         # Speculative decoding.
         elif np.all(num_valid_tokens == 1):
-            if self.use_eagle:
-                attn_state = AscendAttentionState.ChunkedPrefill
-            else:
-                attn_state = AscendAttentionState.SpecDecoding
+            attn_state = AscendAttentionState.ChunkedPrefill if self.use_eagle else AscendAttentionState.SpecDecoding
         # splitfuse
         elif not ascend_config.ascend_scheduler_config.enabled or self.chunked_prefill_enabled:
             attn_state = AscendAttentionState.ChunkedPrefill
@@ -1271,38 +1266,38 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens=padded_num_tokens_across_dp,
                 num_tokens_across_dp=num_tokens_across_dp,
                 with_prefill=with_prefill,
-                num_actual_tokens=total_num_scheduled_tokens):
-            with ProfileExecuteDuration().capture_async("forward"):
-                self.maybe_setup_kv_connector(scheduler_output)
-                model_kwargs = {}
-                if self.torchair_graph_enabled:
-                    model_kwargs["kv_caches"] = self.kv_caches
-                    model_kwargs["attn_metadata"] = attn_metadata
-                if self.torchair_graph_enabled and not with_prefill:
-                    maybe_converting_weight_acl_format(self.model,
-                                                       ACL_FORMAT_FRACTAL_NZ)
+                num_actual_tokens=total_num_scheduled_tokens
+        ), ProfileExecuteDuration().capture_async("forward"):
+            self.maybe_setup_kv_connector(scheduler_output)
+            model_kwargs = {}
+            if self.torchair_graph_enabled:
+                model_kwargs["kv_caches"] = self.kv_caches
+                model_kwargs["attn_metadata"] = attn_metadata
+            if self.torchair_graph_enabled and not with_prefill:
+                maybe_converting_weight_acl_format(self.model,
+                                                   ACL_FORMAT_FRACTAL_NZ)
 
-                    compiled_model = self._get_torchair_lazy_compiled_model(
-                        padded_num_tokens_across_dp)
-                    hidden_states = compiled_model(
-                        input_ids=input_ids,
-                        positions=positions,
-                        intermediate_tensors=intermediate_tensors,
-                        inputs_embeds=inputs_embeds,
-                        **model_kwargs,
-                    )
-                else:
-                    assert self.model is not None
-                    maybe_converting_weight_acl_format(self.model,
-                                                       ACL_FORMAT_FRACTAL_ND)
+                compiled_model = self._get_torchair_lazy_compiled_model(
+                    padded_num_tokens_across_dp)
+                hidden_states = compiled_model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds,
+                    **model_kwargs,
+                )
+            else:
+                assert self.model is not None
+                maybe_converting_weight_acl_format(self.model,
+                                                   ACL_FORMAT_FRACTAL_ND)
 
-                    hidden_states = self.model(
-                        input_ids=input_ids,
-                        positions=positions,
-                        intermediate_tensors=intermediate_tensors,
-                        inputs_embeds=inputs_embeds,
-                        **model_kwargs,
-                    )
+            hidden_states = self.model(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                **model_kwargs,
+            )
 
         self.maybe_wait_for_kv_save()
         finished_sending, finished_recving = self.get_finished_kv_transfer(
@@ -1901,11 +1896,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 input_ids = self.input_ids[:num_tokens]
                 inputs_embeds = None
 
-            if self.uses_mrope:
-                positions = self.mrope_positions[:, :num_tokens]
-            else:
-                positions = self.positions[:num_tokens]
-
+            positions = self.mrope_positions[:, :
+                                             num_tokens] if self.uses_mrope else self.positions[:
+                                                                                                num_tokens]
             if get_pp_group().is_first_rank:
                 intermediate_tensors = None
             else:
@@ -2135,8 +2128,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if is_310p():
             # on 300I Duo platform, we need to patch broadcast. however, this patch will be
             # overwritten by patch_for_hcom in torchair. so we need to re-patch it here.
-            from vllm_ascend.patch.platform.patch_common.patch_distributed import \
-                communication_adaptation_310p
+            from vllm_ascend.patch.platform.patch_common.patch_distributed import (
+                communication_adaptation_310p)
             communication_adaptation_310p()
 
         config = torchair.CompilerConfig()
@@ -2271,10 +2264,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                 nope_cache, acl_format)
                         else:
 
-                            # In order to transfer kv cache through the reigster_memory api from llmdatadist, the memory
-                            # address should be aligned by 2M. In most case, torch_npu can allocate 2M aligned memory, but
-                            # we found there are also some exceptions during test, so we manual align those memory here, this part
-                            # of code may consume 2M * 2 * elem_size memory every layer.
+                            # In order to transfer kv cache through the reigster_memory api from llmdatadist,
+                            # the memory address should be aligned by 2M. In most case, torch_npu can allocate
+                            # 2M aligned memory, but we found there are also some exceptions during test, so we
+                            # manual align those memory here, this part of code may consume 2M * 2 * elem_size
+                            # memory every layer.
                             nope_allocate_shape = num_blocks * block_size * num_kv_heads * nope_dim
                             nope_allocate_shape_alignment = nope_allocate_shape + alignment
                             rope_allocate_shape = num_blocks * block_size * num_kv_heads * rope_dim
@@ -2397,7 +2391,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # time is used to generate the cache, and the second time is used to load the cache to
                 # skip the overhead caused by Dynamo guard mechanism.
                 logger.info(
-                    "Use cached npu graph but cache doesn't exist! Now we compile graph to genetate torchair cache, this usually takes %.1f~%.1f mins.",
+                    "Use cached npu graph but cache doesn't exist! Now we compile graph to " \
+                    "genetate torchair cache, this usually takes %.1f~%.1f mins.",
                     0.5 * graph_num, 1.5 * graph_num)
                 self._compile_torchair_graph(torchair_graph_batch_sizes)
                 NPUPlatform.synchronize()

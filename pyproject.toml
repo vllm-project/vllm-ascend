@@ -34,3 +34,68 @@ plugins.md033.enabled = false # inline-html
 plugins.md046.enabled = false # code-block-style
 plugins.md024.allow_different_nesting = true # no-duplicate-headers
 plugins.md029.enabled = false # ol-prefix
+
+[tool.yapfignore]
+ignore_patterns = [
+    "benchmarks/**",
+    "examples/**",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"benchmarks/**" = ["ALL"]
+"setup.py" = ["ALL"]
+"collect_env.py" = ["ALL"]
+"tests/e2e/long_term/accuracy/accuracy_multicard.py" = ["ALL"]
+# test_prefix_caching need long prefix lines, disable long line check
+"tests/e2e/multicard/test_prefix_caching.py" = ["E501"]
+
+[tool.ruff]
+# Allow lines to be as long as 80.
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # flake8-simplify
+    "SIM",
+    # isort
+    # "I",
+    # flake8-logging-format
+    "G",
+]
+ignore = [
+    # star imports
+    "F405", "F403",
+    # lambda expression assignment
+    "E731",
+    # Loop control variable not used within loop body
+    "B007",
+    # f-string format
+    "UP032",
+    # Can remove once 3.10+ is the minimum Python version
+    "UP007",
+    "UP006",
+    # Remove this after we completed full replacement
+    "UP035",
+]
+
+[tool.mypy]
+plugins = ['pydantic.mypy']
+ignore_missing_imports = true
+check_untyped_defs = true
+follow_imports = "silent"
+
+[tool.isort]
+skip_glob = [
+    "benchmarks/*",
+    "examples/*",
+]
+use_parentheses = true
+skip_gitignore = true

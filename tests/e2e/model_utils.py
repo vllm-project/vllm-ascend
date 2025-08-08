@@ -18,7 +18,8 @@
 #
 
 import warnings
-from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union
+from collections.abc import Sequence
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from vllm.sequence import Logprob, PromptLogprobs, SampleLogprobs
 

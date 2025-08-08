@@ -284,7 +284,8 @@ class AscendMLAMetadataBuilder:
             self, num_seqs: int, block_tables: torch.Tensor) -> torch.Tensor:
 
         max_batch_size, max_blocks = self.runner.graph_block_tables.shape
-        assert max_batch_size >= num_seqs, f"max_batch_size: {max_batch_size} should be bigger than cur_num_seqs: {num_seqs}"
+        assert max_batch_size >= num_seqs, \
+        f"max_batch_size: {max_batch_size} should be bigger than cur_num_seqs: {num_seqs}"
 
         if isinstance(self.runner.graph_block_tables, np.ndarray):
             graph_block_tables = torch.zeros((max_batch_size, max_blocks),
@@ -613,8 +614,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.q_proj = kwargs['q_proj']
         self.kv_b_proj = kwargs['kv_b_proj']
         self.o_proj = kwargs['o_proj']
-        self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa', None)
-        self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
+        self.kv_a_proj_with_mqa = kwargs.get('kv_a_proj_with_mqa')
+        self.kv_a_layernorm = kwargs.get('kv_a_layernorm')
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.tp_size = get_tensor_model_parallel_world_size()
 
@@ -893,9 +894,13 @@ class AscendMLAImpl(MLAAttentionImpl):
                 out=attn_output)
             attn_output = attn_output.view(-1, self.num_heads, self.v_head_dim)
         else:
-            raise RuntimeError(
-                "Unexpected path reached, AscendMLAImpl should only have PrefillNoCache, PrefillCacheHit, ChunkedPrefill and SpecDecoding scenario in forward prefill, please file a bug to vllm-ascend !"
-            )
+            raise RuntimeError("""Unexpected path reached.
+                AscendMLAImpl should only handle:
+                - PrefillNoCache
+                - PrefillCacheHit
+                - ChunkedPrefill
+                - SpecDecoding
+                Please file a bug to vllm-ascend!""")
         attn_output = attn_output.reshape(
             [num_tokens, self.num_heads * self.v_head_dim])
         if attn_metadata.attn_state in [
@@ -926,19 +931,19 @@ class AscendMLAImpl(MLAAttentionImpl):
         B = hidden_states.shape[0]
         N = self.num_kv_heads
         S = 1
-        kv = self.kv_a_proj_with_mqa(hidden_states)[0]
+        kv = self.kv_a_proj_with_mqa(hidden_states)[0]  # type: ignore
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv = kv.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
         cache_mode = "PA_NZ" if self.enable_kv_nz else "PA"
         k_pe, k_nope, _, _ = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv,
-            self.kv_a_layernorm.weight,
+            self.kv_a_layernorm.weight,  # type: ignore
             cos,
             sin,
             slots.to(torch.int64),
             kv_cache[1],
             kv_cache[0],
-            epsilon=self.kv_a_layernorm.variance_epsilon,
+            epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore
             cache_mode=cache_mode,
         )
         return k_pe, k_nope, kv
@@ -955,19 +960,19 @@ class AscendMLAImpl(MLAAttentionImpl):
         B = hidden_states.shape[0]
         N = self.num_kv_heads
         S = 1
-        kv = self.kv_a_proj_with_mqa(hidden_states)[0]
+        kv = self.kv_a_proj_with_mqa(hidden_states)[0]  # type: ignore
         # npu_kv_rmsnorm_rope_cache needs [B, N, S, D]
         kv = kv.view(B, N, S, self.kv_lora_rank + self.qk_rope_head_dim)
         cache_mode = "PA_BLK_NZ" if self.enable_kv_nz else "PA"
         _, _, k_pe, k_nope = torch_npu.npu_kv_rmsnorm_rope_cache(
             kv,
-            self.kv_a_layernorm.weight,
+            self.kv_a_layernorm.weight,  # type: ignore
             cos,
             sin,
             slots.to(torch.int64),
             kv_cache[1],
             kv_cache[0],
-            epsilon=self.kv_a_layernorm.variance_epsilon,
+            epsilon=self.kv_a_layernorm.variance_epsilon,  # type: ignore
             cache_mode=cache_mode,
             is_output_kv=True,
         )

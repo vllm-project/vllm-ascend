@@ -5,7 +5,7 @@ from typing import Dict, List
 import torch
 
 
-class ExpertLoadBalancer(object):
+class ExpertLoadBalancer:
 
     def __init__(self, expert_map_path, global_expert_num):
         self.expert_map_path = expert_map_path
@@ -14,7 +14,7 @@ class ExpertLoadBalancer(object):
             self._expert_file_to_tensor())
 
     def _expert_file_to_tensor(self):
-        with open(self.expert_map_path, "r") as f:
+        with open(self.expert_map_path) as f:
             data = json.load(f)
         layers_num = data["moe_layer_count"]
         gpus_num = data["layer_list"][0]["device_count"]

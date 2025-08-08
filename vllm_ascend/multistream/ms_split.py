@@ -15,30 +15,30 @@ def compute_split_seq_index(
     num_tokens: int,
     imbalance_ratio: float = 0.1,
 ) -> list[int]:
-    if attn_state != AscendAttentionState.DecodeOnly:
-        assert query_lens is not None
-        total_tokens = sum(query_lens)
-        # the first index in last split
-        tokens, split_index = 0, 0
-        for value in query_lens:
-            tokens += value
-            split_index += 1
-            if tokens >= total_tokens // 2:
-                # check the current split index
-                if abs(tokens -
-                       total_tokens // 2) < total_tokens * imbalance_ratio:
-                    return [tokens, split_index]
-                # check the previous split index
-                elif abs(tokens - total_tokens // 2 -
-                         value) < total_tokens * imbalance_ratio:
-                    return [tokens - value, split_index - 1]
-                # fail to split if it is imbalanced
-                # TODO: split tokens in seq
-                else:
-                    return [0, 0]
-    else:
+    if attn_state == AscendAttentionState.DecodeOnly:
         tokens = num_tokens // 2
         return [tokens, tokens]
+
+    assert query_lens is not None
+    total_tokens = sum(query_lens)
+    half_tokens = total_tokens // 2
+    imbalance_threshold = total_tokens * imbalance_ratio
+
+    tokens = 0
+    for split_index, value in enumerate(query_lens, start=1):
+        tokens += value
+        if tokens >= half_tokens:
+            diff_current = abs(tokens - half_tokens)
+            diff_prev = abs(tokens - half_tokens - value)
+
+            if diff_current < imbalance_threshold:
+                return [tokens, split_index]
+            elif diff_prev < imbalance_threshold:
+                return [tokens - value, split_index - 1]
+            else:
+                # TODO: split tokens in seq when imbalanced
+                return [0, 0]
+
     return [0, 0]
 
 
@@ -106,7 +106,10 @@ def model_input_split_v1_mla_attn(
      block_table_post] = split_attn_tensor_type(attn_metadata.block_tables,
                                                 seq_index)
 
-    if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache or attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
+    if attn_metadata.attn_state in (
+            AscendAttentionState.PrefillNoCache,
+            AscendAttentionState.PrefillCacheHit,
+    ):
         # the attn_mla kernel in torch npu only accept 128*128 attn mask
         attn_mask_pre = attn_mask_post = attn_metadata.attn_mask
         attn_state_pre = attn_state_post = attn_metadata.attn_state

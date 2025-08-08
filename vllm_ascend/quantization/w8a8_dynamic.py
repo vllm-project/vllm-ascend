@@ -418,7 +418,8 @@ def fused_experts_with_all2all(
     if expert_map is not None:
         global_num_experts = len(expert_map) + global_redundant_expert_num
         if hasattr(torch_npu, "npu_moe_init_routing_quant"):
-            quantized_tokens, expanded_row_idx, global_expert_tokens, _, token_scales = torch_npu.npu_moe_init_routing_quant(
+            quantized_tokens, expanded_row_idx, global_expert_tokens, _, token_scales = \
+            torch_npu.npu_moe_init_routing_quant(
                 hidden_states,
                 expert_idx=topk_ids.to(torch.int32),
                 active_num=0,
@@ -783,7 +784,7 @@ class AscendW8A8DynamicLinearMethod:
             output_dtype = config.get("output_dtype", x.dtype)
             quantized_x, dynamic_scale = torch_npu.npu_dynamic_quant(x)
         else:
-            assert "output_dtype" in config.keys(), (
+            assert "output_dtype" in config, (
                 f"DynamicLinearMethod needs explicitly specified `output_dtype`"
                 f"for pre-quantized input, got config [{config}]")
             output_dtype = config["output_dtype"]
@@ -919,7 +920,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 # out_flag=False, # todo new api; 第三个输出是否输出
                 # y2_flag=False, # old api; 第三个输出是否输出
                 routed_scaling_factor=1,
-                eps=float(1e-20))
+                eps=1e-20)
         else:
             topk_weights, topk_ids = select_experts(
                 hidden_states=x,
@@ -978,7 +979,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 global_redundant_expert_num=global_redundant_expert_num,
                 shared_experts=shared_experts,
                 is_torchair=self.torchair_graph_enabled,
-                mc2_mask=kwargs.get("mc2_mask", None),
+                mc2_mask=kwargs.get("mc2_mask"),
                 shared_gate_up=shared_gate_up,
                 shared_dequant_scale=shared_dequant_scale)
         elif fused_moe_state in [

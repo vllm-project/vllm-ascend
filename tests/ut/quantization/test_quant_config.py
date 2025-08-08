@@ -84,7 +84,8 @@ class TestAscendQuantConfig(TestBase):
 
         # Test quantized layer
         with patch.object(self.ascend_config, 'is_layer_skipped_ascend', return_value=False), \
-            patch('vllm_ascend.quantization.quant_config.AscendLinearMethod', return_value=MagicMock()) as mock_ascend_linear:
+            patch('vllm_ascend.quantization.quant_config.AscendLinearMethod', return_value=MagicMock()) \
+                as mock_ascend_linear:
 
             method = self.ascend_config.get_quant_method(linear_layer, ".attn")
             self.assertIs(method, mock_ascend_linear.return_value)
@@ -116,14 +117,24 @@ class TestAscendQuantConfig(TestBase):
 
         # Test skipped layer
         with patch.object(self.ascend_config, 'is_layer_skipped_ascend', return_value=True), \
-            patch('vllm_ascend.quantization.quant_config.AscendUnquantizedFusedMoEMethod', return_value=MagicMock()) as mock_ascend_moe:
+            patch('vllm_ascend.quantization.quant_config.AscendUnquantizedFusedMoEMethod', return_value=MagicMock()) \
+                as mock_ascend_moe:
             method = self.ascend_config.get_quant_method(
                 fused_moe_layer, "moe_layer")
             self.assertIs(method, mock_ascend_moe.return_value)
 
         # Test quantized layer
-        with patch.object(self.ascend_config, 'is_layer_skipped_ascend', return_value=False), \
-            patch('vllm_ascend.quantization.quant_config.AscendFusedMoEMethod', return_value=MagicMock()) as mock_ascend_moe:
+        with (
+                patch.object(
+                    self.ascend_config,
+                    'is_layer_skipped_ascend',
+                    return_value=False,
+                ),
+                patch(
+                    'vllm_ascend.quantization.quant_config.AscendFusedMoEMethod',
+                    return_value=MagicMock(),
+                ) as mock_ascend_moe,
+        ):
             method = self.ascend_config.get_quant_method(
                 fused_moe_layer, "moe_layer")
             self.assertIs(method, mock_ascend_moe.return_value)

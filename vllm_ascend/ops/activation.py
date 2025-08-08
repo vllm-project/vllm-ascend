@@ -35,8 +35,6 @@ class AscendSiluAndMul(SiluAndMul):
 
         from vllm_ascend.utils import is_310p
 
-        if is_310p():
-            out = torch_npu.npu_swiglu(x.to(torch.float32)).to(torch.float16)
-        else:
-            out = torch_npu.npu_swiglu(x)
+        out = torch_npu.npu_swiglu(x.to(torch.float32)).to(
+            torch.float16) if is_310p() else torch_npu.npu_swiglu(x)
         return out

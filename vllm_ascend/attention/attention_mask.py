@@ -24,10 +24,8 @@ def _generate_attn_mask(max_seq_len, dtype):
     mask_flag = ~mask_flag
     # Currently for fp16 dtype, the mask value should be set to -inf.
     # TODO: Eliminate this part in the future.
-    if dtype == torch.float16:
-        mask_value = torch.finfo(torch.float32).min
-    else:
-        mask_value = 1
+    mask_value = torch.finfo(
+        torch.float32).min if dtype == torch.float16 else 1
     attn_mask = torch.masked_fill(torch.zeros(size=(max_seq_len, max_seq_len)),
                                   mask_flag, mask_value).to(dtype)
     return attn_mask

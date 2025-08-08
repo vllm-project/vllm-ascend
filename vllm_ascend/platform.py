@@ -66,15 +66,15 @@ class NPUPlatform(Platform):
         # For online serving, "ascend" quantization method is not a choice natively,
         # so we need to add "ascend" quantization method to quantization methods list
         # and the user can enable quantization using "vllm serve --quantization ascend".
-        if parser is not None:
-            quant_action = parser._option_string_actions.get('--quantization')
-            if quant_action and hasattr(quant_action,
-                                        'choices') and quant_action.choices:
-                if ASCEND_QUATIZATION_METHOD not in quant_action.choices:
-                    quant_action.choices.append(ASCEND_QUATIZATION_METHOD)
+        if (parser is not None
+                and (quant_action :=
+                     parser._option_string_actions.get('--quantization'))
+                and hasattr(quant_action, 'choices') and quant_action.choices
+                and ASCEND_QUATIZATION_METHOD not in quant_action.choices):
+            quant_action.choices.append(ASCEND_QUATIZATION_METHOD)
 
-        from vllm_ascend.quantization.quant_config import \
-            AscendQuantConfig  # noqa: F401
+        from vllm_ascend.quantization.quant_config import (  # noqa: F401
+            AscendQuantConfig)
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0):
@@ -195,11 +195,12 @@ class NPUPlatform(Platform):
                 ascend_config.ascend_scheduler_config)
             vllm_config.scheduler_config = ascend_scheduler_config
 
-        if compilation_config.pass_config.enable_sequence_parallelism:
-            if not parallel_config.enable_expert_parallel or vllm_config.model_config.hf_config.model_type != "qwen3_moe":
-                raise NotImplementedError(
-                    "For better performance in Qwen3 MoE, SP only works exclusively with MC2, AllToAll, and AllToAllV."
-                )
+        if (compilation_config.pass_config.enable_sequence_parallelism and
+            (not parallel_config.enable_expert_parallel
+             or vllm_config.model_config.hf_config.model_type != "qwen3_moe")):
+            raise NotImplementedError(
+                "For better performance in Qwen3 MoE, SP only works exclusively with MC2, AllToAll, and AllToAllV."
+            )
 
         # register Ascend CustomOp
         register_ascend_customop()
