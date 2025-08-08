@@ -23,8 +23,8 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch_npu
+import vllm.envs as envs_vllm
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
-from vllm import envs_vllm
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
