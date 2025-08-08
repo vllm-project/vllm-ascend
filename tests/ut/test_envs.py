@@ -15,25 +15,26 @@
 import inspect
 import os
 
+import vllm_ascend.envs as envs_ascend
 from tests.ut.base import TestBase
-from vllm_ascend import envs
 
 
 class TestEnvVariables(TestBase):
 
     def setUp(self):
-        self.env_vars = list(envs.env_variables.keys())
+        self.env_vars = list(envs_ascend.env_variables.keys())
 
     def test_env_vars_behavior(self):
         for var_name in self.env_vars:
             with self.subTest(var=var_name):
                 original_val = os.environ.get(var_name)
-                var_handler = envs.env_variables[var_name]
+                var_handler = envs_ascend.env_variables[var_name]
 
                 try:
                     if var_name in os.environ:
                         del os.environ[var_name]
-                    self.assertEqual(getattr(envs, var_name), var_handler())
+                    self.assertEqual(getattr(envs_ascend, var_name),
+                                     var_handler())
 
                     handler_source = inspect.getsource(var_handler)
                     if 'int(' in handler_source:
@@ -45,7 +46,7 @@ class TestEnvVariables(TestBase):
 
                     for test_val in test_vals:
                         os.environ[var_name] = test_val
-                        self.assertEqual(getattr(envs, var_name),
+                        self.assertEqual(getattr(envs_ascend, var_name),
                                          var_handler())
 
                 finally:
@@ -55,7 +56,7 @@ class TestEnvVariables(TestBase):
                         os.environ[var_name] = original_val
 
     def test_dir_and_getattr(self):
-        self.assertEqual(sorted(envs.__dir__()), sorted(self.env_vars))
+        self.assertEqual(sorted(envs_ascend.__dir__()), sorted(self.env_vars))
         for var_name in self.env_vars:
             with self.subTest(var=var_name):
-                getattr(envs, var_name)
+                getattr(envs_ascend, var_name)

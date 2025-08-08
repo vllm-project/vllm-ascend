@@ -14,7 +14,7 @@ from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.utils import cdiv, round_down
 
-from vllm_ascend import envs
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
@@ -1054,7 +1054,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             # be removed after the torch_npu contains `torch_npu.atb.npu_multi_head_latent_attention` become
             # public available
             assert len(kv_c_and_k_pe_cache) > 1
-            if envs.VLLM_ASCEND_MLA_PA:
+            if envs_ascend.VLLM_ASCEND_MLA_PA:
                 attn_output = torch_npu.atb.npu_multi_head_latent_attention(
                     q_nope, q_pe, kv_c_and_k_pe_cache[0],
                     kv_c_and_k_pe_cache[1], attn_metadata.decode.block_table,
