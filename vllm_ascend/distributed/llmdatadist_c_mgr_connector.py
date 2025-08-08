@@ -316,6 +316,7 @@ class LLMDataDistCMgrConnectorWorker:
         self.vllm_config = vllm_config
         self.executor = ThreadPoolExecutor(1)
         self.thread_lock = threading.Lock()
+        self.cache = None  # type: ignore[has-type]
 
         self.llm_datadist_role = None
         self.llm_datadist_remote_role = None
@@ -830,25 +831,18 @@ class LLMDataDistCMgrConnectorWorker:
                 cluster_id=remote_cluster_id, model_id=1)
             logger.info("Try pull blocks from remote server")
             try:
-                self.cache_manager.pull_blocks(
-                    remote_cache_key_k_normed,
-                    self.cache[0],  # type: ignore[has-type]
-                    remote_block_ids,
-                    local_block_ids)
-                self.cache_manager.pull_blocks(
-                    remote_cache_key_k_pe,
-                    self.cache[1],  # type: ignore[has-type]    
-                    remote_block_ids,
-                    local_block_ids)
+                self.cache_manager.pull_blocks(remote_cache_key_k_normed,
+                                               self.cache[0], remote_block_ids,
+                                               local_block_ids)
+                self.cache_manager.pull_blocks(remote_cache_key_k_pe,
+                                               self.cache[1], remote_block_ids,
+                                               local_block_ids)
             except (TypeError, ValueError) as e:
                 raise RuntimeError(
                     f"LLMDataDistCMgrConnectorWorker: Passing unexpected parameter to \
                     pull_blocks remote_cache_key: {remote_cache_key_k_normed} {remote_cache_key_k_pe}, \
                     cache: {self.cache}, local_block_ids: {local_block_ids}, \
-                    remote_block_ids: {remote_block_ids}"
-
-                    # type: ignore[has-type]
-                ) from e
+                    remote_block_ids: {remote_block_ids}") from e
             except LLMException as e:
                 raise RuntimeError(
                     "LLMDataDistCMgrConnectorWorker: Timeout during pull_blocks, \
@@ -858,20 +852,15 @@ class LLMDataDistCMgrConnectorWorker:
             remote_cache_key = BlocksCacheKey(cluster_id=remote_cluster_id)
             logger.info("Try pull blocks from remote server")
             try:
-                self.cache_manager.pull_blocks(
-                    remote_cache_key,
-                    self.cache,  # type: ignore[has-type]
-                    remote_block_ids,
-                    local_block_ids)
+                self.cache_manager.pull_blocks(remote_cache_key, self.cache,
+                                               remote_block_ids,
+                                               local_block_ids)
             except (TypeError, ValueError) as e:
                 raise RuntimeError(
                     f"LLMDataDistCMgrConnectorWorker: Passing unexpected \
-                        parameter to pull_blocks remote_cache_key: {remote_cache_key}, \
-                            cache: {self.cache}, local_block_ids: {local_block_ids}, \
-                                remote_block_ids: {remote_block_ids}"
-
-                    # type: ignore[has-type]
-                ) from e
+                    parameter to pull_blocks remote_cache_key: {remote_cache_key}, \
+                    cache: {self.cache}, local_block_ids: {local_block_ids}, \
+                    remote_block_ids: {remote_block_ids}") from e
             except LLMException as e:
                 raise RuntimeError(
                     "LLMDataDistCMgrConnectorWorker: Timeout during pull_blocks, you can \
