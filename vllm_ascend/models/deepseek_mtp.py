@@ -95,7 +95,6 @@ class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
         inputs_embeds = torch.where((positions == 0).unsqueeze(-1),
                                     torch.zeros_like(inputs_embeds),
                                     inputs_embeds)
-
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
