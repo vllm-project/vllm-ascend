@@ -414,7 +414,8 @@ class AscendC8KVCacheMethod:
             raise NotImplementedError("kv cache int8 are not "
                                       "implemented for "
                                       "PrefillCacheHit")
-        elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:  # changed attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+        # Changed attn_metadata.attn_state == AscendAttentionState.DecodeOnly
+        elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
             if hasattr(attn_metadata, "decode"):
                 # torch_air
                 decode_meta = attn_metadata.decode

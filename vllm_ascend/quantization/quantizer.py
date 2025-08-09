@@ -41,8 +41,9 @@ class AscendQuantizer:
     def get_quantizer(cls,
                       quant_config: Dict[str, Any],
                       prefix: str,
-                      packed_modules_mapping: Optional[Dict[str,
-                                                            Any]] = dict()):
+                      packed_modules_mapping: Optional[Dict[str, Any]] = None):
+        if packed_modules_mapping is None:
+            packed_modules_mapping = {}
         # TODO: Need a param to choose quantization algorithms.
         quantization_algorithm = ''
 
@@ -69,7 +70,7 @@ class VLLMAscendQuantizer:
     def __init__(self, quant_description):
         if VLLMAscendQuantizer.patched:
             return
-        for name in quant_description.keys():
+        for name in quant_description:
             if "norm.bias" in name:
                 VLLMAscendQuantizer.apply_patch(
                     "vllm.model_executor.layers.layernorm.RMSNorm", "__init__",
@@ -157,7 +158,7 @@ class VLLMAscendQuantizer:
 
             try:
                 current_module = importlib.import_module(current_path)
-            except ModuleNotFoundError:
+            except ModuleNotFoundError as e:
                 # Handle missing module
                 parent = importlib.import_module(
                     parent_path) if parent_path else None
@@ -176,7 +177,7 @@ class VLLMAscendQuantizer:
                     if function_name:
                         raise AttributeError(
                             f"Function {function_name} missing in {current_path}"
-                        )
+                        ) from e
                 else:
                     if not create_dummy:
                         raise
@@ -248,16 +249,16 @@ class VLLMAscendQuantizer:
         if packed_modules_mapping is None:
             packed_modules_mapping = dict()
         # Attention
-        if '.attn' in prefix and 'fa_quant_type' in quant_description.keys():
+        if '.attn' in prefix and 'fa_quant_type' in quant_description:
             quant_type = quant_description['fa_quant_type']
         # Use KVCache int8
-        elif '.attn' in prefix and 'kv_quant_type' in quant_description.keys():
+        elif '.attn' in prefix and 'kv_quant_type' in quant_description:
             quant_type = quant_description['kv_quant_type']
         # Linear
         else:
             quant_type = cls.get_linear_quant_type(quant_description, prefix,
                                                    packed_modules_mapping)
-        if quant_type in SUPPORT_ASCEND_QUANTIZER_TYPE.keys():
+        if quant_type in SUPPORT_ASCEND_QUANTIZER_TYPE:
             cls = SUPPORT_ASCEND_QUANTIZER_TYPE[quant_type]
             if not cls._instance:
                 cls._instance = cls(quant_description)

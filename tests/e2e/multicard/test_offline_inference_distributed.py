@@ -96,7 +96,8 @@ def test_models_distributed_DeepSeek_dbo():
 
 @pytest.mark.skip(
     reason=
-    "deepseek dbo dose not consider the support on half precision float, will enable this ut after we actually support it"
+    "deepseek dbo dose not consider the support on half precision float, " \
+    "will enable this ut after we actually support it"
 )
 @patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DBO": "1"})
 def test_models_distributed_DeepSeekV3_dbo():

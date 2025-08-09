@@ -142,10 +142,9 @@ def wrapper_load_model(func):
                     return
 
                 proj_attr = module_cfg["proj_attr"]
-                if callable(proj_attr):
-                    proj = proj_attr(module_obj, idx)
-                else:
-                    proj = getattr(module_obj, proj_attr, None)
+                proj = proj_attr(module_obj,
+                                 idx) if callable(proj_attr) else getattr(
+                                     module_obj, proj_attr, None)
 
                 norm = getattr(layer_obj, module_cfg["norm_attr"], None)
 

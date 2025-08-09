@@ -16,8 +16,8 @@
 from unittest.mock import MagicMock, patch
 
 import torch
-from vllm.model_executor.layers.vocab_parallel_embedding import \
-    VocabParallelEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding)
 
 from tests.ut.base import TestBase
 from vllm_ascend.ops.vocab_parallel_embedding import (

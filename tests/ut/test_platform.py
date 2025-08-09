@@ -195,7 +195,8 @@ class TestNPUPlatform(TestBase):
     def test_clear_npu_memory_gc_collect_failure(self, mock_reset_stats,
                                                  mock_empty_cache,
                                                  mock_gc_collect):
-        with self.assertRaises(Exception):
+        # TODO: Replace with specific exception
+        with self.assertRaises(Exception):  # noqa: B017
             self.platform.clear_npu_memory()
 
         mock_gc_collect.assert_called_once()

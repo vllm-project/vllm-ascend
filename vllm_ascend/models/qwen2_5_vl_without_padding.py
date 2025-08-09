@@ -312,10 +312,7 @@ class AscendQwen2_5_VisionTransformer_Without_Padding(Qwen2_5_VisionTransformer
         # transformers
         x = x.unsqueeze(1)
         for layer_num, blk in enumerate(self.blocks):
-            if layer_num in self.fullatt_block_indexes:
-                cu_seqlens_now = cu_seqlens
-            else:
-                cu_seqlens_now = cu_window_seqlens
+            cu_seqlens_now = cu_seqlens if layer_num in self.fullatt_block_indexes else cu_window_seqlens
             x = blk(x, cu_seqlens=cu_seqlens_now, cos=cos, sin=sin)
 
         # adapter
