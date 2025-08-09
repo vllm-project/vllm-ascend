@@ -160,28 +160,19 @@ def apply_mlp(hidden_states: torch.Tensor,
             group_list = torch.cat(
                 [group_list[:1], torch.diff(group_list, dim=0)])
             group_list_type = 1
-        bias1 = [w1_scale_bias]
+        bias1 = w1_scale_bias
         bias2 = [w2_scale_bias]
         # TODO w4a8 scene: dynamic acquisition of dtype in the future
         _output_dtype = torch.bfloat16
 
-    # gmm1: gate_up_proj
-    hidden_states = torch_npu.npu_grouped_matmul(
-        x=[hidden_states],
-        weight=[w1],
-        scale=[w1_scale],
+    # gmm1: gate_up_proj & act_fn: swiglu
+    hidden_states, swiglu_out_scale, _ = torch_npu.npu_grouped_matmul_swiglu_quant(
+        x=hidden_states,
+        weight=w1,
         bias=bias1,
-        per_token_scale=[pertoken_scale],
-        split_item=2,
-        group_list_type=group_list_type,
-        group_type=0,
         group_list=group_list,
-        output_dtype=_output_dtype)[0]
-
-    # act_fn: swiglu
-    hidden_states = torch_npu.npu_swiglu(hidden_states)
-    hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(
-        hidden_states)
+        weight_scale=w1_scale,
+        x_scale=pertoken_scale)
 
     # gmm2: down_proj
     hidden_states = torch_npu.npu_grouped_matmul(
@@ -984,9 +975,10 @@ class AscendW8A8DynamicFusedMoEMethod:
         elif fused_moe_state in [
                 FusedMoEState.AllGather, FusedMoEState.NaiveMulticast
         ]:
+            torch_npu.npu_format_cast_(layer.w13_weight, ACL_FORMAT_FRACTAL_NZ)
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
-                                 w1_scale=layer.w13_weight_scale,
+                                 w1_scale=layer.w13_weight_scale_fp32,
                                  w2=layer.w2_weight,
                                  w2_scale=layer.w2_weight_scale,
                                  topk_weights=topk_weights,

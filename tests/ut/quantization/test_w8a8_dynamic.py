@@ -18,16 +18,14 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
     @patch("torch.distributed.all_to_all_single")
     @patch("torch_npu.npu_moe_re_routing")
     @patch("torch_npu.npu_grouped_matmul")
-    @patch("torch_npu.npu_swiglu")
+    @patch("torch_npu.npu_grouped_matmul_swiglu_quant")
     @patch("torch_npu.npu_dynamic_quant")
     @patch("torch_npu.npu_moe_finalize_routing")
     @patch("torch_npu.npu_moe_init_routing")
-    def test_fused_experts_with_all2all(self, mock_moe_init_routing,
-                                        mock_moe_finalize_routing,
-                                        mock_dynamic_quant, mock_swiglu,
-                                        mock_grouped_matmul,
-                                        mock_moe_re_routing,
-                                        mock_all_to_all_single):
+    def test_fused_experts_with_all2all(
+            self, mock_moe_init_routing, mock_moe_finalize_routing,
+            mock_dynamic_quant, mock_grouped_matmul_swiglu_quant,
+            mock_grouped_matmul, mock_moe_re_routing, mock_all_to_all_single):
         expert_map = MagicMock()
         ep_group = MagicMock()
         placeholder_int8 = torch.randint(0,
@@ -49,7 +47,11 @@ class TestAscendW8A8FusedMoEMethod(TestBase):
                                                           dtype=torch.int32),
                                             self.placeholder)
         mock_grouped_matmul.return_value = self.placeholder
-        mock_swiglu.return_value = self.placeholder
+        mock_grouped_matmul_swiglu_quant.return_value = (
+            placeholder_int8,
+            self.placeholder,
+            self.placeholder,
+        )
         mock_dynamic_quant.return_value = (
             placeholder_int8,
             torch.randn(self.num_tokens),
