@@ -640,26 +640,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self, num_tokens: int, with_prefill: bool, enable_dbo: bool
     ) -> tuple[int, Optional[torch.Tensor], bool, bool]:
         if self.dp_size == 1:
-            if self.torchair_graph_enabled and not with_prefill:
-                maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
-                    num_tokens)
-                return maybe_padded_num_tokens, None, with_prefill, enable_dbo
             return num_tokens, None, with_prefill, enable_dbo
 
-        maybe_padded_num_tokens = num_tokens
         num_tokens_across_dp, with_prefill, enable_dbo = self._get_forward_metadata_across_dp(
             num_tokens, with_prefill, enable_dbo)
-
-        if self.torchair_graph_enabled and not with_prefill:
-            max_num_token = num_tokens_across_dp.max().item()
-            maybe_padded_num_tokens = self.select_torchair_padded_batch_size(
-                max_num_token)
-            num_tokens_across_dp = torch.full((self.dp_size, ),
-                                              maybe_padded_num_tokens,
-                                              dtype=torch.int32,
-                                              device="cpu")
-
-        return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, enable_dbo
+        return num_tokens, num_tokens_across_dp, with_prefill, enable_dbo
 
     def _check_dbo_is_valid(self, query_lens: torch.Tensor,
                             attn_state: AscendAttentionState,
