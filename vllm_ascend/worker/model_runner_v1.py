@@ -345,6 +345,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.use_cached_npu_graph = ascend_config.torchair_graph_config.use_cached_graph
         self.torchair_graph_batch_sizes = ascend_config.torchair_graph_config.graph_batch_sizes
+        self.use_ring_mla = ascend_config.chunked_prefill_for_mla
+
         if ascend_config.torchair_graph_config.graph_batch_sizes_init:
             self.init_torchair_graph_batch_sizes()
 
@@ -1137,11 +1139,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         else:
             attn_state = AscendAttentionState.PrefillCacheHit
 
-        self.attn_mask = self._make_attention_mask(
-            seq_lens=seq_lens,
-            query_lens=num_scheduled_tokens,
-            position=positions,
-            attn_state=attn_state)
+        # NOTE: when use ring_mla, attn_mask don't need to generate here.
+        if not self.use_ring_mla or attn_state == AscendAttentionState.PrefillNoCache:
+            attn_mask = self._make_attention_mask(
+                seq_lens=seq_lens,
+                query_lens=num_scheduled_tokens,
+                position=positions,
+                attn_state=attn_state)
+            self.attn_mask = attn_mask
         self.attn_state = attn_state  # type: ignore
 
         extra_builder_kwargs = {}
