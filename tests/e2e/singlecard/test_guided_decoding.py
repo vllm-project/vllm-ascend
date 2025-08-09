@@ -28,7 +28,7 @@ from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 from tests.e2e.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
-MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
+MODEL_NAME = "Qwen/Qwen3-0.6B-Base"
 
 GuidedDecodingBackend = ["xgrammar", "guidance"]
 
