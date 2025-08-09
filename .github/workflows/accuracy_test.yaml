@@ -65,13 +65,9 @@ jobs:
       matrix:
         include:
           - model_name: Qwen3-8B-Base
-            runner: linux-aarch64-a2-1
-          - model_name: Qwen2.5-VL-7B-Instruct
-            runner: linux-aarch64-a2-1
+            runner: linux-aarch64-a2-4
           - model_name: Qwen3-30B-A3B
-            runner: linux-aarch64-a2-2
-          - model_name: DeepSeek-V2-Lite
-            runner: linux-aarch64-a2-2
+            runner: linux-aarch64-a2-4
       fail-fast: false
 
     name: ${{ matrix.model_name }} accuracy
