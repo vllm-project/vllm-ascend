@@ -7,12 +7,17 @@ from vllm.distributed.parallel_state import (GroupCoordinator, get_world_group,
 
 # Currently, mc2 op need their own group coordinator.
 _MC2: Optional[GroupCoordinator] = None
+_OTP: Optional[GroupCoordinator] = None
 
 
 def get_mc2_group() -> GroupCoordinator:
     assert _MC2 is not None, ("mc2 group is not initialized")
     return _MC2
 
+def get_otp_group() -> GroupCoordinator:
+    assert _OTP is not None, (
+        "output tensor parallel group is not initialized")
+    return _OTP
 
 def model_parallel_initialized():
     return (_MC2 is not None)
@@ -39,6 +44,22 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                      get_world_group().local_rank,
                                      backend,
                                      group_name="mc2")
+    
+    otp_size = parallel_config.oproj_tensor_parallel_size
+    if otp_size is not None:
+        group_ranks = []
+        global _OTP
+        num_oproj_tensor_parallel_groups: int = (world_size //
+                                                otp_size)
+        for i in range(num_oproj_tensor_parallel_groups):
+            ranks = list(
+                range(i * otp_size,
+                    (i + 1) * otp_size))
+            group_ranks.append(ranks)
+        _OTP = init_model_parallel_group(group_ranks,
+                                        get_world_group().local_rank,
+                                        backend,
+                                        group_name="otp")
 
 
 def destroy_ascend_model_parallel():
@@ -46,3 +67,8 @@ def destroy_ascend_model_parallel():
     if _MC2:
         _MC2.destroy()
     _MC2 = None
+    
+    global _OTP
+    if _OTP:
+        _OTP.destroy()  
+    _OTP = None
