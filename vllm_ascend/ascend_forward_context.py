@@ -19,6 +19,7 @@ class FusedMoEState(Enum):
     AllGatherEP = 3
     NaiveMulticast = 4
     All2AllSeq = 5
+    AllGatherEPNaiveMulticast = 6
 
 
 # TODO(zzzzwwjj): add soc_version to choose branch
@@ -28,6 +29,8 @@ def _get_fused_moe_state(ep_size: int, with_prefill: bool,
     # only supports deepseek v3/r1
     if (envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
             and is_deepseek_v3_r1):
+        if with_prefill:
+            return FusedMoEState.AllGatherEPNaiveMulticast
         return FusedMoEState.AllGatherEP
     elif ep_size == 1:
         if with_prefill:

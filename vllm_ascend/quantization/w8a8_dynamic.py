@@ -572,8 +572,11 @@ def fused_experts_with_allgather(hidden_states: torch.Tensor,
         row_idx_type=1)
     group_list_type = 1
 
-    sorted_topk_weight = torch.index_select(topk_weights.view(-1), 0,
-                                            expanded_x_idx)
+    valid_token_num = expert_tokens.sum()
+    sorted_topk_weight = torch.empty_like(expanded_x_idx, dtype=topk_weights.dtype, device=topk_weights.device)
+    sorted_topk_weight[:valid_token_num] = torch.index_select(topk_weights.view(-1), 0,
+                                            expanded_x_idx[:valid_token_num])
+
     row_index = expanded_x_idx // topk_ids.shape[-1]
     row_index = row_index.to(torch.int64)
     share_input = torch.zeros((batch_size, hidden_size),
@@ -951,7 +954,7 @@ class AscendW8A8DynamicFusedMoEMethod:
             topk_ids = torch.randint_like(topk_ids, 0, global_num_experts)
 
         topk_weights = topk_weights.to(x.dtype)
-        if fused_moe_state == FusedMoEState.AllGatherEP:
+        if fused_moe_state in (FusedMoEState.AllGatherEP, FusedMoEState.AllGatherEPNaiveMulticast):
             return fused_experts_with_allgather(
                 hidden_states=x,
                 w1=layer.w13_weight,
