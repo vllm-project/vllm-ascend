@@ -315,15 +315,26 @@ class CustomDeepseekV2MoE(nn.Module):
         self.enable_multistream_moe = \
             ascend_config.torchair_graph_config.enable_multistream_moe and \
             self.torchair_graph_enabled
+        self.enable_super_kernel = self.enable_multistream_moe and self.tp_size == 1
+        self.params_dtype = torch.get_default_dtype()
 
-        self.gate = ReplicatedLinear(config.hidden_size,
-                                     config.n_routed_experts,
-                                     bias=False,
-                                     quant_config=None,
-                                     prefix=f"{prefix}.gate")
+        # Converting gate weight to fp32 is to adapt to the super kernel feature.
+        # Super kernel feature currently cannot fuse operators such as cast, stridedslice, and add.
+        # In the moe stage, Cast will interrupt the fusion of the super kernel. To avoid this problem,
+        # modifications will be made in the initialization stage.
+        self.gate = ReplicatedLinear(
+            config.hidden_size,
+            config.n_routed_experts,
+            bias=False,
+            quant_config=None,
+            params_dtype=torch.float32
+            if self.enable_super_kernel else self.params_dtype,
+            prefix=f"{prefix}.gate")
         if config.topk_method == "noaux_tc":
             self.gate.e_score_correction_bias = nn.Parameter(
-                torch.empty(config.n_routed_experts))
+                torch.empty(config.n_routed_experts,
+                            dtype=torch.float if self.enable_super_kernel else
+                            self.params_dtype))
         else:
             self.gate.e_score_correction_bias = None
 
@@ -370,7 +381,6 @@ class CustomDeepseekV2MoE(nn.Module):
         if transfer_config is not None:
             self.kv_consumer = transfer_config.kv_role == "kv_consumer"
 
-        self.params_dtype = torch.get_default_dtype()
         self.rm_router_logits = self.experts.rm_router_logits
 
     def forward(self,

@@ -238,11 +238,23 @@ class TestAscendFusedMoe:
 
     @pytest.mark.parametrize(
         "others_param",
-        [[None,
-          MagicMock(return_value=torch.randn(5, 32)), False, 5, None],
-         [2, None, False, 5, None], [None, None, True, 5, None],
-         [None, None, False, 1, None], [None, None, True, 5, 1],
-         [None, None, False, 5, 1]])
+        [[
+            None,
+            MagicMock(return_value=torch.randn(5, 32)), False, 5, None, False,
+            None, False
+        ], [2, None, False, 5, None, False, None, False],
+         [None, None, True, 5, None, False, None, False],
+         [None, None, False, 1, None, False, None, False],
+         [None, None, True, 5, 1, False, None, False],
+         [None, None, False, 5, 1, False, None, False],
+         [
+             None, None, True, 5, 1, True,
+             MagicMock(return_value=(torch.randn(5, 8), None)), False
+         ],
+         [
+             None, None, False, 5, 1, True,
+             MagicMock(return_value=(torch.randn(5, 8), None)), True
+         ]])
     def test_forward(self, mock_dist_env, default_moe_config, others_param):
         """
         1 test has shared_experts
@@ -251,14 +263,21 @@ class TestAscendFusedMoe:
         4 test single num_tokens(decode)
         5 test ep_size is 1 and is_prefill is true
         6 test ep_size is 1 and is_prefill is False
+        7 test enable_multistream_moe and is_prefill is true
         """
-        top_k, shared_experts, is_prefill, num_tokens, ep_size = others_param
+        top_k, shared_experts, is_prefill, num_tokens, ep_size, enable_multistream_moe, gate, enable_super_kernel = others_param
         inputs = torch.randn(num_tokens, 32)
         router_logits = torch.randn(num_tokens, 8)
         moe = AscendFusedMoE(**default_moe_config)
 
         if ep_size == 1:
             moe.moe_parallel_config.ep_size = 1
+
+        if enable_multistream_moe:
+            moe.enable_multistream_moe = True
+
+        if enable_super_kernel:
+            moe.enable_super_kernel = True
 
         moe.quant_method = MockQuantMethod(shared_experts, num_tokens)
         forward_context = MagicMock(mc2_mask=torch.zeros(num_tokens,
@@ -270,7 +289,8 @@ class TestAscendFusedMoe:
                                  router_logits,
                                  is_prefill=is_prefill,
                                  top_k=top_k,
-                                 shared_experts=shared_experts)
+                                 shared_experts=shared_experts,
+                                 gate=gate)
 
         moe.quant_method.apply.assert_called_once()
 
