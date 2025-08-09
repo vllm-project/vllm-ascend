@@ -381,6 +381,93 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         global_input_tokens = alltoall_token_permutation2(global_input_tokens)
 
         return share_experts_output, global_input_tokens, tokens_per_expert
+    
+    def preprocess_and_permtute1(self,
+                                 hidden_states: torch.Tensor,
+                                 probs: torch.Tensor,
+                                 routing_map: torch.Tensor,
+                                 shared_experts=None,
+                                 shared_experts_input: torch.Tensor = None):
+        self.hidden_shape = hidden_states.shape
+        self.probs = probs
+        self.top_indices = routing_map
+        assert probs.dim() == 2, "Expected 2D tensor for probs"
+        assert routing_map.dim() == 2, "Expected 2D tensor for routing map"
+        assert self.hidden_shape is not None
+
+        hidden_states = hidden_states.view(-1, self.hidden_shape[-1])
+        tokens_per_expert = self.preprocess(routing_map, with_sync=False)
+        self.hidden_shape_before_permute = hidden_states.shape
+
+        if self.device_sync_point == "before_permutation_1":
+            torch.npu.current_stream().synchronize()
+
+        event = torch.npu.current_stream().record_event()
+        self.perm1_finish_event = torch.npu.Event()
+        with torch.npu.stream(self.overlap_stream):
+            assert self.overlap_stream is not None
+            self.overlap_stream.wait_event(event)
+
+            if shared_experts is not None:
+                shared_output = shared_experts(shared_experts_input)
+                self.cached_shared_expert_output = shared_output
+
+            hidden_states, self.reversed_local_input_permutation_mapping = torch_npu.npu_moe_token_permute(
+                tokens=hidden_states,
+                indices=self.top_indices,
+                num_out_tokens=self.num_out_tokens,
+            )
+
+            self.perm1_finish_event.record()
+
+        # repeat interleve will launch a sync on current_stream.
+        if self.num_local_experts > 1:
+            self.device_sync_point = "no_sync"
+            if self.num_global_tokens_per_local_expert is None:
+                raise ValueError(
+                    "num_global_tokens_per_local_expert must be set before operations."
+                )
+            self.global_input_tokens_local_experts_indices = torch.repeat_interleave(
+                self.expert_ids_per_ep_rank,
+                self.num_global_tokens_per_local_expert.ravel())
+
+        self.cached_permutated_local_input_tokens = hidden_states
+        self.tokens_per_expert = tokens_per_expert
+    
+    def dispatch_alltoall(self):
+        ep_group = self.ep_group
+
+        # Perform expert parallel AlltoAll communication
+        if self.device_sync_point == "before_ep_alltoall":
+            torch.npu.current_stream().synchronize()
+
+        torch.npu.current_stream().wait_event(self.perm1_finish_event)
+        self.perm1_finish_event = None
+        _, self.cached_global_input_tokens, permute1_ep_all_to_all_handle = async_all_to_all(
+            self.cached_permutated_local_input_tokens,
+            self.output_splits,
+            self.input_splits,
+            ep_group,
+        )
+        permute1_ep_all_to_all_handle.wait()
+        if self.cached_permutated_local_input_tokens is None:
+            raise ValueError(
+                "cached_permutated_local_input_tokens must be set before operations."
+            )
+        self.cached_permutated_local_input_tokens.untyped_storage().resize_(0)
+        self.cached_permutated_local_input_tokens = None
+
+    def permute2(self):
+        global_input_tokens = self.cached_global_input_tokens
+        if self.num_local_experts > 1:
+            global_input_tokens, self.reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(
+                self.cached_global_input_tokens,
+                self.global_input_tokens_local_experts_indices)
+            assert self.cached_global_input_tokens is not None
+            self.cached_global_input_tokens.untyped_storage().resize_(0)
+            self.cached_global_input_tokens = None
+
+        return global_input_tokens, self.tokens_per_expert
 
     def token_unpermutation(self,
                             hidden_states: torch.Tensor,

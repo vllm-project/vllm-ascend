@@ -3,10 +3,11 @@ from unittest.mock import MagicMock
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.attention_v1 import AscendAttentionState, AscendMetadata
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.ms_split import (compute_split_seq_index,
                                               model_input_split_v1_mla_attn,
+                                              model_input_split_v1_attn,
                                               split_attn_int_type,
                                               split_attn_tensor_type)
 
@@ -145,3 +146,42 @@ class TestMsSplit(TestBase):
                                                ascendMLAPrefillMetadata,
                                                ms_split_config)
         self.assertEqual(result, [None])
+    
+
+    def test_split_v1_attn_input_none(self):
+        attn_metadata = None
+        ms_split_config = MSAttentionMetadataSplitConfig()
+        result = model_input_split_v1_attn(attn_metadata,
+                                           AscendMetadata,
+                                           ms_split_config)
+        self.assertEqual(result, [None])
+    
+
+    def test_split_v1_attn_input_prefill_only(self):
+        attn_metadata = AscendMetadata(
+            attn_state=AscendAttentionState.PrefillNoCache,
+            attn_mask=None,
+            num_actual_tokens=511,
+            seq_lens=torch.tensor([60, 120, 78, 253]),
+            query_start_loc=torch.tensor([0, 60, 180, 258]),
+            query_lens=torch.tensor([60, 120, 78, 253]),
+            max_query_len=253,
+            block_tables=torch.arange(511),
+            slot_mapping=torch.arange(511),
+            enable_dbo_across_dp=True
+        )
+        ms_split_config = MSAttentionMetadataSplitConfig()
+        meta1, meta2 = model_input_split_v1_attn(attn_metadata,
+                                           AscendMetadata,
+                                           ms_split_config)
+        self.assertEqual(meta1.attn_state, AscendAttentionState.PrefillNoCache)
+        self.assertEqual(meta2.attn_state, AscendAttentionState.PrefillNoCache)
+        self.assertEqual(meta1.num_actual_tokens, 258)
+        self.assertEqual(meta2.num_actual_tokens, 253)
+        self.assertEqual(meta1.seq_lens.tolist(), [60, 120, 78])
+        self.assertEqual(meta2.seq_lens.tolist(), [253])
+        self.assertEqual(meta1.query_start_loc.tolist(), [0, 60, 180, 258])
+        self.assertEqual(meta2.query_start_loc.tolist(), [0])
+        self.assertEqual(meta1.max_query_len, 120)
+        self.assertEqual(meta2.max_query_len, 253)
+        
