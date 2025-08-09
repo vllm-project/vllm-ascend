@@ -2395,7 +2395,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.use_cached_npu_graph and not check_torchair_cache_exist():
                 # If caching is enabled but does not exist, we will compile the model twice. The first
                 # time is used to generate the cache, and the second time is used to load the cache to
-                # skip the overhead caused by Dynamo guard mechanism.
+                # skip the overhead caused by Dynamo guard mechanism. Detailed introduction is as follows:
+                # https://www.hiascend.com/document/detail/zh/Pytorch/710/modthirdparty/torchairuseguide/torchair_00016.html
                 logger.info(
                     "Use cached npu graph but cache doesn't exist! Now we compile graph to genetate torchair cache, this usually takes %.1f~%.1f mins.",
                     0.5 * graph_num, 1.5 * graph_num)
