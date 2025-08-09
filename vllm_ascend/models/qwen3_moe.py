@@ -23,7 +23,7 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, CompilationLevel, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
                                              get_tp_group)
@@ -52,7 +52,7 @@ from vllm_ascend.ops.sequence_parallel import (MetadataForPadding,
                                                init_metadata_for_sp)
 
 
-class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
+class CustomQwen3MoeSparseMoeBlock(Qwen3MoeSparseMoeBlock):
 
     def __init__(
         self,
@@ -104,9 +104,6 @@ class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
     ):
         if attn_metadata is None:
             attn_metadata = get_forward_context().attn_metadata
-        # when profile runs, force experts to load balanced tokens
-        # to avoid high memory consumption on a single rank.
-        enable_force_load_balance = get_forward_context().in_profile_run
         is_prefill = get_forward_context().with_prefill
 
         # router_logits: (num_tokens, n_experts)
@@ -117,7 +114,7 @@ class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
             router_logits=router_logits,
             is_prefill=is_prefill,
             top_k=self.top_k,
-            enable_force_load_balance=enable_force_load_balance,
+            enable_force_load_balance=False,
             shared_experts=None,
             _metadata_for_padding=_metadata_for_padding,
         )
@@ -161,22 +158,21 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
         layer_idx = extract_layer_index(prefix)
         mlp_only_layers = ([] if not hasattr(config, "mlp_only_layers") else
                            config.mlp_only_layers)
-        self.use_aclgraph = (vllm_config is not None
-                             and vllm_config.compilation_config.level
-                             == CompilationLevel.PIECEWISE
-                             and not vllm_config.model_config.enforce_eager)
+        ep_enabled = vllm_config is not None and vllm_config.parallel_config.enable_expert_parallel
+        self.unquantized_ep_enabled = quant_config is None and ep_enabled
         if (layer_idx not in mlp_only_layers) and (
                 config.num_experts > 0 and
             (layer_idx + 1) % config.decoder_sparse_step == 0):
-            if not self.use_aclgraph:
-                # FIXME: custom sparse moe block doesn't work with aclgraph.
-                self.mlp = CustomSparseMoeBlock(config=config,
-                                                quant_config=quant_config,
-                                                prefix=f"{prefix}.mlp")
-            else:
+            if self.unquantized_ep_enabled:
+                # FIXME: ascend unquanitzed allgather_ep doesn't work with aclgraph.
                 self.mlp = Qwen3MoeSparseMoeBlock(config=config,
                                                   quant_config=quant_config,
                                                   prefix=f"{prefix}.mlp")
+            else:
+                self.mlp = CustomQwen3MoeSparseMoeBlock(
+                    config=config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.mlp")
         else:
             self.mlp = Qwen3MoeMLP(hidden_size=config.hidden_size,
                                    intermediate_size=config.intermediate_size,
@@ -234,7 +230,7 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual)
 
-        if not self.use_aclgraph:
+        if not self.unquantized_ep_enabled:
             hidden_states = self.mlp(
                 hidden_states, _metadata_for_padding=_metadata_for_padding)
         else:
@@ -340,6 +336,7 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+
         self.model = CustomQwen3MoeModel(vllm_config=vllm_config,
                                          prefix=maybe_prefix(prefix, "model"))
         self.lm_head = ParallelLMHead(config.vocab_size,
