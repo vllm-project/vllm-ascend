@@ -58,8 +58,8 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LazyLoader, cdiv, is_pin_memory_available)
-from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
+                        LazyLoader, cdiv, is_pin_memory_available, _enable_lmhead_tp)
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher 
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
@@ -1276,6 +1276,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens)
             logits_indices = spec_decode_metadata.logits_indices
+        
+            if _enable_lmhead_tp(): # 
+                if not with_prefill:
+                    max_num_reqs_across_dp = padded_num_tokens_across_dp
+                else:
+                    max_num_reqs_across_dp = self.max_num_reqs
+                logits_indices = nn.functional.pad(
+                    logits_indices,
+                    (0, max_num_reqs_across_dp - logits_indices.shape[0]))
 
         return (attn_metadata, positions, num_scheduled_tokens,
                 num_input_tokens, num_tokens_across_dp,
@@ -1734,11 +1743,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Sample the next token and get logprobs if needed.
             sampling_metadata = self.input_batch.sampling_metadata
             if spec_decode_metadata is None:
+                if _enable_lmhead_tp():
+                    logits = logits[:self.input_batch.num_reqs]
                 sampler_output = self.sampler(
                     logits=logits,
                     sampling_metadata=sampling_metadata,
                 )
             else:
+                if _enable_lmhead_tp():
+                    logits = logits[:len(spec_decode_metadata.logits_indices)]
                 # When indexing with a tensor (bonus_logits_indices), PyTorch
                 # creates a new tensor with separate storage from the original
                 # logits tensor. This means any in-place operations on bonus_logits

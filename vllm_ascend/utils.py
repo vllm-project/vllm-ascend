@@ -547,3 +547,9 @@ def get_ascend_soc_version():
     global _ascend_soc_version
     assert _ascend_soc_version is not None
     return _ascend_soc_version
+
+
+def _enable_lmhead_tp() -> bool:
+    if get_ascend_config().lmhead_tensor_parallel_size is not None:
+        return True
+    return False

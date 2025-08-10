@@ -41,7 +41,7 @@ from vllm.model_executor.layers.logits_processor import (
     _prune_hidden_states
 )
 from vllm.model_executor.parameter import BasevLLMParameter
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import set_weight_attrs, _enable_lmhead_tp
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -129,11 +129,10 @@ class CustomParallelLMHead(ParallelLMHead):
                  quant_config: Optional[QuantizationConfig] = None,
                  prefix: str = ""): 
         Module.__init__(self)
-        self._enable_lmhead_tp = False
-        if get_ascend_config().lmhead_tensor_parallel_size is not None:
+
+        if _enable_lmhead_tp():
             tp_rank = get_lmheadtp_group().rank_in_group
             self.tp_size = get_lmheadtp_group().world_size
-            self._enable_lmhead_tp = True
         else:
             tp_rank = get_tensor_model_parallel_rank()
             self.tp_size = get_tensor_model_parallel_world_size()
@@ -279,12 +278,7 @@ class CustomLogitsProcessor(LogitsProcessor):
             Logits tensor for next token prediction with shape [batch_size, vocab_size] or None
         """
 
-        if lm_head._enable_lmhead_tp:
-            # _enable_lmhead_tp used in the graph mode，and batch_size is the same across different dp.
-            lmhead_tp_size = lm_head.tp_size
-            local_batch_size = hidden_states.size(0)
-            vocab_size_per_partition = lm_head.num_embeddings_per_partition
-
+        if _enable_lmhead_tp():
             # Gather hidden states from all devices in tensor parallel group
             gathered_hidden_states = get_lmheadtp_group().all_gather(hidden_states, dim=0)
         else:
@@ -297,37 +291,15 @@ class CustomLogitsProcessor(LogitsProcessor):
             bias=embedding_bias
         )
 
-        if lm_head._enable_lmhead_tp:
-            # Prepare for all-to-all communication to redistribute logits
-            input_split_sizes = [local_batch_size] * get_lmheadtp_group().world_size
-            output_split_sizes = [local_batch_size * vocab_size_per_partition] * lmhead_tp_size
-
-            all_to_all_output = torch.empty(
-                local_batch_size * (vocab_size_per_partition * lmhead_tp_size),
-                dtype=local_logits.dtype, 
-                device='npu'
-            )
-                
-            # Perform all-to-all communication to get correct logit partitions
-            dist.all_to_all_single(
-                all_to_all_output,
-                local_logits,
-                output_split_sizes,
-                input_split_sizes,
-                group=get_lmheadtp_group().device_group
-            )
-            
-            # Reshape and combine logits from all partitions
-            reshaped_logits = all_to_all_output.view(
-                lmhead_tp_size, local_batch_size, vocab_size_per_partition
-            )
-            combined_logits = reshaped_logits.permute(1, 0, 2).reshape(local_batch_size, -1)
+        if _enable_lmhead_tp():
+            logits = get_lmheadtp_group().all_to_all(local_logits)
         else:
             # Gather logits for tensor parallel
-            combined_logits = self._gather_logits(local_logits)
+            logits = self._gather_logits(local_logits)
 
         # Remove paddings in vocab (if any)
-        if combined_logits is not None:
-            combined_logits = combined_logits[..., :self.org_vocab_size]
+        if logits is not None:
+            logits = logits[..., :self.org_vocab_size]
             
-        return combined_logits
+        return logits
+    
