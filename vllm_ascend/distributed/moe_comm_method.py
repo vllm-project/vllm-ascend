@@ -42,16 +42,27 @@ class MoECommMethod(ABC):
         num_experts: int,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
         """Pre-process before MLP.
+
         Args:
-            hidden_states: Tensor of shape (num_tokens, hidden_size)
-            topk_ids: Tensor of shape (num_tokens, top_k_num)
-            topk_weights: Tensor of shape (num_tokens, top_k_num)
-            expert_map: Tensor mapping global expert IDs to local IDs
-            num_experts: Number of local experts
+            hidden_states (torch.Tensor): Tensor of shape (num_tokens, hidden_size)
+            topk_ids (torch.Tensor): Tensor of shape (num_tokens, top_k_num)
+            topk_weights (torch.Tensor): Tensor of shape (num_tokens, top_k_num)
+            expert_map (torch.Tensor): Tensor of shape (global_num_experts, )
+                Mapping from global expert IDs to local expert IDs.
+            num_experts (int): Number of local experts (experts on this device).
+
         Returns:
-            permuted_hidden_states: Tensor of shape (num_tokens * top_k_num, hidden_size)
-            expert_tokens: Tensor of shape (num_experts,)
-            group_list_type: Argument for grouped matmul
+            tuple[torch.Tensor, torch.Tensor, int]: Return a tuple containing:
+                - permuted_hidden_states (torch.Tensor): Tensor of shape
+                    (num_tokens * top_k_num, hidden_size) after permuting
+                    hidden_states based on topk_ids.
+                - expert_tokens (torch.Tensor): Tensor of shape (num_experts, )
+                    Number of tokens assigned to each expert.
+                - group_list_type (int): Type of group list, 0 for `cumsum`
+                    and 1 for `count`. This is mainly for `npu_grouped_matmul`
+                    to determine how to handle the output.
+        Raises:
+            NotImplementedError: If the method is not implemented in the subclass.
         """
         pass
 
@@ -59,11 +70,12 @@ class MoECommMethod(ABC):
     def _post_process(self, mlp_output: torch.Tensor,
                       hidden_states: torch.Tensor) -> None:
         """Post-process after MLP.
+
         Args:
-            mlp_output: Tensor of shape (num_tokens * top_k_num, hidden_size)
-            hidden_states: Tensor of shape (num_tokens, hidden_size)
-        Returns:
-            None: This method mutates hidden_states in-place.
+            mlp_output (torch.Tensor): Tensor of shape
+                (num_tokens * top_k_num, hidden_size) after MLP.
+            hidden_states (torch.Tensor): Tensor of shape
+                (num_tokens, hidden_size) to be updated with the final output.
         """
         pass
 
@@ -78,6 +90,7 @@ class DummyCommImpl(MoECommMethod):
         expert_map: torch.Tensor,
         num_experts: int,
     ) -> tuple[torch.Tensor, torch.Tensor, int]:
+        """Dummy implementation, see moe_comm_pre_process_fake for details."""
         return moe_comm_pre_process_fake(hidden_states, topk_ids, topk_weights,
                                          expert_map, num_experts)
 
@@ -166,11 +179,22 @@ class NativeAllGatherCommImpl(MoECommMethod):
 
 
 class AllGatherCommImpl(MoECommMethod):
-    """This implementation is for the scenarios listed below:
-    1. `enable_expert_parallel=False`.
-    2. If `npu_moe_init_routing_v2` is available, we will support `enable_expert_parallel=True`,
-       and this implementation will become the default one, changing the name to `AllGather` at
-       the same time.
+    """This implementation is the same as NativeAllGatherCommImpl,
+    but uses NPU-specific ops for better performance.
+
+    This implementation should be compatible with all scenarios, and
+    thus it is the default implementation for MoE communication methods.
+    It uses `torch_npu.npu_moe_init_routing_v2` for pre-processing
+    and `torch_npu.npu_moe_token_unpermute` for post-processing
+    to handle the token-to-expert mapping and communication efficiently.
+
+    NOTE(Yizhou): TBH, it is really weird that we were supposed to use
+    `torch_npu.npu_moe_init_routing_v2` and `torch_npu.npu_moe_finalize_routing`
+    or `torch_npu.npu_moe_token_permute` and `torch_npu.npu_moe_token_unpermute`
+    for pre-processing and post-processing, respectively.
+    But `npu_moe_finalize_routing` will lead to accuracy issues so we have to
+    use `torch_npu.npu_moe_token_unpermute` instead.
+    This is a workaround and should be removed after the issue is fixed.
     """
 
     def _pre_process(
@@ -392,6 +416,10 @@ def moe_comm_pre_process(
     expert_map: torch.Tensor,
     num_experts: int,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """This function is a wrapper for the pre_process method of the
+    MoECommMethod instance stored in the ForwardContext. So it can be
+    used as a custom op in the vllm framework.
+    """
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.moe_comm_method
     return self._pre_process(hidden_states, topk_ids, topk_weights, expert_map,
@@ -405,6 +433,9 @@ def moe_comm_pre_process_fake(
     expert_map: torch.Tensor,
     num_experts: int,
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
+    """This is a fake implementation of the pre_process method.
+    torch.compile will use this implementation to generate FX graph.
+    """
     top_k_num = topk_ids.shape[1]
     permuted_hidden_states = hidden_states.repeat_interleave(top_k_num, dim=0)
     expert_tokens = torch.zeros((num_experts, ),
@@ -416,6 +447,10 @@ def moe_comm_pre_process_fake(
 
 def moe_comm_post_process(mlp_output: torch.Tensor,
                           hidden_states: torch.Tensor) -> None:
+    """This function is a wrapper for the post_process method of the
+    MoECommMethod instance stored in the ForwardContext. So it can be
+    used as a custom op in the vllm framework.
+    """
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.moe_comm_method
     self._post_process(mlp_output, hidden_states)
