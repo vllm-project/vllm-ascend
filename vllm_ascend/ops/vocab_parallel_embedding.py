@@ -41,7 +41,7 @@ from vllm.model_executor.layers.logits_processor import (
     _prune_hidden_states
 )
 from vllm.model_executor.parameter import BasevLLMParameter
-from vllm.model_executor.utils import set_weight_attrs, _enable_lmhead_tp
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
@@ -51,7 +51,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 
 from vllm_ascend.distributed.parallel_state import get_lmheadtp_group
 from vllm_ascend.ascend_config import get_ascend_config
-
+from vllm_ascend.utils import _enable_lmhead_tp
 
 def get_masked_input_and_mask(
         input_: torch.Tensor, org_vocab_start_index: int,

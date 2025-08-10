@@ -57,9 +57,6 @@ class AscendConfig:
             assert(
                 self.torchair_graph_config.enabled == True
             ), "lmhead_tensor_parallel_size is only supported in graph mode"
-            assert(
-                vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
-            ),"lmhead_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
 
 
 class TorchairGraphConfig:
