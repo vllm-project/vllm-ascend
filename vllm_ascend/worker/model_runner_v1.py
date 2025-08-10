@@ -108,13 +108,10 @@ import vllm.envs as envs_vllm
 
 import vllm_ascend.envs as envs_ascend
 
-<<<<<<< HEAD
 if is_310p():
     torch_npu.npu.set_compile_mode(jit_compile=False)
 
 
-=======
->>>>>>> 14635834 ([Feat]: Add custom lmhead tensor model parallel in pure DP and graph-mode scenarios.)
 @dataclass
 class GraphCaptureContext:
     stream: torch.npu.Stream
