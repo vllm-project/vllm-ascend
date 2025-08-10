@@ -168,18 +168,6 @@ class NPUTorchairModelRunner(NPUModelRunner):
             hidden_states = super()._generate_dummy_run_hidden_states(
                 with_prefill, is_torchair_compile, input_ids, positions,
                 attn_metadata, num_tokens, intermediate_tensors, inputs_embeds)
-            if not self.in_profile_run and self._enable_lmhead_tp():
-                # lmhead_tp introduces additional communication across
-                # dp when computing logits. Hence we need to add it
-                # in profile_run.
-                if not with_prefill:
-                    max_num_reqs_across_dp = num_tokens
-                else:
-                    max_num_reqs_across_dp = self.scheduler_config.max_num_seqs
-                dummy_indices = torch.zeros(max_num_reqs_across_dp,
-                                            device=hidden_states.device,
-                                            dtype=torch.int32)
-                self.model.compute_logits(hidden_states[dummy_indices], None)
         return hidden_states
 
     def _convert_torch_format(self, kv_cache):

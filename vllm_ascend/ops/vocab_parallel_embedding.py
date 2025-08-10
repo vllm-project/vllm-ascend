@@ -19,38 +19,20 @@ from typing import Optional, Tuple
 
 import torch
 from torch.nn import Module
-import torch.distributed as dist
-from torch.nn.parameter import Parameter, UninitializedParameter
-
-from vllm.distributed import (
-    divide,
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce
-)
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding,
-    DEFAULT_VOCAB_PADDING_SIZE,
-    pad_vocab_size,
-    UnquantizedEmbeddingMethod,
-    ParallelLMHead
-)
-from vllm.model_executor.layers.logits_processor import (
-    LogitsProcessor,
-    _apply_logits_processors,
-    _prune_hidden_states
-)
-from vllm.model_executor.parameter import BasevLLMParameter
-from vllm.model_executor.utils import set_weight_attrs, _enable_lmhead_tp
-from vllm.model_executor.sampling_metadata import SamplingMetadata
+from torch.nn.parameter import Parameter
+from vllm.distributed import (divide, get_tensor_model_parallel_rank,
+                              get_tensor_model_parallel_world_size,
+                              tensor_model_parallel_all_reduce)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig,
-    QuantizeMethodBase,
-    method_has_implemented_embedding
-)
+    QuantizationConfig, QuantizeMethodBase, method_has_implemented_embedding)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, UnquantizedEmbeddingMethod,
+    VocabParallelEmbedding, pad_vocab_size)
+from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.distributed.parallel_state import get_lmheadtp_group
-from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.parallel_state import get_lmhead_tp_group
+from vllm_ascend.utils import lmhead_tp_enable
 
 
 class AscendVocabParallelEmbedding(VocabParallelEmbedding):
@@ -104,8 +86,7 @@ class AscendVocabParallelEmbedding(VocabParallelEmbedding):
 
 
 class CustomParallelLMHead(ParallelLMHead):
-    
-    """Costom Parallelized LM head, added the feature of lmheadTP in pure dp scenario
+    """Custom Parallelized LM head, added the feature of lmheadTP in pure dp scenario
     
     Output logits weight matrices used in the Sampler. The weight and bias
     tensors are padded to make sure they are divisible by the number of
@@ -119,6 +100,7 @@ class CustomParallelLMHead(ParallelLMHead):
         org_num_embeddings: original vocabulary size (without LoRA).
         padding_size: padding size for the vocabulary.
     """
+
     def __init__(self,
                  num_embeddings: int,
                  embedding_dim: int,
@@ -127,16 +109,16 @@ class CustomParallelLMHead(ParallelLMHead):
                  org_num_embeddings: Optional[int] = None,
                  padding_size: int = DEFAULT_VOCAB_PADDING_SIZE,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""): 
+                 prefix: str = ""):
         Module.__init__(self)
 
-        if _enable_lmhead_tp():
-            tp_rank = get_lmheadtp_group().rank_in_group
-            self.tp_size = get_lmheadtp_group().world_size
+        if lmhead_tp_enable():
+            tp_rank = get_lmhead_tp_group().rank_in_group
+            self.tp_size = get_lmhead_tp_group().world_size
         else:
             tp_rank = get_tensor_model_parallel_rank()
             self.tp_size = get_tensor_model_parallel_world_size()
-        
+
         self.num_embeddings = num_embeddings
         self.padding_size = padding_size
         self.org_vocab_size = org_num_embeddings or num_embeddings
@@ -196,7 +178,7 @@ class CustomParallelLMHead(ParallelLMHead):
                                          self.num_embeddings_padded,
                                          params_dtype=params_dtype,
                                          weight_loader=self.weight_loader)
-        
+
         self.quant_config = quant_config
         if bias:
             self.bias = Parameter(
@@ -208,91 +190,33 @@ class CustomParallelLMHead(ParallelLMHead):
             })
         else:
             self.register_parameter("bias", None)
-        
+
+
 class CustomLogitsProcessor(LogitsProcessor):
     """Custom logits processor extending base LogitsProcessor functionality.
     Added the feature of lmheadTP in pure dp scenario
     """
-    
-    def __init__(self,
-                 vocab_size: int,
-                 org_vocab_size: Optional[int] = None,
-                 scale: float = 1.0,
-                 logits_as_input: bool = False,
-                 soft_cap: Optional[float] = None) -> None:
-        super().__init__(
-            vocab_size=vocab_size,
-            org_vocab_size=org_vocab_size,
-            scale=scale,
-            logits_as_input=logits_as_input,
-            soft_cap=soft_cap
-        )
-
-    def forward(
-        self,
-        lm_head: CustomParallelLMHead,
-        hidden_states: torch.Tensor,
-        sampling_metadata: Optional[SamplingMetadata] = None,
-        embedding_bias: Optional[torch.Tensor] = None,
-    ) -> Optional[torch.Tensor]:
-        if self.logits_as_input:
-            logits = hidden_states
-        else:
-            if sampling_metadata is not None:
-                hidden_states = _prune_hidden_states(hidden_states,
-                                                     sampling_metadata)
-
-            # Get the logits for the next tokens.
-            logits = self._get_logits(hidden_states, lm_head, embedding_bias)
-        if logits is not None:
-            if self.soft_cap is not None:
-                logits = logits / self.soft_cap
-                logits = torch.tanh(logits)
-                logits = logits * self.soft_cap
-
-            if self.scale != 1.0:
-                logits *= self.scale
-
-            # Apply logits processors (if any).
-            if sampling_metadata is not None and \
-                sampling_metadata.seq_groups is not None:
-                logits = _apply_logits_processors(logits, sampling_metadata)
-        
-        return logits
 
     def _get_logits(
-            self,
-            hidden_states: torch.Tensor,
-            lm_head: CustomParallelLMHead,
-            embedding_bias: Optional[torch.Tensor],
-        ) -> Optional[torch.Tensor]:
-        """
-        Compute logits for next token prediction using parallel processing.
-        
-        Args:
-            hidden_states: Current hidden states from the model with shape [batch_size, hidden_size]
-            lm_head: Parallel embedding layer for vocabulary predictions
-            embedding_bias: Optional bias tensor to add to logits with shape [vocab_size]
-            
-        Returns:
-            Logits tensor for next token prediction with shape [batch_size, vocab_size] or None
-        """
+        self,
+        hidden_states: torch.Tensor,
+        lm_head: CustomParallelLMHead,
+        embedding_bias: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
 
-        if _enable_lmhead_tp():
+        if lmhead_tp_enable():
             # Gather hidden states from all devices in tensor parallel group
-            gathered_hidden_states = get_lmheadtp_group().all_gather(hidden_states, dim=0)
+            gathered_hidden_states = get_lmhead_tp_group().all_gather(
+                hidden_states, dim=0)
         else:
             gathered_hidden_states = hidden_states
 
-        # Compute logits using quantized matrix multiplication
-        local_logits = lm_head.quant_method.apply(
-            lm_head,
-            gathered_hidden_states,
-            bias=embedding_bias
-        )
+        local_logits = lm_head.quant_method.apply(lm_head,
+                                                  gathered_hidden_states,
+                                                  bias=embedding_bias)
 
-        if _enable_lmhead_tp():
-            logits = get_lmheadtp_group().all_to_all(local_logits)
+        if lmhead_tp_enable():
+            logits = get_lmhead_tp_group().all_to_all(local_logits)
         else:
             # Gather logits for tensor parallel
             logits = self._gather_logits(local_logits)
@@ -300,6 +224,5 @@ class CustomLogitsProcessor(LogitsProcessor):
         # Remove paddings in vocab (if any)
         if logits is not None:
             logits = logits[..., :self.org_vocab_size]
-            
+
         return logits
-    

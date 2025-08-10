@@ -58,8 +58,8 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LazyLoader, cdiv, is_pin_memory_available, _enable_lmhead_tp)
-from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher 
+                        LazyLoader, cdiv, is_pin_memory_available)
+from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
@@ -89,7 +89,7 @@ from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.torchair.torchair_attention import AscendTorchairMetadata
 from vllm_ascend.torchair.torchair_mla import AscendMLATorchairMetadata
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               ProfileExecuteDuration, is_310p,
+                               ProfileExecuteDuration, is_310p,lmhead_tp_enable,
                                vllm_version_is)
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
@@ -1276,15 +1276,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens)
             logits_indices = spec_decode_metadata.logits_indices
-        
-            if _enable_lmhead_tp(): # 
-                if not with_prefill:
-                    max_num_reqs_across_dp = padded_num_tokens_across_dp
-                else:
-                    max_num_reqs_across_dp = self.max_num_reqs
-                logits_indices = nn.functional.pad(
-                    logits_indices,
-                    (0, max_num_reqs_across_dp - logits_indices.shape[0]))
+
+        if lmhead_tp_enable():
+            max_num_reqs_across_dp = padded_num_tokens_across_dp if not with_prefill else self.max_num_reqs
+            logits_indices = nn.functional.pad(
+                logits_indices,
+                (0, max_num_reqs_across_dp - logits_indices.shape[0]))
 
         return (attn_metadata, positions, num_scheduled_tokens,
                 num_input_tokens, num_tokens_across_dp,
@@ -1743,14 +1740,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Sample the next token and get logprobs if needed.
             sampling_metadata = self.input_batch.sampling_metadata
             if spec_decode_metadata is None:
-                if _enable_lmhead_tp():
+                if lmhead_tp_enable() and logits is not None:
                     logits = logits[:self.input_batch.num_reqs]
                 sampler_output = self.sampler(
                     logits=logits,
                     sampling_metadata=sampling_metadata,
                 )
             else:
-                if _enable_lmhead_tp():
+                if lmhead_tp_enable() and logits is not None:
                     logits = logits[:len(spec_decode_metadata.logits_indices)]
                 # When indexing with a tensor (bonus_logits_indices), PyTorch
                 # creates a new tensor with separate storage from the original
@@ -2093,19 +2090,18 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 assert aclgraph_runtime_mode == _cg_mode, (
                     f"Aclgraph runtime mode mismatch at dummy_run. "
                     f"Expected {_cg_mode}, but got {aclgraph_runtime_mode}.")
-            
-            need_dummy_logits = (not self.in_profile_run and self._enable_lmhead_tp())
-            
+
+            need_dummy_logits = (not self.in_profile_run
+                                 and lmhead_tp_enable())
+
             if need_dummy_logits:
-                # lmhead_tp introduces additional communication across
-                # dp when computing logits. Hence we need to add it
-                # in profile_run.
-                max_num_reqs_across_dp = num_tokens if not with_prefill else self.scheduler_config.max_num_seqs
+                max_num_reqs_across_dp = num_tokens if not with_prefill else max_num_reqs
                 dummy_indices = torch.zeros(max_num_reqs_across_dp,
-                                            device=hidden_states.device,
                                             dtype=torch.int32)
+
                 def dummy_compute_logits(hidden_states):
-                    return self.model.compute_logits(hidden_states[dummy_indices], None)
+                    return self.model.compute_logits(
+                        hidden_states[dummy_indices], None)
 
             with set_ascend_forward_context(
                     attn_metadata,
@@ -2124,8 +2120,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     attn_metadata, num_tokens, intermediate_tensors,
                     inputs_embeds)
                 if need_dummy_logits:
-                    dummy_compute_logits(hidden_states) 
-                
+                    dummy_compute_logits(hidden_states)
+
             if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
                 assert isinstance(self.drafter, MtpProposer)
                 self.drafter.dummy_run(
@@ -2136,8 +2132,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     num_tokens_across_dp=num_tokens_across_dp)
                 if need_dummy_logits:
                     dummy_compute_logits(hidden_states)
-                
-
             return hidden_states
 
     @contextmanager

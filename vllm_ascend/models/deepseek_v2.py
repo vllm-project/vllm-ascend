@@ -48,12 +48,11 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import get_sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.layers.vocab_parallel_embedding import \
+    VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.deepseek_v2 import \
@@ -67,16 +66,17 @@ from vllm.model_executor.models.utils import (
     PPMissingLayer, is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.sequence import IntermediateTensors
-from vllm.model_executor.sampling_metadata import SamplingMetadata
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
+from vllm_ascend.ops.vocab_parallel_embedding import (CustomLogitsProcessor,
+                                                      CustomParallelLMHead)
 from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import dispose_tensor
 
 from vllm_ascend.utils import dispose_tensor, npu_prefetch
-from vllm_ascend.ops.vocab_parallel_embedding import CustomParallelLMHead, CustomLogitsProcessor
+
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
 
@@ -881,7 +881,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                                                 config.hidden_size,
                                                 quant_config=quant_config,
                                                 prefix=maybe_prefix(
-                                                prefix, "lm_head"))
+                                                    prefix, "lm_head"))
         else:
             self.lm_head = PPMissingLayer()
         self.logits_processor = CustomLogitsProcessor(config.vocab_size)

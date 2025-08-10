@@ -26,7 +26,7 @@ from vllm_ascend.models.deepseek_v2 import (
     CustomDeepseekV2MLP, CustomDeepseekV2MoE,
     CustomDeepseekV2RowParallelLinear,
     CustomDeepseekV2RowParallelLinearReplaceAllreduce,
-    CustomDeepseekV2SiluAndMul)
+    CustomDeepseekV2SiluAndMul, CustomLogitsProcessor, CustomParallelLMHead)
 
 
 @pytest.fixture

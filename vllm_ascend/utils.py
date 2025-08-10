@@ -549,7 +549,5 @@ def get_ascend_soc_version():
     return _ascend_soc_version
 
 
-def _enable_lmhead_tp() -> bool:
-    if get_ascend_config().lmhead_tensor_parallel_size is not None:
-        return True
-    return False
+def lmhead_tp_enable() -> bool:
+    return get_ascend_config().lmhead_tensor_parallel_size is not None
