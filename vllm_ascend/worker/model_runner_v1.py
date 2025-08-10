@@ -57,7 +57,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LazyLoader, cdiv)
+                        LazyLoader, cdiv, _enable_lmhead_tp)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
@@ -91,6 +91,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
+
 
 if not vllm_version_is("0.10.0"):
     from vllm.tasks import GenerationTask, SupportedTask
@@ -1333,6 +1334,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         aux_hidden_states = None
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = hidden_states
+        
+        if _enable_lmhead_tp(): # 
+            if not with_prefill:
+                max_num_reqs_across_dp = padded_num_tokens_across_dp
+            else:
+                max_num_reqs_across_dp = self.max_num_reqs
+            sample_indices = nn.functional.pad(
+                sample_indices,
+                (0, max_num_reqs_across_dp - sample_indices.shape[0]))
 
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
                 total_num_scheduled_tokens, logits_indices, aux_hidden_states,
@@ -1638,14 +1648,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                       num_scheduled_tokens_np,
                                       finished_sending, finished_recving,
                                       kv_connector_output)
-                # temporary disable
-                # sample_hidden_states = hidden_states[logits_indices] 
-                # logits = self.model.compute_logits(sample_hidden_states, None)
-                if self.torchair_graph_enabled and attn_metadata.prefill is None:
-                    logits = self.model.compute_logits(hidden_states, None)
-                    logits = logits[sample_indices]
-                else:
-                    logits = self.model.compute_logits(hidden_states[sample_indices], None)
+                sample_hidden_states = hidden_states[logits_indices]
+                logits = self.model.compute_logits(sample_hidden_states, None)
+
             if broadcast_pp_output:
                 model_output_broadcast_data = {
                     "logits": logits.contiguous(),
@@ -1663,11 +1668,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Sample the next token and get logprobs if needed.
             sampling_metadata = self.input_batch.sampling_metadata
             if spec_decode_metadata is None:
+                if _enable_lmhead_tp():
+                    logits = logits[:self.input_batch.num_reqs]
                 sampler_output = self.sampler(
                     logits=logits,
                     sampling_metadata=sampling_metadata,
                 )
             else:
+                if _enable_lmhead_tp():
+                    logits = logits[:len(spec_decode_metadata.logits_indices)]
                 # When indexing with a tensor (bonus_logits_indices), PyTorch
                 # creates a new tensor with separate storage from the original
                 # logits tensor. This means any in-place operations on bonus_logits
@@ -1974,11 +1983,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         inputs_embeds=None,
                         **model_kwargs,
                     )
-                    self.model.compute_logits(hidden_states, None)
                 else:
                     maybe_converting_weight_acl_format(self.model,
                                                        ACL_FORMAT_FRACTAL_ND)
-
                     hidden_states = model(
                         input_ids=input_ids,
                         positions=positions,
@@ -1991,6 +1998,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     if self.use_spec_decode and isinstance(
                             self.drafter, EagleProposer):
                         self.drafter.dummy_run(num_tokens)
+            
+            if _enable_lmhead_tp() and not self.in_profile_run:
+                if not with_prefill:
+                    max_num_reqs_across_dp = num_reqs
+                else:
+                    max_num_reqs_across_dp = max_num_reqs
+                dummy_indices = torch.zeros(max_num_reqs_across_dp,
+                                            device=hidden_states.device,
+                                            dtype=torch.int32)
+                model.compute_logits(hidden_states[dummy_indices], None)
+            
             if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
                 assert isinstance(self.drafter, MtpProposer)
                 self.drafter.dummy_run(
@@ -1999,6 +2017,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     skip_attn=skip_attn,
                     num_reqs=num_reqs,
                     num_tokens_across_dp=num_tokens_across_dp)
+                if not self.in_profile_run and _enable_lmhead_tp():
+                    if not with_prefill:
+                        max_num_reqs_across_dp = num_reqs
+                    else:
+                        max_num_reqs_across_dp = max_num_reqs
+                    dummy_indices = torch.zeros(max_num_reqs_across_dp,
+                                                device=hidden_states.device,
+                                                dtype=torch.int32)
+                    model.compute_logits(hidden_states[dummy_indices], None)
 
             return hidden_states
 
