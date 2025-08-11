@@ -1,21 +1,22 @@
 from typing import Optional, Union
+
 import torch
-from torch import nn
 import torch.distributed as dist
+from torch import nn
 from torch.nn.parameter import Parameter, UninitializedParameter
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.linear import LinearBase
-from vllm.model_executor.layers.linear import (
-    RowParallelLinear, set_weight_attrs, WEIGHT_LOADER_V2_SUPPORTED)
-from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
-                              tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
+from vllm.model_executor.layers.linear import (WEIGHT_LOADER_V2_SUPPORTED,
+                                               RowParallelLinear,
+                                               UnquantizedLinearMethod,
+                                               set_weight_attrs)
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig, QuantizeMethodBase)
 
-from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.parallel_state import get_otp_group
 
 
 class Oproj_RowParallelLinear(RowParallelLinear):
@@ -80,7 +81,7 @@ class Oproj_RowParallelLinear(RowParallelLinear):
         else:
             self.tp_rank = get_tensor_model_parallel_rank()
             self.tp_size = get_tensor_model_parallel_world_size()
-        
+
         self.input_size_per_partition = divide(input_size, self.tp_size)
         self.output_size_per_partition = output_size
         self.output_partition_sizes = [output_size]
@@ -165,7 +166,6 @@ class Oproj_RowParallelLinear(RowParallelLinear):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-
     def forward(
         self,
         input_: torch.Tensor,
@@ -193,9 +193,8 @@ class Oproj_RowParallelLinear(RowParallelLinear):
             splitted_input = split_tensor_along_last_dim(
                 input_, num_partitions=self.tp_size)
             input_parallel = splitted_input[tp_rank].contiguous()
-        
-        
-        if self._enable_otp: 
+
+        if self._enable_otp:
             # Prepare tensors for all-to-all communication
             local_batch_size = input_parallel.size(0)
             chunk_size = self.input_size_per_partition
@@ -203,29 +202,28 @@ class Oproj_RowParallelLinear(RowParallelLinear):
 
             # Reshape tensor for efficient cross-device transfer:
             # [batch, dim] -> [tp_size, batch, chunk] -> flattened
-            send_buf = (
-                input_parallel.reshape(-1, self.tp_size, chunk_size)
-                .transpose(0, 1)
-                .contiguous()
-                .view(-1))
-            
+            send_buf = (input_parallel.reshape(-1, self.tp_size,
+                                               chunk_size).transpose(
+                                                   0, 1).contiguous().view(-1))
+
             # Create receive buffer
-            recv_buf = torch.empty(
-                total_batch_size * chunk_size,
-                dtype=input_parallel.dtype,
-                device=input_.device)
-            
+            recv_buf = torch.empty(total_batch_size * chunk_size,
+                                   dtype=input_parallel.dtype,
+                                   device=input_.device)
+
             # Perform all-to-all communication
-            dist.all_to_all_single(
-                recv_buf, send_buf, group=get_otp_group().device_group)
+            dist.all_to_all_single(recv_buf,
+                                   send_buf,
+                                   group=get_otp_group().device_group)
             input_parallel = recv_buf.view(total_batch_size, chunk_size)
 
         # Matrix multiply with quantized method
         assert self.quant_method is not None
         # Only fuse bias add for rank 0 to avoid duplicate bias addition in TP>1
         bias_ = None if (self.tp_rank > 0 or self.skip_bias_add) else self.bias
-        output_parallel = self.quant_method.apply(
-            self, input_parallel, bias=bias_)
+        output_parallel = self.quant_method.apply(self,
+                                                  input_parallel,
+                                                  bias=bias_)
 
         if self._enable_otp:
             # otp-specific: Combine partial results across devices

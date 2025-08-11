@@ -34,13 +34,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     UnquantizedEmbeddingMethod, VocabParallelEmbedding)
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
+
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.ops.fused_moe import AscendUnquantizedFusedMoEMethod
 from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD
-from vllm_ascend.ops.linear import Oproj_RowParallelLinear
-from vllm_ascend.distributed.parallel_state import get_otp_group
-from .quantizer import AscendQuantizer
 
+from .quantizer import AscendQuantizer
 
 
 @register_quantization_config(ASCEND_QUATIZATION_METHOD)
@@ -231,7 +231,7 @@ class AscendLinearMethod(LinearMethodBase):
                 tp_rank = get_tensor_model_parallel_rank()
         else:
             tp_rank = 0
-        
+
         return self.quant_method.apply(layer, x, bias, tp_rank)
 
 
