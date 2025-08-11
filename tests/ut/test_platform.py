@@ -444,7 +444,7 @@ class TestNPUPlatform(TestBase):
         )
         self.assertEqual(
             result,
-            "vllm_ascend.attention.attention_v1_torchair.AscendAttentionTorchairBackend"
+            "vllm_ascend.torchair.torchair_attention.AscendAttentionTorchairBackend"
         )
 
     @patch('vllm_ascend.platform.get_ascend_config')
