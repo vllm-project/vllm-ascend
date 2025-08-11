@@ -4,6 +4,7 @@ from enum import Enum
 from typing import Any, Optional
 
 import torch
+from vllm.config import get_current_vllm_config
 from vllm.config import VllmConfig
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_world_size)
@@ -81,6 +82,19 @@ def set_ascend_forward_context(
                                                is_deepseek_v3_r1)
         forward_context.fused_moe_state = fused_moe_state
         forward_context.in_profile_run = in_profile_run
+        
+        vllm_config = get_current_vllm_config()
+        top_k = vllm_config.model_config.hf_config.num_experts_per_tok
+        num_experts = vllm_config.model_config.hf_config.n_routed_experts
+        quant_config = vllm_config.quant_config
+
+        need_param = {
+            "top_k": top_k,  # Example value for top_k
+            "num_experts": num_experts  # Example value for num_experts
+        }
+
+        token_dispatcher = UnquantizedTokenDispatcherWithAll2AllV(need_param)
+        forward_context.token_dispatcher = token_dispatcher
 
         # NOTE: This cannot be set using set_forward_context
         # due to multiple warmups before actual capturing

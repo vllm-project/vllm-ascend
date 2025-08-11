@@ -463,7 +463,7 @@ class MoETokenDispatcher(ABC):
         """
         self.shared_experts = None
         self.top_k = need_param["top_k"]
-        self.expert_map = need_param["expert_map"]
+        self.num_experts = need_param["num_experts"]
 
     @property
     def ep_group(self):
@@ -488,12 +488,13 @@ class MoETokenDispatcher(ABC):
         return 1
 
     @abstractmethod
-    def token_permutation(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-    ):
+    def token_permutation(self,
+                          hidden_states: torch.Tensor,
+                          topk_weights: torch.Tensor,
+                          topk_ids: torch.Tensor,
+                          expert_map: torch.Tensor = None,
+                          log2phy: torch.Tensor = None,
+                          global_redundant_expert_num: int = 0):
         """Dispatch tokens to experts.
         Args:
             hidden_states (torch.Tensor): Input hidden_states.
@@ -539,14 +540,9 @@ class UnquantizedTokenDispatcherWithAll2AllV(MoETokenDispatcher):
             config (MoEDispatcherConfig): Configuration for the transformer model.
         """
         super().__init__(need_param)
-        self.num_experts = need_param["num_experts"]
-        self.moe_grouped_gemm = need_param["moe_grouped_gemm"]
-
-        if self.expert_map is not None:
-            self.num_local_experts = int(
-                torch.sum(self.expert_map != -1).item())
-        else:
-            self.num_local_experts = self.num_experts
+        self.moe_grouped_gemm = False
+        self.expert_map = None
+        self.num_local_experts = 0
 
         # self.config = config
         # use MOEAlltoAllSEQTokenDispatcher to init
@@ -685,12 +681,13 @@ class UnquantizedTokenDispatcherWithAll2AllV(MoETokenDispatcher):
 
         return num_tokens_per_local_expert
 
-    def token_permutation(
-        self,
-        hidden_states: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-    ):
+    def token_permutation(self,
+                          hidden_states: torch.Tensor,
+                          topk_weights: torch.Tensor,
+                          topk_ids: torch.Tensor,
+                          expert_map: torch.Tensor = None,
+                          log2phy: torch.Tensor = None,
+                          global_redundant_expert_num: int = 0):
         """
         Dispatch tokens to local experts using AlltoAllSeq communication.
 
@@ -709,8 +706,14 @@ class UnquantizedTokenDispatcherWithAll2AllV(MoETokenDispatcher):
         self.hidden_shape = hidden_states.shape
         self.topk_weights = topk_weights
         self.top_indices = topk_ids
+        self.expert_map = expert_map
         assert topk_weights.dim() == 2, "Expected 2D tensor for topk_weights"
         assert topk_ids.dim() == 2, "Expected 2D tensor for routing map"
+
+        if self.expert_map is not None:
+            self.num_local_experts = torch.sum(self.expert_map != -1).item()
+        else:
+            self.num_local_experts = self.num_experts
 
         # Permutation 1: input to AlltoAll input
         def alltoall_token_permutation1(hidden_states, topk_ids):
@@ -968,17 +971,13 @@ class UnquantizedTokenDispatcherWithAll2AllV(MoETokenDispatcher):
         self.num_global_tokens_per_local_expert = None
         self.num_global_tokens_per_local_expert_cpu = None
 
-        return output, None
+        return output
 
 
 class QuantizedTokenDispatcherWithAll2All(MoETokenDispatcher):
 
     def __init__(self, need_param):
         super().__init__(need_param)
-        self.num_experts = need_param["num_experts"]
-        self.global_redundant_expert_num = need_param[
-            "global_redundant_expert_num"]
-        self.log2phy = need_param["log2phy"]
         self._meta = {}
 
     def _save_meta(self, **kwargs):
@@ -1000,18 +999,23 @@ class QuantizedTokenDispatcherWithAll2All(MoETokenDispatcher):
 
         return hidden_states, expanded_row_idx, expanded_expert_idx
 
-    def token_permutation(self, hidden_states, topk_weights, topk_ids):
-        if self.log2phy is not None:
-            topk_ids = self.log2phy[topk_ids]
+    def token_permutation(self,
+                          hidden_states,
+                          topk_weights,
+                          topk_ids,
+                          expert_map: torch.Tensor = None,
+                          log2phy: torch.Tensor = None,
+                          global_redundant_expert_num: int = 0):
+        if log2phy is not None:
+            topk_ids = log2phy[topk_ids]
         original_shape = hidden_states.shape
         if len(original_shape) == 3:
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
         num_tokens, _ = hidden_states.shape
 
-        if self.expert_map is not None:
-            global_num_experts = len(
-                self.expert_map) + self.global_redundant_expert_num
+        if expert_map is not None:
+            global_num_experts = len(expert_map) + global_redundant_expert_num
             if hasattr(torch_npu, "npu_moe_init_routing_quant"):
                 quantized_tokens, expanded_row_idx, global_expert_tokens, _, token_scales = torch_npu.npu_moe_init_routing_quant(
                     hidden_states,
@@ -1078,6 +1082,7 @@ class QuantizedTokenDispatcherWithAll2All(MoETokenDispatcher):
 
         self._save_meta(topk_ids=topk_ids,
                         topk_weights=topk_weights,
+                        expert_map=expert_map,
                         original_shape=original_shape,
                         quantized_tokens_shape=quantized_tokens.shape,
                         inverse_indices=inverse_indices,
@@ -1087,7 +1092,7 @@ class QuantizedTokenDispatcherWithAll2All(MoETokenDispatcher):
         return hidden_states, expert_tokens, group_list_type, dynamic_scale
 
     def token_unpermutation(self, expert_output, bias=None):
-        if self.expert_map is not None:
+        if self._meta["expert_map"] is not None:
             reordered_outputs = torch.index_select(
                 expert_output,
                 dim=0,
