@@ -21,7 +21,6 @@ from typing import List, Optional, Union
 
 import torch
 import torch_npu
-import vllm.model_executor.models.qwen3_moe as qwen3
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.attention import AttentionMetadata
@@ -36,8 +35,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
-from vllm.model_executor.models.qwen3_moe import (Qwen3MoeDecoderLayer,
-                                                  Qwen3MoeForCausalLM,
+from vllm.model_executor.models.qwen3_moe import (Qwen3MoeForCausalLM,
                                                   Qwen3MoeModel)
 from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
@@ -54,8 +52,7 @@ from vllm_ascend.multistream.layers import (MultiStreamPostTransformerLayer,
 from vllm_ascend.multistream.metadata import (MultiStreamConfig,
                                               MultiStreamStepMetadata,
                                               make_multistream_metadata_ds)
-from vllm_ascend.ops.fused_moe import (AscendSparseMoeBlock, apply_mlp,
-                                       select_experts)
+from vllm_ascend.ops.fused_moe import apply_mlp, select_experts
 from vllm_ascend.models.qwen3_moe import CustomQwen3MoeDecoderLayer
 
 VLLM_ASCEND_ENABLE_DBO: bool = envs_ascend.VLLM_ASCEND_ENABLE_DBO
