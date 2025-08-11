@@ -20,8 +20,6 @@ from typing import Optional, Tuple, Union
 import torch
 from vllm.model_executor.layers.layernorm import RMSNorm
 
-from vllm_ascend.utils import is_310p
-
 
 class AddRMSNormW8A8Quant(RMSNorm):
     # Fuse AddRmsNorm and W8A8 quantization ops together
@@ -69,6 +67,7 @@ class AscendRMSNorm(RMSNorm):
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         import torch_npu
 
+        from vllm_ascend.utils import is_310p
         if residual is not None:
             if is_310p():
                 orig_dtype = residual.dtype

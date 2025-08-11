@@ -2,7 +2,8 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from vllm.model_executor.layers.layernorm import RMSNorm
+
+from vllm_ascend.ops.layernorm import AscendRMSNorm
 
 
 @pytest.fixture
@@ -27,9 +28,9 @@ def test_AscendRMSNorm_forward(mock_add_rmsnorm, mock_rmsnorm, is_310p_return,
                                residual, dummy_tensor):
 
     with patch("vllm_ascend.utils.is_310p", return_value=is_310p_return):
-        layer = RMSNorm(hidden_size=32, eps=1e-05)
+        layer = AscendRMSNorm(hidden_size=32, eps=1e-05)
         if residual is not None:
-            out_x, out_residual = layer.forward(dummy_tensor, residual)
+            out_x, out_residual = layer.forward_oot(dummy_tensor, residual)
 
             if is_310p_return:
                 expected_arg_x = dummy_tensor + residual.to(dummy_tensor.dtype)
@@ -46,7 +47,7 @@ def test_AscendRMSNorm_forward(mock_add_rmsnorm, mock_rmsnorm, is_310p_return,
                 assert torch.allclose(out_x, expected_out_x)
                 assert torch.allclose(out_residual, expected_out_residual)
         else:
-            out_x = layer.forward(dummy_tensor, residual)
+            out_x = layer.forward_oot(dummy_tensor, residual)
             expected_out_x = dummy_tensor + 1
 
             mock_rmsnorm.assert_called_once()
