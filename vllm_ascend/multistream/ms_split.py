@@ -295,7 +295,6 @@ def model_input_split_v1_attn(
     has_prefill_pre, _ = torch.any(query_lens_pre > 1).item(), torch.any(
         query_lens_post > 1).item()
 
-
     if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache or attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
         # the attn_mla kernel in torch npu only accept 128*128 attn mask
         attn_mask_pre = attn_mask_post = attn_metadata.attn_mask
@@ -349,4 +348,3 @@ def model_input_split_v1_attn(
     )
 
     return [attention_metadata_pre, attention_metadata_post]
-

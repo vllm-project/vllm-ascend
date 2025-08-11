@@ -148,7 +148,6 @@ class TestMsSplit(TestBase):
                                                ms_split_config)
         self.assertEqual(result, [None])
     
-
     def test_split_v1_attn_input_none(self):
         attn_metadata = None
         ms_split_config = MSAttentionMetadataSplitConfig()
@@ -156,7 +155,6 @@ class TestMsSplit(TestBase):
                                            ms_split_config)
         self.assertEqual(result, [None])
     
-
     def test_split_v1_attn_input_prefill_only(self):
         attn_metadata = AscendMetadata(
             attn_state=AscendAttentionState.PrefillNoCache,
@@ -182,4 +180,3 @@ class TestMsSplit(TestBase):
         self.assertEqual(meta2.query_start_loc.tolist(), [0])
         self.assertEqual(meta1.max_query_len, 120)
         self.assertEqual(meta2.max_query_len, 253)
-        

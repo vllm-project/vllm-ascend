@@ -207,7 +207,6 @@ def test_models_distributed_alltoallv_prefill_dbo() -> None:
         vllm_model.generate(example_prompts, sampling_params)
 
 
-
 def test_models_distributed_Qwen3_W8A8():
     example_prompts = [
         "Hello, my name is",
