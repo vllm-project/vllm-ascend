@@ -261,7 +261,7 @@ jobs:
           git checkout -B "${BRANCH_NAME}" upstream/main
 
       - name: Download only current run reports
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: ./docs/source/developer_guide/evaluation/accuracy_report
           pattern: report-*
