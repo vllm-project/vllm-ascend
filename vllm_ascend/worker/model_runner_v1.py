@@ -85,7 +85,7 @@ from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
-from vllm_ascend.utils import (ProfileExecuteDuration,
+from vllm_ascend.utils import (TORCHAIR_CACHE_DIR, ProfileExecuteDuration,
                                check_torchair_cache_exist,
                                write_kv_cache_bytes_to_file)
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
@@ -370,6 +370,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled and self.vllm_config.model_config.use_mla
         self.use_cached_npu_graph = ascend_config.torchair_graph_config.use_cached_graph
+        self.use_cached_kv_cache_bytes = ascend_config.torchair_graph_config.use_cached_kv_cache_bytes
         self.torchair_graph_batch_sizes = ascend_config.torchair_graph_config.graph_batch_sizes
 
         if ascend_config.torchair_graph_config.graph_batch_sizes_init:
@@ -1915,6 +1916,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     self.model.__dict__[forward_proxy_name],
                     dynamic=True,
                     fullgraph=envs_vllm.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                    cache_dir=TORCHAIR_CACHE_DIR,
                     config=config,
                     ge_cache=False)
             return self.torchair_compiled_models[batch_size]
@@ -2093,14 +2095,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             torchair_graph_batch_sizes = self.torchair_graph_batch_sizes
             graph_num = len(torchair_graph_batch_sizes)
             if self.use_cached_npu_graph and not check_torchair_cache_exist():
-                # If caching is enabled but does not exist, we will compile the model twice. The first
-                # time is used to generate the cache, and the second time is used to load the cache to
-                # skip the overhead caused by Dynamo guard mechanism.
+                # If caching is enabled but does not exist (either
+                # use_cached_kv_cache_bytes is disabled or kv_cache_bytes are
+                # different), we will compile the model twice. The first time is
+                # used to generate the cache, and the second time is used to load the
+                # cache to skip the overhead caused by Dynamo guard mechanism.
                 logger.info(
-                    "Use cached npu graph but cache doesn't exist! Now we compile graph to genetate torchair cache, this usually takes %.1f~%.1f mins.",
+                    "Cache compilation for torchair graph is enabled. Now we compile graph to genetate"
+                    " torchair cache, this usually takes %.1f~%.1f mins.",
                     0.5 * graph_num, 1.5 * graph_num)
                 self._compile_torchair_graph(torchair_graph_batch_sizes)
                 NPUPlatform.synchronize()
+                # Note: We reset dynamo and reload the compiled torchair cached computation graph below
+                # that was compiled above. This operation reduces graph launch time by 2-4ms and avoids
+                # runtime errors caused by configuration mismatches in graph mode.
                 torch._dynamo.reset()
                 self.torchair_compiled_models.clear()
                 if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
@@ -2115,8 +2123,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     "Capturing torchair graph, this usually takes %.1f~%.1f mins.",
                     0.5 * graph_num, 1.5 * graph_num)
                 self._compile_torchair_graph(torchair_graph_batch_sizes)
-
-            if self.new_kv_cache_bytes > 0:
+            if self.use_cached_kv_cache_bytes and self.new_kv_cache_bytes > 0:
                 write_kv_cache_bytes_to_file(torch.distributed.get_rank(),
                                              self.new_kv_cache_bytes)
         elif self.use_aclgraph:

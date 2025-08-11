@@ -193,7 +193,9 @@ class NPUWorker(WorkerBase):
         logger.info(
             f"Available memory: {available_kv_cache_memory}, total memory: {total_npu_memory}"
         )
-        if get_ascend_config().torchair_graph_config.enabled:
+        if (get_ascend_config().torchair_graph_config.enabled
+                and get_ascend_config(
+                ).torchair_graph_config.use_cached_kv_cache_bytes):
             if check_torchair_cache_exist(
             ) and check_kv_cache_bytes_cache_exist():
                 old_kv_cache_bytes = read_kv_cache_bytes_from_file(

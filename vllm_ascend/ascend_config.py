@@ -75,6 +75,9 @@ class TorchairGraphConfig:
         )  # Whether to enable torchair graph mode. Currently only DeepSeek series models and PanguProMoE are supported to use torchair graph mode
         self.use_cached_graph = torchair_graph_config.get(
             "use_cached_graph", False)  # Whether to use cached graph
+        self.use_cached_kv_cache_bytes = torchair_graph_config.get(
+            "use_cached_kv_cache_bytes", False
+        )  # Whether to use cached kv_caches' memory, this option can only be enabled with use_cached_graph
         self.graph_batch_sizes = torchair_graph_config.get(
             "graph_batch_sizes", [])  # The batch size for torchair graph cache
         self.graph_batch_sizes_init = torchair_graph_config.get(
@@ -106,6 +109,10 @@ class TorchairGraphConfig:
                 raise RuntimeError(
                     "use_cached_graph is valid only when Torchair graph mode is enabled"
                 )
+            if self.use_cached_kv_cache_bytes:
+                raise RuntimeError(
+                    "use_cached_kv_cache_bytes is valid only when Torchair graph mode is enabled"
+                )
             if self.graph_batch_sizes:
                 raise RuntimeError(
                     "graph_batch_sizes is valid only when Torchair graph mode is enabled"
@@ -133,8 +140,12 @@ class TorchairGraphConfig:
         if not self.enable_multistream_moe:
             if self.enable_super_kernel:
                 raise RuntimeError(
-                    "enable_super_kernel is valid only when Torchair graph mode and enable_multistream_moe is enabled"
+                    "enable_super_kernel is valid only when Torchair graph mode and enable_multistream_moe are enabled"
                 )
+        if self.use_cached_kv_cache_bytes and not self.use_cached_graph:
+            raise RuntimeError(
+                "use_cached_kv_cache_bytes is valid only when Torchair graph mode and use_cached_graph are enabled"
+            )
 
 
 class AscendSchedulerConfig:

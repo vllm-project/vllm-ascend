@@ -28,7 +28,10 @@ from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
 from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
-from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD, update_aclgraph_sizes
+from vllm_ascend.utils import (ASCEND_QUATIZATION_METHOD,
+                               check_torchair_cache_exist,
+                               delete_torchair_cache_file,
+                               update_aclgraph_sizes)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -157,6 +160,14 @@ class NPUPlatform(Platform):
                 "Torchair compilation enabled on NPU. Setting level to NO_COMPILATION"
             )
             compilation_config.level = CompilationLevel.NO_COMPILATION
+            # Note: We delete the torchair cache folder here to prevent runtime issues caused by dimension
+            # mismatches or configuration inconsistencies when users reuse cached computation graphs. Though
+            # this will increase graph compilation duration, it significantly enhances robustness and decreases
+            # graph launching time during inference. In order to decrease torchair graph compilation time, users
+            # can enable both `use_cached_graph` and `use_cached_kv_cache_bytes` in torchair_graph_config.
+            if check_torchair_cache_exist(
+            ) and not ascend_config.torchair_graph_config.use_cached_kv_cache_bytes:
+                delete_torchair_cache_file()
         elif parallel_config.distributed_executor_backend == "ray":
             logger.warning(
                 "Ray distributed executor backend is not compatible with ACL Graph mode "
