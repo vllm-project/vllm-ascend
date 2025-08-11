@@ -20,10 +20,11 @@
 from typing import Optional
 
 import torch
+import torch_npu
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ,
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                maybe_converting_weight_acl_format)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
@@ -113,3 +114,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
                 with_prefill, is_torchair_compile, input_ids, positions,
                 attn_metadata, num_tokens, intermediate_tensors, inputs_embeds)
         return hidden_states
+
+    def _convert_torch_format(self, kv_cache):
+        kv_cache = torch_npu.npu_format_cast(kv_cache, ACL_FORMAT_FRACTAL_ND)
+        return kv_cache
