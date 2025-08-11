@@ -83,7 +83,7 @@ def generate_report(tp_size, eval_config, report_data, report_dir, env_config):
         datasets=",".join([task["name"] for task in eval_config["tasks"]]),
         apply_chat_template=eval_config.get("apply_chat_template", True),
         fewshot_as_multiturn=eval_config.get("fewshot_as_multiturn", True),
-        limit=eval_config.get("limit", None),
+        limit=eval_config.get("limit", "N/A"),
         batch_size="auto",
         num_fewshot=eval_config.get("num_fewshot", "N/A"),
         rows=report_data["rows"],
