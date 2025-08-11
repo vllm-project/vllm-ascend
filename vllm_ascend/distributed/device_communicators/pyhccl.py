@@ -156,10 +156,9 @@ class PyHcclCommunicator:
             f"but the input tensor is on {tensor.device}")
         if stream is None:
             stream = current_stream()
-        if src == self.rank:
-            buffer = buffer_type(tensor.data_ptr())
-        else:
-            buffer = buffer_type(tensor.data_ptr())
+        buffer = buffer_type(
+            tensor.data_ptr()) if src == self.rank else buffer_type(
+                tensor.data_ptr())
         self.hccl.hcclBroadcast(buffer, tensor.numel(),
                                 hcclDataTypeEnum.from_torch(tensor.dtype), src,
                                 self.comm, aclrtStream_t(stream.npu_stream))

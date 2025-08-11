@@ -25,8 +25,8 @@ from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
 from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
                                                RowParallelLinear,
                                                UnquantizedLinearMethod)
-from vllm.model_executor.layers.quantization import \
-    register_quantization_config
+from vllm.model_executor.layers.quantization import (
+    register_quantization_config)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
@@ -92,12 +92,9 @@ class AscendQuantConfig(QuantizationConfig):
                 return UnquantizedLinearMethod()
             return AscendLinearMethod(self, prefix,
                                       self.packed_modules_mapping)
-        elif isinstance(layer, Attention) and \
-            'fa_quant_type' in self.quant_description.keys() and \
-            self.quant_description['fa_quant_type'] is not None:
-            return AscendKVCacheMethod(self, prefix)
-        elif isinstance(layer, Attention) and self.quant_description.get(
-                'kv_quant_type') == 'C8':
+        elif isinstance(layer, Attention) and (
+                self.quant_description.get('fa_quant_type') is not None
+                or self.quant_description.get('kv_quant_type') == 'C8'):
             return AscendKVCacheMethod(self, prefix)
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix,
@@ -209,7 +206,7 @@ class AscendLinearMethod(LinearMethodBase):
             layer.register_parameter(pergroup_name, param)
             set_weight_attrs(param, extra_weight_attrs)
             if "weight_scale_second" in pergroup_name or "weight_offset_second" in pergroup_name:
-                setattr(param, "input_dim", 1)
+                param.input_dim = 1
                 param.input_dim = 1
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -303,8 +300,7 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             layer.register_parameter(param_key, param)
             set_weight_attrs(param, extra_weight_attrs)
             if "weight_scale_second" in param_key or "weight_offset_second" in param_key:
-                setattr(param, "quant_method",
-                        FusedMoeWeightScaleSupported.GROUP.value)
+                param.quant_method = FusedMoeWeightScaleSupported.GROUP.value
 
     def apply(
         self,

@@ -16,7 +16,8 @@
 #
 import time
 from collections import deque
-from typing import Iterable, Union
+from collections.abc import Iterable
+from typing import Union
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVEventBatch
@@ -84,7 +85,7 @@ class AscendScheduler(Scheduler):
 
             def skip_cur_request():
                 self.waiting.popleft()
-                skipped_waiting_requests.appendleft(request)
+                skipped_waiting_requests.appendleft(request)  # noqa: B023
 
             # P/D: skip request if still waiting for remote kvs.
             if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
@@ -422,11 +423,9 @@ class AscendScheduler(Scheduler):
         num_evictable_computed_blocks = sum(1 for blk in computed_blocks
                                             if blk.ref_cnt == 0)
         # If number of free blocks is less than water mark after allocating, don't allocate.
-        if (self.kv_cache_manager.block_pool.get_num_free_blocks() -
-                num_evictable_computed_blocks -
-                num_new_blocks) < watermark_blocks:
-            return False
-        return True
+        return (self.kv_cache_manager.block_pool.get_num_free_blocks() -
+                num_evictable_computed_blocks - num_new_blocks
+                >= watermark_blocks)
 
     def _get_prompt_limit(self, request: Request) -> int:
         if (self.scheduler_config.chunked_prefill_enabled

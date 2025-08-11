@@ -1,7 +1,8 @@
 # Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
 # Copyright 2024 The Qwen team.
 # Copyright 2023 The vLLM team.
-# Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved. Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
+# Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
+# Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -204,7 +205,8 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
         if not self.enable_sequence_parallelism:
             self.self_attn.o_proj.reduce_results = True
         else:
-            self.self_attn.o_proj.reduce_results = not _metadata_for_padding.not_dummy_and_is_prefill if _metadata_for_padding is not None else True
+            self.self_attn.o_proj.reduce_results = not _metadata_for_padding.not_dummy_and_is_prefill \
+            if _metadata_for_padding is not None else True
 
         # Self Attention
         if residual is None:
@@ -285,10 +287,8 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
         _metadata_for_padding: Optional[MetadataForPadding] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            if inputs_embeds is not None:
-                hidden_states = inputs_embeds
-            else:
-                hidden_states = self.get_input_embeddings(input_ids)
+            hidden_states = inputs_embeds if inputs_embeds is not None else self.get_input_embeddings(
+                input_ids)
             residual = None
         else:
             assert intermediate_tensors is not None

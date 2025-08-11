@@ -259,7 +259,7 @@ class AscendW4A8DynamicFusedMoEMethod:
                 # out_flag=False, # todo new api; should the third output be output
                 # y2_flag=False, # old api; should the third output be output
                 routed_scaling_factor=1,
-                eps=float(1e-20))
+                eps=1e-20)
         else:
             topk_weights, topk_ids = select_experts(
                 hidden_states=x,
@@ -311,7 +311,7 @@ class AscendW4A8DynamicFusedMoEMethod:
                 is_torchair=self.torchair_graph_enabled,
                 quantized_x_for_share=shared_gate_up,
                 dynamic_scale_for_share=shared_dequant_scale,
-                mc2_mask=kwargs.get("mc2_mask", None))
+                mc2_mask=kwargs.get("mc2_mask"))
         else:
             # The current implementation of deepseek moe splits hidden_states
             # according to tp_size before they are feed into fused_moe module.

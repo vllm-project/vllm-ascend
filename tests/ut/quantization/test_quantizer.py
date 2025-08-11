@@ -78,10 +78,14 @@ class TestGetQuantizer(TestBase):
         quant_description = {'linear_type': 'INT8'}
         prefix = 'nothing'
         expected_type = 'INT8'
-        with patch('vllm_ascend.quantization.quantizer.VLLMAscendQuantizer.get_linear_quant_type',
-                            return_value=expected_type), \
-            patch.dict('vllm_ascend.quantization.quantizer.SUPPORT_ASCEND_QUANTIZER_TYPE', SUPPORT_ASCEND_QUANTIZER_TYPE):
-
+        with (patch(
+                'vllm_ascend.quantization.quantizer.VLLMAscendQuantizer.get_linear_quant_type',
+                return_value=expected_type,
+        ),
+              patch.dict(
+                  'vllm_ascend.quantization.quantizer.SUPPORT_ASCEND_QUANTIZER_TYPE',
+                  SUPPORT_ASCEND_QUANTIZER_TYPE,
+              )):
             result = VLLMAscendQuantizer.get_quantizer(
                 quant_description,
                 prefix,

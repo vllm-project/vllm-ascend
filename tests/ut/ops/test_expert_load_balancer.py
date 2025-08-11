@@ -45,7 +45,7 @@ class TestExpertLoadBalancer(TestBase):
     def setUp(self):
         _TEST_DIR = os.path.dirname(__file__)
         json_file = _TEST_DIR + "/expert_map.json"
-        with open(json_file, 'r') as f:
+        with open(json_file) as f:
             self.expert_map: MockData = json.load(f)
 
         self.expert_load_balancer = ExpertLoadBalancer(json_file,
