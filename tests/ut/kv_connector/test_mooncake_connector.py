@@ -5,11 +5,11 @@ import threading
 import time
 import unittest
 from collections import defaultdict, deque
-from unittest.mock import ANY, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import msgspec
 import zmq
-from vllm.utils import make_zmq_path, make_zmq_socket
+from vllm.utils import make_zmq_path
 from zmq import Context  # type: ignore
 
 from vllm_ascend.distributed.mooncake_connector import (
@@ -992,8 +992,8 @@ class TestUtils(unittest.TestCase):
     @patch("vllm_ascend.distributed.mooncake_connector.logger")
     def test_ensure_zmq_send_retry_and_fail(self, mock_logger):
         mock_socket = MagicMock()
-        mock_socket.send.side_effect = zmq.ZMQError(
-            "send failed")  # type: ignore
+        mock_socket.send.side_effect = zmq.ZMQError(  # type: ignore
+            "send failed")
         with self.assertRaises(RuntimeError):
             ensure_zmq_send(mock_socket, b"hello", max_retries=2)
         self.assertEqual(mock_socket.send.call_count, 2)
@@ -1003,8 +1003,9 @@ class TestUtils(unittest.TestCase):
         mock_socket = MagicMock()
         mock_socket.recv.return_value = b"response"
         mock_poller = MagicMock()
-        mock_poller.poll.return_value = [(mock_socket, zmq.POLLIN)
-                                         ]  # type: ignore
+        mock_poller.poll.return_value = [
+            (mock_socket, zmq.POLLIN)  # type: ignore
+        ]
         data = ensure_zmq_recv(mock_socket, mock_poller)
         self.assertEqual(data, b"response")
 
