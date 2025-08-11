@@ -70,7 +70,7 @@ def test_mtp_correctness(
         model=model_name,
         tensor_parallel_size=1,
         max_num_seqs=256,
-        gpu_memory_utilization=0.5,
+        gpu_memory_utilization=0.6,
         distributed_executor_backend="mp",
         enable_expert_parallel=True,
         speculative_config={
