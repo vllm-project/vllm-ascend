@@ -207,15 +207,15 @@ class CustomQwen3MoeAttention(Qwen3MoeAttention):
 
     @staticmethod
     def normalize_qkv(qkv: torch.Tensor, q_size: int, kv_size: int,
-                      head_dim: int, rms_norm_eps: float):
+                      head_dim: int, q_norm, k_norm):
         q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
 
         q_by_head = q.view(*q.shape[:-1], q.shape[-1] // head_dim, head_dim)
-        q_by_head = RMSNorm(head_dim, eps=rms_norm_eps)(q_by_head)
+        q_by_head = q_norm(q_by_head)
         q = q_by_head.view(q.shape)
 
         k_by_head = k.view(*k.shape[:-1], k.shape[-1] // head_dim, head_dim)
-        k_by_head = RMSNorm(head_dim, eps=rms_norm_eps)(k_by_head)
+        k_by_head = k_norm(k_by_head)
         k = k_by_head.view(k.shape)
 
         return q, k, v
@@ -228,7 +228,7 @@ class CustomQwen3MoeAttention(Qwen3MoeAttention):
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = self.normalize_qkv(qkv, self.q_size, self.kv_size,
-                                     self.head_dim, self.rms_norm_eps)
+                                     self.head_dim, self.q_norm, self.k_norm)
 
         if (self.torchair_graph_enabled and attn_metadata is not None and
                 attn_metadata.attn_state == AscendAttentionState.DecodeOnly):

@@ -50,6 +50,18 @@ class TestCustomQwen3MoeForCausalLM:
         assert CustomQwen3MoeForCausalLM.packed_modules_mapping == expected_mapping
 
 
+class DummyRMSNorm:
+
+    def __init__(self, dim: int, eps: float = 1e-6):
+        self.dim = dim
+        self.eps = eps
+
+    def __call__(self, x):
+        mean_sq = x.pow(2).mean(dim=-1, keepdim=True)
+        denom = (mean_sq + self.eps).sqrt()
+        return x / denom
+
+
 class TestCustomQwen3MoeAttention(unittest.TestCase):
 
     def setUp(self):
@@ -70,8 +82,10 @@ class TestCustomQwen3MoeAttention(unittest.TestCase):
         ones_qkv = torch.ones((1, 1, self.q_size + 2 * self.kv_size),
                               dtype=torch.float32)
 
+        q_norm = DummyRMSNorm(self.head_dim, self.rms_eps)
+        k_norm = DummyRMSNorm(self.head_dim, self.rms_eps)
         q, k, v = CustomQwen3MoeAttention.normalize_qkv(
-            ones_qkv, self.q_size, self.kv_size, self.head_dim, self.rms_eps)
+            ones_qkv, self.q_size, self.kv_size, self.head_dim, q_norm, k_norm)
 
         norm_val = 1.0 / math.sqrt(1.0 + self.rms_eps)
 

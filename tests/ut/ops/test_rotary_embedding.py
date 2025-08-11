@@ -4,8 +4,9 @@ from unittest.mock import MagicMock, patch
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.ops.rotary_embedding import (__set_cos_sin_cache,
-                                              custom_rotary_embedding_enabled,
+from vllm_ascend.ops.rotary_embedding import \
+    __set_cos_sin_cache as raw__set_cos_sin_cache
+from vllm_ascend.ops.rotary_embedding import (custom_rotary_embedding_enabled,
                                               native_rope_deepseek_forward,
                                               rope_forward_oot, rotate_half,
                                               yarn_find_correction_dim,
@@ -327,7 +328,7 @@ class MockRotaryEmbedding(torch.nn.Module):
         self.max_position_embeddings = max_position_embeddings
 
     def _set_cos_sin_cache(self, seq_len, device, dtype):
-        return __set_cos_sin_cache(self, seq_len, device, dtype)
+        return raw__set_cos_sin_cache(self, seq_len, device, dtype)
 
 
 class TestSetCosSinCache(TestBase):
