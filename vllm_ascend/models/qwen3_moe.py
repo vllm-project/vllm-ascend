@@ -33,6 +33,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.models.interfaces import (MixtureOfExperts,
@@ -51,6 +52,40 @@ from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.ops.sequence_parallel import (MetadataForPadding,
                                                init_metadata_for_sp)
 
+class CustomQwen3MoeAttention(Qwen3MoeAttention):
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # Add qk-norm
+        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
+                           self.head_dim)
+        q_by_head = self.q_norm(q_by_head)
+        q = q_by_head.view(q.shape)
+        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
+                           self.head_dim)
+        k_by_head = self.k_norm(k_by_head)
+        k = k_by_head.view(k.shape)
+        if type(self.rotary_emb) is RotaryEmbedding:
+            # We optimized RotaryEmbedding by moving index_select of cos & sin outside.
+            # if cos & sin are provided, set is_cos_sin_cached to True to skip index_select.
+            q, k = self.rotary_emb(positions,
+                                   q,
+                                   k,
+                                   cos=cos,
+                                   sin=sin,
+                                   is_cos_sin_cached=True)
+        else:
+            q, k = self.rotary_emb(positions, q, k)
+        attn_output = self.attn(q, k, v)
+        output, _ = self.o_proj(attn_output)
+        return output
 
 class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
 
@@ -142,7 +177,7 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
-        self.self_attn = Qwen3MoeAttention(
+        self.self_attn = CustomQwen3MoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
@@ -195,6 +230,8 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
     def forward(
         self,
         positions: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
         _metadata_for_padding: Optional[MetadataForPadding] = None,
@@ -223,6 +260,8 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
 
         hidden_states = self.self_attn(
             positions=positions,
+            cos=cos,
+            sin=sin,
             hidden_states=hidden_states,
         )
 
@@ -276,6 +315,11 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
 
+        self.cos_sin_cache = None
+        first_existing_layer = self.layers[self.start_layer]
+        if type(first_existing_layer.self_attn.rotary_emb) is RotaryEmbedding:
+            self.cos_sin_cache = first_existing_layer.self_attn.rotary_emb.cos_sin_cache
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -294,10 +338,23 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
+
+        # Generate cos and sin outside layers to avoid repeated calculation.
+        cos, sin = None, None
+        if self.cos_sin_cache is not None:
+            cos_sin = self.cos_sin_cache.index_select(0, positions)
+            last_dim = cos_sin.size()[-1]
+            cos, sin = cos_sin.reshape(-1, 2, last_dim // 2).repeat(1, 1, 2).chunk(2, dim=-2)
+            # BSNH
+            cos, sin = cos.view(1, -1, 1, last_dim).contiguous(), sin.view(
+                1, -1, 1, last_dim).contiguous()
+
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions,
+                cos,
+                sin,
                 hidden_states,
                 residual,
                 _metadata_for_padding=_metadata_for_padding)
