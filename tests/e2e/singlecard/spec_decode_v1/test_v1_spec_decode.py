@@ -108,4 +108,46 @@ def test_eagle_correctness(
     model_name: str,
     use_eagle3: bool,
 ):
-    pass
+    '''
+    Compare the outputs of a original LLM and a speculative LLM
+    should be the same when using eagle speculative decoding.
+    '''
+    if not use_eagle3:
+        pytest.skip("Not current support for the test.")
+
+    ref_llm = LLM(model=model_name, max_model_len=2048, enforce_eager=True)
+    ref_outputs = ref_llm.chat(test_prompts, sampling_config)
+    del ref_llm
+
+    spec_model_name = eagle3_model_name() if use_eagle3 else eagle_model_name()
+    spec_llm = LLM(
+        model=model_name,
+        trust_remote_code=True,
+        enable_chunked_prefill=True,
+        max_num_seqs=1,
+        max_num_batched_tokens=2048,
+        gpu_memory_utilization=0.6,
+        speculative_config={
+            "method": "eagle3" if use_eagle3 else "eagle",
+            "model": spec_model_name,
+            "num_speculative_tokens": 2,
+            "max_model_len": 128,
+        },
+        max_model_len=128,
+        enforce_eager=True,
+    )
+    spec_outputs = spec_llm.chat(test_prompts, sampling_config)
+    matches = 0
+    misses = 0
+    for ref_output, spec_output in zip(ref_outputs, spec_outputs):
+        if ref_output.outputs[0].text == spec_output.outputs[0].text:
+            matches += 1
+        else:
+            misses += 1
+            print(f"ref_output: {ref_output.outputs[0].text}")
+            print(f"spec_output: {spec_output.outputs[0].text}")
+
+    # Heuristic: expect at least 66% of the prompts to match exactly
+    # Upon failure, inspect the outputs to check for inaccuracy.
+    assert matches > int(0.66 * len(ref_outputs))
+    del spec_llm
