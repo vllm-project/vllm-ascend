@@ -12,11 +12,14 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
+import math
+import unittest
 
 import pytest
+import torch
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
-
-from vllm_ascend.models.qwen3_moe import CustomQwen3MoeForCausalLM
+from vllm_ascend.models.qwen3_moe import (CustomQwen3MoeAttention,
+                                          CustomQwen3MoeForCausalLM)
 
 
 class TestCustomQwen3MoeForCausalLM:
@@ -44,3 +47,40 @@ class TestCustomQwen3MoeForCausalLM:
             ]
         }
         assert CustomQwen3MoeForCausalLM.packed_modules_mapping == expected_mapping
+
+
+class TestNormalizeQKVWithFixedInput(unittest.TestCase):
+    def setUp(self):
+        self.batch = 2
+        self.seq_len = 3
+        self.q_size = 8
+        self.kv_size = 8
+        self.head_dim = 4
+        self.rms_eps = 1e-6
+
+        total_dim = self.q_size + 2 * self.kv_size
+
+        self.qkv = torch.arange(
+            self.batch * self.seq_len * total_dim,
+            dtype=torch.float32
+        ).reshape(self.batch, self.seq_len, total_dim)
+
+    def test_constant_input_normalization(self):
+        ones_qkv = torch.ones(
+            (1, 1, self.q_size + 2 * self.kv_size),
+            dtype=torch.float32
+        )
+
+        q, k, v = CustomQwen3MoeAttention.normalize_qkv(
+            ones_qkv, self.q_size, self.kv_size, self.head_dim, self.rms_eps
+        )
+
+        norm_val = 1.0 / math.sqrt(1.0 + self.rms_eps)
+
+        expected_q = torch.full((1, 1, self.q_size), norm_val)
+        expected_k = torch.full((1, 1, self.kv_size), norm_val)
+        expected_v = torch.ones((1, 1, self.kv_size), dtype=torch.float32)
+
+        self.assertTrue(torch.allclose(q, expected_q, atol=1e-6))
+        self.assertTrue(torch.allclose(k, expected_k, atol=1e-6))
+        self.assertTrue(torch.equal(v, expected_v))
