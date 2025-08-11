@@ -1605,9 +1605,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                                      intermediate_tensors))
         kv_connector_output = None
         if not vllm_version_is("0.10.0"):
-            kv_connector_output = KVConnectorOutput(
-                finished_sending=finished_sending,
-                finished_recving=finished_recving)
+            if finished_sending is not None and finished_recving is not None:
+                kv_connector_output = KVConnectorOutput(
+                    finished_sending=finished_sending,
+                    finished_recving=finished_recving)
+            else:
+                kv_connector_output = None
             finished_sending = None
             finished_recving = None
         with ProfileExecuteDuration().capture_async("post process"):
