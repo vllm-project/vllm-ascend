@@ -332,7 +332,7 @@ class MockRotaryEmbedding(torch.nn.Module):
 
 class TestSetCosSinCache(TestBase):
 
-    def test_set_cos_sin_cache_registers_buffers_and_sets_embed(self):
+    def test_set_cos_sin_cache(self):
         # prepare an instance with reasonable values
         base = 10000.0
         rotary_dim = 4
@@ -341,9 +341,9 @@ class TestSetCosSinCache(TestBase):
         # mock out register_buffer
         model.register_buffer = MagicMock()
         # call the private method via name mangling
-        model._RotaryEmbedding._set_cos_sin_cache(seq_len=8,
-                                                  device="cpu",
-                                                  dtype=torch.float32)
+        model._set_cos_sin_cache(seq_len=8,
+                                 device="cpu",
+                                 dtype=torch.float32)
         # expect three calls: inv_freq, cos, sin
         assert model.register_buffer.call_count == 3
         names = [call.args[0] for call in model.register_buffer.call_args_list]
