@@ -179,7 +179,10 @@ def test_models_distributed_alltoallv() -> None:
         vllm_model.generate(example_prompts, sampling_params)
 
 
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ": "1", "VLLM_ASCEND_ENABLE_DBO": "1"})
+@patch.dict(os.environ, {
+    "VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ": "1", 
+    "VLLM_ASCEND_ENABLE_DBO": "1"
+})
 def test_models_distributed_alltoallv_prefill_dbo() -> None:
     example_prompts = ["The president of the United States is"] * 50
     dtype = "half"

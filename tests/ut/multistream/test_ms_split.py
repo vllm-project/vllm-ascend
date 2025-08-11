@@ -3,11 +3,12 @@ from unittest.mock import MagicMock
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.attention.attention_v1 import AscendAttentionState, AscendMetadata
+from vllm_ascend.attention.attention_v1 import (AscendAttentionState, 
+                                                AscendMetadata)
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.ms_split import (compute_split_seq_index,
-                                              model_input_split_v1_mla_attn,
                                               model_input_split_v1_attn,
+                                              model_input_split_v1_mla_attn,
                                               split_attn_int_type,
                                               split_attn_tensor_type)
 
@@ -151,8 +152,7 @@ class TestMsSplit(TestBase):
     def test_split_v1_attn_input_none(self):
         attn_metadata = None
         ms_split_config = MSAttentionMetadataSplitConfig()
-        result = model_input_split_v1_attn(attn_metadata,
-                                           AscendMetadata,
+        result = model_input_split_v1_attn(attn_metadata, AscendMetadata,
                                            ms_split_config)
         self.assertEqual(result, [None])
     
@@ -168,12 +168,10 @@ class TestMsSplit(TestBase):
             max_query_len=253,
             block_tables=torch.arange(511),
             slot_mapping=torch.arange(511),
-            enable_dbo_across_dp=True
-        )
+            enable_dbo_across_dp=True)
         ms_split_config = MSAttentionMetadataSplitConfig()
-        meta1, meta2 = model_input_split_v1_attn(attn_metadata,
-                                           AscendMetadata,
-                                           ms_split_config)
+        meta1, meta2 = model_input_split_v1_attn(attn_metadata, AscendMetadata,
+                                                 ms_split_config)
         self.assertEqual(meta1.attn_state, AscendAttentionState.PrefillNoCache)
         self.assertEqual(meta2.attn_state, AscendAttentionState.PrefillNoCache)
         self.assertEqual(meta1.num_actual_tokens, 258)

@@ -44,6 +44,7 @@ from vllm.sequence import IntermediateTensors
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.tensor_parallel import \
     gather_from_sequence_parallel_region
+from vllm_ascend.models.qwen3_moe import CustomQwen3MoeDecoderLayer
 from vllm_ascend.multistream.base import MSEventKey
 from vllm_ascend.multistream.context import (
     advance_step_multistream_layer_context, get_multistream_layer_context)
@@ -53,7 +54,6 @@ from vllm_ascend.multistream.metadata import (MultiStreamConfig,
                                               MultiStreamStepMetadata,
                                               make_multistream_metadata_ds)
 from vllm_ascend.ops.fused_moe import apply_mlp, select_experts
-from vllm_ascend.models.qwen3_moe import CustomQwen3MoeDecoderLayer
 
 VLLM_ASCEND_ENABLE_DBO: bool = envs_ascend.VLLM_ASCEND_ENABLE_DBO
 
