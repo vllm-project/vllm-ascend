@@ -20,7 +20,6 @@
 import copy
 import gc
 import math
-import os
 import time
 import types
 import weakref
@@ -349,19 +348,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             reversed(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
 
-        # NOTE: Pre-construct a mask matrix to improve the efficiency of
+        # NOTE: Pre-construct a mask matrix on cpu to improve the efficiency of
         # attention mask construction during inference.
-        # Note that the length of the matrix needs to be carefully balanced: a
-        # matrix that is too large will consume excessive VRAM, while a matrix
-        # that is too small will require dynamic concatenation during inference,
-        # leading to performance degradation.
-        # Therefore, an environment variable is added here to dynamically set
-        # the size of the pre-constructed mask matrix based on requirements.
-        mask_len = os.getenv("PAGED_ATTENTION_MASK_LEN", 10000)
-        self.attn_mask_len = min(self.model_config.max_model_len,
-                                 int(mask_len))
         self.attn_mask_builder = AttentionMaskBuilder.initialize_from_len(
-            self.attn_mask_len, self.dtype)
+            self.model_config.max_model_len, self.dtype)
 
         self.sampler = Sampler()
         self.new_kv_cache_bytes = -1
@@ -703,12 +693,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     def get_model(self) -> nn.Module:
         return self.model
 
-    def _make_attention_mask(self, seq_lens, query_lens, position,
+    def _make_attention_mask(self, seq_lens, position,
                              attn_state) -> torch.Tensor:
         # Chunk Prefill situation.
         if attn_state == AscendAttentionState.ChunkedPrefill:
             return self.attn_mask_builder.get_splitfuse_attn_mask(
-                seq_lens, query_lens, position, self.dtype, self.device)
+                seq_lens, position, self.dtype, self.device)
         # Prefill without cache situation.
         elif attn_state == AscendAttentionState.PrefillNoCache:
             max_seq_len = max(seq_lens, default=0)
@@ -956,16 +946,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.mrope_positions_cpu[:, :total_num_scheduled_tokens],
                 non_blocking=True)
 
-        self.positions[total_num_scheduled_tokens:num_input_tokens].zero_()
-        self.positions[:total_num_scheduled_tokens].copy_(
-            self.positions_cpu[:total_num_scheduled_tokens], non_blocking=True)
+        self.positions_cpu[total_num_scheduled_tokens:num_input_tokens].zero_()
+        self.positions[:num_input_tokens].copy_(
+            self.positions_cpu[:num_input_tokens], non_blocking=True)
+        positions_cpu = self.positions_cpu[:num_input_tokens]
         positions = self.positions[:num_input_tokens]
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
 
         self.seq_lens_np[:num_reqs] = (
             self.input_batch.num_computed_tokens_cpu[:num_reqs] +
             num_scheduled_tokens)
-        seq_lens = self.seq_lens_cpu[:num_reqs]
+        seq_lens_cpu = self.seq_lens_cpu[:num_reqs]
 
         block_table_indices = (req_indices * self.max_num_blocks_per_req +
                                positions_np // self.block_size)
@@ -999,11 +990,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         # NOTE: when use ring_mla, attn_mask don't need to generate here.
         if not self.vllm_config.model_config.use_mla:
-            attn_mask = self._make_attention_mask(
-                seq_lens=seq_lens,
-                query_lens=num_scheduled_tokens,
-                position=positions,
-                attn_state=attn_state)
+            attn_mask = self._make_attention_mask(seq_lens=seq_lens_cpu,
+                                                  position=positions_cpu,
+                                                  attn_state=attn_state)
             self.attn_mask = attn_mask
         self.attn_state = attn_state  # type: ignore
 
