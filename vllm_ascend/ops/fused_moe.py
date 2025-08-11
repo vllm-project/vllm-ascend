@@ -77,10 +77,6 @@ def unified_fused_experts(
     moe_comm_method: Optional[MoECommMethod] = None,
     # For TorchAir graph
     is_torchair: bool = False,
-    # For communication
-    use_mc2: bool = False,
-    moe_all_to_all_group_name: str = "",
-    mc2_mask: Optional[torch.Tensor] = None,
     # For Cube/Vector parallel
     shared_experts: Optional[Any] = None,
     quantized_x_for_share: Optional[Any] = None,
@@ -104,9 +100,6 @@ def unified_fused_experts(
 
     num_experts = w1.shape[0]
 
-    # permuted_hidden_states, expert_tokens, group_list_type = moe_comm_method._pre_process(
-    #     hidden_states, topk_ids, topk_weights, expert_map, num_experts
-    # )
     permuted_hidden_states, expert_tokens, group_list_type = torch.ops.vllm.moe_comm_pre_process(
         hidden_states, topk_ids, topk_weights, expert_map, num_experts)
     mlp_output = apply_mlp(
@@ -116,7 +109,6 @@ def unified_fused_experts(
         expert_tokens,
         group_list_type=group_list_type,
     )
-    # moe_comm_method._post_process(mlp_output, hidden_states)
     torch.ops.vllm.moe_comm_post_process(mlp_output, hidden_states)
 
     return hidden_states

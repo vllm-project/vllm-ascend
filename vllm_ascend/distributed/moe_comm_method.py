@@ -305,23 +305,6 @@ class MC2CommImpl(MoECommMethod):
         self.topk_weights = topk_weights.to(torch.float32)
         self.mc2_mask = get_forward_context().mc2_mask
 
-        # tp_size = get_tensor_model_parallel_world_size()
-        # self.chunked_hidden_states = torch.tensor_split(hidden_states,
-        #                                             tp_size,
-        #                                             dim=0)
-        # chunked_topk_ids = torch.tensor_split(self.topk_ids,
-        #                                             tp_size,
-        #                                             dim=0)
-        # chunked_topk_weights = torch.tensor_split(self.topk_weights,
-        #                                             tp_size,
-        #                                             dim=0)
-        # chunked_mc2_mask = torch.tensor_split(self.mc2_mask, tp_size, dim=0)
-        # tp_rank = get_tensor_model_parallel_rank()
-        # hidden_states = self.chunked_hidden_states[tp_rank]
-        # self.topk_ids = chunked_topk_ids[tp_rank]
-        # self.topk_weights = chunked_topk_weights[tp_rank]
-        # self.mc2_mask = chunked_mc2_mask[tp_rank]
-
         dispatch_kwargs = {
             "x": hidden_states,
             "expert_ids": self.topk_ids,
@@ -399,14 +382,6 @@ class MC2CommImpl(MoECommMethod):
         combine = torch_npu.npu_moe_distribute_combine_v2 if self.enable_dispatch_v2 else torch_npu.npu_moe_distribute_combine
 
         hidden_states[:] = combine(**combine_kwargs)
-
-        # final_hidden_states = combine(**combine_kwargs)
-
-        # dist.all_gather(list(self.chunked_hidden_states), final_hidden_states, get_tp_group().device_group)
-
-        # final_hidden_states = torch.cat(self.chunked_hidden_states, dim=0)
-
-        # hidden_states[:] = final_hidden_states
 
 
 def moe_comm_pre_process(
