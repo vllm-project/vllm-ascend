@@ -205,11 +205,9 @@ def fused_experts_with_mc2(
         group_list_type=1,
         group_type=0,
         group_list=group_list,
-    )
+    )[0]
 
-    # TODO: Remove this in the future.
-    gate_up_out = torch.cat(gate_up_out_list, dim=0)
-    gate_up_out = torch_npu.npu_swiglu(gate_up_out)
+    gate_up_out = torch_npu.npu_swiglu(gate_up_out_list)
 
     w2 = w2.transpose(1, 2)
     down_out_list = torch_npu.npu_grouped_matmul(
@@ -219,9 +217,7 @@ def fused_experts_with_mc2(
         group_list_type=1,
         group_type=0,
         group_list=group_list,
-    )
-
-    down_out_list = torch.cat(down_out_list, dim=0)
+    )[0]
 
     # moeCombine
     kwargs_mc2 = {
@@ -312,9 +308,8 @@ def apply_mlp(
         group_list_type=group_list_type,
         group_type=0,
         group_list=group_list,
-    )
+    )[0]
 
-    hidden_states = torch.cat(hidden_states, dim=0)
     hidden_states = torch_npu.npu_swiglu(hidden_states)
 
     w2 = w2.transpose(1, 2)
@@ -325,9 +320,8 @@ def apply_mlp(
         group_list_type=group_list_type,
         group_type=0,
         group_list=group_list,
-    )
+    )[0]
 
-    hidden_states = torch.cat(hidden_states, dim=0)
     return hidden_states
 
 
@@ -417,23 +411,19 @@ def fused_experts_with_all2all(
         group_list_type=0,
         group_type=0,
         group_list=expert_tokens,
-    )
+    )[0]
 
-    # TODO: Remove this in the future.
-    hidden_states = torch.cat(gate_up_out_list, dim=0)
-    hidden_states = torch_npu.npu_swiglu(hidden_states)
+    hidden_states = torch_npu.npu_swiglu(gate_up_out_list)
 
     w2 = w2.transpose(1, 2)
-    down_out_list = torch_npu.npu_grouped_matmul(
+    hidden_states = torch_npu.npu_grouped_matmul(
         x=[hidden_states],
         weight=[w2],
         split_item=2,
         group_list_type=0,
         group_type=0,
         group_list=expert_tokens,
-    )
-
-    hidden_states = torch.cat(down_out_list, dim=0)
+    )[0]
 
     if expert_map is not None:
         resorted_idx = torch.argsort(sorted_idx)
@@ -823,11 +813,9 @@ def fused_experts(
         group_list_type=0,
         group_type=0,
         group_list=expert_tokens,
-    )
+    )[0]
 
-    # TODO: Remove this in the future.
-    gate_up_out = torch.cat(gate_up_out_list, dim=0)
-    gate_up_out = torch_npu.npu_swiglu(gate_up_out)
+    gate_up_out = torch_npu.npu_swiglu(gate_up_out_list)
 
     w2 = w2.transpose(1, 2)
     down_out_list = torch_npu.npu_grouped_matmul(
@@ -837,9 +825,7 @@ def fused_experts(
         group_list_type=0,
         group_type=0,
         group_list=expert_tokens,
-    )
-
-    down_out_list = torch.cat(down_out_list, dim=0)
+    )[0]
 
     if expert_map is not None:
         weighted_down_out = down_out_list * sorted_weights.unsqueeze(1)
@@ -1195,8 +1181,27 @@ class AscendFusedMoE(FusedMoE):
     ):
         # TODO: This could not initialize FusedMoE baseclass,
         # fixme and make __init__() of AscendFusedMoE more clear
-        super(FusedMoE, self).__init__()
-
+        super().__init__(
+            num_experts=num_experts,
+            top_k=top_k,
+            hidden_size=hidden_size,
+            intermediate_size=intermediate_size,
+            params_dtype=params_dtype,
+            reduce_results=reduce_results,
+            renormalize=renormalize,
+            use_grouped_topk=use_grouped_topk,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            quant_config=quant_config,
+            tp_size=tp_size,
+            ep_size=ep_size,
+            dp_size=dp_size,
+            prefix=prefix,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            e_score_correction_bias=e_score_correction_bias,
+            activation=activation,
+        )
         AscendFusedMoE.moe_counter += 1
         self.moe_instance_id = AscendFusedMoE.moe_counter
 
