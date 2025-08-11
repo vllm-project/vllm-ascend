@@ -83,7 +83,6 @@ def set_ascend_forward_context(
         forward_context.fused_moe_state = fused_moe_state
         forward_context.in_profile_run = in_profile_run
         
-        vllm_config = get_current_vllm_config()
         top_k = vllm_config.model_config.hf_config.num_experts_per_tok
         num_experts = vllm_config.model_config.hf_config.n_routed_experts
         quant_config = vllm_config.quant_config
