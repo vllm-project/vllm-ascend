@@ -180,7 +180,7 @@ def test_models_distributed_alltoallv() -> None:
 
 
 @patch.dict(os.environ, {
-    "VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ": "1", 
+    "VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ": "1",
     "VLLM_ASCEND_ENABLE_DBO": "1"
 })
 def test_models_distributed_alltoallv_prefill_dbo() -> None:

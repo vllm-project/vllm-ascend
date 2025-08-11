@@ -3,7 +3,7 @@ from unittest.mock import MagicMock
 import torch
 
 from tests.ut.base import TestBase
-from vllm_ascend.attention.attention_v1 import (AscendAttentionState, 
+from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.ms_split import (compute_split_seq_index,
