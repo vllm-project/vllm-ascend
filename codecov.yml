@@ -17,7 +17,7 @@
 
 coverage:
   status:
-    # non-voting, new code must be fully tested
+     # Patch coverage is mandatory and must be >= 80%
     patch:
       default:
         target: 80%
