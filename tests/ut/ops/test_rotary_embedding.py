@@ -341,9 +341,7 @@ class TestSetCosSinCache(TestBase):
         # mock out register_buffer
         model.register_buffer = MagicMock()
         # call the private method via name mangling
-        model._set_cos_sin_cache(seq_len=8,
-                                 device="cpu",
-                                 dtype=torch.float32)
+        model._set_cos_sin_cache(seq_len=8, device="cpu", dtype=torch.float32)
         # expect three calls: inv_freq, cos, sin
         assert model.register_buffer.call_count == 3
         names = [call.args[0] for call in model.register_buffer.call_args_list]

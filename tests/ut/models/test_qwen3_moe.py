@@ -18,6 +18,7 @@ import unittest
 import pytest
 import torch
 from vllm.model_executor.models.qwen3_moe import Qwen3MoeForCausalLM
+
 from vllm_ascend.models.qwen3_moe import (CustomQwen3MoeAttention,
                                           CustomQwen3MoeForCausalLM)
 
@@ -49,7 +50,8 @@ class TestCustomQwen3MoeForCausalLM:
         assert CustomQwen3MoeForCausalLM.packed_modules_mapping == expected_mapping
 
 
-class TestNormalizeQKVWithFixedInput(unittest.TestCase):
+class TestCustomQwen3MoeAttention(unittest.TestCase):
+
     def setUp(self):
         self.batch = 2
         self.seq_len = 3
@@ -60,20 +62,16 @@ class TestNormalizeQKVWithFixedInput(unittest.TestCase):
 
         total_dim = self.q_size + 2 * self.kv_size
 
-        self.qkv = torch.arange(
-            self.batch * self.seq_len * total_dim,
-            dtype=torch.float32
-        ).reshape(self.batch, self.seq_len, total_dim)
+        self.qkv = torch.arange(self.batch * self.seq_len * total_dim,
+                                dtype=torch.float32).reshape(
+                                    self.batch, self.seq_len, total_dim)
 
     def test_constant_input_normalization(self):
-        ones_qkv = torch.ones(
-            (1, 1, self.q_size + 2 * self.kv_size),
-            dtype=torch.float32
-        )
+        ones_qkv = torch.ones((1, 1, self.q_size + 2 * self.kv_size),
+                              dtype=torch.float32)
 
         q, k, v = CustomQwen3MoeAttention.normalize_qkv(
-            ones_qkv, self.q_size, self.kv_size, self.head_dim, self.rms_eps
-        )
+            ones_qkv, self.q_size, self.kv_size, self.head_dim, self.rms_eps)
 
         norm_val = 1.0 / math.sqrt(1.0 + self.rms_eps)
 
