@@ -179,6 +179,32 @@ def test_models_distributed_alltoallv() -> None:
         vllm_model.generate(example_prompts, sampling_params)
 
 
+@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ": "1", "VLLM_ASCEND_ENABLE_DBO": "1"})
+def test_models_distributed_alltoallv_prefill_dbo() -> None:
+    example_prompts = ["The president of the United States is"] * 50
+    dtype = "half"
+    sampling_params = SamplingParams(max_tokens=5,
+                                     temperature=0.0,
+                                     top_k=50,
+                                     top_p=0.9)
+
+    with VllmRunner(
+            "vllm-ascend/Qwen3-30B-A3B-Puring",
+            dtype=dtype,
+            tensor_parallel_size=2,
+            distributed_executor_backend="mp",
+    ) as vllm_model:
+        model_arch = 'Qwen3MoeForCausalLM'
+        registed_models = ModelRegistry.models
+        assert registed_models[
+            model_arch].module_name == "vllm_ascend.models.qwen3_dbo"
+        assert registed_models[
+            model_arch].class_name == "CustomQwen3MoeForCausalLMDBO"
+        vllm_model.generate(example_prompts, sampling_params)
+        vllm_model.generate(example_prompts, sampling_params)
+
+
+
 def test_models_distributed_Qwen3_W8A8():
     example_prompts = [
         "Hello, my name is",
