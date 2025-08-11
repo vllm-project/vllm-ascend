@@ -20,9 +20,7 @@ coverage:
     # non-voting, new code must be fully tested
     patch:
       default:
-        target: 100%
-        # non-voting
-        informational: true
+        target: 80%
     # non-voting
     project:
       default:
