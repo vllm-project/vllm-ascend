@@ -226,9 +226,9 @@ class CustomQwen3MoeAttention(Qwen3MoeAttention):
             hidden_states: torch.Tensor,
             kv_cache: Optional[torch.Tensor] = None,
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
-        q, k, v = self.normalize_qkv(self.qkv_proj(hidden_states), self.q_size,
-                                     self.kv_size, self.head_dim,
-                                     self.rms_norm_eps)
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = self.normalize_qkv(qkv, self.q_size, self.kv_size,
+                                     self.head_dim, self.rms_norm_eps)
 
         if (self.torchair_graph_enabled and attn_metadata is not None and
                 attn_metadata.attn_state == AscendAttentionState.DecodeOnly):
