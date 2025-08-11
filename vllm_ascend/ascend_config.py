@@ -51,19 +51,22 @@ class AscendConfig:
             "enable_shared_expert_dp", False
         ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel
         
+
         self.oproj_tensor_parallel_size = additional_config.get(
             "oproj_tensor_parallel_size", None)
         if self.oproj_tensor_parallel_size is not None:
-            logger.info(f"Enable oproj_tensor_parallel_size={self.oproj_tensor_parallel_size} in pure DP scenario")
-            assert(
+            logger.info(
+                f"Enable oproj_tensor_parallel_size={self.oproj_tensor_parallel_size} in pure DP scenario"
+            )
+            assert (
                 vllm_config.parallel_config.tensor_parallel_size == 1
-            ),"oproj_tensor_parallel_size is only supported in the pure DP scenario"
-            assert(
-                self.torchair_graph_config.enabled == True
-            ), "oproj_tensor_parallel_size is only supported in graph mode"
-            assert(
-                vllm_config.kv_transfer_config is not None and vllm_config.kv_transfer_config.is_kv_consumer
-            ),"oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
+            ), "oproj_tensor_parallel_size is only supported in the pure DP scenario"
+            assert self.torchair_graph_config.enabled, "oproj_tensor_parallel_size is only supported in graph mode"
+            assert (
+                vllm_config.kv_transfer_config is not None
+                and vllm_config.kv_transfer_config.is_kv_consumer
+            ), "oproj_tensor_parallel_size is only supported in pd scenario and can only be used in D node."
+
 
 class TorchairGraphConfig:
     """

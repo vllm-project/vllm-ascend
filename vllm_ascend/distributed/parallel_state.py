@@ -13,10 +13,10 @@ _MLP_TP: Optional[GroupCoordinator] = None
 _OTP: Optional[GroupCoordinator] = None
 
 
-
 def get_mc2_group() -> GroupCoordinator:
     assert _MC2 is not None, ("mc2 group is not initialized")
     return _MC2
+
 
 def get_otp_group() -> GroupCoordinator:
     assert _OTP is not None, (
@@ -76,17 +76,14 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
     if otp_size is not None:
         group_ranks = []
         global _OTP
-        num_oproj_tensor_parallel_groups: int = (world_size //
-                                                otp_size)
+        num_oproj_tensor_parallel_groups: int = (world_size // otp_size)
         for i in range(num_oproj_tensor_parallel_groups):
-            ranks = list(
-                range(i * otp_size,
-                    (i + 1) * otp_size))
+            ranks = list(range(i * otp_size, (i + 1) * otp_size))
             group_ranks.append(ranks)
         _OTP = init_model_parallel_group(group_ranks,
-                                        get_world_group().local_rank,
-                                        backend,
-                                        group_name="otp")
+                                         get_world_group().local_rank,
+                                         backend,
+                                         group_name="otp")
 
 
 def get_mlp_tensor_model_parallel_world_size():
@@ -114,5 +111,5 @@ def destroy_ascend_model_parallel():
     
     global _OTP
     if _OTP:
-        _OTP.destroy()  
+        _OTP.destroy()
     _OTP = None

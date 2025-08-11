@@ -22,7 +22,6 @@ from torch.nn.parameter import Parameter
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
-                              tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.linear import (WEIGHT_LOADER_V2_SUPPORTED,
                                                ColumnParallelLinear,
@@ -471,4 +470,3 @@ class OprojCustomRowParallelLinear(CustomRowParallelLinear):
         if not self.return_bias:
             return output
         return output, output_bias
-
