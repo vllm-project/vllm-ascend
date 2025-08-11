@@ -3,7 +3,7 @@
 from typing import Callable, Optional, Tuple, Union
 
 import torch
-
+import torch_npu
 from vllm_ascend.utils import is_310p
 
 if is_310p():
@@ -11,6 +11,7 @@ if is_310p():
                                          bgmv_shrink, sgmv_expand,
                                          sgmv_expand_slice, sgmv_shrink)
 else:
+    #print("This not is 310P")
     from vllm_ascend.lora.punica_wrapper.lora_ops import (
         bgmv_expand, bgmv_expand_slice, bgmv_shrink, sgmv_expand,
         sgmv_expand_slice, sgmv_shrink)
@@ -287,13 +288,11 @@ class PunicaWrapperNPU(PunicaWrapperBase):
             output_slices (Tuple[int, ...]): Every slice's size.
             buffer (Optional[Tuple[torch.Tensor, ...]]): Defaults to None.
         """
-
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
         if lora_bias_stacked is not None:
             assert len(lora_bias_stacked) == len(output_slices)
             y = self._apply_bias(self.token_lora_indices, y, output_slices,
                                  lora_bias_stacked)
-
         if buffer is None:
             r = lora_b_stacked[0].size(-1)
             # We set the buffer to be float32 by default, consistent with the
@@ -322,7 +321,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                         **kwargs) -> None:
         """
         Applies lora  specifically for LogitsProcessorWithLoRA.
-
+        
         Semantics:
             buffer = (x @ lora_a_stacked) * scale
             y += buffer @ lora_b_stacked
@@ -338,27 +337,18 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         y_org = y
         y = y.view(-1, y.shape[-1])
         x = x.view(-1, x.shape[-1])
-
-        if lora_a_stacked.dim() == 2:
-            lora_a_stacked = lora_a_stacked.unsqueeze(0)
-        if lora_b_stacked.dim() == 2:
-            lora_b_stacked = lora_b_stacked.unsqueeze(0)
-
-        r = lora_a_stacked.size(-1)
-
+        r = lora_b_stacked.size(-1)
         if buffer is None:
+            # We set the buffer to be float32 by default, consistent with the
+            # triton op
             buffer = torch.zeros((x.size(0), r),
                                  dtype=torch.float32,
                                  device=x.device)
-
-        indices = self.sampler_indices
-        if indices.max() >= lora_a_stacked.size(0):
-            indices = torch.clamp(indices, 0, lora_a_stacked.size(0) - 1)
-
-        lora_a_reshaped = lora_a_stacked.transpose(1, 2)
-        lora_b_reshaped = lora_b_stacked.transpose(1, 2)
-
-        bgmv_shrink(x, lora_a_reshaped, buffer, indices, scale)
-        bgmv_expand(buffer, lora_b_reshaped, y, indices, add_inputs=True)
-
+        # LogitsProcessorWithLoRA always using bgmv. 
+        bgmv_shrink(x, lora_a_stacked, buffer, self.sampler_indices, scale)
+        bgmv_expand(buffer,
+                    lora_b_stacked,
+                    y,
+                    self.sampler_indices,
+                    add_inputs=True)
         y = y.view_as(y_org)
