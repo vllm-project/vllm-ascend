@@ -5,12 +5,12 @@ import threading
 import time
 import unittest
 from collections import defaultdict, deque
-from unittest.mock import ANY, MagicMock, Mock, PropertyMock, call, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import msgspec
 import zmq
 from vllm.utils import make_zmq_path, make_zmq_socket
-from zmq import Context
+from zmq import Context  # type: ignore
 
 from vllm_ascend.distributed.mooncake_connector import (
     KVCacheRecvingThread, KVCacheSendingThread, KVCacheTaskTracker,
@@ -68,7 +68,7 @@ class TestKVCacheTaskTrackerInit(unittest.TestCase):
         mock_make_zmq_socket.assert_called_once_with(
             ctx=unittest.mock.ANY,
             path="ipc:///tmp/vllm_mooncake_connector_test.ipc",
-            socket_type=zmq.PUSH,
+            socket_type=zmq.PUSH,  # type: ignore
             bind=False)
         mock_logger.info.assert_called_once_with(
             "Connecting to transfer socket at %s",
@@ -100,7 +100,7 @@ class TestKVCacheTaskTrackerListenMethod(unittest.TestCase):
         test_messages = [("request_001", 1), ("request_001", 2),
                          ("request_002", 0), ("request_003", 1)]
         ctx = Context()
-        sender_socket = ctx.socket(zmq.PUSH)
+        sender_socket = ctx.socket(zmq.PUSH)  # type: ignore
         sender_socket.connect(self.tracker.socket_path)
         for msg in test_messages:
             sender_socket.send_pyobj(msg)
@@ -389,8 +389,8 @@ class TestKVCacheSendingThread(unittest.TestCase):
         self.assertTrue(ready_event.wait(timeout=3),
                         "Server thread startup timeout")
 
-        context = zmq.Context()
-        sock = context.socket(zmq.DEALER)
+        context = zmq.Context()  # type: ignore
+        sock = context.socket(zmq.DEALER)  # type: ignore
         sock.connect(f"tcp://{host}:{free_port}")
         encoder = msgspec.msgpack.Encoder()
         decoder = msgspec.msgpack.Decoder(type=MooncakeAgentMetadata)
@@ -482,10 +482,10 @@ class TestSocketManagement(unittest.TestCase):
         mock_make_socket.assert_called_once()
         args, kwargs = mock_make_socket.call_args
         self.assertEqual(kwargs.get('path'), 'tcp://test_host:12345')
-        self.assertEqual(kwargs.get('socket_type'), zmq.REQ)
+        self.assertEqual(kwargs.get('socket_type'), zmq.REQ)  # type: ignore
         self.assertFalse(kwargs.get('bind', True))
         self.thread.remote_poller.register.assert_called_with(
-            mock_sock, zmq.POLLIN)
+            mock_sock, zmq.POLLIN)  # type: ignore
 
     def test_return_socket_to_pool(self):
         mock_sock = MagicMock()
@@ -669,30 +669,26 @@ class TestMainThreadLoop(unittest.TestCase):
 class MockVllmConfig:
 
     def __init__(self):
-
-        class MockCacheConfig:
-            block_size = 16
-
-        class MockParallelConfig:
-            tensor_parallel_size = 2
-            data_parallel_size = 1
-            data_parallel_rank_local = 0
-
-        class MockKVTransferConfig:
-            kv_port = 5000
-            engine_id = "test_engine"
-            kv_role = "kv_producer"
-
-            def get_from_extra_config(self, key, default):
-                if key == "prefill":
-                    return {"tp_size": 4, "dp_size": 1}
-                elif key == "decode":
-                    return {"tp_size": 2, "dp_size": 1}
-                return default
-
-        self.cache_config = MockCacheConfig()
-        self.parallel_config = MockParallelConfig()
-        self.kv_transfer_config = MockKVTransferConfig()
+        self.parallel_config = MagicMock()
+        self.cache_config = MagicMock()
+        self.kv_transfer_config = MagicMock()
+        self.parallel_config.tensor_parallel_size = 2
+        self.parallel_config.data_parallel_rank_local = 0
+        self.parallel_config.data_parallel_size_local = 1
+        self.cache_config.block_size = 16
+        self.kv_transfer_config.kv_port = 5000
+        self.kv_transfer_config.kv_role = 'kv_producer'
+        self.kv_transfer_config.get_from_extra_config = MagicMock()
+        self.kv_transfer_config.get_from_extra_config.side_effect = lambda k, d: {
+            "prefill": {
+                "tp_size": 2,
+                "dp_size": 1
+            },
+            "decode": {
+                "tp_size": 2,
+                "dp_size": 1
+            }
+        }.get(k, d)
 
 
 class MockRequest:
@@ -804,8 +800,8 @@ class TestMooncakeConnectorSchedulerMatchedTokens(unittest.TestCase):
 class TestHelperFunctions(unittest.TestCase):
 
     def test_group_concurrent_contiguous(self):
-        src = [1, 2, 3, 5, 6]
-        dst = [10, 11, 12, 14, 15]
+        src: list[int] = [1, 2, 3, 5, 6]
+        dst: list[int] = [10, 11, 12, 14, 15]
 
         src_groups, dst_groups = group_concurrent_contiguous(src, dst)
 
@@ -816,8 +812,8 @@ class TestHelperFunctions(unittest.TestCase):
         self.assertEqual(dst_groups[1], [14, 15])
 
     def test_group_concurrent_contiguous_empty(self):
-        src = []
-        dst = []
+        src: list[int] = []
+        dst: list[int] = []
         src_groups, dst_groups = group_concurrent_contiguous(src, dst)
         self.assertEqual(src_groups, [])
         self.assertEqual(dst_groups, [])
@@ -964,8 +960,8 @@ class TestUtils(unittest.TestCase):
         self.assertIsInstance(h1, int)
 
     def test_group_concurrent_contiguous(self):
-        src = [1, 2, 3, 5, 6]
-        dst = [10, 11, 12, 20, 21]
+        src: list[int] = [1, 2, 3, 5, 6]
+        dst: list[int] = [10, 11, 12, 20, 21]
         src_g, dst_g = group_concurrent_contiguous(src, dst)
         self.assertEqual(src_g, [[1, 2, 3], [5, 6]])
         self.assertEqual(dst_g, [[10, 11, 12], [20, 21]])
@@ -984,7 +980,7 @@ class TestUtils(unittest.TestCase):
     def test_zmq_ctx_ok(self, mock_make_socket):
         mock_socket = MagicMock()
         mock_make_socket.return_value = mock_socket
-        with zmq_ctx(zmq.REQ, "tcp://localhost:1234") as s:
+        with zmq_ctx(zmq.REQ, "tcp://localhost:1234") as s:  # type: ignore
             self.assertEqual(s, mock_socket)
 
     @patch("vllm_ascend.distributed.mooncake_connector.logger")
@@ -996,7 +992,8 @@ class TestUtils(unittest.TestCase):
     @patch("vllm_ascend.distributed.mooncake_connector.logger")
     def test_ensure_zmq_send_retry_and_fail(self, mock_logger):
         mock_socket = MagicMock()
-        mock_socket.send.side_effect = zmq.ZMQError("send failed")
+        mock_socket.send.side_effect = zmq.ZMQError(
+            "send failed")  # type: ignore
         with self.assertRaises(RuntimeError):
             ensure_zmq_send(mock_socket, b"hello", max_retries=2)
         self.assertEqual(mock_socket.send.call_count, 2)
@@ -1006,7 +1003,8 @@ class TestUtils(unittest.TestCase):
         mock_socket = MagicMock()
         mock_socket.recv.return_value = b"response"
         mock_poller = MagicMock()
-        mock_poller.poll.return_value = [(mock_socket, zmq.POLLIN)]
+        mock_poller.poll.return_value = [(mock_socket, zmq.POLLIN)
+                                         ]  # type: ignore
         data = ensure_zmq_recv(mock_socket, mock_poller)
         self.assertEqual(data, b"response")
 
@@ -1076,31 +1074,6 @@ mock_envs_ascend = MagicMock()
 mock_envs_ascend.MOONCAKE_CONNECTOR_PROTOCOL = "mock_protocol"
 
 mock_logger = MagicMock()
-
-
-class MockVllmConfig:
-
-    def __init__(self):
-        self.parallel_config = MagicMock()
-        self.cache_config = MagicMock()
-        self.kv_transfer_config = MagicMock()
-        self.parallel_config.tensor_parallel_size = 2
-        self.parallel_config.data_parallel_rank_local = 0
-        self.parallel_config.data_parallel_size_local = 1
-        self.cache_config.block_size = 16
-        self.kv_transfer_config.kv_port = 5000
-        self.kv_transfer_config.kv_role = 'kv_producer'
-        self.kv_transfer_config.get_from_extra_config = MagicMock()
-        self.kv_transfer_config.get_from_extra_config.side_effect = lambda k, d: {
-            "prefill": {
-                "tp_size": 2,
-                "dp_size": 1
-            },
-            "decode": {
-                "tp_size": 2,
-                "dp_size": 1
-            }
-        }.get(k, d)
 
 
 class MockTransferEngine:
@@ -1177,7 +1150,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
         ]
 
         for p in self.patches:
-            p.start()
+            p.start()  # type: ignore
 
         self.vllm_config = MockVllmConfig()
         self.engine_id = "test_engine"
@@ -1185,7 +1158,7 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
 
     def tearDown(self):
         for p in self.patches:
-            p.stop()
+            p.stop()  # type: ignore
 
     def test_register_kv_caches_producer(self):
         worker = MooncakeConnectorWorker(self.vllm_config, self.engine_id)
