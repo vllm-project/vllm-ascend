@@ -95,10 +95,7 @@ def gemma3_forward_oot(
     variance_epsilon = self.variance_epsilon
     orig_dtype = x.dtype
     if residual is not None:
-        if orig_dtype == torch.float16:
-            x = x + residual.float()
-        else:
-            x = x + residual
+        x = x + residual
         residual = x
         return (torch_npu.npu_rms_norm(x, (1.0 + weight), variance_epsilon)[0], residual)
     return torch_npu.npu_rms_norm(x, (1.0 + weight), variance_epsilon)[0]
