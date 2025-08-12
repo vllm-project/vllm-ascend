@@ -15,7 +15,7 @@ def get_mc2_group() -> GroupCoordinator:
 
 
 def get_lmhead_group() -> GroupCoordinator:
-    assert _LMHEAD is not None, ("mc2 group is not initialized")
+    assert _LMHEAD is not None, ("lmhead group is not initialized")
     return _LMHEAD
 
 
