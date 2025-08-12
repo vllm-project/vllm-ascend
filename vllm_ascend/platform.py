@@ -146,9 +146,8 @@ class NPUPlatform(Platform):
         check_ascend_config(vllm_config, enforce_eager)
 
         if vllm_config.speculative_config and envs_ascend.VLLM_ASCEND_ENABLE_DBO:
-            raise NotImplementedError(
-                "DBO and mtp can't work at the same time. Please `export VLLM_ASCEND_ENABLE_DBO=0`"
-            )
+            raise ValueError(
+                "DBO and mtp can't work at the same time. Please `export VLLM_ASCEND_ENABLE_DBO=0`")
         if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:
             logger.info("Compilation disabled, using eager mode by default")
             compilation_config.level = CompilationLevel.NO_COMPILATION
