@@ -1029,6 +1029,8 @@ class QuantizedTokenDispatcherWithAll2All(MoETokenDispatcher):
             else:
                 hidden_states, expanded_row_idx, expanded_expert_idx = self.init_routing(
                     hidden_states, topk_ids, global_num_experts)
+                expanded_row_idx = (expanded_row_idx.view(top_k, -1).permute(
+                    1, 0).contiguous().view(-1))
                 global_expert_tokens = torch.bincount(
                     expanded_expert_idx, minlength=global_num_experts)
                 global_expert_tokens = global_expert_tokens.to(torch.int32)
@@ -1109,7 +1111,7 @@ class QuantizedTokenDispatcherWithAll2All(MoETokenDispatcher):
                 hidden_states,
                 skip1=None,
                 skip2=None,
-                bias=None,
+                bias=bias,
                 scales=self._meta["topk_weights"],
                 expanded_src_to_dst_row=self._meta["expanded_row_idx"],
                 export_for_source_row=None,
@@ -1121,7 +1123,7 @@ class QuantizedTokenDispatcherWithAll2All(MoETokenDispatcher):
                 expert_output,
                 skip1=None,
                 skip2=None,
-                bias=None,
+                bias=bias,
                 scales=self._meta["topk_weights"],
                 expanded_src_to_dst_row=self._meta["expanded_row_idx"],
                 export_for_source_row=self._meta["topk_ids"],
