@@ -105,13 +105,13 @@ class TestUnquantizedTokenDispatcherWithAll2AllV(TestBase):
         self.mock_tp_ep_group_prop.return_value = self.mock_tp_ep_group
         self.mock_tp_ep_size_prop.return_value = self.mock_tp_ep_size
 
-        # Mock async_all_to_all 返回值 (3 个值)
+        # Mock async_all_to_all
         patcher6 = patch('vllm_ascend.ops.moe_dispatcher.token_dispatcher.async_all_to_all')
         self.mock_async_all_to_all = patcher6.start()
         self.addCleanup(patcher6.stop)
         self.mock_async_all_to_all.return_value = (None, torch.randn(16, 16), MagicMock())
 
-        # Mock torch_npu.npu_moe_token_permute 返回值 (2 个值)
+        # Mock torch_npu.npu_moe_token_permute
         patcher7 = patch('vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch_npu.npu_moe_token_permute')
         self.mock_npu_moe_token_permute = patcher7.start()
         self.addCleanup(patcher7.stop)
@@ -135,7 +135,7 @@ class TestUnquantizedTokenDispatcherWithAll2AllV(TestBase):
         self.addCleanup(patcher10.stop)
         self.mock_histc.return_value = torch.tensor([2, 2, 2, 2], dtype=torch.float32)
 
-        # Mock torch.npu.stream 上下文管理器
+        # Mock torch.npu.stream
         patcher11 = patch('vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch.npu.stream')
         self.mock_npu_stream = patcher11.start()
         self.addCleanup(patcher11.stop)
@@ -401,10 +401,8 @@ class TestQuantizedTokenDispatcherWithAll2All(TestBase):
         topk_weights = torch.rand(8, 4)
         topk_ids = torch.randint(0, 4, (8, 2))
 
-        # 手动设置 _meta 以避免 KeyError
         self.dispatcher._meta = {"top_k": top_k}
-        
-        # 使用 patch.object 来 mock _save_meta 方法，只保存实际存在的变量
+
         with patch.object(self.dispatcher, '_save_meta') as mock_save_meta:
             result = self.dispatcher.token_permutation(
                 top_k=top_k,
@@ -413,18 +411,14 @@ class TestQuantizedTokenDispatcherWithAll2All(TestBase):
                 topk_weights=topk_weights,
                 topk_ids=topk_ids
             )
-            
-            # 验证 _save_meta 被调用了
+
             mock_save_meta.assert_called()
-            
-            # 获取实际调用的参数
+
             call_args = mock_save_meta.call_args[1]
-            
-            # 验证只保存了在 else 分支中定义的变量
+
             expected_keys = {'topk_ids', 'topk_weights', 'expert_map', 'original_shape', 'expanded_row_idx'}
             actual_keys = set(call_args.keys())
-            
-            # 确保没有引用未定义的变量
+
             self.assertFalse('quantized_tokens_shape' in actual_keys)
             self.assertFalse('inverse_indices' in actual_keys)
             self.assertFalse('scatter_size_list' in actual_keys)
@@ -447,7 +441,6 @@ class TestQuantizedTokenDispatcherWithAll2All(TestBase):
         topk_ids = torch.randint(0, 4, (8, 2))
         expert_map = torch.tensor([0, 1, 2, 3])
 
-        # 手动设置 _meta 以避免 KeyError
         self.dispatcher._meta = {"top_k": top_k}
         
         result = self.dispatcher.token_permutation(
@@ -470,7 +463,6 @@ class TestQuantizedTokenDispatcherWithAll2All(TestBase):
         self.mock_hasattr.return_value = True
         
         # Now we need to patch the function that exists only when hasattr is True
-        # 使用 create=True 来 patch 不存在的属性
         with patch('vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch_npu.npu_moe_init_routing_quant', create=True) as mock_init_routing_quant:
             mock_init_routing_quant.return_value = (
                 torch.randn(16, 32),  # quantized_tokens
@@ -487,7 +479,6 @@ class TestQuantizedTokenDispatcherWithAll2All(TestBase):
             topk_ids = torch.randint(0, 4, (8, 2))
             expert_map = torch.tensor([0, 1, 2, 3])
 
-            # 手动设置 _meta 以避免 KeyError
             self.dispatcher._meta = {"top_k": top_k}
             
             result = self.dispatcher.token_permutation(
@@ -522,7 +513,7 @@ class TestQuantizedTokenDispatcherWithAll2All(TestBase):
         self.mock_npu_moe_finalize_routing.assert_called()
 
     def test_token_unpermutation_with_expert_map(self):
-        # Setup meta data (包含 quantized_tokens_shape)
+        # Setup meta data
         self.dispatcher._meta = {
             "expert_map": torch.tensor([0, 1, 2, 3]),
             "inverse_indices": torch.arange(16),
