@@ -38,7 +38,7 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.ops.fused_moe import AscendUnquantizedFusedMoEMethod
-from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD
+from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD, _enable_oproj_tp
 
 from .quantizer import AscendQuantizer
 
@@ -225,7 +225,7 @@ class AscendLinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if isinstance(layer, RowParallelLinear):
-            if get_ascend_config().oproj_tensor_parallel_size is not None:
+            if _enable_oproj_tp():
                 tp_rank = get_otp_group().rank_in_group
             else:
                 tp_rank = get_tensor_model_parallel_rank()

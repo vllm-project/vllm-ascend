@@ -509,3 +509,7 @@ def get_ascend_soc_version():
     global _ascend_soc_version
     assert _ascend_soc_version is not None
     return _ascend_soc_version
+
+
+def _enable_oproj_tp() -> bool:
+    return get_ascend_config().oproj_tensor_parallel_size is not None
