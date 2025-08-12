@@ -38,7 +38,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import CustomDeepseekV2DecoderLayer
-
+from vllm_ascend.ops.vocab_parallel_embedding import CustomLogitsProcessor, CustomParallelLMHead
 
 class CustomDeepSeekShareHead(SharedHead):
 
@@ -48,7 +48,7 @@ class CustomDeepSeekShareHead(SharedHead):
                  prefix: str = "") -> None:
         nn.Module.__init__(self)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.head = ParallelLMHead(config.vocab_size,
+        self.head = CustomParallelLMHead(config.vocab_size,
                                    config.hidden_size,
                                    quant_config=quant_config,
                                    prefix=maybe_prefix(prefix, "head"))
@@ -141,7 +141,7 @@ class CustomDeepSeekMultiTokenPredictor(DeepSeekMultiTokenPredictor):
             for idx in range(self.mtp_start_layer_idx,
                              self.mtp_start_layer_idx + self.num_mtp_layers)
         ]
-        self.logits_processor = LogitsProcessor(config.vocab_size)
+        self.logits_processor = CustomLogitsProcessor(config.vocab_size)
 
     def forward(
         self,
