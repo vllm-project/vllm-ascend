@@ -166,8 +166,13 @@ def test_e2e_pangu_with_torchair():
 
 def _qwen_torchair_test_fixture(
     model,
+    tp,
     enable_expert_parallel,
 ):
+    # The current access control does not support 16 cards,
+    # so the MC2 operator in Qwen's graph mode cannot run.
+    # Once 16-card support is available,
+    # this e2e can be switched to graph mode.
     example_prompts = [
         "Hello, my name is",
         "The president of the United States is",
@@ -177,7 +182,7 @@ def _qwen_torchair_test_fixture(
 
     additional_config = {
         "torchair_graph_config": {
-            "enabled": True,
+            "enabled": False,
         },
         "ascend_scheduler_config": {
             "enabled": True,
@@ -188,9 +193,9 @@ def _qwen_torchair_test_fixture(
     with VllmRunner(
             model,
             dtype="half",
-            tensor_parallel_size=2,
+            tensor_parallel_size=tp,
             distributed_executor_backend="mp",
-            enforce_eager=False,
+            enforce_eager=True,
             additional_config=additional_config,
             enable_expert_parallel=enable_expert_parallel,
     ) as vllm_model:
@@ -214,8 +219,8 @@ def _qwen_torchair_test_fixture(
 
 
 def test_e2e_qwen2_with_torchair():
-    _qwen_torchair_test_fixture("Qwen/Qwen2.5-0.5B-Instruct", False)
+    _qwen_torchair_test_fixture("Qwen/Qwen2.5-32B-Instruct", 2, False)
 
 
 def test_e2e_qwen3_moe_with_torchair():
-    _qwen_torchair_test_fixture("Qwen/Qwen3-30B-A3B", True)
+    _qwen_torchair_test_fixture("Qwen/Qwen3-30B-A3B", 2, True)
