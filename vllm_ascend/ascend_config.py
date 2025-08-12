@@ -47,6 +47,7 @@ class AscendConfig:
         self.expert_map_path = additional_config.get("expert_map_path", None)
         self.chunked_prefill_for_mla = additional_config.get(
             "chunked_prefill_for_mla", False)
+
         self.lmhead_tensor_parallel_size = additional_config.get(
             "lmhead_tensor_parallel_size", None)
         if self.lmhead_tensor_parallel_size is not None:
@@ -59,6 +60,11 @@ class AscendConfig:
             assert (
                 self.torchair_graph_config.enabled == True
             ), "lmhead_tensor_parallel_size is only supported in graph mode"
+
+        self.enable_shared_expert_dp = additional_config.get(
+            "enable_shared_expert_dp", True
+        ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel
+
 
 
 class TorchairGraphConfig:
@@ -178,6 +184,10 @@ def check_ascend_config(vllm_config, enforce_eager):
                     raise NotImplementedError(
                         "Torchair graph mode only works with following model types:"
                         f"{TORCHAIR_MODEL_LIST}.")
+            if ascend_config.enable_shared_expert_dp:
+                logger.warning(
+                    "enable_shared_expert_dp is not supported for torchair graph mode currently, "
+                    "it has been disabled automatically.")
         # aclgraph case
         else:
             # aclgraph doesn't work with deepseek model and only qwen model is well tested.
