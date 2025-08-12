@@ -1037,15 +1037,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             decode_q_c = q_c[:num_decode_tokens]
             cos = attn_metadata.decode.cos
             sin = attn_metadata.decode.sin
-            # Without explicitly controlling the order, IndexByTensor operations
-            # would be placed after `matmul W_KV_T` hindering the overlapping of
-            # KvRmsNormRopeCache and SingleRope.
-            npu_wait_tensor(decode_q_c,
-                            cos,
-                            enabled=enable_multistream_mla)
-            npu_wait_tensor(decode_q_c,
-                            sin,
-                            enabled=enable_multistream_mla)
             decode_ql_nope, decode_q_pe = \
                 self._q_proj_and_k_up_proj(decode_q_c)
             decode_slots = attn_metadata.slot_mapping[:num_decode_tokens]
