@@ -1,15 +1,19 @@
 import math
+from unittest import mock
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+import torch_npu
 
 from tests.ut.base import TestBase
+from vllm_ascend.ops.rotary_embedding import __set_cos_sin_cache  # noqa E402
 from vllm_ascend.ops.rotary_embedding import \
     __set_cos_sin_cache as raw__set_cos_sin_cache
 from vllm_ascend.ops.rotary_embedding import (custom_rotary_embedding_enabled,
                                               native_rope_deepseek_forward,
-                                              rope_forward_oot, rotate_half,
+                                              rope_forward, rope_forward_oot,
+                                              rotate_half,
                                               yarn_find_correction_dim,
                                               yarn_get_mscale)
 
@@ -363,3 +367,65 @@ class TestSetCosSinCache:
             assert buf.shape == expected_shape
             assert buf.device == device
             assert buf.dtype == torch.float32
+
+
+class DummyConfig:
+
+    class TorchairGraphConfig:
+        enabled = True
+
+    torchair_graph_config = TorchairGraphConfig()
+
+
+class DummyModel:
+
+    def __init__(self, head_size, max_pos):
+        self.head_size = head_size
+        self.max_position_embeddings = max_pos
+        self.cos = torch.randn(max_pos, head_size)
+        self.sin = torch.randn(max_pos, head_size)
+
+    def embed(self, positions, weight):
+        B, S = positions.shape
+        return torch.ones(B, S, self.head_size) * 0.5
+
+
+@mock.patch("vllm_ascend.ops.rotary_embedding.get_ascend_config",
+            return_value=DummyConfig())
+@mock.patch.object(torch_npu, "npu_apply_rotary_pos_emb")
+@mock.patch("vllm_ascend.ops.rotary_embedding.__set_cos_sin_cache")
+def test_rope_forward_output_shape(mock_set_cache, mock_npu_apply,
+                                   mock_get_ascend_config):
+    batch_size = 2
+    seq_len = 4
+    num_heads = 3
+    head_size = 5
+
+    q = torch.randn(batch_size, seq_len, num_heads * head_size)
+    k = torch.randn_like(q)
+
+    positions = torch.arange(seq_len).unsqueeze(0).repeat(batch_size, 1)
+
+    model = DummyModel(head_size=head_size, max_pos=100)
+
+    def fake_apply_rotary(q_in, k_in, cos, sin):
+        return q_in, k_in
+
+    mock_npu_apply.side_effect = fake_apply_rotary
+
+    q_out, k_out = rope_forward(
+        model,
+        positions=positions,
+        query=q,
+        key=k,
+        offsets=None,
+        is_neox_style_override=None,
+        max_seq_len=None,
+        is_prefill=False,  # no rope_forward_oot
+        is_qwen_torchair=True,  # go rotary
+    )
+
+    assert q_out.shape == (batch_size, 1, seq_len, num_heads * head_size)
+    assert k_out.shape == (batch_size, 1, seq_len, num_heads * head_size)
+
+    mock_set_cache.assert_not_called()

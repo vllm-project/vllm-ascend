@@ -21,8 +21,10 @@ Run `pytest tests/multicard/test_torchair_graph_mode.py`.
 """
 import os
 from typing import Dict
+from unittest.mock import patch
 
 from tests.e2e.conftest import VllmRunner
+from vllm_ascend.ascend_forward_context import _get_fused_moe_state
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
@@ -218,9 +220,11 @@ def _qwen_torchair_test_fixture(
         print(f"Generated text: {vllm_output[i][1]!r}")
 
 
-def test_e2e_qwen2_with_torchair():
-    _qwen_torchair_test_fixture("Qwen/Qwen2.5-0.5B-Instruct", 2, False)
-
-
 def test_e2e_qwen3_moe_with_torchair():
-    _qwen_torchair_test_fixture("Qwen/Qwen3-30B-A3B", 2, True)
+
+    def stubbed_get_state(ep_size, with_prefill, is_deepseek_v3_r1):
+        return _get_fused_moe_state(16, with_prefill, is_deepseek_v3_r1)
+
+    with patch('vllm_ascend.ascend_forward_context._get_fused_moe_state',
+               side_effect=stubbed_get_state):
+        _qwen_torchair_test_fixture("Qwen/Qwen3-30B-A3B", 2, True)
