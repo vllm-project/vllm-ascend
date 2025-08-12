@@ -15,7 +15,7 @@ from vllm.utils import make_zmq_path
 from zmq import Context  # type: ignore
 
 fake_engine = types.ModuleType("mooncake.engine")
-fake_engine.TransferEngine = MagicMock() # type: ignore[attr-defined]
+fake_engine.TransferEngine = MagicMock()  # type: ignore[attr-defined]
 sys.modules["mooncake.engine"] = fake_engine
 
 from vllm_ascend.distributed.mooncake_connector import (

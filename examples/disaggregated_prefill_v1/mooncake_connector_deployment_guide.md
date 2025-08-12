@@ -7,6 +7,7 @@
      *  CANN >= 8.2.rc1
      *  PyTorch >= 2.5.1, torch-npu >= 2.5.1.post1.dev20250619
      *  vLLM (same version as vllm-ascend)
+     *  mooncake-transfer-engine reference documentation: https://github.com/kvcache-ai/Mooncake/blob/main/doc/zh/ascend_transport.md
 
 The vllm version must be the same as the main branch of vllm-ascend, for example, 2025/07/30. The version is
 
