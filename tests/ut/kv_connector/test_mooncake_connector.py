@@ -1,8 +1,10 @@
 import os
 import queue
 import socket
+import sys
 import threading
 import time
+import types
 import unittest
 from collections import defaultdict, deque
 from unittest.mock import MagicMock, patch
@@ -11,6 +13,10 @@ import msgspec
 import zmq
 from vllm.utils import make_zmq_path
 from zmq import Context  # type: ignore
+
+fake_engine = types.ModuleType("mooncake.engine")
+fake_engine.TransferEngine = MagicMock()
+sys.modules["mooncake.engine"] = fake_engine
 
 from vllm_ascend.distributed.mooncake_connector import (
     KVCacheRecvingThread, KVCacheSendingThread, KVCacheTaskTracker,
