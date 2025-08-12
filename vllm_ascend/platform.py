@@ -27,9 +27,9 @@ from torch.distributed.distributed_c10d import PrefixStore
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
 from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD, update_aclgraph_sizes
-import vllm_ascend.envs as envs_ascend
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
