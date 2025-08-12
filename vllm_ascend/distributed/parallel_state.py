@@ -20,12 +20,12 @@ def get_lmhead_group() -> GroupCoordinator:
 
 
 def model_parallel_initialized():
-    return (_MC2 is not None and _LMHEAD is not None)
+    return (_MC2 is not None)
 
 
 def init_ascend_model_parallel(
     expert_parallel_size: int = 1,
-    lm_head_tp_size: int = 1,
+    lm_head_tp_size: int = -1,
     backend: Optional[str] = None,
 ):
     if model_parallel_initialized():
@@ -47,16 +47,17 @@ def init_ascend_model_parallel(
                                      get_world_group().local_rank,
                                      backend,
                                      group_name="mc2")
+    
+    if lm_head_tp_size > 0:
+        all_ranks = torch.arange(world_size).reshape(-1, lm_head_tp_size)
+        global _LMHEAD
+        group_ranks = all_ranks.unbind(0)
+        group_ranks = [x.tolist() for x in group_ranks]
 
-    all_ranks = torch.arange(world_size).reshape(-1, lm_head_tp_size)
-    global _LMHEAD
-    group_ranks = all_ranks.unbind(0)
-    group_ranks = [x.tolist() for x in group_ranks]
-
-    _LMHEAD = init_model_parallel_group(group_ranks,
-                                        get_world_group().local_rank,
-                                        backend,
-                                        group_name="lmhead")
+        _LMHEAD = init_model_parallel_group(group_ranks,
+                                            get_world_group().local_rank,
+                                            backend,
+                                            group_name="lmhead")
 
 
 def destroy_ascend_model_parallel():
