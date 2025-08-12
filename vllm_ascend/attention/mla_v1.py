@@ -940,7 +940,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
 
-        num_tokens = q_nope.size(0)
+        num_tokens = ql_nope.size(0)
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
         actual_seq_lengths = None
@@ -961,23 +961,23 @@ class AscendMLAImpl(MLAAttentionImpl):
             assert num_tokens % self.spec_token_num == 0
             input_layout = "TND"
             # [bs * q_seq_len, num_heads_per_rank, dim]
-            q_nope = q_nope.view(num_tokens, self.num_heads, -1)
+            ql_nope = ql_nope.view(num_tokens, self.num_heads, -1)
             q_pe = q_pe.view(num_tokens, self.num_heads, -1)
             sparse_mode = 3
             spec_attn_mask = attn_metadata.decode.attn_mask  # type:ignore
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
         else:
             if self.enable_kv_nz:
-                q_nope = q_nope.view(num_tokens, 1, self.num_heads, -1)
+                ql_nope = ql_nope.view(num_tokens, 1, self.num_heads, -1)
                 q_pe = q_pe.view(num_tokens, 1, self.num_heads, -1)
             else:
-                q_nope = q_nope.view(num_tokens, self.num_heads, 1, -1)
+                ql_nope = ql_nope.view(num_tokens, self.num_heads, 1, -1)
                 q_pe = q_pe.view(num_tokens, self.num_heads, 1, -1)
             sparse_mode = 0
             spec_attn_mask = None
 
         attn_output, _ = torch_npu.npu_fused_infer_attention_score(
-            q_nope,
+            ql_nope,
             k_nope,
             k_nope,
             query_rope=q_pe,
