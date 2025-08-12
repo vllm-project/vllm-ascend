@@ -19,6 +19,7 @@ from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
 from vllm_ascend.utils import ProfileExecuteDuration, _enable_lmhead_tp
 
+
 class MtpProposer:
 
     def __init__(
@@ -224,7 +225,7 @@ class MtpProposer:
                         previous_hidden_states=self.
                         hidden_states[:num_input_tokens],
                         kv_caches=self.runner.kv_caches[-1:])
-                    
+
         num_indices = last_token_indices.shape[0]
         if _enable_lmhead_tp():
             if not self.runner.with_prefill:
@@ -232,8 +233,8 @@ class MtpProposer:
             else:
                 max_num_reqs_across_dp = self.vllm_config.scheduler_config.max_num_seqs
             last_token_indices = nn.functional.pad(
-                last_token_indices, (0, max_num_reqs_across_dp - num_indices)) 
-               
+                last_token_indices, (0, max_num_reqs_across_dp - num_indices))
+
         sample_hidden_states = hidden_states[last_token_indices]
         logits = self.model.compute_logits(sample_hidden_states, None)
         if _enable_lmhead_tp() and num_indices < logits.shape[0]:

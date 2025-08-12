@@ -58,13 +58,12 @@ class AscendConfig:
                 vllm_config.parallel_config.tensor_parallel_size == 1
             ), "lmhead_tensor_parallel_size is only supported in the pure DP scenario"
             assert (
-                self.torchair_graph_config.enabled == True
+                self.torchair_graph_config.enabled
             ), "lmhead_tensor_parallel_size is only supported in graph mode"
 
         self.enable_shared_expert_dp = additional_config.get(
             "enable_shared_expert_dp", True
         ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel
-
 
 
 class TorchairGraphConfig:

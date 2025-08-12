@@ -269,7 +269,6 @@ class CustomLogitsProcessor(LogitsProcessor):
         else:
             gathered_hidden_states = hidden_states
 
-        # Compute logits using quantized matrix multiplication
         local_logits = lm_head.quant_method.apply(lm_head,
                                                   gathered_hidden_states,
                                                   bias=embedding_bias)

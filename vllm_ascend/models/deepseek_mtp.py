@@ -25,11 +25,10 @@ from transformers import PretrainedConfig
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import get_sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead, VocabParallelEmbedding)
+from vllm.model_executor.layers.vocab_parallel_embedding import \
+    VocabParallelEmbedding
 from vllm.model_executor.models.deepseek_mtp import (
     DeepSeekMTP, DeepSeekMultiTokenPredictor, DeepSeekMultiTokenPredictorLayer,
     SharedHead)
@@ -37,8 +36,11 @@ from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend.ops.vocab_parallel_embedding import (CustomLogitsProcessor,
+                                                      CustomParallelLMHead)
+
 from .deepseek_v2 import CustomDeepseekV2DecoderLayer
-from vllm_ascend.ops.vocab_parallel_embedding import CustomLogitsProcessor, CustomParallelLMHead
+
 
 class CustomDeepSeekShareHead(SharedHead):
 
@@ -49,9 +51,9 @@ class CustomDeepSeekShareHead(SharedHead):
         nn.Module.__init__(self)
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.head = CustomParallelLMHead(config.vocab_size,
-                                   config.hidden_size,
-                                   quant_config=quant_config,
-                                   prefix=maybe_prefix(prefix, "head"))
+                                         config.hidden_size,
+                                         quant_config=quant_config,
+                                         prefix=maybe_prefix(prefix, "head"))
 
 
 class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
