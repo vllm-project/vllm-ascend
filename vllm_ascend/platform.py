@@ -29,6 +29,7 @@ from vllm.platforms import Platform, PlatformEnum
 
 from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
 from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD, update_aclgraph_sizes
+import vllm_ascend.envs as envs_ascend
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -143,6 +144,10 @@ class NPUPlatform(Platform):
             enforce_eager = getattr(model_config, "enforce_eager", False)
 
         check_ascend_config(vllm_config, enforce_eager)
+
+        if vllm_config.speculative_config and envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+            raise NotImplementedError(
+                "DBO and mtp can't work at the same time. Please `export VLLM_ASCEND_ENABLE_DBO=0`")
 
         if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:
             logger.info("Compilation disabled, using eager mode by default")
