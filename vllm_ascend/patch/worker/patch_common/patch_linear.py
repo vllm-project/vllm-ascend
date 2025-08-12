@@ -35,11 +35,12 @@ from vllm.forward_context import get_forward_context
 from torch.nn.parameter import Parameter, UninitializedParameter
 
 
-from vllm_ascend.distributed.parallel_state import get_mlp_tensor_model_parallel_world_size, get_mlp_tensor_model_parallel_rank, get_mlp_tp_group
-import torch
-from typing import Any, Literal, Optional, Union
-from vllm.config import QuantizationConfig
 
+import torch
+import itertools
+from typing import Any, Literal, Optional, Union
+
+from vllm.config import QuantizationConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -52,9 +53,14 @@ from vllm.model_executor.parameter import (BasevLLMParameter,
                                            RowvLLMParameter)
 from vllm.distributed import (divide,
                               split_tensor_along_last_dim,)
+from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.layers.linear import adjust_scalar_to_fused_array, adjust_marlin_shard, adjust_bitsandbytes_4bit_shard
+
+from vllm_ascend.utils import (dispose_tensor)
+from vllm_ascend.distributed.parallel_state import get_mlp_tensor_model_parallel_world_size, get_mlp_tensor_model_parallel_rank, get_mlp_tp_group
 
 _HCOMM_INFO = None
-
+logger = init_logger(__name__)
 
 class AscendRowParallelLinear(RowParallelLinear):
     """
@@ -300,21 +306,20 @@ class AttnColumnParallelLinear(LinearBase):
         param.load_column_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(
-        self, input_
+        self, input_, num_tokens
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         bias = self.bias if not self.skip_bias_add else None
         # self.global_batch_size = vllm_config.scheduler_config.max_num_seqs
         # Matrix multiply.
         assert self.quant_method is not None
         forward_context = get_forward_context()
-        num_tokens_across_dp = forward_context.num_tokens_across_dp
+        max_num_tokens_across_dp = forward_context.max_tokens_across_dp
+        if num_tokens < max_num_tokens_across_dp:
+            input_ = torch.nn.functional.pad(input_, (0, 0, 0, max_num_tokens_across_dp - num_tokens))
+        input2_ = get_mlp_tp_group().all_gather(input_, 0)
         
-        gathered_input = [torch.empty(batch_size, input_.size(
-            1), dtype=input_.dtype, device=input_.device) for batch_size in num_tokens_across_dp]
-        torch.distributed.all_gather(
-                gathered_input, input_, group=get_mlp_tp_group().device_group)
-        input2_ = torch.cat(gathered_input, dim=0)
         output = self.quant_method.apply(self, input2_, bias)
+        
         output_bias = self.bias if self.skip_bias_add else None
         if not self.return_bias:
             return output
@@ -463,7 +468,7 @@ class AttnRowParallelLinear(LinearBase):
         param.load_row_parallel_weight(loaded_weight=loaded_weight)
 
     def forward(
-        self, input_
+        self, input_, num_tokens
     ) -> Union[torch.Tensor, tuple[torch.Tensor, Optional[Parameter]]]:
         tp_rank = get_mlp_tensor_model_parallel_rank()
         if self.input_is_parallel:
@@ -481,12 +486,10 @@ class AttnRowParallelLinear(LinearBase):
         output_parallel = self.quant_method.apply(self,
                                                   input_parallel,
                                                   bias=bias_)
-        num_tokens_across_dp = get_forward_context().num_tokens_across_dp
-        num_tokens_across_dp = tuple(num_tokens_across_dp.numpy())
-        split_tensor = list(torch.split(output_parallel, num_tokens_across_dp, dim=0))
-        output = torch.empty_like(split_tensor[tp_rank])
-        torch.distributed.reduce_scatter(output, split_tensor, op=torch.distributed.ReduceOp.SUM, group=get_mlp_tp_group().device_group)
-
+        
+        output = get_mlp_tp_group().reduce_scatter(output_parallel, 0)
+        output = output[:num_tokens,:]
+        dispose_tensor(output_parallel)
         output_bias = self.bias if self.skip_bias_add else None
 
         if not self.return_bias:
