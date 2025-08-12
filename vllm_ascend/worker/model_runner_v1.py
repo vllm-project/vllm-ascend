@@ -26,7 +26,7 @@ import types
 import weakref
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -1010,7 +1010,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
     ) -> tuple[Union[AscendMetadata, AscendMLAMetadata,
                      AscendTorchairMetadata], torch.Tensor, SpecDecodeMetadata,
                torch.Tensor, int, torch.Tensor, torch.Tensor, np.ndarray,
-               Optional[set[str]], Optional[set[str]]]:
+               Optional[set[str]], Optional[set[str]], Optional[Any]]:
         # Check input valid
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -1290,7 +1290,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         **model_kwargs,
                     )
 
-        self.maybe_wait_for_kv_save()
+        finished_dumping = self.maybe_wait_for_kv_save()
         finished_sending, finished_recving = self.get_finished_kv_transfer(
             scheduler_output)
         use_spec_decode = len(
@@ -1322,7 +1322,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
                 total_num_scheduled_tokens, logits_indices, aux_hidden_states,
-                num_scheduled_tokens, finished_sending, finished_recving)
+                num_scheduled_tokens, finished_sending, finished_recving, finished_dumping)
 
     def _get_cumsum_and_arange(
         self,
@@ -1587,7 +1587,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             (attn_metadata, hidden_states, spec_decode_metadata, positions,
              num_scheduled_tokens, logits_indices, aux_hidden_states,
              num_scheduled_tokens_np, finished_sending,
-             finished_recving) = (self._process_reqs(scheduler_output,
+             finished_recving, finished_dumping) = (self._process_reqs(scheduler_output,
                                                      intermediate_tensors))
         kv_connector_output = None
         if not vllm_version_is("0.10.0"):
@@ -1595,6 +1595,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 kv_connector_output = KVConnectorOutput(
                     finished_sending=finished_sending,
                     finished_recving=finished_recving)
+                kv_connector_output.finished_dumping = finished_dumping
             else:
                 kv_connector_output = None
             finished_sending = None
@@ -1777,6 +1778,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             pooler_output=[],
             **extra_args,
         )
+        model_runner_output.finished_dumping = finished_dumping
 
         durations = ProfileExecuteDuration().pop_captured_sync()
         if durations:
@@ -1820,9 +1822,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             kv_connector.start_load_kv(get_forward_context())
 
     @staticmethod
-    def maybe_wait_for_kv_save() -> None:
+    def maybe_wait_for_kv_save() -> Optional[Any]:
         if has_kv_transfer_group():
-            get_kv_transfer_group().wait_for_save()
+            return get_kv_transfer_group().wait_for_save()
 
     @staticmethod
     def get_finished_kv_transfer(
