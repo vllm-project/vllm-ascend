@@ -1154,9 +1154,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                               attn_state,
                                               total_num_scheduled_tokens)
 
-        enable_dbo = self._check_dbo_is_valid(self.query_lens.tolist(),
-                                              attn_state,
-                                              total_num_scheduled_tokens)
         (padded_num_tokens_across_dp, num_tokens_across_dp, with_prefill,
          enable_dbo) = self._get_forward_metadata_across_dp_and_pad(
              total_num_scheduled_tokens, with_prefill, enable_dbo)
