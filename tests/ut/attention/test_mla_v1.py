@@ -691,3 +691,40 @@ class TestAscendMLAImpl(TestBase):
         self.assertEqual(result.shape[2], self.impl.v_head_dim)
         mock_up_proj.assert_called_once()
         mock_page_attention_mla.assert_called_once()
+
+    @patch("vllm_ascend.attention.mla_v1.AscendMLAImpl._forward_prefill")
+    @patch("torch_npu._npu_reshape_and_cache")
+    def test_forward_without_graph(self, _, mock_forward_prefill):
+        self.impl.running_in_graph = False
+        self.impl.torchair_graph_enabled = False
+
+        num_tokens = 100
+        num_blocks = 256
+        block_size = 4
+        rotary_emb_return_value = (torch.randn(num_tokens, 16,
+                                               self.impl.kv_lora_rank),
+                                   torch.randn(0, 1, self.impl.kv_lora_rank))
+        self.impl.rotary_emb.side_effect = lambda *args, **kwargs: rotary_emb_return_value
+        self.impl.o_proj.side_effect = lambda *args, **kwargs: torch.randn(
+            1, num_blocks, 128)
+
+        hidden_states_or_q_c = torch.randn(num_tokens, self.impl.q_lora_rank)
+        hidden_states_or_kv_c_normed = torch.randn(num_tokens,
+                                                   self.impl.kv_lora_rank)
+        k_pe = torch.randn(num_tokens, self.impl.qk_rope_head_dim)
+        kv_cache = (torch.randn(num_blocks, block_size, self.impl.num_heads,
+                                self.impl.kv_lora_rank),
+                    torch.randn(num_blocks, block_size, self.impl.num_heads,
+                                self.impl.qk_rope_head_dim))
+        output = torch.randn(num_tokens, self.impl.num_heads,
+                             self.impl.v_head_dim)
+
+        metadata = MagicMock()
+        metadata.num_decodes = 0
+        metadata.num_prefills = num_tokens
+        mock_forward_prefill.return_value = torch.randn(
+            0, self.impl.num_heads * self.impl.v_head_dim)
+        result = self.impl.forward(None, hidden_states_or_q_c,
+                                   hidden_states_or_kv_c_normed, k_pe,
+                                   kv_cache, metadata, output, False)
+        self.assertEqual(result.shape[0], num_tokens)
