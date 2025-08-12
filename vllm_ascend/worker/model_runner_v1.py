@@ -85,13 +85,12 @@ from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         write_kv_cache_bytes_to_file)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               ProfileExecuteDuration, is_310p,
-                               maybe_converting_weight_acl_format,
-                               vllm_version_is, _enable_lmhead_tp)
+                               ProfileExecuteDuration, _enable_lmhead_tp,
+                               is_310p, maybe_converting_weight_acl_format,
+                               vllm_version_is)
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
-
 
 if not vllm_version_is("0.10.0"):
     from vllm.tasks import GenerationTask, SupportedTask
@@ -1334,8 +1333,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         aux_hidden_states = None
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = hidden_states
-        
-        if _enable_lmhead_tp(): # 
+
+        if _enable_lmhead_tp():  #
             if not with_prefill:
                 max_num_reqs_across_dp = padded_num_tokens_across_dp
             else:
@@ -1998,7 +1997,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     if self.use_spec_decode and isinstance(
                             self.drafter, EagleProposer):
                         self.drafter.dummy_run(num_tokens)
-            
+
             if _enable_lmhead_tp() and not self.in_profile_run:
                 if not with_prefill:
                     max_num_reqs_across_dp = num_reqs
@@ -2008,7 +2007,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                             device=hidden_states.device,
                                             dtype=torch.int32)
                 model.compute_logits(hidden_states[dummy_indices], None)
-            
+
             if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
                 assert isinstance(self.drafter, MtpProposer)
                 self.drafter.dummy_run(

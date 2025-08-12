@@ -9,14 +9,17 @@ from vllm.distributed.parallel_state import (GroupCoordinator, get_world_group,
 _MC2: Optional[GroupCoordinator] = None
 _LMTP: Optional[GroupCoordinator] = None
 
+
 def get_mc2_group() -> GroupCoordinator:
     assert _MC2 is not None, ("mc2 group is not initialized")
     return _MC2
+
 
 def get_lmheadtp_group() -> GroupCoordinator:
     assert _LMTP is not None, (
         "lm head tensor parallel group is not initialized")
     return _LMTP
+
 
 def model_parallel_initialized():
     return (_MC2 is not None)
@@ -43,22 +46,23 @@ def init_ascend_model_parallel(parallel_config: ParallelConfig, ):
                                      get_world_group().local_rank,
                                      backend,
                                      group_name="mc2")
-    
+
     lmhead_tensor_parallel_size = parallel_config.lmhead_tensor_parallel_size
     if lmhead_tensor_parallel_size is not None:
         group_ranks = []
         global _LMTP
         num_lmhead_tensor_parallel_groups: int = (world_size //
-                                                lmhead_tensor_parallel_size)
+                                                  lmhead_tensor_parallel_size)
         for i in range(num_lmhead_tensor_parallel_groups):
             ranks = list(
                 range(i * lmhead_tensor_parallel_size,
-                    (i + 1) * lmhead_tensor_parallel_size))
+                      (i + 1) * lmhead_tensor_parallel_size))
             group_ranks.append(ranks)
         _LMTP = init_model_parallel_group(group_ranks,
-                                        get_world_group().local_rank,
-                                        backend,
-                                        group_name="lmheadtp")
+                                          get_world_group().local_rank,
+                                          backend,
+                                          group_name="lmheadtp")
+
 
 def destroy_ascend_model_parallel():
     global _MC2

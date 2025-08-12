@@ -50,11 +50,13 @@ class AscendConfig:
         self.lmhead_tensor_parallel_size = additional_config.get(
             "lmhead_tensor_parallel_size", None)
         if self.lmhead_tensor_parallel_size is not None:
-            logger.info(f"Enable lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size} in pure DP scenario")
-            assert(
+            logger.info(
+                f"Enable lmhead_tensor_parallel_size={self.lmhead_tensor_parallel_size} in pure DP scenario"
+            )
+            assert (
                 vllm_config.parallel_config.tensor_parallel_size == 1
-            ),"lmhead_tensor_parallel_size is only supported in the pure DP scenario"
-            assert(
+            ), "lmhead_tensor_parallel_size is only supported in the pure DP scenario"
+            assert (
                 self.torchair_graph_config.enabled == True
             ), "lmhead_tensor_parallel_size is only supported in graph mode"
 
