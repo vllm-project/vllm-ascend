@@ -195,6 +195,7 @@ def test_models_distributed_alltoallv_prefill_dbo() -> None:
             "vllm-ascend/Qwen3-30B-A3B-Puring",
             dtype=dtype,
             tensor_parallel_size=2,
+            enable_expert_parallel=True,
             distributed_executor_backend="mp",
     ) as vllm_model:
         model_arch = 'Qwen3MoeForCausalLM'
