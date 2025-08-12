@@ -24,14 +24,13 @@ import torch_npu
 from vllm.attention.backends.abstract import (AttentionImpl, AttentionLayer,
                                               AttentionType)
 from vllm.attention.backends.utils import PAD_SLOT_ID
-from vllm.v1.core.sched.output import SchedulerOutput
 
 from vllm_ascend.attention.attention_v1 import (AscendAttentionBackend,
+                                                AscendAttentionMetadataBuilder,
                                                 AscendAttentionState,
                                                 AscendMetadata)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d)
-from vllm_ascend.worker.npu_input_batch import InputBatch
 
 
 class AscendAttentionTorchairBackend(AscendAttentionBackend):
@@ -90,14 +89,10 @@ class AscendTorchairMetadata(AscendMetadata):
     decode: Optional[AscendDecodeMetadata] = None
 
 
-class AscendAttentionTorchairMetadataBuilder:
+class AscendAttentionTorchairMetadataBuilder(AscendAttentionMetadataBuilder):
 
     def __init__(self, runner):
-        self.runner = runner
-
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
-        return False
+        super().__init__(runner)
 
     def _get_graph_runner_block_tables(
             self, num_seqs: int, block_tables: torch.Tensor) -> torch.Tensor:
