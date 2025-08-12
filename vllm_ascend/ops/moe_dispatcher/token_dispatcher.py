@@ -1002,13 +1002,12 @@ class QuantizedTokenDispatcherWithAll2All(MoETokenDispatcher):
                           expert_map: torch.Tensor = None,
                           log2phy: torch.Tensor = None,
                           global_redundant_expert_num: int = 0):
+        #print("using custom quant all2all", flush=True)
         if log2phy is not None:
             topk_ids = log2phy[topk_ids]
         original_shape = hidden_states.shape
         if len(original_shape) == 3:
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-
-        num_tokens, _ = hidden_states.shape
 
         self._save_meta(top_k=top_k)
 
@@ -1070,6 +1069,16 @@ class QuantizedTokenDispatcherWithAll2All(MoETokenDispatcher):
                 per_token_scales=dynamic_scale)
             expert_tokens = expert_tokens.to(torch.int64)
             group_list_type = 1
+
+            self._save_meta(topk_ids=topk_ids,
+                            topk_weights=topk_weights,
+                            expert_map=expert_map,
+                            original_shape=original_shape,
+                            quantized_tokens_shape=quantized_tokens.shape,
+                            inverse_indices=inverse_indices,
+                            scatter_size_list=scatter_size_list,
+                            gather_size_list=gather_size_list,
+                            expanded_row_idx=expanded_row_idx)
         else:
             hidden_states, expanded_row_idx, expanded_expert_idx = self.init_routing(
                 hidden_states, topk_ids, num_experts)
@@ -1080,15 +1089,12 @@ class QuantizedTokenDispatcherWithAll2All(MoETokenDispatcher):
             group_list_type = 0
             dynamic_scale = None
 
-        self._save_meta(topk_ids=topk_ids,
-                        topk_weights=topk_weights,
-                        expert_map=expert_map,
-                        original_shape=original_shape,
-                        quantized_tokens_shape=quantized_tokens.shape,
-                        inverse_indices=inverse_indices,
-                        scatter_size_list=scatter_size_list,
-                        gather_size_list=gather_size_list,
-                        expanded_row_idx=expanded_row_idx)
+            self._save_meta(topk_ids=topk_ids,
+                            topk_weights=topk_weights,
+                            expert_map=expert_map,
+                            original_shape=original_shape,
+                            expanded_row_idx=expanded_row_idx)
+
         return hidden_states, expert_tokens, group_list_type, dynamic_scale
 
     def token_unpermutation(self, expert_output, bias=None):
@@ -1111,7 +1117,7 @@ class QuantizedTokenDispatcherWithAll2All(MoETokenDispatcher):
                 hidden_states,
                 skip1=None,
                 skip2=None,
-                bias=bias,
+                bias=None,
                 scales=self._meta["topk_weights"],
                 expanded_src_to_dst_row=self._meta["expanded_row_idx"],
                 export_for_source_row=None,
@@ -1123,7 +1129,7 @@ class QuantizedTokenDispatcherWithAll2All(MoETokenDispatcher):
                 expert_output,
                 skip1=None,
                 skip2=None,
-                bias=bias,
+                bias=None,
                 scales=self._meta["topk_weights"],
                 expanded_src_to_dst_row=self._meta["expanded_row_idx"],
                 export_for_source_row=self._meta["topk_ids"],
