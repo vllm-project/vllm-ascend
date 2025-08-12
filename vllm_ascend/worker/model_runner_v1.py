@@ -338,7 +338,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         self.use_aclgraph = (self.vllm_config.compilation_config.level
                              == CompilationLevel.PIECEWISE
-                             and not self.model_config.enforce_eager)
+                             and not self.model_config.enforce_eager and
+                             not ascend_config.torchair_graph_config.enabled)
         self.aclgraph_batch_sizes = list(
             reversed(
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
@@ -1297,10 +1298,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # NOTE: Currently this padding logic is really messy,
         # MC2 may not be available in eager mode
         # TODO: Unify the padding logic between TorchAir and ACL Graph ASAP
-        if not self.use_aclgraph or self.torchair_graph_enabled:
-            num_input_tokens = padded_num_tokens_across_dp
-        else:
+        if self.use_aclgraph:
             num_tokens_across_dp = num_tokens_across_dp_native
+        else:
+            num_input_tokens = padded_num_tokens_across_dp
 
         # Run forward pass
         with set_ascend_forward_context(
