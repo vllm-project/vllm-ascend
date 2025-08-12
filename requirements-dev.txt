@@ -18,4 +18,4 @@ protobuf>3.20.0
 librosa 
 soundfile
 pytest_mock
-mooncake-transfer-engine
+mooncake-transfer-engine==0.3.5
