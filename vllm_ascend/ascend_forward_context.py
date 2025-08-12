@@ -82,16 +82,8 @@ def set_ascend_forward_context(
         forward_context.fused_moe_state = fused_moe_state
         forward_context.in_profile_run = in_profile_run
         
-        top_k = vllm_config.model_config.hf_config.num_experts_per_tok
-        num_experts = vllm_config.model_config.hf_config.n_routed_experts
         quant_config = vllm_config.quant_config
-
-        need_param = {
-            "top_k": top_k,  # Example value for top_k
-            "num_experts": num_experts  # Example value for num_experts
-        }
-
-        token_dispatcher = UnquantizedTokenDispatcherWithAll2AllV(need_param)
+        token_dispatcher = UnquantizedTokenDispatcherWithAll2AllV()
         forward_context.token_dispatcher = token_dispatcher
 
         # NOTE: This cannot be set using set_forward_context
