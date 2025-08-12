@@ -19,6 +19,7 @@ requires = [
     "msgpack",
     "quart",
     "numba",
+    "mooncake-transfer-engine==0.3.5",
 ]
 build-backend = "setuptools.build_meta"
 
