@@ -102,7 +102,8 @@ class AscendQuantConfig(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
-                return AscendUnquantizedFusedMoEMethod(layer.moe if hasattr(layer, 'moe') else None)
+                return AscendUnquantizedFusedMoEMethod(
+                    layer.moe if hasattr(layer, 'moe') else None)
             return AscendFusedMoEMethod(self, prefix,
                                         self.packed_modules_mapping)
         elif isinstance(layer, VocabParallelEmbedding):
