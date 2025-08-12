@@ -381,7 +381,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
         global_input_tokens = alltoall_token_permutation2(global_input_tokens)
 
         return share_experts_output, global_input_tokens, tokens_per_expert
-    
+
     def preprocess_and_permtute1(self,
                                  hidden_states: torch.Tensor,
                                  probs: torch.Tensor,
@@ -433,7 +433,7 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
 
         self.cached_permutated_local_input_tokens = hidden_states
         self.tokens_per_expert = tokens_per_expert
-    
+
     def dispatch_alltoall(self):
         ep_group = self.ep_group
 

@@ -147,14 +147,14 @@ class TestMsSplit(TestBase):
                                                ascendMLAPrefillMetadata,
                                                ms_split_config)
         self.assertEqual(result, [None])
-    
+
     def test_split_v1_attn_input_none(self):
         attn_metadata = None
         ms_split_config = MSAttentionMetadataSplitConfig()
         result = model_input_split_v1_attn(attn_metadata, AscendMetadata,
                                            ms_split_config)
         self.assertEqual(result, [None])
-    
+
     def test_split_v1_attn_input_prefill_only(self):
         attn_metadata = AscendMetadata(
             attn_state=AscendAttentionState.PrefillNoCache,
