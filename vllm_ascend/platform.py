@@ -147,7 +147,8 @@ class NPUPlatform(Platform):
 
         if vllm_config.speculative_config and envs_ascend.VLLM_ASCEND_ENABLE_DBO:
             raise ValueError(
-                "DBO and mtp can't work at the same time. Please `export VLLM_ASCEND_ENABLE_DBO=0`")
+                "DBO and mtp can't work at the same time. Please `export VLLM_ASCEND_ENABLE_DBO=0`"
+            )
         if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:
             logger.info("Compilation disabled, using eager mode by default")
             compilation_config.level = CompilationLevel.NO_COMPILATION
@@ -165,7 +166,7 @@ class NPUPlatform(Platform):
             logger.warning(
                 "Ray distributed executor backend is not compatible with ACL Graph mode "
                 "right now. Setting level to NO_COMPILATION")
-            compilation_config.level = CompilationLevel.NO_COMPILATION
+            compilation_config.level = CompilationLevel.NfvO_COMPILATION
         else:
             logger.info(
                 "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
