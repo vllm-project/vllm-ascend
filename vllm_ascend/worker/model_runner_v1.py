@@ -2055,8 +2055,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if self.drafter:
                 logger.info("Loading drafter model...")
                 if isinstance(self.drafter, EagleProposer):
+                    self.drafter.load_model(self.model)
                     if self.use_aux_hidden_state_outputs:
-                        self.drafter.load_model(self.model)
                         self.model.set_aux_hidden_state_layers(
                             self.model.get_eagle3_aux_hidden_state_layers())
                 else:
