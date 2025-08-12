@@ -25,9 +25,9 @@ from vllm_ascend.models.deepseek_v2 import (
     CustomDeepseekV2DecoderLayer, CustomDeepseekV2ForCausalLM,
     CustomDeepseekV2MergedReplicatedLinear, CustomDeepseekV2MLAAttention,
     CustomDeepseekV2MLP, CustomDeepseekV2MoE,
-    CustomDeepseekV2RowParallelLinear,
     CustomDeepseekV2RowParallelLinearReplaceAllreduce,
     CustomDeepseekV2SiluAndMul)
+from vllm_ascend.ops.linear import Oproj_RowParallelLinear
 
 
 @pytest.fixture
@@ -167,8 +167,7 @@ def test_custom_deepseek_v2_merged_replicated_linear(mock_distributed):
 
 
 @pytest.mark.parametrize("cls", [
-    CustomDeepseekV2RowParallelLinearReplaceAllreduce,
-    CustomDeepseekV2RowParallelLinear
+    CustomDeepseekV2RowParallelLinearReplaceAllreduce, Oproj_RowParallelLinear
 ])
 def test_row_parallel_linear(cls, mock_distributed):
     linear = cls(input_size=128, output_size=64, bias=False, quant_config=None)
