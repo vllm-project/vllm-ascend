@@ -13,6 +13,7 @@ setuptools-scm>=8
 torch>=2.7.1
 torchvision
 wheel
+mooncake
 
 # requirements for disaggregated prefill
 msgpack

@@ -19,6 +19,7 @@ requires = [
     "msgpack",
     "quart",
     "numba",
+    "mooncake",
 ]
 build-backend = "setuptools.build_meta"
 
