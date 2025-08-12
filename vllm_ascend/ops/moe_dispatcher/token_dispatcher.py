@@ -774,7 +774,11 @@ class UnquantizedTokenDispatcherWithAll2AllV(MoETokenDispatcher):
         # token premute2 input
         global_input_tokens = alltoall_token_permutation2(global_input_tokens)
 
-        return share_experts_output, global_input_tokens, tokens_per_expert
+        return {
+            "share_experts_output": share_experts_output,
+            "global_input_tokens": global_input_tokens,
+            "tokens_per_expert": tokens_per_expert
+        }
 
     def preprocess_and_permtute1(self,
                                  hidden_states: torch.Tensor,
@@ -1095,7 +1099,12 @@ class QuantizedTokenDispatcherWithAll2All(MoETokenDispatcher):
                             original_shape=original_shape,
                             expanded_row_idx=expanded_row_idx)
 
-        return hidden_states, expert_tokens, group_list_type, dynamic_scale
+        return {
+            "hidden_states": hidden_states,
+            "expert_tokens": expert_tokens,
+            "group_list_type": group_list_type,
+            "dynamic_scale": dynamic_scale
+        }
 
     def token_unpermutation(self, expert_output, bias=None):
         if self._meta["expert_map"] is not None:
