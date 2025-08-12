@@ -219,7 +219,7 @@ def _qwen_torchair_test_fixture(
 
 
 def test_e2e_qwen2_with_torchair():
-    _qwen_torchair_test_fixture("Qwen/Qwen2.5-32B-Instruct", 2, False)
+    _qwen_torchair_test_fixture("Qwen/Qwen2.5-0.5B-Instruct", 2, False)
 
 
 def test_e2e_qwen3_moe_with_torchair():
