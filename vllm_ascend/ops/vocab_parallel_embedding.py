@@ -89,7 +89,7 @@ VocabParallelEmbedding.forward = vocab_parallel_embedding_forward
 
 
 class CustomParallelLMHead(ParallelLMHead):
-    """Costom Parallelized LM head, added the feature of lmheadTP in pure dp scenario
+    """Custom Parallelized LM head, added the feature of lmheadTP in pure dp scenario
     
     Output logits weight matrices used in the Sampler. The weight and bias
     tensors are padded to make sure they are divisible by the number of
