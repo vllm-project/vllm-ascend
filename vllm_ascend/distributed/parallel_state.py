@@ -107,7 +107,7 @@ def init_ascend_model_parallel_for_AE_split(
     global _EP
     assert _EP is None, ("expert parallel group is already initialized")
     group_ranks = all_ranks.transpose(1, 2).reshape(
-        -1, 1 * 4).unbind(0)
+        -1, 1 * expert_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     #print(f"vllm ascend _EP group_ranks is === {group_ranks}")
     

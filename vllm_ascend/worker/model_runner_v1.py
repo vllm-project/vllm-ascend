@@ -2336,8 +2336,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
         """
-        from vllm.distributed.parallel_state import get_world_group
-        if get_world_group().rank_in_group > 3:
+        from vllm.distributed.parallel_state import get_world_group,get_tensor_model_parallel_world_size
+        tp_size = get_tensor_model_parallel_world_size()
+        if get_world_group().rank_in_group > tp_size - 1:
             ctx = {
                 'model.layers.0.self_attn.attn': Attention(head_size=576, num_heads=4,num_kv_heads= 1,scale=0.1147213867929261)
             }

@@ -661,7 +661,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.tp_rank = get_tp_group().rank_in_group
         ascend_config = get_ascend_config()
         rank = get_world_group().rank_in_group
-        if rank < 4:
+        if rank < self.tp_size:
             # TODO: enable mla in vllm-ascend
             if model_config.use_mla:
                 attn_cls = CustomDeepseekV2MLAAttention
@@ -746,7 +746,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
 
         if self.enable_attn_export_split:
             # 如果是Attn就计算一次Attn，否则就不计算
-            if rank < 4:
+            if rank < self.tp_size:
                 # print(f"rank is == {rank} , start attn")
                 # 计算attention
                 hidden_states = self.self_attn(
@@ -1015,6 +1015,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                                                    torch.Tensor]]) -> set[str]:
         """"""
         rank = get_world_group().rank_in_group
+        tp_size = get_tensor_model_parallel_world_size()
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
@@ -1041,7 +1042,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
 
-            if rank < 4 and self.is_moe(name):
+            if rank < tp_size and self.is_moe(name):
                 continue
 
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
@@ -1092,7 +1093,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                     # load expert gate up down ,without share expert
                     break
                 else:
-                    if rank > 3 and not self.is_moe(name) and not self.is_moe_other(name):
+                    if rank > tp_size - 1 and not self.is_moe(name) and not self.is_moe_other(name):
                         continue
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
