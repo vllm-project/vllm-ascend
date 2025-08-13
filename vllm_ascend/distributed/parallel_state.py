@@ -47,7 +47,7 @@ def init_ascend_model_parallel(
                                      get_world_group().local_rank,
                                      backend,
                                      group_name="mc2")
-    
+
     if lm_head_tp_size > 0:
         all_ranks = torch.arange(world_size).reshape(-1, lm_head_tp_size)
         global _LMHEAD
