@@ -55,6 +55,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # Please make sure that the version is correct.
     "SOC_VERSION":
     lambda: os.getenv("SOC_VERSION", "ASCEND910B1"),
+    # location for orchestrated deployment of communication algorithms.
+    "HCCL_OP_EXPANSION_MODE":
+    lambda: os.environ.get("HCCL_OP_EXPANSION_MODE", None),
     # If set, vllm-ascend will print verbose logs during compilation
     "VERBOSE":
     lambda: bool(int(os.getenv('VERBOSE', '0'))),
