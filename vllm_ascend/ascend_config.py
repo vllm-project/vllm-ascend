@@ -203,6 +203,13 @@ def check_ascend_config(vllm_config, enforce_eager):
                 "Ascend scheduler is only supported for V1 Engine.")
     # for v1 engine
     else:
+        # TODO(yexiong): remove this verification after mtp model supports original vllm scheduler
+        if (not ascend_config.ascend_scheduler_config.enabled
+                and vllm_config.speculative_config
+                and vllm_config.speculative_config.method == 'deepseek_mtp'):
+            raise NotImplementedError(
+                "Currently deepseek MTP model is only supported for ascend scheduler."
+            )
         # for eager mode
         if enforce_eager:
             # torchair_graph cannot be enabled with eager mode.
