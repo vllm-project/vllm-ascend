@@ -748,7 +748,7 @@ def fused_experts_with_all2allv(
     return output
 
 
-def universal_fused_experts(hidden_states: torch.Tensor,
+def unified_fused_experts(hidden_states: torch.Tensor,
                             w1: torch.Tensor,
                             w2: torch.Tensor,
                             topk_weights: torch.Tensor,
@@ -769,26 +769,6 @@ def universal_fused_experts(hidden_states: torch.Tensor,
                                                  global_redundant_expert_num)
     expert_output = apply_mlp(results["global_input_tokens"], w1, w2,
                               results["tokens_per_expert"])
-    final_hidden_states = token_dispatcher.token_unpermutation(expert_output)
-    return final_hidden_states
-
-
-def universal_fused_experts(
-    hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
-    topk_weights: torch.Tensor,
-    topk_ids: torch.Tensor,
-    top_k: int,
-    num_experts: int,
-    expert_map: torch.Tensor = None,
-    apply_router_weight_on_input: bool = False,
-    max_num_tokens: Optional[int] = None,
-):
-    token_dispatcher = get_forward_context().token_dispatcher
-    _, dispatched_input, tokens_per_expert = token_dispatcher.token_permutation(
-        top_k, num_experts, hidden_states, topk_weights, topk_ids, expert_map)
-    expert_output = apply_mlp(dispatched_input, w1, w2, tokens_per_expert)
     final_hidden_states = token_dispatcher.token_unpermutation(expert_output)
     return final_hidden_states
 
@@ -1232,7 +1212,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 expert_map=expert_map,
                 ep_group=get_ep_group())
         elif fused_moe_state == FusedMoEState.All2AllSeq:
-            return universal_fused_experts(hidden_states=x,
+            return unified_fused_experts(hidden_states=x,
                                            w1=layer.w13_weight,
                                            w2=layer.w2_weight,
                                            topk_weights=topk_weights,
