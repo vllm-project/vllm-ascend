@@ -748,31 +748,6 @@ def fused_experts_with_all2allv(
     return output
 
 
-def unified_fused_experts(hidden_states: torch.Tensor,
-                            w1: torch.Tensor,
-                            w2: torch.Tensor,
-                            topk_weights: torch.Tensor,
-                            topk_ids: torch.Tensor,
-                            top_k: int,
-                            num_experts: int,
-                            expert_map: torch.Tensor = None,
-                            log2phy: torch.Tensor = None,
-                            global_redundant_expert_num: int = 0,
-                            w1_scale: torch.Tensor = None,
-                            w1_scale_bias: torch.Tensor = None,
-                            w2_scale: torch.Tensor = None,
-                            w2_scale_bias: torch.Tensor = None):
-    token_dispatcher = get_forward_context().token_dispatcher
-    results = token_dispatcher.token_permutation(top_k, num_experts,
-                                                 hidden_states, topk_weights,
-                                                 topk_ids, expert_map, log2phy,
-                                                 global_redundant_expert_num)
-    expert_output = apply_mlp(results["global_input_tokens"], w1, w2,
-                              results["tokens_per_expert"])
-    final_hidden_states = token_dispatcher.token_unpermutation(expert_output)
-    return final_hidden_states
-
-
 def fused_experts(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -1212,15 +1187,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 expert_map=expert_map,
                 ep_group=get_ep_group())
         elif fused_moe_state == FusedMoEState.All2AllSeq:
-            return unified_fused_experts(hidden_states=x,
-                                           w1=layer.w13_weight,
-                                           w2=layer.w2_weight,
-                                           topk_weights=topk_weights,
-                                           topk_ids=topk_ids,
-                                           top_k=top_k,
-                                           num_experts=global_num_experts,
-                                           expert_map=expert_map)
-
             token_dispatcher = kwargs.get("token_dispatcher")
             return fused_experts_with_all2allv(
                 token_dispatcher=token_dispatcher,

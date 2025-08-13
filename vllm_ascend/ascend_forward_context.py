@@ -81,10 +81,6 @@ def set_ascend_forward_context(
                                                is_deepseek_v3_r1)
         forward_context.fused_moe_state = fused_moe_state
         forward_context.in_profile_run = in_profile_run
-        
-        quant_config = vllm_config.quant_config
-        token_dispatcher = UnquantizedTokenDispatcherWithAll2AllV()
-        forward_context.token_dispatcher = token_dispatcher
 
         # NOTE: This cannot be set using set_forward_context
         # due to multiple warmups before actual capturing
