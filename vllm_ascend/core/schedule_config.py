@@ -78,7 +78,7 @@ class AscendSchedulerConfig(SchedulerConfig):
         else:
             if self.long_prefill_token_threshold is None:
                 self.long_prefill_token_threshold = \
-                    int(self.max_model_len * 0.04)
+                    max(1, int(self.max_model_len * 0.04))
 
         assert (self.max_long_partial_prefills > 0)
         assert (self.long_prefill_token_threshold > 0)
