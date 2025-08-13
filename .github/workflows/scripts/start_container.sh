@@ -43,7 +43,8 @@ docker run -itd \
     --device /dev/hisi_hdc \
     -e CLUSTER_SIZE:$CLUSTER_SIZE \
     -e MASTER_ADDR:$MASTER_ADDR \
-    -v $GITHUB_WORKSPACE:$WORKSPACE \
+    -e WORKSPACE="/home/workspace" \
+    -v $GITHUB_WORKSPACE:/home/workspace \
     -v /usr/local/dcmi:/usr/local/dcmi \
     -v /usr/local/Ascend/driver/tools/hccn_tool:/usr/local/Ascend/driver/tools/hccn_tool \
     -v /usr/local/bin/npu-smi:/usr/local/bin/npu-smi \

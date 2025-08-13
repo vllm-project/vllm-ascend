@@ -91,5 +91,5 @@ jobs:
       - name: Docker post test cleanup
         if: always()
         run: |
+          docker exec -i $CONTAINER_NAME bash -lc 'find "$WORKSPACE" -mindepth 1 -maxdepth 1 -xdev -exec rm -rf {} +'
           docker rm -f ascend_ci_a3 2>/dev/null || true
-          # sudo find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -xdev -exec rm -rf {} +
