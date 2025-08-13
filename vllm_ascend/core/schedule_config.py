@@ -16,7 +16,7 @@
 #
 
 from dataclasses import dataclass, fields
-from typing import Type, Union
+from typing import Optional, Type, Union
 
 from vllm.config import SchedulerConfig
 
@@ -24,6 +24,8 @@ from vllm.config import SchedulerConfig
 @dataclass
 class AscendSchedulerConfig(SchedulerConfig):
     enable_chunked_prefill: bool = False
+    max_long_partial_prefills: Optional[Union[int, float]] = None
+    long_prefill_token_threshold: Optional[Union[int, float]] = None
     policy: str = "fcfs"
     scheduler_cls: Union[str, Type[object]] = (
         "vllm_ascend.core.scheduler.AscendScheduler")
@@ -42,6 +44,8 @@ class AscendSchedulerConfig(SchedulerConfig):
         }
         # Override default values into original SchedulerConfig
         scheduler_config["enable_chunked_prefill"] = False
+        scheduler_config["max_long_partial_prefills"] = None
+        scheduler_config["long_prefill_token_threshold"] = None
         scheduler_config["policy"] = "fcfs"
         scheduler_config["scheduler_cls"] = (
             "vllm_ascend.core.scheduler.AscendScheduler")
@@ -67,6 +71,17 @@ class AscendSchedulerConfig(SchedulerConfig):
                 "max_num_batched_tokens and makes vLLM reject longer "
                 "sequences. Please increase max_num_batched_tokens or "
                 "decrease max_model_len.")
+        # concurrent partial prefills. Default is inf
+        if self.max_long_partial_prefills is None:
+            self.max_long_partial_prefills = float('inf')
+            self.long_prefill_token_threshold = float('inf')
+        else:
+            if self.long_prefill_token_threshold is None:
+                self.long_prefill_token_threshold = \
+                    int(self.max_model_len * 0.04)
+
+        assert (self.max_long_partial_prefills > 0)
+        assert (self.long_prefill_token_threshold > 0)
         if self.policy != "fcfs":
             raise NotImplementedError(
                 f"currently AscendScheduler only supports fcfs policy, got {self.policy}"
