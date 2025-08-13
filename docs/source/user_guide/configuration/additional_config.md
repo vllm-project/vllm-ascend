@@ -53,6 +53,8 @@ The details of each config option are as follows:
 | Name | Type | Default | Description |
 | ---- | ---- | ------- | ----------- |
 | `enabled` | bool | `False` | Whether to enable ascend scheduler for V1 engine|
+| `max_long_partial_prefills` | Union[int, float] | `float('inf')` | the maximum number of prompts longer than long_prefill_token_threshold that will be prefilled concurrently. |
+| `long_prefill_token_threshold` | Union[int, float] | `False` | a request is considered long if the prompt is longer than this number of tokens. |
 
 ascend_scheduler_config also support the options from [vllm scheduler config](https://docs.vllm.ai/en/stable/api/vllm/config.html#vllm.config.SchedulerConfig). For example, you can add `enable_chunked_prefill: True` to ascend_scheduler_config as well.
 
@@ -73,6 +75,8 @@ An example of additional configuration is as follows:
     "ascend_scheduler_config": {
         "enabled": True,
         "enable_chunked_prefill": True,
+        "max_long_partial_prefills": 1,
+        "long_prefill_token_threshold": 4096,
     },
     "refresh": False,
 }
