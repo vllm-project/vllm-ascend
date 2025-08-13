@@ -29,8 +29,6 @@ from vllm.utils import get_ip, logger, make_zmq_path, make_zmq_socket
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 
-import vllm_ascend.envs as envs_ascend
-
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
@@ -812,9 +810,8 @@ class MooncakeConnectorWorker:
     ) -> None:
         """Initialize the mooncake instance."""
         device_name = device_name if device_name is not None else ""
-        ret_value = self.engine.initialize(
-            hostname, "P2PHANDSHAKE", envs_ascend.MOONCAKE_CONNECTOR_PROTOCOL,
-            device_name)
+        ret_value = self.engine.initialize(hostname, "P2PHANDSHAKE", "ascend",
+                                           device_name)
         if ret_value != 0:
             raise RuntimeError(
                 f"Mooncake initialization failed with ret_value: {ret_value}")
