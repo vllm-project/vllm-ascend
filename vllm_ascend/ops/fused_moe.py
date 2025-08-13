@@ -52,6 +52,7 @@ from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
                                npu_wait_tensor, super_kernel)
 
 VLLM_ASCEND_MOE_ALL2ALL_BUFFER: bool = envs_ascend.VLLM_ASCEND_MOE_ALL2ALL_BUFFER
+VLLM_ASCEND_ENABLE_FLASHCOMM: int = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM
 
 
 def process_topk_ids(
@@ -1335,6 +1336,7 @@ class AscendFusedMoE(FusedMoE):
         mc2_mask = forward_context.mc2_mask
 
         enable_sp = _metadata_for_padding is not None and _metadata_for_padding.not_dummy_and_is_prefill
+        enable_flashcomm2 = VLLM_ASCEND_ENABLE_FLASHCOMM == 2
         tp_size = get_tensor_model_parallel_world_size()
         if enable_sp:
             tp_rank = get_tensor_model_parallel_rank()
@@ -1342,7 +1344,7 @@ class AscendFusedMoE(FusedMoE):
             chunk_mc2_mask = torch.tensor_split(mc2_mask_sp, tp_size, dim=0)
             mc2_mask = chunk_mc2_mask[tp_rank]
 
-        if fused_moe_state != FusedMoEState.AllGather and not enable_sp:
+        if fused_moe_state != FusedMoEState.AllGather and not enable_sp and not enable_flashcomm2:
             if fused_moe_state in {
                     FusedMoEState.MC2, FusedMoEState.MC2_PREFILL
             }:
@@ -1427,7 +1429,7 @@ class AscendFusedMoE(FusedMoE):
             self.moe_load += expert_token_num if group_list_type else \
                 torch.cat([expert_token_num[:1], expert_token_num[1:] - expert_token_num[:-1]])
 
-        if not self.enable_prefill_optimizations and fused_moe_state != FusedMoEState.AllGather and not enable_sp:
+        if not self.enable_prefill_optimizations and fused_moe_state != FusedMoEState.AllGather and not enable_sp and not enable_flashcomm2:
             if tp_size > 1:
                 dist.all_gather(list(chunk_hidden_states), e_hidden_states,
                                 self.tp_group)
