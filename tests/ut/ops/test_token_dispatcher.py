@@ -116,8 +116,6 @@ class TestUnquantizedTokenDispatcherWithAll2AllV(TestBase):
         self.mock_tp_ep_group_prop = patcher4.start()
         self.mock_tp_ep_size_prop = patcher5.start()
 
-        self.dispatcher = UnquantizedTokenDispatcherWithAll2AllV(need_param)
-
         # Mock async_all_to_all
         patcher6 = patch(
             'vllm_ascend.ops.moe_dispatcher.token_dispatcher.async_all_to_all')
@@ -199,6 +197,8 @@ class TestUnquantizedTokenDispatcherWithAll2AllV(TestBase):
 
         # Mock shared experts
         self.mock_shared_experts = MagicMock()
+        
+        self.dispatcher = UnquantizedTokenDispatcherWithAll2AllV(need_param)
 
     def test_token_permutation(self):
         hidden_states = torch.randn(8, 16)
@@ -291,8 +291,6 @@ class TestQuantizedTokenDispatcherWithAll2All(TestBase):
         self.mock_ep_size_prop = patcher3.start()
         self.mock_tp_ep_group_prop = patcher4.start()
         self.mock_tp_ep_size_prop = patcher5.start()
-
-        self.dispatcher = QuantizedTokenDispatcherWithAll2All(need_param)
 
         # Mock torch.distributed.all_to_all_single
         patcher6 = patch(
@@ -402,6 +400,8 @@ class TestQuantizedTokenDispatcherWithAll2All(TestBase):
         self.mock_new_empty = patcher17.start()
         self.addCleanup(patcher17.stop)
         self.mock_new_empty.return_value = torch.randn(16, 32)
+        
+        self.dispatcher = QuantizedTokenDispatcherWithAll2All(need_param)
 
     def test_token_permutation_without_expert_map(self):
         # Mock hasattr to return False (simulate no npu_moe_init_routing_quant)
