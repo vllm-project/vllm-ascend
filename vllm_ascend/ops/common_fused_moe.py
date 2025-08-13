@@ -19,12 +19,13 @@ from typing import Callable, Optional
 
 import torch
 from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.layer import \
     UnquantizedFusedMoEMethod
 
 from vllm_ascend.ascend_config import get_ascend_config
-from vllm_ascend.ops.fused_moe import (fused_experts, fused_experts_moge,
-                                       select_experts)
+from vllm_ascend.ops.fused_moe import (fused_experts_moge, select_experts,
+                                       unified_fused_experts)
 from vllm_ascend.utils import is_310p
 
 original_unquantized_fused_moe_init_func = UnquantizedFusedMoEMethod.__init__
@@ -95,20 +96,18 @@ def forward_oot(
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input)
 
-    # If use aclgraph, we need to set max_num_tokens to make
-    # the input shape of `npu_moe_init_routing` fixed
-    max_num_tokens = self.max_num_batched_tokens if self.use_aclgraph else None
+    moe_comm_method = get_forward_context().moe_comm_method
 
-    return fused_experts(
+    return unified_fused_experts(
         hidden_states=x,
         w1=layer.w13_weight,
         w2=layer.w2_weight,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        top_k=top_k,
+        global_num_experts=global_num_experts,
         expert_map=expert_map,
-        apply_router_weight_on_input=apply_router_weight_on_input,
-        max_num_tokens=max_num_tokens)
+        moe_comm_method=moe_comm_method,
+    )
 
 
 UnquantizedFusedMoEMethod.__init__ = unquantized_fused_moe_init_func

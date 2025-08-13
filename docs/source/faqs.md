@@ -10,7 +10,7 @@
 
 ### 1. What devices are currently supported?
 
-Currently, **ONLY** Atlas A2 series(Ascend-cann-kernels-910b)，Atlas A2 series(Atlas-A3-cann-kernels) and Atlas 300I(Ascend-cann-kernels-310p) series are supported:
+Currently, **ONLY** Atlas A2 series(Ascend-cann-kernels-910b)，Atlas A3 series(Atlas-A3-cann-kernels) and Atlas 300I(Ascend-cann-kernels-310p) series are supported:
 
 - Atlas A2 Training series (Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 Box16, Atlas 300T A2)
 - Atlas 800I A2 Inference series (Atlas 800I A2)
@@ -161,10 +161,10 @@ for output in outputs:
 2. Set the following enveriments parameters:
 
 ```bash
-export LCCL_DETERMINISTIC = 1
-export HCCL_DETERMINISTIC = 1
-export ATB_MATMUL_SHUFFLE_K_ENABLE = 0
-export ATB_LLM_LCOC_ENABLE = 0
+export LCCL_DETERMINISTIC=1
+export HCCL_DETERMINISTIC=true
+export ATB_MATMUL_SHUFFLE_K_ENABLE=0
+export ATB_LLM_LCOC_ENABLE=0
 ```
 
 ### 19. How to fix the error "ImportError: Please install vllm[audio] for audio support" for Qwen2.5-Omni model？
