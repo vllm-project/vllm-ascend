@@ -86,8 +86,6 @@ from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.torchair.torchair_attention import AscendTorchairMetadata
-from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
-                                        write_kv_cache_bytes_to_file)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                ProfileExecuteDuration, is_310p,
                                maybe_converting_weight_acl_format)

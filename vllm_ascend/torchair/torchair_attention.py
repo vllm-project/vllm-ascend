@@ -164,10 +164,15 @@ class AscendAttentionTorchairMetadataBuilder(AscendAttentionMetadataBuilder):
               num_reqs,
               num_actual_tokens,
               max_query_len,
-              graph_pad_size: int = -1,
               enable_dbo_across_dp: bool = False,
+              is_only_prefill: bool = False,
               *args,
               **kwargs):
+
+        if 'graph_pad_size' in kwargs:
+            graph_pad_size = kwargs['graph_pad_size']
+        else:
+            graph_pad_size = -1  # default value
 
         device = self.runner.device
 
