@@ -1234,6 +1234,7 @@ class AscendFusedMoE(FusedMoE):
                 self.token_dispatchers = [
                     self.token_dispatcher, token_dispatcher1
                 ]
+        self.enable_flashcomm2 = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM == 2
 
     def naive_multicast(self, x: torch.Tensor,
                         cu_tokens_across_dp_cpu: torch.Tensor):
@@ -1303,6 +1304,8 @@ class AscendFusedMoE(FusedMoE):
             mc2_mask_sp = _metadata_for_padding.mc2_mask if _metadata_for_padding is not None else forward_context.mc2_mask
             chunk_mc2_mask = torch.tensor_split(mc2_mask_sp, tp_size, dim=0)
             mc2_mask = chunk_mc2_mask[tp_rank]
+            replace_allreduce = True
+        if self.enable_flashcomm2:
             replace_allreduce = True
 
         if (fused_moe_state not in [
