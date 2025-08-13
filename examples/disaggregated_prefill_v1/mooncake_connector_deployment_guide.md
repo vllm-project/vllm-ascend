@@ -5,14 +5,14 @@
  *  Software:
      *  Python >= 3.9, < 3.12
      *  CANN >= 8.2.rc1
-     *  PyTorch >= 2.5.1, torch-npu >= 2.5.1.post1.dev20250619
+     *  PyTorch >= 2.7.1, torch-npu >= 2.7.1.dev20250724
      *  vLLM (same version as vllm-ascend)
      *  mooncake-transfer-engine reference documentation: https://github.com/kvcache-ai/Mooncake/blob/main/doc/zh/ascend_transport.md
 
 The vllm version must be the same as the main branch of vllm-ascend, for example, 2025/07/30. The version is
 
- *  vllm: v0.10.0
- *  vllm-ascend: main branch ( as of 25/07/30)
+ *  vllm: v0.10.1
+ *  vllm-ascend: v0.10.1rc1
 
 ## run
 
@@ -49,7 +49,6 @@ export GLOO_SOCKET_IFNAME="xxxxxx"
 export TP_SOCKET_IFNAME="xxxxxx"
 export HCCL_SOCKET_IFNAME="xxxxxx"
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3
-export VLLM_USE_V1=1
 
 vllm serve "/xxxxx/DeepSeek-V2-Lite-Chat" \
   --host localhost \
@@ -90,7 +89,6 @@ vllm serve "/xxxxx/DeepSeek-V2-Lite-Chat" \
 Set `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` to the corresponding NIC.<br>
 `ASCEND_RT_VISIBLE_DEVICES` specifies the cards on which the node run resides. The total number of cards equals `dp_size*tp_size`.<br>
 `BUDGET_CONFIG_PATH` specifies the path of the mooncake.json file.<br>
-Set `VLLM_USE_V1` to 1.<br>
 `/xxxxx/DeepSeek-V2-Lite-Chat` is configured as a model that requires run.<br>
 `--host`: indicates the IP address of the node to be started.<br>
 `--port`: indicates the port to be started, which corresponds to the port in step 4.<br>
@@ -120,7 +118,6 @@ export GLOO_SOCKET_IFNAME="xxxxxx"
 export TP_SOCKET_IFNAME="xxxxxx"
 export HCCL_SOCKET_IFNAME="xxxxxx"
 export ASCEND_RT_VISIBLE_DEVICES=4,5,6,7
-export VLLM_USE_V1=1
 
 vllm serve "/xxxxx/DeepSeek-V2-Lite-Chat" \
   --host localhost \
