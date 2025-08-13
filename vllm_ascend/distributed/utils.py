@@ -25,6 +25,11 @@ def is_lmhead_tp():
     # We only activate optimization of lmhead communication
     # when tp_size == 1, dp_size > 1 and lmhead_tp_size > 1.
 
+    try:
+        get_lmhead_group()
+    except AssertionError:
+        return False
+
     tp_size = get_tensor_model_parallel_world_size()
     dp_size = get_dp_group().world_size
     lmhead_tp_size = get_lmhead_group().world_size
