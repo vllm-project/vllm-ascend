@@ -61,10 +61,6 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: Start container
-        run: |
-          bash .github/workflows/scripts/start_container.sh
-
       - name: Checkout vllm-ascend
         uses: actions/checkout@v4
         with:
@@ -78,6 +74,10 @@ jobs:
           repository: vllm-project/vllm
           ref: main
           path: ./vllm-empty
+
+      - name: Start container
+        run: |
+          bash .github/workflows/scripts/start_container.sh
 
       - name: Run multi-node test
         run: |
