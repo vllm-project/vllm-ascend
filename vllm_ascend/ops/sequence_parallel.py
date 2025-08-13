@@ -68,6 +68,15 @@ class MetadataForPadding:
 
         return slice_data
 
+    def padding_full(self, data: torch.Tensor) -> torch.Tensor:
+        if self.padding_flag:
+            pad_size = self.pad_size
+            padded_data = F.pad(data, (0, 0, 0, pad_size))
+        else:
+            padded_data = data
+            
+        return padded_data
+
     def padding_aligned_scatter(self, data: torch.Tensor) -> torch.Tensor:
         if self.padding_flag:
             pad_size = self.pad_size
@@ -118,3 +127,23 @@ def init_metadata_for_sp(input_ids, enable_sequence_parallelism):
 
     return MetadataForPadding(padding_flag=False,
                               not_dummy_and_is_prefill=False)
+
+def init_metadata_for_flashcomm2(input_ids):
+    tp_size = get_tensor_model_parallel_world_size()
+    lengths_sum_unpadding = input_ids.shape[0]
+    lengths_sum_padding = (
+        (lengths_sum_unpadding + tp_size - 1) // tp_size) * tp_size
+    if lengths_sum_unpadding == lengths_sum_padding:
+        padding_flag = False
+    else:
+        padding_flag = True
+    pad_size = lengths_sum_padding - lengths_sum_unpadding
+    _metadata_for_padding = MetadataForPadding(
+        lengths_sum_unpadding=lengths_sum_unpadding,
+        lengths_sum_padding=lengths_sum_padding,
+        padding_flag=padding_flag,
+        pad_size=pad_size,
+        not_dummy_and_is_prefill=False)
+
+    return _metadata_for_padding
+

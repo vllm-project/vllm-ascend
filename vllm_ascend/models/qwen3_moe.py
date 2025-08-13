@@ -17,11 +17,13 @@
 # Adapted from vllm/model_executor/models/qwen3_moe.py
 # This file is a part of the vllm-ascend project.
 
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 from torch import nn
 from transformers import PretrainedConfig
+import torch.distributed as dist
+import vllm_ascend.envs as envs_ascend
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, CompilationLevel, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -30,7 +32,8 @@ from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (ReplicatedLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -47,9 +50,10 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.sequence import IntermediateTensors
 
+from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
 from vllm_ascend.ops.sequence_parallel import (MetadataForPadding,
-                                               init_metadata_for_sp)
+                                               init_metadata_for_sp, init_metadata_for_flashcomm2)
 from vllm_ascend.utils import vllm_version_is
 
 
@@ -126,6 +130,153 @@ class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
         return hidden_states
 
 
+class CustomQwen3MoeMLP(Qwen3MoeMLP):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        intermediate_size: int,
+        hidden_act: str,
+        quant_config: Optional[QuantizationConfig] = None,
+        reduce_results: bool = True,
+        prefix: str = "",
+    ) -> None:
+        super().__init__(hidden_size=hidden_size,
+                    intermediate_size=intermediate_size,
+                    hidden_act=hidden_act,
+                    quant_config=quant_config,
+                    reduce_results=reduce_results,
+                    prefix=prefix)
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.enable_flashcomm2 = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM == 2
+        if self.enable_flashcomm2:
+            # if flashcomm2 enabled, replace Linear+AllReduce with All2All+Linear
+            self.down_proj = ReplicatedLinear(
+                intermediate_size,
+                hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.down_proj",
+            )
+        else:
+            self.down_proj = RowParallelLinear(
+                intermediate_size,
+                hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.down_proj",
+            )
+
+    def forward(self, x):
+        #if flashcomm2 enabled, the input of MLP is DP
+        #so we need allgather hidden_states and then use TP in gate_up and use DP(by all2all) in down_proj
+        if self.enable_flashcomm2:
+            x = tensor_model_parallel_all_gather(x, 0)
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        if self.enable_flashcomm2:
+            #Do not need pad input, because the input of mlp is the output of the attn, which is padded
+            output = torch.empty(x.shape, dtype=x.dtype, device=x.device)
+            dist.all_to_all_single(output,
+                                   x,
+                                   group=get_tp_group().device_group)
+            x = output.reshape(self.tp_size, -1, output.size(-1)) \
+                        .transpose(0, 1) \
+                        .reshape(-1, output.size(-1)*self.tp_size)
+        x, _ = self.down_proj(x)
+        return x
+
+
+class CustomQwen3MoeAttention(Qwen3MoeAttention):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        rope_theta: float = 10000,
+        rope_scaling: Optional[dict[str, Any]] = None,
+        max_position_embeddings: int = 8192,
+        head_dim: Optional[int] = None,
+        rms_norm_eps: float = 1e-06,
+        qkv_bias: bool = False,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+        dual_chunk_attention_config: Optional[dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(hidden_size=hidden_size,
+                         num_heads=num_heads,
+                         num_kv_heads=num_kv_heads,
+                         rope_theta=rope_theta,
+                         rope_scaling=rope_scaling,
+                         max_position_embeddings=max_position_embeddings,
+                         head_dim=head_dim,
+                         rms_norm_eps=rms_norm_eps,
+                         qkv_bias=qkv_bias,
+                         cache_config=cache_config,
+                         quant_config=quant_config,
+                         prefix=prefix,
+                         dual_chunk_attention_config=dual_chunk_attention_config)
+        self.tp_size = get_tensor_model_parallel_world_size()
+        self.enable_flashcomm2 = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM == 2
+        if self.enable_flashcomm2:
+            self.o_proj = ReplicatedLinear(
+                self.total_num_heads * self.head_dim,
+                hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.o_proj",
+            )
+        else:
+            self.o_proj = RowParallelLinear(self.total_num_heads * self.head_dim,
+                                            hidden_size,
+                                            bias=False,
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.o_proj")
+
+    def attn_output_all_to_all(self, 
+                               attn_output: torch.Tensor,
+                               _metadata_for_padding: Optional[MetadataForPadding] = None) -> torch.Tensor:
+        assert _metadata_for_padding is not None, "Metadata for padding is required for FlashComm2."
+        # pad input because AllGather requires token_num to be divisible by tp_size
+        attn_output = _metadata_for_padding.padding_full(attn_output)
+        output = torch.empty(attn_output.shape,
+                            dtype=attn_output.dtype,
+                            device=attn_output.device)
+        dist.all_to_all_single(output,
+                            attn_output,
+                            group=get_tp_group().device_group)
+        attn_output = output.reshape(self.tp_size, -1, output.size(-1)) \
+                            .transpose(0, 1) \
+                            .reshape(-1, output.size(-1)*self.tp_size)
+        return attn_output
+
+    def forward(
+            self,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor,
+            _metadata_for_padding: Optional[MetadataForPadding] = None) -> torch.Tensor:
+        qkv, _ = self.qkv_proj(hidden_states)
+        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # Add qk-norm
+        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
+                           self.head_dim)
+        q_by_head = self.q_norm(q_by_head)
+        q = q_by_head.view(q.shape)
+
+        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
+                           self.head_dim)
+        k_by_head = self.k_norm(k_by_head)
+        k = k_by_head.view(k.shape)
+        q, k = self.rotary_emb(positions, q, k)
+        attn_output = self.attn(q, k, v)
+        if self.enable_flashcomm2:
+            attn_output = self.attn_output_all_to_all(attn_output, _metadata_for_padding)
+        output, _ = self.o_proj(attn_output)
+        return output
+
+
 class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
 
     def __init__(
@@ -143,7 +294,7 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
-        self.self_attn = Qwen3MoeAttention(
+        self.self_attn = CustomQwen3MoeAttention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
@@ -179,7 +330,7 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
                                                   quant_config=quant_config,
                                                   prefix=f"{prefix}.mlp")
         else:
-            self.mlp = Qwen3MoeMLP(hidden_size=config.hidden_size,
+            self.mlp = CustomQwen3MoeMLP(hidden_size=config.hidden_size,
                                    intermediate_size=config.intermediate_size,
                                    hidden_act=config.hidden_act,
                                    quant_config=quant_config,
@@ -192,6 +343,7 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
         self.enable_sequence_parallelism = (
             vllm_config.compilation_config.pass_config.
             enable_sequence_parallelism if vllm_config is not None else False)
+        self.enable_flashcomm2 = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM == 2
 
     def forward(
         self,
@@ -202,15 +354,16 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
     ) -> torch.Tensor:
 
         # To prevent precision issues during the decoder phase when only prefilling enables SP
-        if not self.enable_sequence_parallelism:
-            self.self_attn.o_proj.reduce_results = True
-        else:
-            self.self_attn.o_proj.reduce_results = not _metadata_for_padding.not_dummy_and_is_prefill if _metadata_for_padding is not None else True
+        if not self.enable_flashcomm2:
+            if not self.enable_sequence_parallelism:
+                self.self_attn.o_proj.reduce_results = True
+            else:
+                self.self_attn.o_proj.reduce_results = not _metadata_for_padding.not_dummy_and_is_prefill if _metadata_for_padding is not None else True
 
         # Self Attention
         if residual is None:
             residual = hidden_states
-            if _metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill:
+            if _metadata_for_padding and (_metadata_for_padding.not_dummy_and_is_prefill or self.enable_flashcomm2):
                 residual = _metadata_for_padding.padding_slice(residual)
 
             hidden_states = self.input_layernorm(hidden_states)
@@ -218,18 +371,20 @@ class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
 
-            if _metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill:
+            if _metadata_for_padding and (_metadata_for_padding.not_dummy_and_is_prefill or self.enable_flashcomm2):
                 hidden_states = _metadata_for_padding.allgather_unpadding_aligned(
                     hidden_states)
 
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
+            _metadata_for_padding=_metadata_for_padding
         )
 
-        if _metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill:
-            hidden_states = _metadata_for_padding.padding_aligned_reduce_scatter(
-                hidden_states)
+        if not self.enable_flashcomm2:
+            if _metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill:
+                hidden_states = _metadata_for_padding.padding_aligned_reduce_scatter(
+                    hidden_states)
 
         # Fully Connected
         hidden_states, residual = self.post_attention_layernorm(
@@ -280,6 +435,7 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
+        self.enable_flashcomm2 = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM == 2
 
     def forward(
         self,
@@ -314,7 +470,7 @@ class CustomQwen3MoeModel(Qwen3MoeModel):
 
         hidden_states, _ = self.norm(hidden_states, residual)
 
-        if _metadata_for_padding and _metadata_for_padding.not_dummy_and_is_prefill:
+        if _metadata_for_padding and (_metadata_for_padding.not_dummy_and_is_prefill or self.enable_flashcomm2):
             hidden_states = _metadata_for_padding.allgather_unpadding_aligned(
                 hidden_states)
 
@@ -358,6 +514,7 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
             self.model.make_empty_intermediate_tensors)
 
         self.enable_sequence_parallelism = vllm_config.compilation_config.pass_config.enable_sequence_parallelism
+        self.enable_flashcomm2 = envs_ascend.VLLM_ASCEND_ENABLE_FLASHCOMM == 2
         # Set MoE hyperparameters
         self.expert_weights: list[torch.Tensor] = []
 
@@ -386,8 +543,13 @@ class CustomQwen3MoeForCausalLM(Qwen3MoeForCausalLM):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        _metadata_for_padding = init_metadata_for_sp(
-            input_ids, self.enable_sequence_parallelism)
+        if self.enable_flashcomm2:
+            if self.enable_sequence_parallelism:
+                raise ValueError(f"Sequence parallelism and FlashComm2 cannot be enabled simultaneously.")
+            _metadata_for_padding = init_metadata_for_flashcomm2(input_ids)
+        else:
+            _metadata_for_padding = init_metadata_for_sp(
+                input_ids, self.enable_sequence_parallelism)
         hidden_states = self.model(input_ids, positions, intermediate_tensors,
                                    inputs_embeds, _metadata_for_padding)
         return hidden_states

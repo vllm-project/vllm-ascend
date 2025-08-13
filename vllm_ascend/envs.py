@@ -145,6 +145,9 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # this feature in eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MLP_OPTIMIZE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MLP_OPTIMIZE", '0'))),
+    # FlashComm optimization: Enable v1 and v2 by setting this flag to 1 or 2 respectively
+    "VLLM_ASCEND_ENABLE_FLASHCOMM":
+    lambda: int(os.getenv("VLLM_ASCEND_ENABLE_FLASHCOMM", '0'))
 }
 
 # end-env-vars-definition
