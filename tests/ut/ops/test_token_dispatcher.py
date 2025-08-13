@@ -15,16 +15,18 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 
+from unittest.mock import MagicMock, PropertyMock, patch
+
 import pytest
+import torch
 from pytest_mock import MockerFixture
 
 from tests.ut.base import PytestBase, TestBase
-from unittest.mock import patch, MagicMock, PropertyMock
-import torch
 from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
-    MoEAlltoAllSeqOverLapDispatcher, MoEDispatcherConfig)
+    MoEAlltoAllSeqOverLapDispatcher, MoEDispatcherConfig,
+    QuantizedTokenDispatcherWithAll2All,
+    UnquantizedTokenDispatcherWithAll2AllV)
 from vllm_ascend.utils import adapt_patch  # noqa E402
-from vllm_ascend.ops.moe_dispatcher.token_dispatcher import UnquantizedTokenDispatcherWithAll2AllV, QuantizedTokenDispatcherWithAll2All
 
 
 class TestMoEAlltoAllSeqOverLapDispatcher(PytestBase):
@@ -419,10 +421,6 @@ class TestQuantizedTokenDispatcherWithAll2All(TestBase):
 
             call_args = mock_save_meta.call_args[1]
 
-            expected_keys = {
-                'topk_ids', 'topk_weights', 'expert_map', 'original_shape',
-                'expanded_row_idx'
-            }
             actual_keys = set(call_args.keys())
 
             self.assertFalse('quantized_tokens_shape' in actual_keys)
