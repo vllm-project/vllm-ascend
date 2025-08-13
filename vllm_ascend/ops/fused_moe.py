@@ -57,6 +57,15 @@ from vllm_ascend.utils import (AscendSocVersion, dispose_tensor,
 
 MOE_ALL2ALL_BUFFER: bool = envs_ascend.MOE_ALL2ALL_BUFFER
 
+def return_row_idx(hidden_states, top_k):
+    num_tokens, _ = hidden_states.shape
+    row_idx_len = num_tokens * top_k
+    row_idx = (torch.arange(0,
+                            row_idx_len,
+                            dtype=torch.int32,
+                            device=hidden_states.device).view(
+                                top_k, -1).permute(1, 0).contiguous())
+    return row_idx
 
 def unified_fused_experts(
     hidden_states: torch.Tensor,
@@ -390,6 +399,7 @@ def fused_experts_with_all2all(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
+    row_idx:torch.Tensor,
     top_k: int,
     expert_map: torch.Tensor = None,
     ep_group: GroupCoordinator = None,
@@ -400,17 +410,10 @@ def fused_experts_with_all2all(
 
     num_tokens, _ = hidden_states.shape
     num_experts = w1.shape[0]
-    device = hidden_states.device
 
     if expert_map is not None:
         global_num_experts = len(expert_map)
         local_num_experts = global_num_experts // ep_group.world_size
-        row_idx_len = num_tokens * top_k
-        row_idx = (torch.arange(0,
-                                row_idx_len,
-                                dtype=torch.int32,
-                                device=device).view(top_k, -1).permute(
-                                    1, 0).contiguous())
         hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
             hidden_states,
             row_idx=row_idx,
@@ -444,12 +447,6 @@ def fused_experts_with_all2all(
 
         hidden_states = hidden_states[sorted_idx]
     else:
-        row_idx_len = num_tokens * top_k
-        row_idx = torch.arange(0,
-                               row_idx_len,
-                               dtype=torch.int32,
-                               device=topk_weights.device).view(
-                                   top_k, -1).permute(1, 0).contiguous()
         hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
             hidden_states,
             row_idx=row_idx,
@@ -523,6 +520,7 @@ def fused_experts_with_all2all_buffer(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
+    row_idx: torch.Tensor,
     top_k: int,
     max_model_len: int,
     global_batch_size: int,
@@ -534,14 +532,10 @@ def fused_experts_with_all2all_buffer(
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
 
     num_tokens, _ = hidden_states.shape
-    device = hidden_states.device
 
     global_num_experts = len(expert_map)
     local_num_experts = global_num_experts // ep_group.world_size
     row_idx_len = num_tokens * top_k
-    row_idx = (torch.arange(0, row_idx_len, dtype=torch.int32,
-                            device=device).view(top_k,
-                                                -1).permute(1, 0).contiguous())
     hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
         hidden_states,
         row_idx=row_idx,
@@ -754,6 +748,7 @@ def fused_experts(
     w2: torch.Tensor,
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
+    row_idx: torch.Tensor,
     top_k: int,
     expert_map: torch.Tensor = None,
     apply_router_weight_on_input: bool = False,
@@ -845,12 +840,6 @@ def fused_experts(
         # Rearrange hidden_states
         sorted_hidden_states = hidden_states[sorted_token_indices]
     else:
-        row_idx_len = num_tokens * top_k
-        row_idx = (torch.arange(0,
-                                row_idx_len,
-                                dtype=torch.int32,
-                                device=device).view(top_k, -1).permute(
-                                    1, 0).contiguous())
         active_num = max_num_tokens if max_num_tokens is not None else num_tokens
         sorted_hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
             hidden_states,
@@ -993,11 +982,11 @@ def select_experts(
     if scoring_func == "softmax":
         # NOTE: vLLM use dtype=torch.float here
         if not use_grouped_topk and custom_routing_function is None:
-            topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k_softmax(
+            topk_weights, topk_ids, row_idx = torch_npu.npu_moe_gating_top_k_softmax(
                 x=router_logits, finished=None, k=top_k)
             topk_ids = topk_ids.to(torch.int32)
             topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
-            return topk_weights, topk_ids
+            return topk_weights, topk_ids, row_idx
 
         topk_weights = router_logits.softmax(dim=-1)
     elif scoring_func == "sigmoid":
@@ -1034,7 +1023,8 @@ def select_experts(
                                                 sorted=False)
         topk_ids = topk_ids.to(torch.int32)
         topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
-        return topk_weights, topk_ids
+        row_idx = return_row_idx(hidden_states, top_k)
+        return topk_weights, topk_ids, row_idx
 
     if custom_routing_function is not None:
         topk_weights, topk_ids = custom_routing_function(
@@ -1045,7 +1035,8 @@ def select_experts(
             global_num_experts=global_num_experts)
         # Required by npu_moe_init_routing
         topk_ids = topk_ids.to(torch.int32)
-        return topk_weights, topk_ids
+        row_idx = return_row_idx(hidden_states, top_k)
+        return topk_weights, topk_ids, row_idx
 
     topk_weights, topk_ids = topk_weights.topk(top_k, dim=-1)
     topk_weights = topk_weights.to(hidden_states.dtype)
@@ -1053,8 +1044,9 @@ def select_experts(
     # Required by npu_moe_init_routing
     topk_ids = topk_ids.to(torch.int32)
     topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
+    row_idx = return_row_idx(hidden_states, top_k)
 
-    return topk_weights, topk_ids
+    return topk_weights, topk_ids, row_idx
 
 
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
@@ -1127,9 +1119,11 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 # out_flag=False, # todo new api; should the third output be output
                 # y2_flag=False, # old api; should the third output be output
                 routed_scaling_factor=1,
-                eps=float(1e-20))
+                eps=float(1e-20),
+            )
+            row_idx = return_row_idx(x, top_k)
         else:
-            topk_weights, topk_ids = select_experts(
+            topk_weights, topk_ids, row_idx = select_experts(
                 hidden_states=x,
                 router_logits=router_logits,
                 top_k=top_k,
@@ -1172,6 +1166,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                                  w2=layer.w2_weight,
                                  topk_weights=topk_weights,
                                  topk_ids=topk_ids,
+                                 row_idx=row_idx,
                                  top_k=top_k,
                                  expert_map=expert_map)
         elif MOE_ALL2ALL_BUFFER:
@@ -1181,6 +1176,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                 w2=layer.w2_weight,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
+                row_idx=row_idx,
                 top_k=top_k,
                 max_model_len=self.max_model_len,
                 global_batch_size=self.global_batch_size,
@@ -1202,6 +1198,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                                               w2=layer.w2_weight,
                                               topk_weights=topk_weights,
                                               topk_ids=topk_ids,
+                                              row_idx=row_idx,
                                               top_k=top_k,
                                               expert_map=expert_map,
                                               ep_group=get_ep_group())
