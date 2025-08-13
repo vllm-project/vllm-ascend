@@ -673,7 +673,6 @@ class UnquantizedTokenDispatcherWithAll2AllV(MoETokenDispatcher):
             global_input_tokens)
 
         return {
-            "share_experts_output": None,
             "global_input_tokens": global_input_tokens,
             "tokens_per_expert": tokens_per_expert
         }
