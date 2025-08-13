@@ -1,0 +1,100 @@
+#
+# Copyright (c) 2025 Huawei Technologies Co., Ltd. All Rights Reserved.
+# This file is a part of the vllm-ascend project.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+name: 'Multi-Node-Test'
+# This workflow runs nightly benchmarks for vllm-ascend.
+
+on:
+  workflow_dispatch:
+    # Allow manual triggering of the workflow
+
+
+# Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
+# declared as "shell: bash -el {0}" on steps that need to be properly activated.
+# It's used to activate ascend-toolkit environment variables.
+defaults:
+  run:
+    shell: bash -el {0}
+
+jobs:
+  get_header_node_ip:
+    # This job is used to get the header node IP address.
+    name: 'Get Header Node IP'
+    runs-on: linux-aarch64-a3-node0
+    outputs:
+        header_ip: ${{ steps.get_header_node_ip.outputs.MASTER_IP }}
+    steps:
+      - name: Get header node IP
+        id: get_header_node_ip
+        run: |
+          echo "MASTER_IP=$(hostname -I | awk '{print $1}')" >> $GITHUB_OUTPUT
+  test_multi_node:
+    # Currently, we run multi-node tests only on: vllm==main, vllm-ascend==main.
+    name: 'Multi-Node-Test / DP'
+    needs: get_header_node_ip
+    strategy:
+        matrix:
+          runner: [linux-aarch64-a3-node0, linux-aarch64-a3-node1]
+    runs-on: ${{matrix.runner}}
+    env:
+      CONTAINER_NAME: ascend_ci_a3
+      WORKSPACE: /home/workspace
+      CLUSTER_SIZE: 2
+      MASTER_IP: ${{ needs.get_header_node_ip.outputs.header_ip }}
+    steps:
+
+      - name: Set config
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: check user
+        run: |
+          whoami
+          
+      - name: Checkout vllm-ascend
+        uses: actions/checkout@v4
+        with:
+          repository: Potabk/vllm-ascend
+          ref: multi_node_ci
+          path: ./
+          clean: true
+
+      - name: Checkout vllm
+        uses: actions/checkout@v4
+        with:
+          repository: vllm-project/vllm
+          ref: main
+          path: ./vllm-empty
+
+      - name: Start container
+        run: |
+          bash .github/workflows/scripts/start_container.sh
+
+      - name: Run multi-node test
+        run: |
+          SCRIPT_PATH="$WORKSPACE/.github/workflows/scripts/install_and_test.sh"
+          if [ "${{ matrix.runner }}" == "linux-aarch64-a3-node0" ]; then
+            docker exec -i $CONTAINER_NAME bash -lc "bash $SCRIPT_PATH header"
+          else
+            docker exec -i $CONTAINER_NAME bash -lc "bash $SCRIPT_PATH worker $MASTER_IP"
+          fi
+
+      - name: Docker post test cleanup
+        if: always()
+        run: |
+          docker rm -f ascend_ci_a3 2>/dev/null || true
+          sudo find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -xdev -exec rm -rf {} +
