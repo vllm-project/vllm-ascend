@@ -1435,8 +1435,16 @@ class AscendFusedMoE(FusedMoE):
                 e_hidden_states, expert_token_num, group_list_type = e_hidden_states
 
         if self.dynamic_eplb:
-            self.moe_load += expert_token_num if group_list_type else \
-                torch.cat([expert_token_num[:1], expert_token_num[1:] - expert_token_num[:-1]])
+            if is_prefill:
+                token_nums = expert_token_num if group_list_type else \
+                    torch.cat([expert_token_num[:1], expert_token_num[1:] - expert_token_num[:-1]])
+                self.moe_load.add_(token_nums)
+            else:
+                with npu_stream_switch("moe_load_async", 0):
+                    npu_wait_tensor(hidden_states, expert_token_num)
+                    token_nums = expert_token_num if group_list_type else \
+                        torch.cat([expert_token_num[:1], expert_token_num[1:] - expert_token_num[:-1]])
+                    self.moe_load.add_(token_nums)
 
         if not self.enable_prefill_optimizations and fused_moe_state != FusedMoEState.AllGather and not enable_sp:
             if tp_size > 1:
