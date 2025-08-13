@@ -457,13 +457,12 @@ class MoEAlltoAllSeqOverLapDispatcher(MoEDispatcher):
 
 class MoETokenDispatcher(ABC):
 
-    def __init__(self, need_param) -> None:
+    def __init__(self, **kwargs) -> None:
         """
         Initialize the MoE Token Dispatcher.
         """
-        self.shared_experts = None
-        self.top_k = need_param.get("top_k")
-        self.num_experts = need_param.get("num_experts")
+        self.top_k = kwargs.get("top_k")
+        self.num_experts = kwargs.get("num_experts")
 
     @property
     def ep_group(self):
@@ -478,15 +477,6 @@ class MoETokenDispatcher(ABC):
     def ep_size(self):
         return get_ep_group().world_size
 
-    @property
-    def tp_ep_group(self):
-        """Get expert tensor and model parallel group."""
-        return None
-
-    @property
-    def tp_ep_size(self):
-        return 1
-
     @abstractmethod
     def token_permutation(self,
                           hidden_states: torch.Tensor,
@@ -495,78 +485,37 @@ class MoETokenDispatcher(ABC):
                           expert_map: torch.Tensor = None,
                           log2phy: torch.Tensor = None,
                           global_redundant_expert_num: int = 0):
-        """Dispatch tokens to experts.
-        Args:
-            hidden_states (torch.Tensor): Input hidden_states.
-            topk_weights (torch.Tensor): The routing probability tensor [num_tokens, num_experts].
-            topk_ids (torch.Tensor): Token to expert mapping tensor.
-        Returns:
-            torch.Tensor: Tokens tensor.
-        """
         raise NotImplementedError("Dispatch function not implemented.")
 
     @abstractmethod
     def token_unpermutation(self,
                             expert_output: torch.Tensor,
                             bias: torch.Tensor = None):
-        """Restores the expert output to its original ordering.
-        Args:
-            expert_output (torch.Tensor): The output tensor from the expert models.
-            bias (torch.Tensor): The bias tensor.
-        Returns:
-            (torch.Tensor, torch.Tensor): Unpermuted activation and optional bias.
-        """
         raise NotImplementedError("Restore function not implemented.")
-
-    def set_shared_experts(self, shared_experts):
-        """Set shared expert to the dispatcher."""
-        self.shared_experts = shared_experts
 
 
 class UnquantizedTokenDispatcherWithAll2AllV(MoETokenDispatcher):
-    overlap_stream = None
     """
     The implementation of the AlltoAll-based token dispatcher, which handles token
     dispatching on the sequence level instead of token level. The core of this implementation
     lies in each device dispatching on the entire sequence, with the hidden state being partitioned.
     """
 
-    def __init__(self, need_param):
-        """
-        Initialize the AlltoAllSeq token dispatcher.
-        Args:
-            config (MoEDispatcherConfig): Configuration for the transformer model.
-        """
-        super().__init__(need_param)
-        self.moe_grouped_gemm = False
-        self.expert_map = None
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         self.hidden_shape = None
         self.topk_weights = None
         self.input_splits = None
         self.output_splits = None
-        self.topk_ids = None
         self.hidden_shape_before_permute = None
 
         # [tp_ep_size * ep_size, num_local_experts]. Represents the number of tokens sent
         # to each local expert by all ranks.
         self.num_global_tokens_per_local_expert = None
 
-        # A cuda stream synchronization is needed in self.token_permutation()
-        # in some cases, because there are several non-blocking DtoH data
-        # transfers called in self.preprocess(). The synchronization happens
-        # at different points based on MoE settings as late as possible.
-        # Valid sync points are "before_permutation_1", "before_ep_alltoall",
-        # "before_finish", and "no_sync".
-        self.device_sync_point = "no_sync"
-
         # cached intermediate tensors.
         self.tokens_per_expert = None
         self.global_input_tokens_local_experts_indices = None
-
-        if MoEAlltoAllSeqOverLapDispatcher.overlap_stream is None:
-            MoEAlltoAllSeqOverLapDispatcher.overlap_stream = torch.npu.Stream()
-
-        self.overlap_stream = MoEAlltoAllSeqOverLapDispatcher.overlap_stream
 
         self.num_local_experts = self.num_experts // self.ep_size
         assert self.num_local_experts > 0, "Expected at least one expert"
@@ -614,14 +563,6 @@ class UnquantizedTokenDispatcherWithAll2AllV(MoETokenDispatcher):
 
         # Dropless
         self.num_out_tokens = indices.numel()
-        if self.ep_size > 1 or self.num_local_experts > 1:
-            # Token dropless and enable ep. A synchronization is needed before expert parallel
-            # AlltoAll communication to get the `input_splits` and `output_splits` CPU values.
-            self.device_sync_point = "before_ep_alltoall"
-        else:
-            # Token dropless and no ep. A synchronization is needed to get the
-            # `tokens_per_expert` CPU value.
-            self.device_sync_point = "before_finish"
 
         if ep_size > 1:
             # ===================================================
@@ -658,7 +599,6 @@ class UnquantizedTokenDispatcherWithAll2AllV(MoETokenDispatcher):
                 raise ValueError(
                     "num_global_tokens_per_local_expert must be set before operations."
                 )
-            self.device_sync_point = "no_sync"
             self.global_input_tokens_local_experts_indices = torch.repeat_interleave(
                 self.expert_ids_per_ep_rank,
                 self.num_global_tokens_per_local_expert.ravel())
@@ -687,8 +627,6 @@ class UnquantizedTokenDispatcherWithAll2AllV(MoETokenDispatcher):
         """
         self.hidden_shape = hidden_states.shape
         self.topk_weights = topk_weights
-        self.top_indices = topk_ids
-        self.expert_map = expert_map
         assert topk_weights.dim() == 2, "Expected 2D tensor for topk_weights"
         assert topk_ids.dim() == 2, "Expected 2D tensor for routing map"
 
@@ -697,17 +635,12 @@ class UnquantizedTokenDispatcherWithAll2AllV(MoETokenDispatcher):
             assert self.hidden_shape is not None
             hidden_states = hidden_states.view(-1, self.hidden_shape[-1])
             tokens_per_expert = self.preprocess(topk_ids)
-            if self.tp_ep_size > 1:
-                hidden_states = all_to_all_sp2hp(hidden_states,
-                                                 group=self.tp_ep_group)
-            self.hidden_shape_before_permute = hidden_states.shape
 
-            if self.device_sync_point == "before_permutation_1":
-                torch.npu.current_stream().synchronize()
+            self.hidden_shape_before_permute = hidden_states.shape
 
             permutated_local_input_tokens, reversed_local_input_permutation_mapping = torch_npu.npu_moe_token_permute(
                 tokens=hidden_states,
-                indices=self.top_indices,
+                indices=topk_ids,
                 num_out_tokens=self.num_out_tokens,
             )
             return permutated_local_input_tokens, reversed_local_input_permutation_mapping, tokens_per_expert
@@ -717,21 +650,12 @@ class UnquantizedTokenDispatcherWithAll2AllV(MoETokenDispatcher):
         self.reversed_local_input_permutation_mapping = reversed_local_input_permutation_mapping
         # permute 1
 
-        # Perform expert parallel AlltoAll communication
-        if self.device_sync_point == "before_ep_alltoall":
-            torch.npu.current_stream().synchronize()
         _, global_input_tokens, permute1_ep_all_to_all_handle = async_all_to_all(
             permutated_local_input_tokens,
             self.output_splits,
             self.input_splits,
             self.ep_group,
         )
-
-        # shared experts compute
-        if self.shared_experts is not None:
-            (share_experts_output), *_ = self.shared_experts(hidden_states)
-        else:
-            share_experts_output = None
 
         permute1_ep_all_to_all_handle.wait()
         permutated_local_input_tokens.untyped_storage().resize_(0)
@@ -742,15 +666,6 @@ class UnquantizedTokenDispatcherWithAll2AllV(MoETokenDispatcher):
                 global_input_tokens, self.reversed_global_input_permutation_mapping = torch_npu.npu_moe_token_permute(
                     global_input_tokens,
                     self.global_input_tokens_local_experts_indices)
-
-            # Perform tensor parallel AllGather on the hidden dimension to obtain the input tokens.
-            # global_input_tokens: [SEQL, H/TP] -> [SEQL, H]
-            if self.tp_ep_size > 1 and self.moe_grouped_gemm:
-                global_input_tokens = all_gather_last_dim_from_tensor_parallel_region(
-                    global_input_tokens, self.tp_ep_group)
-            if self.device_sync_point == "before_finish":
-                torch.npu.current_stream().synchronize()
-
             return global_input_tokens
 
         # token premute2 input
@@ -758,7 +673,7 @@ class UnquantizedTokenDispatcherWithAll2AllV(MoETokenDispatcher):
             global_input_tokens)
 
         return {
-            "share_experts_output": share_experts_output,
+            "share_experts_output": None,
             "global_input_tokens": global_input_tokens,
             "tokens_per_expert": tokens_per_expert
         }
@@ -779,11 +694,6 @@ class UnquantizedTokenDispatcherWithAll2AllV(MoETokenDispatcher):
 
         def unpermute_expert_output_to_alltoall_format(hidden_states):
             assert bias is None, "Bias is not supported in MoEAlltoAllSeqTokenDispatcher"
-            # Perform tensor parallel Reduce-Scatter
-            # hidden_states: [SEQL, H] -> [SEQL, H/TP]
-            if self.tp_ep_size > 1:
-                hidden_states = reduce_scatter_last_dim_to_tensor_parallel_region(
-                    hidden_states, group=self.tp_ep_group)
 
             # Unpermutation 2: expert output to AlltoAll input
             if hidden_states.shape[0] > 0 and self.num_local_experts > 1:
@@ -814,11 +724,6 @@ class UnquantizedTokenDispatcherWithAll2AllV(MoETokenDispatcher):
                 probs=self.topk_weights,
                 restore_shape=self.hidden_shape_before_permute)
 
-            # Perform tensor parallel AlltoAll communication
-            # output: [S*B, H/TP] -> [S*B/TP, H]
-            if self.tp_ep_size > 1:
-                output = all_to_all_hp2sp(output, self.tp_ep_group)
-
             # Reshape the output tensor
             output = output.view(self.hidden_shape)
             return output
@@ -835,8 +740,8 @@ class UnquantizedTokenDispatcherWithAll2AllV(MoETokenDispatcher):
 
 class QuantizedTokenDispatcherWithAll2All(MoETokenDispatcher):
 
-    def __init__(self, need_param):
-        super().__init__(need_param)
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         self._meta = {}
 
     def _save_meta(self, **kwargs):
