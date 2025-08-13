@@ -46,7 +46,7 @@ class DynamicEplb(EplbPolicy):
         return workload_new
 
     @staticmethod
-    # 热点专家拆分为冗余专家
+    # Split hotspot experts into redundant experts
     def original_compute_balanced_pack_redundancy(origin_weights, card_num, num_redundancy_expert, card_per_host=16):
         # Step 1: Sort the items by weight in descending order (we are sorting by weight now)
         # Sort based on the second element (the second value of each tuple)

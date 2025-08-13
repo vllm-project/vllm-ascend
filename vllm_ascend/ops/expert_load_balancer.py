@@ -3,7 +3,7 @@ import random
 from typing import Dict, List
 
 import torch
-from vllm_ascend.distributed.parallel_state import get_ep_group
+from vllm.distributed import get_ep_group
 
 
 class ExpertLoadBalancer(object):
