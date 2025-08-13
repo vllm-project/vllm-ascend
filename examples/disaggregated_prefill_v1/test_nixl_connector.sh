@@ -35,52 +35,44 @@ launch_disagg_prefill() {
   export VLLM_USE_V1=1
   model="/models/DeepSeek-R1-Distill-Qwen-7B"
   # disagg prefill
-  ASCEND_RT_VISIBLE_DEVICES=0 python3 \
+  VLLM_NIXL_SIDE_CHANNEL_PORT=5557 ASCEND_RT_VISIBLE_DEVICES=0 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model $model \
     --port 30100 \
-    --max-model-len 10000 \
     --gpu-memory-utilization 0.9 \
     --kv-transfer-config \
-    '{"kv_connector":"NixlConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":1,"kv_buffer_size":5e9}' &
+    '{"kv_connector":"NixlNpuConnector","kv_role":"kv_producer","kv_rank":0,"kv_parallel_size":1,"kv_buffer_size":5e9}' &
 
-  ASCEND_RT_VISIBLE_DEVICES=1 python3 \
+  VLLM_NIXL_SIDE_CHANNEL_PORT=5558 ASCEND_RT_VISIBLE_DEVICES=1 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model $model \
     --port 30200 \
-    --max-model-len 10000 \
     --gpu-memory-utilization 0.9 \
     --kv-transfer-config \
-    '{"kv_connector":"NixlConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":1,"kv_buffer_size":5e9}' &
+    '{"kv_connector":"NixlNpuConnector","kv_role":"kv_consumer","kv_rank":1,"kv_parallel_size":1,"kv_buffer_size":5e9}' &
 
   wait_for_server 30100
   wait_for_server 30200
-  python3 toy_proxy_server.py --host 0.0.0.0 --port 30000 --prefiller-hosts localhost --prefiller-port 30100 --decoder-hosts localhost --decoder-ports 30200 &
+  python3 load_balance_proxy_server_example.py --host 0.0.0.0 --port 30000 \
+    --prefiller-hosts 127.0.0.1 --prefiller-port 30100 \
+    --decoder-hosts 127.0.0.1 --decoder-ports 30200 &
   sleep 1
 }
 
 
 benchmark() {
   model="/models/DeepSeek-R1-Distill-Qwen-7B"
-  num_prompts=1024
-  input_len=4096
-  output_len=1536
-  cd /vllm-workspace/vllm/benchmarks
-  python3 benchmark_serving.py \
-      --backend vllm \
-      --dataset-name random \
-      --random-input-len $input_len \
-      --random-output-len $output_len \
-      --num-prompts $num_prompts \
-      --ignore-eos \
-      --model $model \
-      --tokenizer $model \
-      --host localhost \
-      --port 30000 \
-      --endpoint /v1/completions \
-      --max-concurrency 10 \
-      --request-rate 10
+  dataset_path="/dataset/ShareGPT_V3_unfiltered_cleaned_split/ShareGPT_V3_unfiltered_cleaned_split.json"
+  num_prompts=4
 
+  vllm bench serve \
+    --backend vllm \
+    --model $model \
+    --dataset-name sharegpt \
+    --dataset-path $dataset_path \
+    --num-prompts $num_prompts \
+    --port 30000 \
+    --endpoint /v1/completions
   sleep 1
 }
 
