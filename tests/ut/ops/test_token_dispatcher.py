@@ -117,26 +117,21 @@ class TestUnquantizedTokenDispatcherWithAll2AllV(TestBase):
         self.mock_tp_ep_size_prop = patcher5.start()
 
         # Mock async_all_to_all
-        patcher6 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.async_all_to_all')
+        patcher6 = patch('vllm_ascend.ops.comm_utils.async_all_to_all')
         self.mock_async_all_to_all = patcher6.start()
         self.addCleanup(patcher6.stop)
         self.mock_async_all_to_all.return_value = (None, torch.randn(16, 16),
                                                    MagicMock())
 
         # Mock torch_npu.npu_moe_token_permute
-        patcher7 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch_npu.npu_moe_token_permute'
-        )
+        patcher7 = patch('torch_npu.npu_moe_token_permute')
         self.mock_npu_moe_token_permute = patcher7.start()
         self.addCleanup(patcher7.stop)
         self.mock_npu_moe_token_permute.return_value = (torch.randn(16, 16),
                                                         torch.arange(16))
 
         # Mock torch_npu.npu_moe_token_unpermute
-        patcher8 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch_npu.npu_moe_token_unpermute'
-        )
+        patcher8 = patch('torch_npu.npu_moe_token_unpermute')
         self.mock_npu_moe_token_unpermute = patcher8.start()
         self.addCleanup(patcher8.stop)
         self.mock_npu_moe_token_unpermute.return_value = torch.randn(8, 16)
@@ -151,43 +146,35 @@ class TestUnquantizedTokenDispatcherWithAll2AllV(TestBase):
             [[2, 2, 2, 2], [2, 2, 2, 2]], dtype=torch.int64)
 
         # Mock torch.histc
-        patcher10 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch.histc')
+        patcher10 = patch('torch.histc')
         self.mock_histc = patcher10.start()
         self.addCleanup(patcher10.stop)
         self.mock_histc.return_value = torch.tensor([2, 2, 2, 2],
                                                     dtype=torch.int64)
 
         # Mock torch.npu.stream
-        patcher11 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch.npu.stream')
+        patcher11 = patch('torch.npu.stream')
         self.mock_npu_stream = patcher11.start()
         self.addCleanup(patcher11.stop)
         self.mock_npu_stream.return_value.__enter__ = MagicMock()
         self.mock_npu_stream.return_value.__exit__ = MagicMock()
 
         # Mock stream and event
-        patcher12 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch.npu.Stream')
-        patcher13 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch.npu.Event')
+        patcher12 = patch('torch.npu.Stream')
+        patcher13 = patch('torch.npu.Event')
         self.mock_stream = patcher12.start()
         self.mock_event = patcher13.start()
         self.addCleanup(patcher12.stop)
         self.addCleanup(patcher13.stop)
 
         # Mock torch.npu.current_device()
-        patcher14 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch.npu.current_device'
-        )
+        patcher14 = patch('torch.npu.current_device')
         self.mock_current_device = patcher14.start()
         self.addCleanup(patcher14.stop)
         self.mock_current_device.return_value = 'cpu'
 
         # Mock torch.npu.current_stream()
-        patcher15 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch.npu.current_stream'
-        )
+        patcher15 = patch('torch.npu.current_stream')
         self.mock_current_stream = patcher15.start()
         self.addCleanup(patcher15.stop)
         mock_stream_obj = MagicMock()
@@ -197,7 +184,7 @@ class TestUnquantizedTokenDispatcherWithAll2AllV(TestBase):
 
         # Mock shared experts
         self.mock_shared_experts = MagicMock()
-        
+
         self.dispatcher = UnquantizedTokenDispatcherWithAll2AllV(need_param)
 
     def test_token_permutation(self):
@@ -293,16 +280,12 @@ class TestQuantizedTokenDispatcherWithAll2All(TestBase):
         self.mock_tp_ep_size_prop = patcher5.start()
 
         # Mock torch.distributed.all_to_all_single
-        patcher6 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch.distributed.all_to_all_single'
-        )
+        patcher6 = patch('torch.distributed.all_to_all_single')
         self.mock_all_to_all_single = patcher6.start()
         self.addCleanup(patcher6.stop)
 
         # Mock torch_npu functions (common ones)
-        patcher7 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch_npu.npu_moe_init_routing'
-        )
+        patcher7 = patch('torch_npu.npu_moe_init_routing')
         self.mock_npu_moe_init_routing = patcher7.start()
         self.addCleanup(patcher7.stop)
         self.mock_npu_moe_init_routing.return_value = (
@@ -311,24 +294,18 @@ class TestQuantizedTokenDispatcherWithAll2All(TestBase):
             torch.randint(0, 4, (16, ))  # expanded_expert_idx
         )
 
-        patcher8 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch_npu.npu_moe_compute_expert_tokens'
-        )
+        patcher8 = patch('torch_npu.npu_moe_compute_expert_tokens')
         self.mock_npu_moe_compute_expert_tokens = patcher8.start()
         self.addCleanup(patcher8.stop)
         self.mock_npu_moe_compute_expert_tokens.return_value = torch.tensor(
             [4, 4, 4, 4])
 
-        patcher9 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch_npu.npu_moe_finalize_routing'
-        )
+        patcher9 = patch('torch_npu.npu_moe_finalize_routing')
         self.mock_npu_moe_finalize_routing = patcher9.start()
         self.addCleanup(patcher9.stop)
         self.mock_npu_moe_finalize_routing.return_value = torch.randn(8, 32)
 
-        patcher10 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch_npu.npu_moe_re_routing'
-        )
+        patcher10 = patch('torch_npu.npu_moe_re_routing')
         self.mock_npu_moe_re_routing = patcher10.start()
         self.addCleanup(patcher10.stop)
         self.mock_npu_moe_re_routing.return_value = (
@@ -338,9 +315,7 @@ class TestQuantizedTokenDispatcherWithAll2All(TestBase):
             torch.tensor([4, 4, 4, 4])  # expert_tokens
         )
 
-        patcher11 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch_npu.npu_dynamic_quant'
-        )
+        patcher11 = patch('torch_npu.npu_dynamic_quant')
         self.mock_npu_dynamic_quant = patcher11.start()
         self.addCleanup(patcher11.stop)
         self.mock_npu_dynamic_quant.return_value = (
@@ -349,9 +324,7 @@ class TestQuantizedTokenDispatcherWithAll2All(TestBase):
         )
 
         # Mock torch.index_select
-        patcher12 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch.index_select'
-        )
+        patcher12 = patch('torch.index_select')
         self.mock_index_select = patcher12.start()
         self.addCleanup(patcher12.stop)
         self.mock_index_select.return_value = torch.randn(16, 32)
@@ -363,8 +336,7 @@ class TestQuantizedTokenDispatcherWithAll2All(TestBase):
         self.addCleanup(patcher13.stop)
 
         # Mock torch.stack to return correct shape
-        patcher14 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch.stack')
+        patcher14 = patch('torch.stack')
         self.mock_stack = patcher14.start()
         self.addCleanup(patcher14.stop)
         # Return tensor of shape [2, 4] to match ep_size=2, num_experts=4
@@ -372,9 +344,7 @@ class TestQuantizedTokenDispatcherWithAll2All(TestBase):
                                                      [4, 4, 4, 4]])
 
         # Mock tensor.view and sum to return proper values
-        patcher15 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch.Tensor.view'
-        )
+        patcher15 = patch('torch.Tensor.view')
         self.mock_tensor_view = patcher15.start()
         self.addCleanup(patcher15.stop)
         mock_view_result = MagicMock()
@@ -385,8 +355,7 @@ class TestQuantizedTokenDispatcherWithAll2All(TestBase):
         self.mock_tensor_view.return_value = mock_view_result
 
         # Mock tensor.sum to return proper value
-        patcher16 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch.Tensor.sum')
+        patcher16 = patch('torch.Tensor.sum')
         self.mock_tensor_sum = patcher16.start()
         self.addCleanup(patcher16.stop)
         mock_sum_result = MagicMock()
@@ -394,13 +363,11 @@ class TestQuantizedTokenDispatcherWithAll2All(TestBase):
         self.mock_tensor_sum.return_value = mock_sum_result
 
         # Mock tensor.new_empty to avoid negative dimension error
-        patcher17 = patch(
-            'vllm_ascend.ops.moe_dispatcher.token_dispatcher.torch.Tensor.new_empty'
-        )
+        patcher17 = patch('torch.Tensor.new_empty')
         self.mock_new_empty = patcher17.start()
         self.addCleanup(patcher17.stop)
         self.mock_new_empty.return_value = torch.randn(16, 32)
-        
+
         self.dispatcher = QuantizedTokenDispatcherWithAll2All(need_param)
 
     def test_token_permutation_without_expert_map(self):
