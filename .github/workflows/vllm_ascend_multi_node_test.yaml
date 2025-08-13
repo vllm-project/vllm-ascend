@@ -61,17 +61,12 @@ jobs:
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
-      - name: check user
-        run: |
-          whoami
-          
       - name: Checkout vllm-ascend
         uses: actions/checkout@v4
         with:
           repository: Potabk/vllm-ascend
           ref: multi_node_ci
           path: ./
-          clean: true
 
       - name: Checkout vllm
         uses: actions/checkout@v4
@@ -97,4 +92,4 @@ jobs:
         if: always()
         run: |
           docker rm -f ascend_ci_a3 2>/dev/null || true
-          sudo find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -xdev -exec rm -rf {} +
+          # sudo find "$GITHUB_WORKSPACE" -mindepth 1 -maxdepth 1 -xdev -exec rm -rf {} +
