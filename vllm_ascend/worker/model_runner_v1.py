@@ -51,9 +51,12 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models.interfaces import supports_transcription
 from vllm.model_executor.models.interfaces_base import (
     VllmModelForPooling, is_pooling_model, is_text_generation_model)
+from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
+from vllm.multimodal.utils import group_mm_kwargs_by_modality
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
+from vllm.tasks import GenerationTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
                         LazyLoader, cdiv)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
@@ -64,6 +67,7 @@ from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorOutput
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import (bind_kv_cache, gather_mm_placeholders,
                                   sanity_check_mm_encoder_outputs,
@@ -84,21 +88,10 @@ from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                ProfileExecuteDuration, is_310p,
-                               maybe_converting_weight_acl_format,
-                               vllm_version_is)
+                               maybe_converting_weight_acl_format)
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
-
-if not vllm_version_is("0.10.0"):
-    from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange
-    from vllm.multimodal.utils import group_mm_kwargs_by_modality
-    from vllm.tasks import GenerationTask, SupportedTask
-    from vllm.v1.worker.kv_connector_model_runner_mixin import \
-        KVConnectorOutput
-else:
-    from vllm.multimodal.inputs import MultiModalKwargs, PlaceholderRange
-    from vllm.multimodal.utils import group_mm_inputs_by_modality
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -478,34 +471,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 model = cast(VllmModelForPooling, self.model)
                 to_update = model.pooler.get_pooling_updates(task)
                 to_update.apply(pooling_params)
-            if vllm_version_is("0.10.0"):
-                self.requests[req_id] = CachedRequestState(
-                    req_id=req_id,
-                    prompt_token_ids=new_req_data.prompt_token_ids,
-                    mm_kwargs=new_req_data.mm_inputs,
-                    mm_positions=new_req_data.mm_positions,
-                    sampling_params=sampling_params,
-                    pooling_params=new_req_data.pooling_params,
-                    generator=generator,
-                    block_ids=new_req_data.block_ids,
-                    num_computed_tokens=new_req_data.num_computed_tokens,
-                    output_token_ids=[],
-                    lora_request=new_req_data.lora_request,
-                )
-            else:
-                self.requests[req_id] = CachedRequestState(
-                    req_id=req_id,
-                    prompt_token_ids=new_req_data.prompt_token_ids,
-                    mm_kwargs=new_req_data.mm_kwargs,
-                    mm_positions=new_req_data.mm_positions,
-                    sampling_params=sampling_params,
-                    pooling_params=new_req_data.pooling_params,
-                    generator=generator,
-                    block_ids=new_req_data.block_ids,
-                    num_computed_tokens=new_req_data.num_computed_tokens,
-                    output_token_ids=[],
-                    lora_request=new_req_data.lora_request,
-                )
+
+            self.requests[req_id] = CachedRequestState(
+                req_id=req_id,
+                prompt_token_ids=new_req_data.prompt_token_ids,
+                mm_kwargs=new_req_data.mm_kwargs,
+                mm_positions=new_req_data.mm_positions,
+                sampling_params=sampling_params,
+                pooling_params=new_req_data.pooling_params,
+                generator=generator,
+                block_ids=new_req_data.block_ids,
+                num_computed_tokens=new_req_data.num_computed_tokens,
+                output_token_ids=[],
+                lora_request=new_req_data.lora_request,
+            )
 
             # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
             if self.uses_mrope:
@@ -514,39 +493,23 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 second_per_grid_ts = []
                 audio_feature_lengths = []
                 use_audio_in_video = False
-                if vllm_version_is("0.10.0"):
-                    for mm_input in self.requests[req_id].mm_kwargs:
-                        if mm_input.get("image_grid_thw") is not None:
-                            image_grid_thw.extend(
-                                mm_input["image_grid_thw"].tolist())
-                        if mm_input.get("video_grid_thw") is not None:
-                            video_grid_thw.extend(
-                                mm_input["video_grid_thw"].tolist())
-                        if mm_input.get("second_per_grid_ts") is not None:
-                            second_per_grid_ts.extend(
-                                mm_input["second_per_grid_ts"])
-                        if mm_input.get("audio_feature_lengths") is not None:
-                            audio_feature_lengths.extend(
-                                mm_input["audio_feature_lengths"])
-                        if mm_input.get("use_audio_in_video") is True:
-                            use_audio_in_video = True
-                else:
-                    for item in self.requests[req_id].mm_kwargs:
-                        mm_input = item.require_data()
-                        if mm_input.get("image_grid_thw") is not None:
-                            image_grid_thw.append(
-                                mm_input["image_grid_thw"].tolist())
-                        if mm_input.get("video_grid_thw") is not None:
-                            video_grid_thw.append(
-                                mm_input["video_grid_thw"].tolist())
-                        if mm_input.get("second_per_grid_ts") is not None:
-                            second_per_grid_ts.append(
-                                mm_input["second_per_grid_ts"])
-                        if mm_input.get("audio_feature_lengths") is not None:
-                            audio_feature_lengths.append(
-                                mm_input["audio_feature_lengths"])
-                        if mm_input.get("use_audio_in_video") is True:
-                            use_audio_in_video = True
+
+                for item in self.requests[req_id].mm_kwargs:
+                    mm_input = item.require_data()
+                    if mm_input.get("image_grid_thw") is not None:
+                        image_grid_thw.append(
+                            mm_input["image_grid_thw"].tolist())
+                    if mm_input.get("video_grid_thw") is not None:
+                        video_grid_thw.append(
+                            mm_input["video_grid_thw"].tolist())
+                    if mm_input.get("second_per_grid_ts") is not None:
+                        second_per_grid_ts.append(
+                            mm_input["second_per_grid_ts"])
+                    if mm_input.get("audio_feature_lengths") is not None:
+                        audio_feature_lengths.append(
+                            mm_input["audio_feature_lengths"])
+                    if mm_input.get("use_audio_in_video") is True:
+                        use_audio_in_video = True
 
                 hf_config = self.model_config.hf_config
 
@@ -947,10 +910,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             return
 
         # Batch the multi-modal inputs.
-        if vllm_version_is("0.10.0"):
-            mm_kwargs = list[MultiModalKwargs]()
-        else:
-            mm_kwargs = list[MultiModalKwargsItem]()
+        mm_kwargs = list[MultiModalKwargsItem]()
         req_ids_pos = list[tuple[str, int, PlaceholderRange]]()
         for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
             req_state = self.requests[req_id]
@@ -968,53 +928,28 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # multimodal inputs. The proper solution should be reordering the
         # encoder outputs.
         encoder_outputs = []
-        if vllm_version_is("0.10.0"):
-            grouped_mm_inputs_list = group_mm_inputs_by_modality(mm_kwargs)
+        for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
+                mm_kwargs,
+                device=self.device,
+                pin_memory=True,
+        ):
+            # Run the encoder.
+            # `curr_group_outputs` is either of the following:
+            # 1. A tensor of shape (num_items, feature_size, hidden_size)
+            # in case feature_size is fixed across all multimodal items.
+            # 2. A list or tuple (length: num_items) of tensors, each of shape
+            # (feature_size, hidden_size) in case the feature size is dynamic
+            # depending on the input multimodal items.
+            curr_group_outputs = self.model.get_multimodal_embeddings(
+                **mm_kwargs_group)
 
-            for grouped_mm_inputs in grouped_mm_inputs_list:
-                batched_mm_inputs = MultiModalKwargs.batch(grouped_mm_inputs)
-                batched_mm_inputs = MultiModalKwargs.as_kwargs(
-                    batched_mm_inputs, device=self.device)
-                # Run the encoder.
-                # `curr_group_outputs` is either of the following:
-                # 1. A tensor of shape (num_items, feature_size, hidden_size)
-                # in case feature_size is fixed across all multimodal items.
-                # 2. A list or tuple (length: num_items) of tensors, each of shape
-                # (feature_size, hidden_size) in case the feature size is dynamic
-                # depending on the input multimodal items.
-                curr_group_outputs = self.model.get_multimodal_embeddings(
-                    **batched_mm_inputs)
+            sanity_check_mm_encoder_outputs(
+                curr_group_outputs,
+                expected_num_items=num_items,
+            )
 
-                sanity_check_mm_encoder_outputs(
-                    curr_group_outputs,
-                    expected_num_items=len(grouped_mm_inputs),
-                )
-
-                for output in curr_group_outputs:
-                    encoder_outputs.append(output)
-        else:
-            for _, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
-                    mm_kwargs,
-                    device=self.device,
-                    pin_memory=True,
-            ):
-                # Run the encoder.
-                # `curr_group_outputs` is either of the following:
-                # 1. A tensor of shape (num_items, feature_size, hidden_size)
-                # in case feature_size is fixed across all multimodal items.
-                # 2. A list or tuple (length: num_items) of tensors, each of shape
-                # (feature_size, hidden_size) in case the feature size is dynamic
-                # depending on the input multimodal items.
-                curr_group_outputs = self.model.get_multimodal_embeddings(
-                    **mm_kwargs_group)
-
-                sanity_check_mm_encoder_outputs(
-                    curr_group_outputs,
-                    expected_num_items=num_items,
-                )
-
-                for output in curr_group_outputs:
-                    encoder_outputs.append(output)
+            for output in curr_group_outputs:
+                encoder_outputs.append(output)
 
         # Cache the encoder outputs.
         for (req_id, input_id, pos_info), output in zip(
@@ -1665,12 +1600,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 pooler_output.append(raw_output.data.cpu())
             else:
                 pooler_output.append(None)
-        extra_args = ({
-            "finished_sending": finished_sending,
-            "finished_recving": finished_recving
-        } if vllm_version_is("0.10.0") else {
-            "kv_connector_output": kv_connector_output
-        })
+        extra_args = ({"kv_connector_output": kv_connector_output})
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
@@ -1706,15 +1636,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
              finished_recving) = (self._process_reqs(scheduler_output,
                                                      intermediate_tensors))
         kv_connector_output = None
-        if not vllm_version_is("0.10.0"):
-            if finished_sending is not None and finished_recving is not None:
-                kv_connector_output = KVConnectorOutput(
-                    finished_sending=finished_sending,
-                    finished_recving=finished_recving)
-            else:
-                kv_connector_output = None
-            finished_sending = None
-            finished_recving = None
+        if finished_sending is not None and finished_recving is not None:
+            kv_connector_output = KVConnectorOutput(
+                finished_sending=finished_sending,
+                finished_recving=finished_recving)
+        else:
+            kv_connector_output = None
+        finished_sending = None
+        finished_recving = None
         with ProfileExecuteDuration().capture_async("post process"):
             # Broadcast PP output for external_launcher (torchrun)
             # to make sure we are synced across pp ranks
@@ -1726,12 +1655,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if not get_pp_group().is_last_rank:
                 # For mid-pipeline stages, return the hidden states.
                 if not broadcast_pp_output:
-                    if kv_connector_output is not None:
-                        hidden_states.kv_connector_output = kv_connector_output
-                    else:
-                        #TODO: Remove this after we drop vllm v0.10.0
-                        hidden_states.finished_sending = finished_sending
-                        hidden_states.finished_recving = finished_recving
+                    hidden_states.kv_connector_output = kv_connector_output
                     return hidden_states
                 assert isinstance(hidden_states, IntermediateTensors)
                 get_pp_group().send_tensor_dict(
@@ -1876,12 +1800,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if has_kv_transfer_group():
                 get_kv_transfer_group().clear_connector_metadata()
 
-        extra_args = ({
-            "finished_sending": finished_sending,
-            "finished_recving": finished_recving
-        } if vllm_version_is("0.10.0") else {
-            "kv_connector_output": kv_connector_output
-        })
+        extra_args = ({"kv_connector_output": kv_connector_output})
 
         model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
