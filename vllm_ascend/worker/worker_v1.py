@@ -34,6 +34,7 @@ from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
+from vllm.tasks import SupportedTask
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
@@ -45,11 +46,8 @@ from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.utils import (init_ascend_soc_version, sleep_mode_enabled,
-                               try_register_lib, vllm_version_is)
+                               try_register_lib)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-
-if not vllm_version_is("0.10.0"):
-    from vllm.tasks import SupportedTask
 
 
 class NPUWorker(WorkerBase):
@@ -209,26 +207,15 @@ class NPUWorker(WorkerBase):
             if not has_kv_transfer_group():
                 return None
 
-            is_legacy = vllm_version_is("0.10.0")
-
-            if is_legacy:
-                finished_sending = output.finished_sending
-                finished_recving = output.finished_recving
-            else:
-                kv_connector_output = output.kv_connector_output
-                finished_sending = kv_connector_output.finished_sending
-                finished_recving = kv_connector_output.finished_recving
+            kv_connector_output = output.kv_connector_output
+            finished_sending = kv_connector_output.finished_sending
+            finished_recving = kv_connector_output.finished_recving
 
             if not finished_sending and not finished_recving:
                 return EMPTY_MODEL_RUNNER_OUTPUT
 
             new_output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-
-            if is_legacy:
-                new_output.finished_sending = finished_sending
-                new_output.finished_recving = finished_recving
-            else:
-                new_output.kv_connector_output = kv_connector_output
+            new_output.kv_connector_output = kv_connector_output
             return new_output
 
         assert isinstance(output, ModelRunnerOutput)
