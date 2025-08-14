@@ -180,4 +180,3 @@ class EplbStatLogger:
                 device_data += device["device_expert"]
             phy2log_data.append(device_data)
         return phy2log_data
-
