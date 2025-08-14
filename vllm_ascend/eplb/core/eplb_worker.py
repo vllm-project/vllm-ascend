@@ -409,7 +409,7 @@ class EplbProcess:
         self.planner_q = planner_q
         self.block_update_q = block_update_q
 
-        self.phy2log_q = Queue(maxsize=1)
+        self.phy2log_q: Queue = Queue(maxsize=1)
         self.phy2log = None
 
         # Create EplbWorker instance

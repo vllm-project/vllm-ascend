@@ -1501,7 +1501,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         if self.dynamic_eplb:
             moe_load, phy2log_map = self.eplb_updator.forward_end()
-            if self.dynamic_eplb_metrics and moe_load is not None:
+            if self.ep_loggers is not None and moe_load is not None:
                 self.ep_loggers.record(moe_load, phy2log_map)
 
         return model_runner_output
