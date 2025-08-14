@@ -1,4 +1,4 @@
-# Multi-Node-Ray (Qwen235B-A3B)
+# Multi-Node-Ray (Qwen/Qwen3-235B-A22B)
 
 Multi-node inference is suitable for scenarios where the model cannot be deployed on a single NPU. In such cases, the model can be distributed using tensor parallelism and pipeline parallelism. The specific parallelism strategies will be covered in the following sections. To successfully deploy multi-node inference, the following three steps need to be completed:
 
@@ -123,7 +123,7 @@ When starting a Ray cluster for multi-node inference, the environment variables 
 export HCCL_IF_IP={local_ip}
 export GLOO_SOCKET_IFNAME={nic_name}
 export TP_SOCKET_IFNAME={nic_name}
-export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1 
+export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 ray start --address='{head_node_ip}:{port_num}' --num-gpus=8 --node-ip-address={local_ip}
 ```
