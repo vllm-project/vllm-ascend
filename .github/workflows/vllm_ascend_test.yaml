@@ -187,7 +187,7 @@ jobs:
           pip install -v -e .
           if [[ "${{ matrix.vllm_version }}" == "v0.10.0" ]]; then
             pip install "transformers<4.54.0"
-          else
+          elif [[ "${{ matrix.vllm_version }}" == "main" ]]; then
             pip install "transformers==4.55.0"
           fi
 
@@ -274,7 +274,7 @@ jobs:
           pip install -v -e .
           if [[ "${{ matrix.vllm_version }}" == "v0.10.0" ]]; then
             pip install "transformers<4.54.0"
-          else
+          elif [[ "${{ matrix.vllm_version }}" == "main" ]]; then
             pip install "transformers==4.55.0"
           fi
 
