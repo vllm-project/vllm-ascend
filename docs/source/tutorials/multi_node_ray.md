@@ -125,7 +125,7 @@ export GLOO_SOCKET_IFNAME={nic_name}
 export TP_SOCKET_IFNAME={nic_name}
 export RAY_EXPERIMENTAL_NOSET_ASCEND_RT_VISIBLE_DEVICES=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-ray start --address='{head_node_ip}:{port_num}' --num-gpus=8 --node-ip-address={local_ip}
+ray start --address='{head_node_ip}:6379' --num-gpus=8 --node-ip-address={local_ip}
 ```
 
 Once the cluster is started on multiple nodes, execute `ray status` and `ray list nodes` to verify the Ray cluster's status. You should see the correct number of nodes and NPUs listed.
