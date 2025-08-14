@@ -10,7 +10,7 @@ from vllm.forward_context import get_forward_context, set_forward_context
 
 import vllm_ascend.envs as envs
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
+from vllm_ascend.ops.moe_dispatcher.token_dispatcher_old import (
     QuantizedTokenDispatcherWithAll2All,
     UnquantizedTokenDispatcherWithAll2AllV)
 

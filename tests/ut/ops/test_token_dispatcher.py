@@ -19,7 +19,7 @@ import pytest
 from pytest_mock import MockerFixture
 
 from tests.ut.base import PytestBase
-from vllm_ascend.ops.moe_dispatcher.token_dispatcher import (
+from vllm_ascend.ops.moe_dispatcher.token_dispatcher_old import (
     MoEAlltoAllSeqOverLapDispatcher, MoEDispatcherConfig)
 from vllm_ascend.utils import adapt_patch  # noqa E402
 
