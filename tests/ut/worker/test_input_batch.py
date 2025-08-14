@@ -12,7 +12,7 @@ def mock_cached_request_state(req_id="1", prompt=[1, 2, 3], output=[4, 5, 6]):
     return CachedRequestState(
         req_id=req_id,
         prompt_token_ids=prompt,
-        mm_inputs=[],
+        mm_kwargs=[],
         mm_positions=[],
         sampling_params=SamplingParams(),
         pooling_params=None,
