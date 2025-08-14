@@ -1858,8 +1858,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             return EMPTY_MODEL_RUNNER_OUTPUT
 
         output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.finished_sending = finished_sending
-        output.finished_recving = finished_recving
+        if vllm_version_is("0.10.0"):
+            output.finished_sending = finished_sending
+            output.finished_recving = finished_recving
+        else:
+            output.kv_connector_output = KVConnectorOutput(
+                finished_sending=finished_sending,
+                finished_recving=finished_recving)
         return output
 
     @staticmethod
