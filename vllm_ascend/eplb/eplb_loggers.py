@@ -118,7 +118,7 @@ class EplbStatLogger:
     def record_loop(self):
         while True:
             try:
-                if self.update_load and self.moe_load is not None:
+                if self.update_load:
                     with self.lock:
                         self.update_load = False
                         moe_load = self.moe_load.tolist()
