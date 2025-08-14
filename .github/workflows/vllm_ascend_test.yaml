@@ -187,6 +187,8 @@ jobs:
           pip install -v -e .
           if [[ "${{ matrix.vllm_version }}" == "v0.10.0" ]]; then
             pip install "transformers<4.54.0"
+          else
+            pip install "transformers==4.55.0"
           fi
 
       - name: Run e2e test
@@ -272,6 +274,8 @@ jobs:
           pip install -v -e .
           if [[ "${{ matrix.vllm_version }}" == "v0.10.0" ]]; then
             pip install "transformers<4.54.0"
+          else
+            pip install "transformers==4.55.0"
           fi
 
       - name: Run vllm-project/vllm-ascend test
