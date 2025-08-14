@@ -4,6 +4,7 @@ import shutil
 from contextlib import contextmanager, nullcontext
 
 import torch
+from torchair.scope import super_kernel as _super_kernel
 
 try:
     # Recent release of torchair has moved these ops to `.scope`.
@@ -96,3 +97,7 @@ def npu_wait_tensor(self: torch.Tensor,
                     *,
                     enabled: bool = True):
     return _npu_wait_tensor(self, dependency) if enabled else self
+
+
+def super_kernel(prefix: str, option: str, enabled: bool = True):
+    return _super_kernel(prefix, option) if enabled else nullcontext()
