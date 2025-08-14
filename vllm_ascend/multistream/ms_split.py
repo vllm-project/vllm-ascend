@@ -105,7 +105,7 @@ def model_input_split_v1_mla_attn(
     [block_table_pre,
      block_table_post] = split_attn_tensor_type(attn_metadata.block_tables,
                                                 seq_index)
-
+    assert attn_metadata.attn_mask is not None
     if attn_metadata.attn_state == AscendAttentionState.PrefillNoCache or attn_metadata.attn_state == AscendAttentionState.PrefillCacheHit:
         # the attn_mla kernel in torch npu only accept 128*128 attn mask
         attn_mask_pre = attn_mask_post = attn_metadata.attn_mask

@@ -43,7 +43,7 @@ class CachedRequestState:
 
     req_id: str
     prompt_token_ids: list[int]
-    mm_inputs: list[MultiModalKwargs]
+    mm_kwargs: list[MultiModalKwargs]
     mm_positions: list[PlaceholderRange]
     sampling_params: Optional[SamplingParams]
     pooling_params: Optional[PoolingParams]
