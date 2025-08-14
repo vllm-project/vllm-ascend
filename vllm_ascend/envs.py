@@ -159,6 +159,10 @@ env_variables: Dict[str, Callable[[], Any]] = {
     #   1: enable moe all2all seq.
     "VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ":
     lambda: bool(int(os.getenv('VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ', '0'))),
+    # Whether to enable hccl allreduce in has_unfinished_dp function.
+    # this feature is supported in A3, and will get better performance.
+    "VLLM_ASCEND_ENABLE_HCCL_ALLREDUCE":
+    lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_HCCL_ALLREDUCE", '0'))),
 }
 
 # end-env-vars-definition
