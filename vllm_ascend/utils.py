@@ -31,7 +31,7 @@ from packaging.version import InvalidVersion, Version
 from torch_npu.npu.streams import Event
 from vllm.logger import logger
 
-import vllm_ascend.envs as envs
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 
 if TYPE_CHECKING:
@@ -214,8 +214,12 @@ def enable_custom_op():
     if _CUSTOM_OP_ENABLED is not None:
         return _CUSTOM_OP_ENABLED
     try:
+        # isort: off
         # register custom ops into torch_library here
         import vllm_ascend.vllm_ascend_C  # type: ignore  # noqa: F401
+        # register the meta implementation for custom kernel if necessary
+        import vllm_ascend.meta_registration  # type: ignore  # noqa: F401
+        # isort: on
         _CUSTOM_OP_ENABLED = True
     except ImportError:
         _CUSTOM_OP_ENABLED = False
@@ -232,7 +236,7 @@ def find_hccl_library() -> str:
     After importing `torch`, `libhccl.so` can be
     found by `ctypes` automatically.
     """
-    so_file = envs.HCCL_SO_PATH
+    so_file = envs_ascend.HCCL_SO_PATH
 
     # manually load the hccl library
     if so_file:
@@ -273,8 +277,8 @@ def adapt_patch(is_global_patch: bool = False):
 
 @functools.cache
 def vllm_version_is(target_vllm_version: str):
-    if envs.VLLM_VERSION is not None:
-        vllm_version = envs.VLLM_VERSION
+    if envs_ascend.VLLM_VERSION is not None:
+        vllm_version = envs_ascend.VLLM_VERSION
     else:
         import vllm
         vllm_version = vllm.__version__
@@ -385,7 +389,7 @@ class ProfileExecuteDuration:
 
     @contextmanager
     def capture_async(self, duration_tag: str):
-        if not envs.VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE:
+        if not envs_ascend.VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE:
             yield
             return
 
@@ -403,7 +407,7 @@ class ProfileExecuteDuration:
     def pop_captured_sync(self) -> dict:
         """Pop and synchronize all events in the observation list"""
         durations: dict[str, float] = {}
-        if not envs.VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE:
+        if not envs_ascend.VLLM_ASCEND_MODEL_EXECUTE_TIME_OBSERVE:
             return durations
 
         while self._observations:
@@ -437,7 +441,7 @@ def get_rm_router_logits_state(ep_size: int, dp_size: int,
     # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
     # only supports deepseek v3/r1
     if dp_size > 1:
-        if (envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
+        if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
                 and is_deepseek_v3_r1):
             return True
         elif ep_size == 1 and is_deepseek_v3_r1:
@@ -451,7 +455,7 @@ def get_rm_router_logits_state(ep_size: int, dp_size: int,
 def get_all_reduce_merge_state(ep_size: int, is_deepseek_v3_r1: bool):
     # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
     # only supports deepseek v3/r1
-    if (envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
+    if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
             and is_deepseek_v3_r1):
         return True
     elif ep_size == 1 and is_deepseek_v3_r1:

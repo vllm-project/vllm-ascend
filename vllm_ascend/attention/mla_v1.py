@@ -14,7 +14,7 @@ from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
 from vllm.utils import cdiv, round_down
 
-from vllm_ascend import envs
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
@@ -621,6 +621,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.enable_kv_nz = ascend_config.torchair_graph_config.enable_kv_nz
+        self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
         # Adapt torch air graph mode with spec decoding.
         speculative_config = get_current_vllm_config().speculative_config
@@ -635,6 +636,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         x = torch.bmm(x, self.W_UV)
         # Convert from (N, B, V) to (B, N * V)
         x = x.transpose(0, 1).reshape(-1, self.num_heads * self.v_head_dim)
+        if hasattr(self, "running_in_graph") and not self.running_in_graph:
+            return x
         MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024  # 16MB
         npu_prefetch(self.o_proj.weight,
                      x,
@@ -905,14 +908,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         ] and not ascend_config.chunked_prefill_for_mla:
             attn_output = attn_output_torch
 
-        current_ms_metadata = get_multistream_comm_context()
-        if current_ms_metadata is None:
-            return self.o_proj(attn_output, is_prefill=True)[0]
-        else:
-            current_ms_metadata.before_comm_event.record()
-            with torch.npu.stream(current_ms_metadata.comm_stream):
-                current_ms_metadata.before_comm_event.wait()
-                return self.o_proj(attn_output, is_prefill=True)[0]
+        return attn_output
 
     def exec_kv(
         self,
@@ -998,7 +994,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
         num_tokens = q_nope.size(0)
-        if self.running_in_graph:
+        if self.running_in_graph or self.running_chunkprefilll_with_torchair:
             # shape of knope/k_pe for npu graph mode should be:
             # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
             block_size = kv_c_and_k_pe_cache[0].shape[1]
@@ -1058,7 +1054,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             # be removed after the torch_npu contains `torch_npu.atb.npu_multi_head_latent_attention` become
             # public available
             assert len(kv_c_and_k_pe_cache) > 1
-            if envs.VLLM_ASCEND_MLA_PA:
+            if envs_ascend.VLLM_ASCEND_MLA_PA:
                 attn_output = torch_npu.atb.npu_multi_head_latent_attention(
                     q_nope, q_pe, kv_c_and_k_pe_cache[0],
                     kv_c_and_k_pe_cache[1], attn_metadata.decode.block_table,
@@ -1112,6 +1108,7 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.running_in_graph = self.torchair_graph_enabled and attn_metadata.attn_state in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
+        self.running_chunkprefilll_with_torchair = self.torchair_graph_enabled and attn_metadata.attn_state == AscendAttentionState.ChunkedPrefill
         num_actual_toks = attn_metadata.num_actual_tokens
         if k_pe is None and not self.running_in_graph:
             kv_c, k_pe = self.kv_a_proj_with_mqa(
@@ -1148,18 +1145,25 @@ class AscendMLAImpl(MLAAttentionImpl):
         if has_decode:
             decode_k_nope = None
             assert attn_metadata.decode is not None
-            if self.running_in_graph:
+            if self.running_in_graph or self.running_chunkprefilll_with_torchair:
                 cos = attn_metadata.decode.cos
                 sin = attn_metadata.decode.sin
-                with npu_stream_switch("mla_secondary",
-                                       0,
-                                       enabled=enable_multistream_mla):
-                    npu_wait_tensor(hidden_states_or_kv_c_normed,
-                                    ckq,
-                                    enabled=enable_multistream_mla)
+                if self.running_chunkprefilll_with_torchair:
+                    decode_hs = (
+                        hidden_states_or_kv_c_normed[:num_decode_tokens])
+                    slots = attn_metadata.slot_mapping[:num_decode_tokens]
                     decode_k_pe, decode_k_nope, decode_kv = self.exec_kv(
-                        hidden_states_or_kv_c_normed, cos, sin, kv_cache,
-                        attn_metadata.slot_mapping)
+                        decode_hs, cos, sin, kv_cache, slots)
+                else:
+                    with npu_stream_switch("mla_secondary",
+                                           0,
+                                           enabled=enable_multistream_mla):
+                        npu_wait_tensor(hidden_states_or_kv_c_normed,
+                                        ckq,
+                                        enabled=enable_multistream_mla)
+                        decode_k_pe, decode_k_nope, decode_kv = self.exec_kv(
+                            hidden_states_or_kv_c_normed, cos, sin, kv_cache,
+                            attn_metadata.slot_mapping)
                 # Without explicitly controlling the order, IndexByTensor operations
                 # would be placed after `matmul W_KV_T` hindering the overlapping of
                 # KvRmsNormRopeCache and SingleRope.
@@ -1183,6 +1187,8 @@ class AscendMLAImpl(MLAAttentionImpl):
                                     decode_k_pe,
                                     enabled=enable_multistream_mla)
                     decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
+            elif self.running_chunkprefilll_with_torchair:
+                decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
             else:
                 decode_q_pe[...], decode_k_pe[...] = self.rotary_emb(
                     attn_metadata.decode.input_positions,
@@ -1221,16 +1227,15 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_cache
         ) > 1, "the number of kv cache should be greater than 1, namely (nope_cache and rope_cache)"
         if self.torchair_graph_enabled:
-            if kv_cache[0].numel(
-            ) > 0 and attn_metadata.attn_state == AscendAttentionState.PrefillNoCache:
+            if kv_cache[0].numel() > 0 and has_prefill:
                 slots = attn_metadata.slot_mapping
                 # NOTE: Separate the kv cache in advance to avoid OOM or other issues
-                torch_npu._npu_reshape_and_cache(key=kv_c_normed.view(
-                    num_tokens, self.num_kv_heads, -1),
-                                                 value=prefill_k_pe,
-                                                 key_cache=kv_cache[0],
-                                                 value_cache=kv_cache[1],
-                                                 slot_indices=slots)
+                torch_npu._npu_reshape_and_cache(
+                    key=kv_c_normed.view(num_tokens, self.num_kv_heads, -1),
+                    value=prefill_k_pe,
+                    key_cache=kv_cache[0],
+                    value_cache=kv_cache[1],
+                    slot_indices=slots[num_decode_tokens:])
         else:
             kv_c_normed = kv_c_normed.view(
                 [num_actual_toks, self.num_kv_heads, -1])
@@ -1240,6 +1245,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                 key_cache=kv_cache[0],
                 value_cache=kv_cache[1],
                 slot_indices=attn_metadata.slot_mapping)
+        if not self.running_in_graph:
+            o_proj_input_shape = (num_actual_toks,
+                                  self.num_heads * self.v_head_dim)
+            o_proj_input = torch.empty(o_proj_input_shape,
+                                       dtype=hidden_states_or_q_c.dtype,
+                                       device=hidden_states_or_q_c.device)
         if has_prefill:
             # FIX: aicore move should be also placed on the comm stream in dbo,
             # otherwise it may affect the accuracy
@@ -1250,11 +1261,12 @@ class AscendMLAImpl(MLAAttentionImpl):
                                                    attn_metadata)
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
+                current_ms_metadata.before_comm_event.record()
                 with torch.npu.stream(current_ms_metadata.comm_stream):
-                    output[num_decode_tokens:] = output_prefill
-                    current_ms_metadata.after_comm_event.record()
+                    current_ms_metadata.before_comm_event.wait()
+                    o_proj_input[num_decode_tokens:] = output_prefill
             else:
-                output[num_decode_tokens:] = output_prefill
+                o_proj_input[num_decode_tokens:] = output_prefill
 
         if has_decode:
             if self.running_in_graph:
@@ -1271,9 +1283,32 @@ class AscendMLAImpl(MLAAttentionImpl):
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
                 with torch.npu.stream(current_ms_metadata.comm_stream):
-                    output[:num_decode_tokens] = output_decode
-                    current_ms_metadata.after_comm_event.record()
+                    o_proj_input[:num_decode_tokens] = output_decode
             else:
-                output[:num_decode_tokens] = output_decode
+                o_proj_input[:num_decode_tokens] = output_decode
 
+        current_ms_metadata = get_multistream_comm_context()
+        MAX_O_PROJ_PREFETCH_SIZE = 16 * 1024 * 1024  # 16MB
+        if current_ms_metadata is None:
+            npu_prefetch(self.o_proj.weight,
+                         o_proj_input,
+                         max_size=MAX_O_PROJ_PREFETCH_SIZE,
+                         enabled=enable_multistream_mla)
+
+            output[...] = self.o_proj(
+                o_proj_input,
+                is_prefill=True,
+                is_force_scatter=self.enable_shared_expert_dp)[0]
+        else:
+            with torch.npu.stream(current_ms_metadata.comm_stream):
+                npu_prefetch(self.o_proj.weight,
+                             o_proj_input,
+                             max_size=MAX_O_PROJ_PREFETCH_SIZE,
+                             enabled=enable_multistream_mla)
+                output[...] = self.o_proj(
+                    o_proj_input,
+                    is_prefill=True,
+                    is_force_scatter=self.enable_shared_expert_dp)[0]
+                current_ms_metadata.after_comm_event.record()
+        del o_proj_input
         return output_padded

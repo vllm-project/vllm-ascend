@@ -54,6 +54,7 @@ from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.utils import FlexibleArgumentParser
 
+# If network issues prevent AudioAsset from fetching remote audio files, retry or check your network.
 audio_assets = [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
 question_per_audio_count = {
     1: "What is recited in the audio?",

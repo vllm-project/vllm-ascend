@@ -4,17 +4,19 @@
 
 - [[v0.7.3.post1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1007)
 - [[v0.9.1rc2] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1487)
-- [[v0.9.2rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/1742)
+- [[v0.10.0rc1] FAQ & Feedback](https://github.com/vllm-project/vllm-ascend/issues/2217)
 
 ## General FAQs
 
 ### 1. What devices are currently supported?
 
-Currently, **ONLY** Atlas A2 series(Ascend-cann-kernels-910b) and Atlas 300I(Ascend-cann-kernels-310p) series are supported:
+Currently, **ONLY** Atlas A2 series(Ascend-cann-kernels-910b)，Atlas A3 series(Atlas-A3-cann-kernels) and Atlas 300I(Ascend-cann-kernels-310p) series are supported:
 
 - Atlas A2 Training series (Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 Box16, Atlas 300T A2)
 - Atlas 800I A2 Inference series (Atlas 800I A2)
-- Atlas 300I Inference series (Atlas 300I Duo)
+- Atlas A3 Training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
+- Atlas 800I A3 Inference series (Atlas 800I A3)
+- [Experimental] Atlas 300I Inference series (Atlas 300I Duo)
 
 Below series are NOT supported yet:
 - Atlas 200I A2 (Ascend-cann-kernels-310b) unplanned yet
@@ -32,6 +34,33 @@ If you are in China, you can use `daocloud` to accelerate your downloading:
 # Replace with tag you want to pull
 TAG=v0.7.3rc2
 docker pull m.daocloud.io/quay.io/ascend/vllm-ascend:$TAG
+```
+
+#### Load Docker Images for offline environment
+If you want to use container image for offline environments (no internet connection), you need to download container image in a environment with internet access:
+
+**Exporting Docker images:**
+
+```{code-block} bash
+   :substitutions:
+# Pull the image on a machine with internet access
+TAG=|vllm_ascend_version|
+docker pull quay.io/ascend/vllm-ascend:$TAG
+
+# Export the image to a tar file and compress to tar.gz
+docker save quay.io/ascend/vllm-ascend:$TAG | gzip > vllm-ascend-$TAG.tar.gz
+```
+
+**Importing Docker images in environment without internet access:**
+
+```{code-block} bash
+   :substitutions:
+# Transfer the tar/tar.gz file to the offline environment and load it
+TAG=|vllm_ascend_version|
+docker load -i vllm-ascend-$TAG.tar.gz
+
+# Verify the image is loaded
+docker images | grep vllm-ascend
 ```
 
 ### 3. What models does vllm-ascend supports?
@@ -159,10 +188,10 @@ for output in outputs:
 2. Set the following enveriments parameters:
 
 ```bash
-export LCCL_DETERMINISTIC = 1
-export HCCL_DETERMINISTIC = 1
-export ATB_MATMUL_SHUFFLE_K_ENABLE = 0
-export ATB_LLM_LCOC_ENABLE = 0
+export LCCL_DETERMINISTIC=1
+export HCCL_DETERMINISTIC=true
+export ATB_MATMUL_SHUFFLE_K_ENABLE=0
+export ATB_LLM_LCOC_ENABLE=0
 ```
 
 ### 19. How to fix the error "ImportError: Please install vllm[audio] for audio support" for Qwen2.5-Omni model？

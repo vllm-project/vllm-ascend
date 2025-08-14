@@ -185,6 +185,9 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pip install -v -e .
+          if [[ "${{ matrix.vllm_version }}" == "v0.10.0" ]]; then
+            pip install "transformers<4.54.0"
+          fi
 
       - name: Run e2e test
         env:
@@ -211,8 +214,7 @@ jobs:
           --ignore=tests/e2e/singlecard/test_embedding.py \
           --ignore=tests/e2e/singlecard/spec_decode_v1/test_v1_mtp_correctness.py \
           --ignore=tests/e2e/singlecard/spec_decode_v1/test_v1_spec_decode.py \
-          --ignore=tests/e2e/singlecard/test_offline_inference_310p.py \
-          --ignore=tests/e2e/singlecard/models/test_lm_eval_correctness.py
+          --ignore=tests/e2e/singlecard/test_offline_inference_310p.py
   e2e-2-cards:
     needs: [e2e]
     if: ${{ needs.e2e.result == 'success' }}
@@ -268,6 +270,9 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pip install -v -e .
+          if [[ "${{ matrix.vllm_version }}" == "v0.10.0" ]]; then
+            pip install "transformers<4.54.0"
+          fi
 
       - name: Run vllm-project/vllm-ascend test
         env:
