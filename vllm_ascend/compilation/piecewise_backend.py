@@ -23,7 +23,7 @@ from unittest.mock import patch
 
 import torch
 import torch.fx as fx
-import vllm.envs as envs
+import vllm.envs as envs_vllm
 from vllm.compilation.backends import VllmBackend
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.monitor import end_monitoring_torch_compile
@@ -93,7 +93,7 @@ class NPUPiecewiseBackend:
 
         self.sym_shape_indices = sym_shape_indices
 
-        self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self.is_debugging_mode = envs_vllm.VLLM_LOGGING_LEVEL == "DEBUG"
 
         # the entries for different shapes that we need to either
         # compile or capture aclgraph

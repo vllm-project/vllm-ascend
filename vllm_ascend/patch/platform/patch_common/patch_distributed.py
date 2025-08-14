@@ -18,7 +18,7 @@
 # This file is a part of the vllm-ascend project.
 
 import torch
-import vllm.envs as envs
+import vllm.envs as envs_vllm
 from vllm.config import ParallelConfig
 
 from vllm_ascend.utils import is_310p
@@ -37,7 +37,7 @@ def parallel_config_get_dp_port(self) -> int:
     self.data_parallel_master_port += 1
 
     # NOTE: Get port from envs directly when using torchrun
-    port = envs.VLLM_DP_MASTER_PORT if envs.VLLM_DP_MASTER_PORT else answer
+    port = envs_vllm.VLLM_DP_MASTER_PORT if envs_vllm.VLLM_DP_MASTER_PORT else answer
     return port
 
 

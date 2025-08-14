@@ -23,7 +23,7 @@ import torch_npu
 from vllm.distributed import GroupCoordinator, get_ep_group
 from vllm.forward_context import get_forward_context
 
-import vllm_ascend.envs as envs
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import FusedMoEState
 from vllm_ascend.distributed.parallel_state import get_mc2_group
@@ -1019,7 +1019,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 1, 2).contiguous()
             layer.w2_weight.data = layer.w2_weight.data.transpose(
                 1, 2).contiguous()
-        if envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP:
+        if envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP:
             torch_npu.npu_format_cast_(layer.w2_weight, ACL_FORMAT_FRACTAL_NZ)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(
             layer.w13_weight_scale.data.shape[0], -1)

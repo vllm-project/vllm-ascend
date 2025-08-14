@@ -23,8 +23,8 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch_npu
+import vllm.envs as envs_vllm
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
-from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -317,8 +317,8 @@ class NPUWorker(WorkerBase):
     def _init_profiler(self):
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
-        if envs.VLLM_TORCH_PROFILER_DIR:
-            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
+        if envs_vllm.VLLM_TORCH_PROFILER_DIR:
+            torch_profiler_trace_dir = envs_vllm.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)
 

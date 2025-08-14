@@ -28,7 +28,7 @@ from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import logger
 from vllm.model_executor.layers.linear import RowParallelLinear
 
-from vllm_ascend import envs
+import vllm_ascend.envs as envs_ascend
 
 _HCOMM_INFO = None
 
@@ -142,6 +142,6 @@ class AscendRowParallelLinear(RowParallelLinear):
         return output
 
 
-if envs.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE:
+if envs_ascend.VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE:
     logger.info("AscendRowParallelLinear: Matmul all-reduce is enabled. ")
     vllm.model_executor.layers.linear.RowParallelLinear = AscendRowParallelLinear

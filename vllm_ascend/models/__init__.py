@@ -1,6 +1,6 @@
 from vllm import ModelRegistry
 
-import vllm_ascend.envs as envs
+import vllm_ascend.envs as envs_ascend
 
 
 def register_model():
@@ -21,7 +21,7 @@ def register_model():
         "Qwen2VLForConditionalGeneration",
         "vllm_ascend.models.qwen2_vl:AscendQwen2VLForConditionalGeneration")
 
-    if envs.USE_OPTIMIZED_MODEL:
+    if envs_ascend.USE_OPTIMIZED_MODEL:
         ModelRegistry.register_model(
             "Qwen2_5_VLForConditionalGeneration",
             "vllm_ascend.models.qwen2_5_vl:AscendQwen2_5_VLForConditionalGeneration"
@@ -32,7 +32,7 @@ def register_model():
             "vllm_ascend.models.qwen2_5_vl_without_padding:AscendQwen2_5_VLForConditionalGeneration_Without_Padding"
         )
 
-    if envs.VLLM_ASCEND_ENABLE_DBO:
+    if envs_ascend.VLLM_ASCEND_ENABLE_DBO:
         ModelRegistry.register_model(
             "DeepseekV2ForCausalLM",
             "vllm_ascend.models.deepseek_dbo:CustomDeepseekDBOForCausalLM")
