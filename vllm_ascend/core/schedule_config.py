@@ -80,8 +80,15 @@ class AscendSchedulerConfig(SchedulerConfig):
                 self.long_prefill_token_threshold = \
                     max(1, int(self.max_model_len * 0.04))
 
-        assert (self.max_long_partial_prefills > 0)
-        assert (self.long_prefill_token_threshold > 0)
+        if self.max_long_partial_prefills <= 0:
+            raise ValueError(
+                f"max_long_partial_prefills must be positive, but got "
+                f"{self.max_long_partial_prefills}")
+        if self.long_prefill_token_threshold <= 0:
+            raise ValueError(
+                f"long_prefill_token_threshold must be positive, but got "
+                f"{self.long_prefill_token_threshold}")
+
         if self.policy != "fcfs":
             raise NotImplementedError(
                 f"currently AscendScheduler only supports fcfs policy, got {self.policy}"
