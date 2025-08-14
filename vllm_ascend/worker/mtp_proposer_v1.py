@@ -294,15 +294,13 @@ class MtpProposer:
                 hidden_states = hidden_states[last_token_indices]
                 slot_mapping = attn_metadata.slot_mapping[last_token_indices]
                 attn_metadata.slot_mapping.fill_(-1)
-                attn_metadata.num_actual_tokens = batch_size
-                attn_metadata.max_query_len = 1
                 attn_metadata.query_start_loc = self.arange[:batch_size + 1]
                 last_token_indices = self.arange[:batch_size]
                 if attn_metadata.num_decode_tokens != 0:
                     attn_metadata.num_decode_tokens = batch_size
-                if attn_metadata.num_prefill_tokens != 0:
-                    attn_metadata.num_prefill_tokens = batch_size
-                attn_metadata.query_lens = [1] * batch_size
+                if is_running_torchair:
+                    attn_metadata.num_actual_tokens = batch_size
+                    attn_metadata.query_lens = [1] * batch_size
             
             input_ids = draft_token_ids_list[-1].int()
             positions += 1
