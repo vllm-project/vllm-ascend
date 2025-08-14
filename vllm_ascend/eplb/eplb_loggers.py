@@ -19,7 +19,8 @@ class EplbStatLogger:
     _gauge_cls = prometheus_client.Gauge
     _counter_cls = prometheus_client.Counter
 
-    def __init__(self, adaptor: VllmEplbAdaptor, expert_map_path: Optional[str]):
+    def __init__(self, adaptor: VllmEplbAdaptor,
+                 expert_map_path: Optional[str]):
         self.rank = get_ep_group().rank
         self.layers_num = adaptor.num_moe_layers
         self.global_expert_num = adaptor.global_expert_num
