@@ -26,7 +26,8 @@ class EplbStatLogger:
         self.ep_size = get_ep_group().world_size
 
         if expert_map_path is None:
-            self.phy2log_map = [[i for i in range(self.global_expert_num)] for _ in range(self.layers_num)]
+            self.phy2log_map = [[i for i in range(self.global_expert_num)]
+                                for _ in range(self.layers_num)]
         else:
             self.phy2log_map = self._expert_file_to_list(expert_map_path)
             self.global_expert_num = len(self.phy2log_map[0])
@@ -34,7 +35,9 @@ class EplbStatLogger:
         self.local_expert_num = self.global_expert_num // self.ep_size
 
         labelnames_phy_load = ["rank", "layer", "phy_expert_id"]
-        labelnames_phy2log = ["rank", "layer", "phy_expert_id", "log_expert_id"]
+        labelnames_phy2log = [
+            "rank", "layer", "phy_expert_id", "log_expert_id"
+        ]
 
         self.phy_expert = self._counter_cls(
             name="vllm:phy_expert_heat",
@@ -46,7 +49,8 @@ class EplbStatLogger:
             documentation="physical expert to logical expert per rank",
             labelnames=labelnames_phy2log)
 
-        self.do_record_loop = threading.Thread(target=self.record_loop, daemon=True)
+        self.do_record_loop = threading.Thread(target=self.record_loop,
+                                               daemon=True)
         self.moe_load = None
 
         self.update_load = False
@@ -57,22 +61,26 @@ class EplbStatLogger:
         if self.rank == 0:
             for layer_id in range(self.layers_num):
                 for phy_expert_id in range(self.global_expert_num):
-                    self.phy_expert.labels(rank=phy_expert_id // self.local_expert_num,
-                                           layer=layer_id,
-                                           phy_expert_id=phy_expert_id % self.local_expert_num)
+                    self.phy_expert.labels(
+                        rank=phy_expert_id // self.local_expert_num,
+                        layer=layer_id,
+                        phy_expert_id=phy_expert_id % self.local_expert_num)
 
             for layer_id in range(len(self.phy2log_map)):
                 local_phy2log = []
-                for phy_expert_id, log_expert_id in enumerate(self.phy2log_map[layer_id]):
-                    a = self.phy2log.labels(rank=phy_expert_id // self.local_expert_num,
-                                            layer=layer_id,
-                                            phy_expert_id=phy_expert_id % self.local_expert_num,
-                                            log_expert_id=log_expert_id)
+                for phy_expert_id, log_expert_id in enumerate(
+                        self.phy2log_map[layer_id]):
+                    a = self.phy2log.labels(
+                        rank=phy_expert_id // self.local_expert_num,
+                        layer=layer_id,
+                        phy_expert_id=phy_expert_id % self.local_expert_num,
+                        log_expert_id=log_expert_id)
                     a.set(1)
                     local_phy2log.append(a)
                 self.all_phy2log.append(local_phy2log)
 
-            self.moe_load = torch.zeros((self.layers_num, self.ep_size, self.local_expert_num))
+            self.moe_load = torch.zeros(
+                (self.layers_num, self.ep_size, self.local_expert_num))
 
             self.lock = threading.Lock()
             self.start_loop()
@@ -85,10 +93,10 @@ class EplbStatLogger:
         return EplbStatLogger._instance
 
     @staticmethod
-    def init_instance(adaptor: VllmEplbAdaptor, expert_map_path: Optional[str]):
+    def init_instance(adaptor: VllmEplbAdaptor,
+                      expert_map_path: Optional[str]):
         """Initialize the singleton instance of ExpertLoadBalancer."""
-        EplbStatLogger._instance = EplbStatLogger(
-            adaptor, expert_map_path)
+        EplbStatLogger._instance = EplbStatLogger(adaptor, expert_map_path)
         return EplbStatLogger._instance
 
     def record(self, moe_load, phy2log_map):
@@ -125,10 +133,13 @@ class EplbStatLogger:
                     with self.lock:
                         self.update_map = False
                         phy2log_map = self.phy2log_map
-                    phy2log_map = np.array(phy2log_map).reshape(self.layers_num, -1)
+                    phy2log_map = np.array(phy2log_map).reshape(
+                        self.layers_num, -1)
                     self.record_phy2log(phy2log_map)
             except Exception as e:
-                logger.debug(f"Record moe_load or phy2log prometheus error, error result:{e}")
+                logger.debug(
+                    f"Record moe_load or phy2log prometheus error, error result:{e}"
+                )
             time.sleep(RECORDING_TIME)
 
     def start_loop(self):
@@ -136,15 +147,15 @@ class EplbStatLogger:
 
     def record_phy2log(self, phy2log_map: list[list[int]]):
         for layer_id in range(len(phy2log_map)):
-            for phy_expert_id, log_expert_id in enumerate(phy2log_map[layer_id]):
+            for phy_expert_id, log_expert_id in enumerate(
+                    phy2log_map[layer_id]):
                 self.all_phy2log[layer_id][phy_expert_id].set(0)
 
                 a = self.phy2log.labels(
                     rank=phy_expert_id // self.local_expert_num,
                     layer=layer_id,
                     phy_expert_id=phy_expert_id % self.local_expert_num,
-                    log_expert_id=log_expert_id
-                )
+                    log_expert_id=log_expert_id)
                 a.set(1)
                 self.all_phy2log[layer_id][phy_expert_id] = a
 
@@ -169,9 +180,3 @@ class EplbStatLogger:
             phy2log_data.append(device_data)
         return phy2log_data
 
-    def clear(self):
-        for layer_id in range(self.layers_num):
-            for phy_expert_id in range(self.global_expert_num):
-                self.phy_expert.labels(rank=phy_expert_id // self.local_expert_num,
-                                       layer=layer_id,
-                                       phy_expert_id=phy_expert_id % self.local_expert_num).reset()

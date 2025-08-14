@@ -452,7 +452,8 @@ class EplbProcess:
         Use spawn method to launch subprocess and return (planner_q, block_update_q, proc).
         """
         proc = Process(target=self.worker_process,
-                       args=(self.planner_q, self.block_update_q, self.phy2log_q),
+                       args=(self.planner_q, self.block_update_q,
+                             self.phy2log_q),
                        daemon=True)
 
         proc.start()
