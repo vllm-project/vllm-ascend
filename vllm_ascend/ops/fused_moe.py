@@ -1258,6 +1258,7 @@ class AscendFusedMoE(FusedMoE):
             scoring_func=scoring_func,
             e_score_correction_bias=e_score_correction_bias,
             activation=activation,
+            apply_router_weight_on_input=apply_router_weight_on_input,
         )
         AscendFusedMoE.moe_counter += 1
         self.moe_instance_id = AscendFusedMoE.moe_counter
