@@ -103,12 +103,15 @@ def forward_oot(
         hidden_states=x,
         w1=layer.w13_weight,
         w2=layer.w2_weight,
+        w1_bias=layer.w13_bias if self.has_bias else None,
+        w2_bias=layer.w2_bias if self.has_bias else None,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
         top_k=top_k,
         expert_map=expert_map,
         apply_router_weight_on_input=apply_router_weight_on_input,
-        max_num_tokens=max_num_tokens)
+        max_num_tokens=max_num_tokens,
+        activation=activation)
 
 
 UnquantizedFusedMoEMethod.__init__ = unquantized_fused_moe_init_func
