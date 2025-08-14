@@ -475,9 +475,17 @@ def register_ascend_customop():
     from vllm.model_executor.custom_op import CustomOp
 
     from vllm_ascend.ops.activation import AscendQuickGELU, AscendSiluAndMul
+    from vllm_ascend.ops.linear import AttnColumnParallelLinear, AttnRowParallelLinear, ATTNMergedColumnParallelLinear
     CustomOp.register_oot(_decorated_op_cls=AscendQuickGELU, name="QuickGELU")
     CustomOp.register_oot(_decorated_op_cls=AscendSiluAndMul,
                           name="SiluAndMul")
+    if envs_ascend.VLLM_ASCEND_ENABLE_MLP_OPTIMZE:
+        CustomOp.register_oot(_decorated_op_cls=AttnColumnParallelLinear,
+                            name="ColumnParallelLinear")
+        CustomOp.register_oot(_decorated_op_cls=AttnRowParallelLinear,
+                            name="RowParallelLinear")
+        CustomOp.register_oot(_decorated_op_cls=ATTNMergedColumnParallelLinear,
+                            name="MergedColumnParallelLinear")
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
