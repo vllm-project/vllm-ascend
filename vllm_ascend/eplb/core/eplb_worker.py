@@ -15,7 +15,7 @@
 # This file is a part of the vllm-ascend project.
 #
 
-from multiprocessing import Process
+from multiprocessing import Process, Queue
 from typing import Any
 
 import networkx as nx  # type: ignore
@@ -39,6 +39,7 @@ class EplbWorker:
         self.old_expert_maps = None
         self.enable_d2d = enable_d2d
         self.rank_id = dist.get_rank()
+        self.phy2log = None
 
     def do_update(self):
         # put data in to queue
@@ -67,6 +68,7 @@ class EplbWorker:
                                           self.num_local_experts)
         _, _, new_placement = self.calculate_rebalance_experts(
             load_info, old_placement)
+        self.phy2log = new_placement
 
         if not torch.is_tensor(new_placement):
             new_placement = torch.tensor(new_placement)
@@ -383,6 +385,9 @@ class EplbWorker:
 
         return list(zip(send_all, recv_all, maps, log2phy_all, layer_ids))
 
+    def get_phy2log(self):
+        return self.phy2log
+
 
 class EplbProcess:
 
@@ -404,11 +409,21 @@ class EplbProcess:
         self.planner_q = planner_q
         self.block_update_q = block_update_q
 
+        self.phy2log_q = Queue(maxsize=1)
+        self.phy2log = None
+
         # Create EplbWorker instance
         self.worker = EplbWorker(self.shared_dict, self.policy_type,
                                  self.enable_d2d)
 
-    def worker_process(self, planner_q, block_update_q):
+    def get_phy2log(self):
+        if self.phy2log_q.empty():
+            return None
+        else:
+            self.phy2log = self.phy2log_q.get()
+            return self.phy2log
+
+    def worker_process(self, planner_q, block_update_q, phy2log_q):
         """
         Subprocess entry: bind to specified NPU, loop waiting for planner_q to wake up, call do_update, then notify main process update is complete.
         """
@@ -418,12 +433,14 @@ class EplbProcess:
                 planner_q.get()
 
                 packed_update_info = self.worker.do_update()
+                self.phy2log = self.worker.get_phy2log()
 
                 while True:
                     if not block_update_q.empty():
                         continue
                     block_update_q.put(packed_update_info)
                     break
+                phy2log_q.put(self.phy2log)
 
             except Exception as e:
                 logger.warning(f"[EPLB subprocess Exiting due to error: {e}",
@@ -435,7 +452,7 @@ class EplbProcess:
         Use spawn method to launch subprocess and return (planner_q, block_update_q, proc).
         """
         proc = Process(target=self.worker_process,
-                       args=(self.planner_q, self.block_update_q),
+                       args=(self.planner_q, self.block_update_q, self.phy2log_q),
                        daemon=True)
 
         proc.start()

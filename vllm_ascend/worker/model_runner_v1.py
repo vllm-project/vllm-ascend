@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
+import os
 import copy
 import gc
 import math
@@ -81,6 +82,7 @@ from vllm_ascend.attention.utils import \
     AscendCommonAttentionMetadata as CommonAttentionMetadata
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
+from vllm_ascend.eplb.eplb_loggers import EplbStatLogger
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
@@ -386,10 +388,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         #EPLB
         self.dynamic_eplb = ascend_config.dynamic_eplb
+        self.dynamic_eplb_metrics = os.getenv("DYNAMIC_EXPERT_LOAD_METRICS", False)
         if self.dynamic_eplb:
             self.eplb_adaptor: Optional[VllmEplbAdaptor] = None
             self.is_eplb_warmuped = False
             self.eplb_updator = EplbUpdator(ascend_config.expert_map_path)
+            self.ep_loggers: Optional[EplbStatLogger] = None
 
         # NOTE: we need to use `in_profile_run` to determine whether `enable_force_load_balance` is True
         self.in_profile_run = False
@@ -1495,7 +1499,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                         " ".join(dr_str))
 
         if self.dynamic_eplb:
-            self.eplb_updator.forward_end()
+            moe_load, phy2log_map = self.eplb_updator.forward_end()
+            if self.dynamic_eplb_metrics and moe_load is not None:
+                self.ep_loggers.record(moe_load, phy2log_map)
 
         return model_runner_output
 
@@ -1836,6 +1842,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.dynamic_eplb and not self.is_eplb_warmuped:
             self.is_eplb_warmuped = True
             self.eplb_adaptor = VllmEplbAdaptor(model=self.model)
+            if self.dynamic_eplb_metrics:
+                self.ep_loggers = EplbStatLogger.init_instance(self.eplb_adaptor, get_ascend_config().expert_map_path)
             self.eplb_updator.set_adaptor(self.eplb_adaptor)
             self.eplb_updator.warm_up_eplb()
 
