@@ -26,7 +26,8 @@ import pytest
 import torch
 from vllm.model_executor.layers.activation import SiluAndMul
 
-from vllm_ascend.ops.fused_moe import fused_experts, select_experts
+from vllm_ascend.ops.fused_moe import fused_experts
+from vllm_ascend.ops.layers.experts_selector import select_experts
 
 NUM_EXPERTS = [8, 64]
 EP_SIZE = [1, 4]
@@ -142,7 +143,7 @@ def test_select_experts(
                                  dtype=torch.int32)
         custom_routing_function.return_value = (mock_weights, mock_ids)
 
-    with patch("vllm_ascend.ops.fused_moe.native_grouped_topk"
+    with patch("vllm_ascend.ops.layers.experts_selector._native_grouped_topk"
                ) as mock_native_grouped_topk:
         mock_native_grouped_topk.side_effect = lambda x, num_groups, k: torch.randn_like(
             x)
