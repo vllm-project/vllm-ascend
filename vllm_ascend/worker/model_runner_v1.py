@@ -388,7 +388,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         #EPLB
         self.dynamic_eplb = ascend_config.dynamic_eplb
-        self.dynamic_eplb_metrics = os.getenv("DYNAMIC_EXPERT_LOAD_METRICS", False)
+        self.dynamic_eplb_metrics = os.getenv("DYNAMIC_EXPERT_LOAD_METRICS", "0") == "1"
         if self.dynamic_eplb:
             self.eplb_adaptor: Optional[VllmEplbAdaptor] = None
             self.is_eplb_warmuped = False

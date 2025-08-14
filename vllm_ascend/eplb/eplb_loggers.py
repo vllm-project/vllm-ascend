@@ -27,7 +27,6 @@ class EplbStatLogger:
         self.ep_size = get_ep_group().world_size
 
         if expert_map_path is None:
-            # self.phy2log_map = torch.arange(self.global_expert_num).repeat(self.layers_num, 1)
             self.phy2log_map = [[i for i in range(self.global_expert_num)] for _ in range(self.layers_num)]
         else:
             self.phy2log_map = self._expert_file_to_list(expert_map_path)
@@ -48,7 +47,7 @@ class EplbStatLogger:
             documentation="physical expert to logical expert per rank",
             labelnames=labelnames_phy2log)
 
-        self.do_record_loop = threading.Thread(target=self.record_loop)
+        self.do_record_loop = threading.Thread(target=self.record_loop, daemon=True)
         self.moe_load = None
 
         self.update_load = False
@@ -83,7 +82,7 @@ class EplbStatLogger:
     def get_instance():
         if EplbStatLogger._instance is None:
             raise ValueError(
-                "ExpertLoadBalancer instance has not been initialized.")
+                "EplbStatLogger instance has not been initialized.")
         return EplbStatLogger
 
     @staticmethod
