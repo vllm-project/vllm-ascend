@@ -120,6 +120,9 @@ def test_guided_json_completion(guided_decoding_backend: str,
 
 @pytest.mark.parametrize("guided_decoding_backend", GuidedDecodingBackend)
 def test_guided_regex(guided_decoding_backend: str, sample_regex):
+    if guided_decoding_backend == "outlines":
+        pytest.skip("Outlines doesn't support regex-based guided decoding.")
+
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
