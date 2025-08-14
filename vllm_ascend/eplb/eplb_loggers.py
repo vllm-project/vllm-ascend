@@ -83,7 +83,7 @@ class EplbStatLogger:
         if EplbStatLogger._instance is None:
             raise ValueError(
                 "EplbStatLogger instance has not been initialized.")
-        return EplbStatLogger
+        return EplbStatLogger._instance
 
     @staticmethod
     def init_instance(adaptor: VllmEplbAdaptor, expert_map_path: Optional[str]):
