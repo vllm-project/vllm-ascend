@@ -85,8 +85,8 @@ from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               ProfileExecuteDuration, is_310p,
-                               maybe_converting_weight_acl_format,
+                               ProfileExecuteDuration, _enable_lmhead_tp,
+                               is_310p, maybe_converting_weight_acl_format,
                                vllm_version_is)
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
@@ -1375,6 +1375,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.use_aux_hidden_state_outputs:
             hidden_states, aux_hidden_states = hidden_states
 
+        if _enable_lmhead_tp():
+            if not with_prefill:
+                max_num_reqs_across_dp = padded_num_tokens_across_dp
+            else:
+                max_num_reqs_across_dp = self.max_num_reqs
+            logits_indices = nn.functional.pad(
+                logits_indices,
+                (0, max_num_reqs_across_dp - logits_indices.shape[0]))
+
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
                 total_num_scheduled_tokens, logits_indices, aux_hidden_states,
                 num_scheduled_tokens, finished_sending, finished_recving)
@@ -1684,6 +1693,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                       kv_connector_output)
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states, None)
+
             if broadcast_pp_output:
                 model_output_broadcast_data = {
                     "logits": logits.contiguous(),
@@ -1701,11 +1711,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Sample the next token and get logprobs if needed.
             sampling_metadata = self.input_batch.sampling_metadata
             if spec_decode_metadata is None:
+                if _enable_lmhead_tp() and logits is not None:
+                    logits = logits[:self.input_batch.num_reqs]
                 sampler_output = self.sampler(
                     logits=logits,
                     sampling_metadata=sampling_metadata,
                 )
             else:
+                if _enable_lmhead_tp() and logits is not None:
+                    logits = logits[:len(spec_decode_metadata.logits_indices)]
                 # When indexing with a tensor (bonus_logits_indices), PyTorch
                 # creates a new tensor with separate storage from the original
                 # logits tensor. This means any in-place operations on bonus_logits
@@ -1997,6 +2011,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     with_prefill, is_torchair_compile, input_ids, positions,
                     attn_metadata, num_tokens, intermediate_tensors,
                     inputs_embeds)
+
+            if _enable_lmhead_tp() and not self.in_profile_run:
+                if not with_prefill:
+                    max_num_reqs_across_dp = num_reqs
+                else:
+                    max_num_reqs_across_dp = max_num_reqs
+                dummy_indices = torch.zeros(max_num_reqs_across_dp,
+                                            device=hidden_states.device,
+                                            dtype=torch.int32)
+                self.model.compute_logits(hidden_states[dummy_indices], None)
+
             if self.speculative_config and self.speculative_config.method == "deepseek_mtp":
                 assert isinstance(self.drafter, MtpProposer)
                 self.drafter.dummy_run(
@@ -2005,6 +2030,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     skip_attn=skip_attn,
                     num_reqs=num_reqs,
                     num_tokens_across_dp=num_tokens_across_dp)
+                if not self.in_profile_run and _enable_lmhead_tp():
+                    if not with_prefill:
+                        max_num_reqs_across_dp = num_reqs
+                    else:
+                        max_num_reqs_across_dp = max_num_reqs
+                    dummy_indices = torch.zeros(max_num_reqs_across_dp,
+                                                device=hidden_states.device,
+                                                dtype=torch.int32)
+                    self.model.compute_logits(hidden_states[dummy_indices],
+                                              None)
 
             return hidden_states
 
