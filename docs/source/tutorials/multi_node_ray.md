@@ -148,6 +148,7 @@ vllm Qwen/Qwen3-235B-A22B \
   --max-num-seqs 25 \
   --served-model-name qwen \
   --trust-remote-code \
+  --enforce-eager \
   --gpu-memory-utilization 0.9
 ```
 
@@ -163,6 +164,7 @@ vllm Qwen/Qwen3-235B-A22B \
   --max-num-seqs 25 \
   --served-model-name qwen \
   --trust-remote-code \
+  --enforce-eager \
   --gpu-memory-utilization 0.9
 ```
 
