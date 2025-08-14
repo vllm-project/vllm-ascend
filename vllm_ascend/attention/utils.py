@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+from vllm.config import SpeculativeConfig
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
 import torch
@@ -14,12 +15,11 @@ class AscendCommonAttentionMetadata:
     For many of the tensors we keep both GPU and CPU versions.
     """
 
-    query_start_loc: torch.Tensor = None
-    query_start_loc_cpu: torch.Tensor = None
+    query_start_loc: torch.Tensor
+    query_start_loc_cpu: torch.Tensor
     """(batch_size + 1,), the start location of each request in query Tensor"""
 
-    seq_lens: torch.Tensor = None
-    seq_lens_cpu: torch.Tensor = None
+    seq_lens_cpu: torch.Tensor
     """(batch_size,), the length of each request including both computed tokens
     and newly scheduled tokens"""
 
@@ -27,13 +27,11 @@ class AscendCommonAttentionMetadata:
     """Number of requests"""
     num_actual_tokens: int
     """Total number of tokens in batch"""
-    max_query_len: int
-    """Longest query in batch"""
 
     actual_seq_lengths_q: list[int] = None
 
-    block_table_tensor: torch.Tensor = None
-    slot_mapping_cpu: torch.Tensor = None
+    block_table_tensor: torch.Tensor
+    slot_mapping_cpu: torch.Tensor
 
     positions: torch.Tensor = None
 
@@ -47,7 +45,7 @@ class AscendCommonAttentionMetadata:
 
     enable_dbo_across_dp: bool = False
 
-    is_only_prefill: bool
+    is_only_prefill: bool = False
 
     graph_pad_size: int = -1
 
@@ -69,8 +67,6 @@ class TorchairCommonAttentionMetadata:
 
     attn_mask: torch.Tensor = None
     spec_attn_mask: torch.Tensor = None
-
-    decode_token_per_req: int
 
     graph_pad_size: int = -1
 
@@ -115,3 +111,12 @@ def split_decodes_and_prefills(
     num_decode_tokens = query_start_loc[first_prefill].item()
     num_prefill_tokens = num_tokens - num_decode_tokens
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
+
+
+def get_decode_token_per_req(speculative_config: SpeculativeConfig):
+    decode_token_per_req = 1
+    if not speculative_config:
+        return decode_token_per_req
+    spec_token_num = speculative_config.num_speculative_tokens
+    assert spec_token_num > 0
+    return decode_token_per_req + spec_token_num
