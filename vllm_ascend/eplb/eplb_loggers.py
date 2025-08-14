@@ -1,13 +1,13 @@
 import json
-import time
 import threading
+import time
 from typing import Optional
 
 import numpy as np
 import prometheus_client
 import torch
-from vllm.logger import logger
 from vllm.distributed.parallel_state import get_ep_group
+from vllm.logger import logger
 
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 
