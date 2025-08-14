@@ -4,7 +4,6 @@ import threading
 from typing import Optional
 
 import torch
-import torch_npu
 import prometheus_client
 import numpy as np
 
