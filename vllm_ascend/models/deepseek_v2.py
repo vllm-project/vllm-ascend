@@ -585,10 +585,13 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         forward_context = get_forward_context()
         if kv_cache is None:
             kv_cache = self.mla_attn.kv_cache[forward_context.virtual_engine]
+        num_tokens = hidden_states.shape[0]
+        if self.enable_shared_expert_dp and self.debug_layer_idx > self.first_k_dense_replace and self.debug_layer_idx < self.layers:
+            # Simulate all gather to calculate output shape
+            num_tokens = num_tokens * self.tp_size
         if not self.enable_shared_expert_dp or self.debug_layer_idx < self.first_k_dense_replace:
             output_shape = hidden_states.shape
         else:
-            num_tokens = hidden_states.shape[0]
             rows = num_tokens // self.tp_size
             if num_tokens % self.tp_size:
                 rows += 1
@@ -598,7 +601,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
                              device=hidden_states.device)
         output = self.mla_attn.impl.forward(hidden_states,
                                             kv_cache,
-                                            attn_metadata,
+                                            forward_context.attn_metadata,
                                             output)
         output = output.view(-1, output_shape[-1])
         return output
@@ -659,8 +662,6 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
-            self.mla_moe_communication = ascend_config.torchair_graph_config.enable_multistream_moe \
-                and model_config.use_mla and self.tp_size > 1
         else:
             self.mlp = CustomDeepseekV2MLP(
                 hidden_size=config.hidden_size,
@@ -669,7 +670,6 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
-            self.mla_moe_communication = False
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
@@ -689,10 +689,6 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         replace_allreduce: bool = False,
     ) -> torch.Tensor:
         # Self Attention
-        if attn_metadata is not None and attn_metadata.num_decodes > 0:
-            mla_moe_communication = self.mla_moe_communication and replace_allreduce
-        else:
-            mla_moe_communication = False
         if residual is None:
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
@@ -704,9 +700,6 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             # to save npu memory because they're no longer used.
             dispose_tensor(previous_hidden_states)
             dispose_tensor(previous_residual)
-        if mla_moe_communication and self.layer_idx > self.first_k_dense_replace:
-            hidden_states = tensor_model_parallel_all_gather(hidden_states,
-                                                             dim=0)
 
         hidden_states = self.self_attn(
             positions=positions,
@@ -714,13 +707,6 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
         )
-
-        if mla_moe_communication and residual.shape[0] != hidden_states.shape[
-                0]:
-            chunk_hidden_states = torch.tensor_split(residual,
-                                                     self.tp_size,
-                                                     dim=0)
-            residual = chunk_hidden_states[self.tp_rank]
 
         if hidden_states.dtype == torch.float16:
             # Fix FP16 overflow
@@ -750,8 +736,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
 
         if isinstance(self.mlp, CustomDeepseekV2MoE):
             hidden_states = self.mlp(hidden_states,
-                                     attn_metadata,
-                                     replace_allreduce=mla_moe_communication)
+                                     attn_metadata)
         else:
             hidden_states = self.mlp(hidden_states)
 
@@ -764,10 +749,6 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             # The scaling of DeepseekV2MOE output would be done in the forward
             # of DeepseekV2MOE
             hidden_states *= 1. / self.routed_scaling_factor
-        if mla_moe_communication and self.layer_idx == self.layers - 1:
-            hidden_states = tensor_model_parallel_all_gather(hidden_states,
-                                                             dim=0)
-            residual = tensor_model_parallel_all_gather(residual, dim=0)
 
         # for last layer of main model and mtp layer.
         if self.enable_shared_expert_dp and self.layer_idx >= (
