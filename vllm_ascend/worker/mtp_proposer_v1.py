@@ -170,7 +170,6 @@ class MtpProposer:
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=self.runner.query_start_loc[:batch_size + 1],
             query_start_loc_cpu=self.runner.query_start_loc_cpu[:batch_size + 1],
-            seq_lens=target_positions[last_token_indices] + 1,
             seq_lens_cpu=target_positions.cpu()[last_token_indices] + 1,
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
@@ -182,8 +181,6 @@ class MtpProposer:
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
-            decode_token_per_req=self.runner.decode_token_per_req,
-            max_num_blocks_per_req=self.runner.max_num_blocks_per_req,
             graph_pad_size=extra_builder_kwargs['graph_pad_size']
         )
         attn_metadata = self.runner.attn_metadata_builder.build(common_attn_metadata)
@@ -302,7 +299,6 @@ class MtpProposer:
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
-            decode_token_per_req=self.runner.decode_token_per_req,
         )
             attn_metadata = self.runner.attn_metadata_builder.build_torchair_graph_dummy(common_attn_metadata)
 

@@ -77,7 +77,6 @@ class NPUTorchairModelRunner(NPUModelRunner):
                 attn_mask=self.attn_mask,
                 spec_attn_mask=self.spec_attn_mask,
                 attn_state=self.attn_state,
-                decode_token_per_req=self.decode_token_per_req,
             )
             attn_metadata = self.attn_metadata_builder.build_torchair_graph_dummy(common_attn_metadata)
         else:

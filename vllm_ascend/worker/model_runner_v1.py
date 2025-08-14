@@ -798,11 +798,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             common_attn_metadata = AscendCommonAttentionMetadata(
                 query_start_loc=self.query_start_loc[:num_reqs + 1],
                 query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
-                seq_lens=self.seq_lens,
                 seq_lens_cpu=self.seq_lens_cpu,
                 num_reqs=num_reqs,
-                num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
+                num_actual_tokens=total_num_scheduled_tokens,
                 actual_seq_lengths_q=self.actual_seq_lengths_q,
                 block_table_tensor=self.input_batch.block_table[0].get_device_tensor(),
                 slot_mapping_cpu=self.slot_mapping_cpu,
@@ -810,7 +809,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 attn_mask=self.attn_mask,
                 spec_attn_mask=self.spec_attn_mask,
                 attn_state=self.attn_state,
-                decode_token_per_req=self.decode_token_per_req,
                 max_num_blocks_per_req=self.max_num_blocks_per_req,
             )
             attn_metadata_i = self.attn_metadata_builder.build(common_attn_metadata)
@@ -1218,11 +1216,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=self.query_start_loc[:num_reqs + 1],
             query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
-            seq_lens=self.seq_lens,
             seq_lens_cpu=self.seq_lens_cpu,
             num_reqs=num_reqs,
             num_actual_tokens=total_num_scheduled_tokens,
-            max_query_len=max_num_scheduled_tokens,
             actual_seq_lengths_q=self.actual_seq_lengths_q,
             block_table_tensor=self.input_batch.block_table[0].get_device_tensor(),
             slot_mapping_cpu=self.slot_mapping_cpu,
@@ -1230,8 +1226,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             attn_mask=self.attn_mask,
             spec_attn_mask=self.spec_attn_mask,
             attn_state=self.attn_state,
-            decode_token_per_req=self.decode_token_per_req,
-            max_num_blocks_per_req=self.max_num_blocks_per_req,
             enable_dbo_across_dp=enable_dbo,
             is_only_prefill=is_only_prefill,
             graph_pad_size=self.graph_pad_size

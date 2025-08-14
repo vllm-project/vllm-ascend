@@ -129,20 +129,17 @@ class EagleProposer:
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=self.runner.query_start_loc[:batch_size + 1],
             query_start_loc_cpu=self.query_start_loc_cpu[:batch_size + 1],
-            seq_lens=self.runner.seq_lens,
             seq_lens_cpu=self.runner.seq_lens_cpu,
+            max_query_len=max_query_len,
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
-            max_query_len=max_query_len,
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
             block_table_tensor=self.runner.input_batch.block_table[0].get_device_tensor(),
-            slot_mapping_cpu=self.runner.slot_mapping_cpu,
-            positions=self.positions,
+            slot_mapping_cpu=target_slot_mapping,
+            positions=target_positions,
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
-            decode_token_per_req=self.runner.decode_token_per_req,
-            max_num_blocks_per_req=self.runner.max_num_blocks_per_req,
         )
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
         attn_metadata = self.runner.attn_metadata_builder.build(common_attn_metadata)

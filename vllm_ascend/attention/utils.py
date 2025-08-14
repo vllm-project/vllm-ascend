@@ -39,10 +39,8 @@ class AscendCommonAttentionMetadata:
     spec_attn_mask: torch.Tensor = None
     attn_state: AscendAttentionState = None
 
-    decode_token_per_req: int
-
-    max_num_blocks_per_req: int
-
+    max_query_len: int
+    
     enable_dbo_across_dp: bool = False
 
     is_only_prefill: bool = False
