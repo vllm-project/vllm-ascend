@@ -18,6 +18,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
 from vllm_ascend.utils import ProfileExecuteDuration
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, TorchairCommonAttentionMetadata
 
 
 class MtpProposer:
@@ -166,12 +167,26 @@ class MtpProposer:
         else:
             num_input_tokens = num_tokens
 
-        attn_metadata = self.runner.attn_metadata_builder.build(
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=self.runner.query_start_loc[:batch_size + 1],
+            query_start_loc_cpu=self.runner.query_start_loc_cpu[:batch_size + 1],
+            seq_lens=target_positions[last_token_indices] + 1,
+            seq_lens_cpu=target_positions.cpu()[last_token_indices] + 1,
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
-            query_start_loc=cu_num_tokens,
-            **extra_builder_kwargs)
+            actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
+            block_table_tensor=self.runner.input_batch.block_table[0].get_device_tensor(),
+            slot_mapping_cpu=target_slot_mapping,
+            positions=target_positions,
+            attn_mask=self.runner.attn_mask,
+            spec_attn_mask=self.runner.spec_attn_mask,
+            attn_state=self.runner.attn_state,
+            decode_token_per_req=self.runner.decode_token_per_req,
+            max_num_blocks_per_req=self.runner.max_num_blocks_per_req,
+            graph_pad_size=extra_builder_kwargs['graph_pad_size']
+        )
+        attn_metadata = self.runner.attn_metadata_builder.build(common_attn_metadata)
 
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
@@ -281,8 +296,15 @@ class MtpProposer:
         if skip_attn:
             attn_metadata = None
         else:
-            attn_metadata = self.runner.attn_metadata_builder.build_torchair_graph_dummy(
-                num_reqs=num_reqs, num_actual_tokens=1)
+            common_attn_metadata = TorchairCommonAttentionMetadata(
+            num_reqs=num_reqs,
+            num_actual_tokens=1,
+            actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
+            attn_mask=self.runner.attn_mask,
+            spec_attn_mask=self.runner.spec_attn_mask,
+            decode_token_per_req=self.runner.decode_token_per_req,
+        )
+            attn_metadata = self.runner.attn_metadata_builder.build_torchair_graph_dummy(common_attn_metadata)
 
         input_ids = self.input_ids[:num_tokens]
         positions = self.positions[:num_tokens]
