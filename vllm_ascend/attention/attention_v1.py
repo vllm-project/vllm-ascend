@@ -27,7 +27,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.utils import direct_register_custom_op
+from vllm.utils import direct_register_custom_op, cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
 
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
@@ -166,6 +166,8 @@ class AscendAttentionMetadataBuilder:
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.device = device
+        self.max_num_blocks_per_req = cdiv(self.model_config.max_model_len,
+                                           vllm_config.cache_config.block_size)
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -179,7 +181,7 @@ class AscendAttentionMetadataBuilder:
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:num_reqs + 1]
 
         block_table = common_attn_metadata.block_table_tensor
-        block_table[:num_reqs, :common_attn_metadata.max_num_blocks_per_req] = (
+        block_table[:num_reqs, :self.max_num_blocks_per_req] = (
             block_table[:num_reqs])
 
         query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]

@@ -23,6 +23,7 @@ import torch
 import torch_npu
 import torch.nn as nn
 from vllm.config import VllmConfig
+from vllm.utils import cdiv
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import PAD_SLOT_ID, CommonAttentionState
@@ -32,7 +33,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d)
 from vllm_ascend.worker.npu_input_batch import InputBatch
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, get_decode_token_per_req
 
 
 class AscendAttentionTorchairBackend(AttentionBackend):
@@ -154,6 +155,9 @@ class AscendAttentionTorchairMetadataBuilder:
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.device = device
+        self.max_num_blocks_per_req = cdiv(self.model_config.max_model_len,
+                                           vllm_config.cache_config.block_size)
+        self.decode_token_per_req = get_decode_token_per_req(vllm_config.speculative_config)
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -214,7 +218,7 @@ class AscendAttentionTorchairMetadataBuilder:
         num_actual_tokens = common_attn_metadata.num_actual_tokens
 
         block_table = common_attn_metadata.block_table_tensor
-        block_table[:num_reqs, :common_attn_metadata.max_num_blocks_per_req] = (
+        block_table[:num_reqs, :self.max_num_blocks_per_req] = (
             block_table[:num_reqs])
 
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
@@ -253,7 +257,7 @@ class AscendAttentionTorchairMetadataBuilder:
                     pad_value = 0
                     num_token_pad_size = graph_pad_size - num_actual_tokens
                     num_reqs_pad_size = (
-                        graph_pad_size // common_attn_metadata.decode_token_per_req -
+                        graph_pad_size // self.decode_token_per_req -
                         num_reqs)
                 pad_value = 1
                 padded_seq_lens = seq_lens.tolist() + [pad_value

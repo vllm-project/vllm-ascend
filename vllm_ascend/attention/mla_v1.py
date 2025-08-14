@@ -25,7 +25,7 @@ from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import npu_prefetch
 from vllm_ascend.worker.npu_input_batch import InputBatch
-from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,split_decodes_and_prefills)
+from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,split_decodes_and_prefills, get_decode_token_per_req)
 
 
 if TYPE_CHECKING:
@@ -186,6 +186,7 @@ class AscendMLAMetadataBuilder:
         scheduler_config = vllm_config.scheduler_config
         self.block_size = vllm_config.cache_config.block_size
         self.max_blocks = (vllm_config.model_config.max_model_len + self.block_size - 1) // self.block_size
+        self.decode_token_per_req = get_decode_token_per_req(vllm_config.speculative_config)
         self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
         if self.chunked_prefill_enabled:
             self.chunked_prefill_workspace_size = min(
@@ -293,7 +294,7 @@ class AscendMLAMetadataBuilder:
                                   device=device)
         block_table = self._get_graph_runner_block_tables(
             num_reqs, block_table)
-        num_tokens = num_reqs * common_attn_metadata.decode_token_per_req
+        num_tokens = num_reqs * self.decode_token_per_req
         seq_lens = torch.zeros(num_reqs, dtype=torch.int32, device=device)
         seq_lens_list = [0] * num_reqs
         input_positions = torch.zeros(num_tokens,

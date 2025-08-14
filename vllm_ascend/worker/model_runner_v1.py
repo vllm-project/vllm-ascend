@@ -92,7 +92,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, get_decode_token_per_req
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -216,7 +216,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             use_mla=self.model_config.use_mla,
         )
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
-            weakref.proxy(self))
+            vllm_config, device)
         self.attn_mask_builder = AttentionMaskBuilder(
             min(self.model_config.max_model_len,
                 int(os.getenv("PAGED_ATTENTION_MASK_LEN", 10000))), self.dtype)
@@ -229,13 +229,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.drafter: Optional[Union[NgramProposer, EagleProposer,
                                      MtpProposer]] = None
         self.actual_seq_lengths_q = []
-        self.spec_token_num = 0
-        self.decode_token_per_req = 1
+        self.decode_token_per_req = get_decode_token_per_req(self.speculative_config)
         if self.speculative_config:
             self.use_spec_decode = True
-            self.spec_token_num = self.speculative_config.num_speculative_tokens
-            assert self.spec_token_num > 0
-            self.decode_token_per_req = 1 + self.spec_token_num
             self.actual_seq_lengths_q = [
                 len for len in
                 range(self.decode_token_per_req, self.max_num_tokens +
