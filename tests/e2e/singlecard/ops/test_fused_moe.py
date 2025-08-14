@@ -148,7 +148,7 @@ def test_select_experts(
         mock_native_grouped_topk.side_effect = lambda x, num_groups, k: torch.randn_like(
             x)
 
-        topk_weights, topk_ids = select_experts(
+        topk_weights, topk_ids, _ = select_experts(
             hidden_states=hidden_states,
             router_logits=router_logits,
             top_k=topk,
