@@ -17,10 +17,10 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
-import os
 import copy
 import gc
 import math
+import os
 import time
 import types
 import weakref
@@ -81,8 +81,8 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import \
     AscendCommonAttentionMetadata as CommonAttentionMetadata
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
-from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.eplb.eplb_loggers import EplbStatLogger
+from vllm_ascend.eplb.eplb_updator import EplbUpdator
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
