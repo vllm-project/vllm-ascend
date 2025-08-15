@@ -29,18 +29,16 @@ import torch_npu
 from vllm.distributed.parallel_state import get_ep_group
 from vllm.forward_context import get_forward_context
 
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.parallel_state import get_mc2_group
 from vllm_ascend.distributed.tensor_parallel import (
     all_gather_last_dim_from_tensor_parallel_region, all_to_all_hp2sp,
     all_to_all_sp2hp, gather_from_sequence_parallel_region,
     reduce_scatter_last_dim_to_tensor_parallel_region)
 from vllm_ascend.ops.comm_utils import async_all_to_all
-from vllm_ascend.distributed.parallel_state import get_mc2_group
-from vllm_ascend.utils import (AscendSocVersion, 
-                               get_ascend_soc_version,)
+from vllm_ascend.utils import AscendSocVersion, get_ascend_soc_version
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
-from vllm_ascend.ascend_config import get_ascend_config
-from vllm.model_executor.layers.fused_moe.config import \
-    FusedMoEParallelConfig  # isort: skip
+
 
 class MoEDispatcherConfig:
 
@@ -485,23 +483,29 @@ class MoETokenDispatcher(ABC):
         return get_ep_group().world_size
 
     @abstractmethod
-    def token_permutation(self,
-                          hidden_states: torch.Tensor,
-                          topk_weights: torch.Tensor,
-                          topk_ids: torch.Tensor,
-                          expert_map: torch.Tensor = None,
-                          log2phy: torch.Tensor = None,
-                          global_redundant_expert_num: int = 0):
+    def token_permutation(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor,
+        log2phy: torch.Tensor = None,
+        global_redundant_expert_num: int = 0,
+        shared_gate_up: Optional[Any] = None,
+        shared_dequant_scale: Optional[Any] = None,
+        shared_experts: Optional[Any] = None,
+    ):
         raise NotImplementedError("Dispatch function not implemented.")
 
     @abstractmethod
     def token_unpermutation(self,
-                            expert_output: torch.Tensor,
+                            hidden_states: torch.Tensor,
                             bias: torch.Tensor = None):
         raise NotImplementedError("Restore function not implemented.")
 
 
 class TokenDispatcherWithMC2(MoETokenDispatcher):
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         device_group = get_mc2_group().device_group
@@ -514,9 +518,10 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.with_quant = kwargs.get("with_quant")
-        self.enable_dispatch_v2 = hasattr(torch_npu, "npu_moe_distribute_dispatch_v2")
+        self.enable_dispatch_v2 = hasattr(torch_npu,
+                                          "npu_moe_distribute_dispatch_v2")
         self.need_extra_args = (get_ascend_soc_version() == AscendSocVersion.A3
-                        or self.torchair_graph_enabled)
+                                or self.torchair_graph_enabled)
 
         # NOTE: Currently, when in A3, we need to pass in some extra param into dispatch & combine
         self.a3_need_extra_args = get_ascend_soc_version() == AscendSocVersion.A3
@@ -526,13 +531,15 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         self.ep_recv_counts = None
         self.shared_act = None
         self.topk_ids = None
-        self.topk_weights =None
+        self.topk_weights = None
         self.shared_experts = None
-    
-    def get_permute_mc2_kwargs(
-        self, hidden_states: torch.Tensor, topk_weights: torch.Tensor, topk_ids:torch.Tensor, expert_map:torch.Tensor,
-        global_redundant_expert_num: int = 0
-    ):
+
+    def get_permute_mc2_kwargs(self,
+                               hidden_states: torch.Tensor,
+                               topk_weights: torch.Tensor,
+                               topk_ids: torch.Tensor,
+                               expert_map: torch.Tensor,
+                               global_redundant_expert_num: int = 0):
         quant_mode = 0
         forward_context = get_forward_context()
         mc2_mask = forward_context.mc2_mask
@@ -576,16 +583,25 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         
 
     def token_permutation(
-        self, hidden_states: torch.Tensor, topk_weights: torch.Tensor, topk_ids:torch.Tensor, expert_map:torch.Tensor,
-        log2phy: torch.Tensor = None, global_redundant_expert_num: int = 0, shared_gate_up: Optional[Any] = None,
-        shared_dequant_scale: Optional[Any] = None, shared_experts: Optional[Any] = None,
-        ):
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor,
+        log2phy: torch.Tensor = None,
+        global_redundant_expert_num: int = 0,
+        shared_gate_up: Optional[Any] = None,
+        shared_dequant_scale: Optional[Any] = None,
+        shared_experts: Optional[Any] = None,
+    ):
         self.expert_map = expert_map
         self.topk_ids = topk_ids
-        self.topk_weights =topk_weights
+        self.topk_weights = topk_weights
         self.shared_experts = shared_experts
-        
-        kwargs_mc2 = self.get_permute_mc2_kwargs(hidden_states, topk_weights, topk_ids, expert_map, global_redundant_expert_num)
+
+        kwargs_mc2 = self.get_permute_mc2_kwargs(hidden_states, topk_weights,
+                                                 topk_ids, expert_map,
+                                                 global_redundant_expert_num)
         self.output = torch_npu.npu_moe_distribute_dispatch_v2(
             **kwargs_mc2
         ) if self.enable_dispatch_v2 else torch_npu.npu_moe_distribute_dispatch(
@@ -602,11 +618,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
                     self.shared_act, self.swiglu_out_scale = shared_act_out[0], shared_act_out[1]
 
         else:
-            print("#####################shared_experts", shared_experts)
             if shared_experts is not None:
                 with npu_stream_switch("moe_secondary", 0):
                     npu_wait_tensor(hidden_states, topk_weights)
-                    shared_gate_up, _ = shared_experts.gate_up_proj(hidden_states)
+                    shared_gate_up, _ = shared_experts.gate_up_proj(
+                        hidden_states)
                     npu_wait_tensor(shared_gate_up, expand_x)
                     self.shared_act = shared_experts.act_fn(shared_gate_up)
         group_list_type = 1
@@ -628,8 +644,8 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         }
         if self.with_quant:
             tp_recv_counts = torch.empty(1,
-                                 dtype=torch.int32,
-                                 device=hidden_states.device)
+                                         dtype=torch.int32,
+                                         device=hidden_states.device)
         else:
             tp_recv_counts = self.output[5]
         stage3_kwargs = {
@@ -661,7 +677,11 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         kwargs_mc2.update(stage3_kwargs)
         return kwargs_mc2
     
-    def token_unpermutation(self, hidden_states: torch.Tensor):
+    def token_unpermutation(
+        self,
+        hidden_states: torch.Tensor,
+        bias: torch.Tensor = None
+    ):
         
         kwargs_mc2 = self.get_unpermute_mc_kwargs(hidden_states)
         hidden_states = torch_npu.npu_moe_distribute_combine_v2(
@@ -673,20 +693,21 @@ class TokenDispatcherWithMC2(MoETokenDispatcher):
         else:
             if self.with_quant:
                 with npu_stream_switch("moe_secondary", 0):
-                    print("#####################self.shared_experts",self.shared_experts)
                     npu_wait_tensor(self.shared_act, hidden_states)
                     shared_hidden_states, _ = self.shared_experts.down_proj(
                         (self.shared_act, self.swiglu_out_scale))
             else:
                 with npu_stream_switch("moe_secondary", 0):
                     npu_wait_tensor(self.shared_act, hidden_states)
-                    shared_hidden_states, _ = self.shared_experts.down_proj(self.shared_act)
+                    shared_hidden_states, _ = self.shared_experts.down_proj(
+                        self.shared_act)
             return hidden_states, shared_hidden_states
 
 class TokenDispatcherWithAllGather(MoETokenDispatcher):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.apply_router_weight_on_input = kwargs.get("apply_router_weight_on_input")
+        self.apply_router_weight_on_input = kwargs.get(
+            "apply_router_weight_on_input")
         self.top_k = kwargs.get("top_k")
         self.max_num_tokens = kwargs.get("max_num_tokens")
         ep_size = kwargs.get("ep_size")
@@ -702,8 +723,16 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
         self.topk_ids = None
 
     def token_permutation(
-        self, hidden_states: torch.Tensor, topk_weights: torch.Tensor, topk_ids:torch.Tensor, expert_map:torch.Tensor,
-        log2phy: torch.Tensor = None, global_redundant_expert_num: int = 0
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor,
+        log2phy: torch.Tensor = None,
+        global_redundant_expert_num: int = 0,
+        shared_gate_up: Optional[Any] = None,
+        shared_dequant_scale: Optional[Any] = None,
+        shared_experts: Optional[Any] = None,
     ):
         self.original_shape = hidden_states.shape
         # assert len(original_shape) == 2
@@ -728,10 +757,10 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
 
         if expert_map is not None:
             # Generate token indices and flatten
-            token_indices = (torch.arange(num_tokens,
-                                        device=device,
-                                        dtype=torch.int64).unsqueeze(1).expand(
-                                            -1, self.top_k).reshape(-1))
+            token_indices = (torch.arange(
+                num_tokens, device=device,
+                dtype=torch.int64).unsqueeze(1).expand(-1,
+                                                       self.top_k).reshape(-1))
 
             # Flatten token-to-expert mappings and map to local experts
             weights_flat = topk_weights.view(-1)
@@ -741,7 +770,8 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             # Filter valid token-expert pairs
             self.mask = local_experts_flat != -1
             filtered_weights = torch.where(
-                self.mask, weights_flat, torch.zeros_like(weights_flat)).to(dtype)
+                self.mask, weights_flat,
+                torch.zeros_like(weights_flat)).to(dtype)
             filtered_experts = torch.where(
                 self.mask, local_experts_flat,
                 torch.full_like(local_experts_flat,
@@ -756,10 +786,11 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             # This is equivalent to but faster than:
             # >>> token_counts = torch.bincount(filtered_experts, minlength=num_experts)[:-1]
             token_counts = torch.zeros(self.num_experts_local + 1,
-                                    device=device,
-                                    dtype=torch.int64)
+                                       device=device,
+                                       dtype=torch.int64)
             ones = torch.ones_like(filtered_experts, dtype=torch.int64)
-            token_counts.scatter_add_(0, filtered_experts.to(torch.int64), ones)
+            token_counts.scatter_add_(0, filtered_experts.to(torch.int64),
+                                      ones)
             expert_tokens = token_counts[:self.num_experts_local]
 
             # Rearrange hidden_states
@@ -767,15 +798,18 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             if self.with_quant:
                 group_list_type = 1
             else:
-                expert_tokens = torch.cumsum(expert_tokens, dim=0, dtype=torch.int64)
+                expert_tokens = torch.cumsum(expert_tokens,
+                                             dim=0,
+                                             dtype=torch.int64)
                 group_list_type = 0
         else:
             row_idx_len = num_tokens * self.top_k
             row_idx = (torch.arange(0,
                                     row_idx_len,
                                     dtype=torch.int32,
-                                    device=device).view(self.top_k, -1).permute(
-                                        1, 0).contiguous())
+                                    device=device).view(self.top_k,
+                                                        -1).permute(
+                                                            1, 0).contiguous())
             active_num = self.max_num_tokens if self.max_num_tokens is not None else num_tokens
             sorted_hidden_states, self.expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
                 hidden_states,
@@ -789,15 +823,19 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             group_list_type = 0
         return group_list_type, sorted_hidden_states, expert_tokens
 
-    def token_unpermutation(self, hidden_states: torch.Tensor):
+    def token_unpermutation(
+        self,
+        hidden_states: torch.Tensor,
+        bias: torch.Tensor = None
+    ):
         dtype = hidden_states.dtype
         device = hidden_states.device
         if self.expert_map is not None:
             weighted_down_out = hidden_states * self.sorted_weights.unsqueeze(1)
 
             final_hidden_states = torch.zeros(*self.original_shape,
-                                            device=hidden_states.device,
-                                            dtype=hidden_states.dtype)
+                                              device=hidden_states.device,
+                                              dtype=hidden_states.dtype)
 
             # TODO: npu_grouped_matmul output random values at [num_valid_tokens:, ...]
             # This created multiple NaN and index_add_ will mix them up which harms accuracy
@@ -809,7 +847,8 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
             valid_output = torch.where(
                 valid_token_mask, weighted_down_out,
                 torch.zeros_like(weighted_down_out)).to(dtype)
-            final_hidden_states.index_add_(0, self.sorted_token_indices, valid_output)
+            final_hidden_states.index_add_(0, self.sorted_token_indices,
+                                           valid_output)
         else:
             if self.with_quant:
                 final_hidden_states = torch_npu.npu_moe_finalize_routing(
@@ -822,10 +861,12 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
                     export_for_source_row=self.topk_ids,
                 )
                 if len(self.original_shape) == 3:
-                    final_hidden_states = final_hidden_states.view(self.original_shape)
+                    final_hidden_states = final_hidden_states.view(
+                        self.original_shape)
             else:
                 scales = torch.ones_like(
-                    self.topk_weights) if self.apply_router_weight_on_input else self.topk_weights
+                    self.topk_weights
+                ) if self.apply_router_weight_on_input else self.topk_weights
                 # TODO: Reorder device memory 2 times here, replace the current
                 # implementation here when suitable operators become available.
                 final_hidden_states = torch_npu.npu_moe_finalize_routing(
@@ -840,16 +881,32 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher):
 
         return final_hidden_states
 
+# mypy: disable-error-code="override"
 class UnquantizedTokenDispatcherWithFusedExpertsMoge(MoETokenDispatcher):
+
     def __init__(self, **kwargs):
         super(MoETokenDispatcher, self).__init__(**kwargs)
-        self.bsz = None
+        self.apply_router_weight_on_input = kwargs.get(
+            "apply_router_weight_on_input")
+        self.ep_size = kwargs.get("ep_size")
+        self.top_k = kwargs.get("top_k")
         device_group = get_ep_group().device_group
-        self.ep_size = device_group.world_size
-        self.local_num_experts = self.global_num_experts // self.ep_size
+        self.local_num_experts = self.num_experts // self.ep_size
         self.local_num_group = self.top_k // self.ep_size
+        self.bsz = None
 
-    def token_permutation(self, hidden_states: torch.Tensor, topk_ids: torch.Tensor, topk_weights:torch.Tensor):
+    def token_permutation(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor,
+        log2phy: torch.Tensor = None,
+        global_redundant_expert_num: int = 0,
+        shared_gate_up: Optional[Any] = None,
+        shared_dequant_scale: Optional[Any] = None,
+        shared_experts: Optional[Any] = None,
+    ):
 
         if self.apply_router_weight_on_input:
             assert (topk_weights.dim() == 2
@@ -868,19 +925,26 @@ class UnquantizedTokenDispatcherWithFusedExpertsMoge(MoETokenDispatcher):
             0, self.sorted_topk_ids // self.local_num_group)
   
         experts_id = torch.arange(0,
-                                self.local_num_experts,
-                                dtype=topk_ids.dtype,
-                                device=topk_ids.device)
-        num_tokens_per_expert = (flatten_topk_ids.unsqueeze(-1) == experts_id).to(
-            torch.float32).sum(0)
+                                  self.local_num_experts,
+                                  dtype=topk_ids.dtype,
+                                  device=topk_ids.device)
+        num_tokens_per_expert = (
+            flatten_topk_ids.unsqueeze(-1) == experts_id).to(
+                torch.float32).sum(0)
         self.topk_scales = topk_weights.view(-1).index_select(
             0, self.sorted_topk_ids).unsqueeze(-1)
         group_list = num_tokens_per_expert.cumsum(dim=0).to(torch.int64)
         return hidden_states, group_list
 
-    def token_unpermutation(self, down_out_list: torch.Tensor):
-        unsorted_topk_ids = torch.argsort(self.sorted_topk_ids.float()).to(torch.int32)
-        unsorted_hidden_states = down_out_list.index_select(0, unsorted_topk_ids)
+    def token_unpermutation(
+        self,
+        hidden_states: torch.Tensor,
+        bias: torch.Tensor = None
+    ):
+        unsorted_topk_ids = torch.argsort(self.sorted_topk_ids.float()).to(
+            torch.int32)
+        unsorted_hidden_states = hidden_states.index_select(
+            0, unsorted_topk_ids)
         final_hidden_states = unsorted_hidden_states.reshape(
             self.bsz, self.top_k // self.ep_size, -1).sum(1)
         return final_hidden_states
