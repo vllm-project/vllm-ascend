@@ -21,7 +21,11 @@ import torch.nn as nn
 import torch_npu
 import random
 import copy
+from vllm.config import VllmConfig
+from vllm_ascend.compilation.quant_fusion_pass import AscendQuantFusionPass
+from vllm_ascend.compilation.graph_rewrite_pass_manager import GraphRewritePassManager
 from vllm_ascend.quantization.w8a8 import quant_per_tensor
+
 
 class ModelWithRMSNormQuant(nn.Module):
     def __init__(self, hidden_size, eps=1e-6, quant_config=None, prefix=""):
@@ -30,13 +34,11 @@ class ModelWithRMSNormQuant(nn.Module):
         self.eps = eps
         self.quant_config = quant_config
         self.prefix = prefix
-        self.former_linear = nn.Linear(hidden_size, hidden_size)  # float
-        self.post_linear = nn.Linear(hidden_size, hidden_size, dtype=torch.int8)    # quantized
-        self.deq_scale = 0.7
+        self.former_linear = nn.Linear(hidden_size, hidden_size)
         self.weight = nn.Parameter(torch.Tensor(hidden_size))
         self.bias = nn.Parameter(torch.Tensor(hidden_size))
-        self.quant_scale = 0.83
-        self.quant_offset = 3
+        self.quant_scale = nn.Parameter(torch.Tensor(hidden_size))
+        self.quant_offset = nn.Parameter(torch.Tensor(hidden_size))
 
     def forward(self, x):
         hidden_states = self.former_linear(x)
@@ -45,35 +47,37 @@ class ModelWithRMSNormQuant(nn.Module):
         return quantized_output, residual
 
 
-def custom_graph_rewriter_backend(gm: torch.fx.GraphModule, example_inputs):
-    from torch.fx.subgraph_rewriter import replace_pattern
-    print("before fusion graph:", gm.graph)
-    def pattern(npu_quant_matmul, output_parallel, rms_norm_weight, scale, offset):
-        output = torch.ops.npu_add_rms_norm(npu_quant_matmul, output_parallel, rms_norm_weight, 1e-6)
-        out0 = output[0]
-        out1 = output[2]
-        new_out = torch.ops.npu.npu_quantize(out0, scale, offset, torch.qint8, -1, False)
-        return new_out, out1
-    
-    def replace(npu_quant_matmul, output_parallel, rms_norm_weight, scale, offset):
-        output = torch.ops.npu.npu_add_rms_norm_quantize(npu_quant_matmul, output_parallel, rms_norm_weight, scale, offset, epsilon=1e-6)
-        return output[0], output[2]
 
-    replace_pattern(gm, pattern, replace)
-    gm.recompile()
-    print("after fusion graph:", gm.graph)
-    return gm
+class CustomizeCompilationInterface:
+    def __init__(self, vllm_config):
+        self.vllm_config = vllm_config
+        self.graph_rewriter_manager = GraphRewritePassManager()
+        self.graph_rewriter_manager.configure(vllm_config)
 
-def test_graph_rewriter():
+    def __call__(self, gm: torch.fx.GraphModule, example_inputs):
+        gm = self.graph_rewriter_manager(gm)
+        gm.recompile()
+        return gm
+
+
+def test_fusion_pass(
+    num_tokens: int = 20,
+    hidden_size: int = 4096,
+):
     # Create a random input tensor
-    num_tokens = 20
-    hidden_size = 4096
     input_tensor = torch.randn(num_tokens, hidden_size)
+    vllm_config = VllmConfig()
+    # Open the compilation fusion config and enable the graph rewriter on quantization
+    vllm_config.additional_config.ascend_compilation_config.enable_graph_rewriter = True
+    vllm_config.additional_config.ascend_compilation_config.enable_quantization_fusion = True
+    compilation_interface = CustomizeCompilationInterface(vllm_config)
+    for pass_ in compilation_interface.graph_rewriter_manager.passes:
+        
 
     # Initialize the model with RMSNorm quantization
     model = ModelWithRMSNormQuant(hidden_size=hidden_size)
     new_model = copy.deepcopy(model)
-    compiled_model = torch.compile(model, backend=custom_graph_rewriter_backend)
+    compiled_model = torch.compile(model, backend=CustomizeCompilationInterface(vllm_config))
     for i in range(3):
         output = compiled_model(input_tensor)
     # Check if the output is as expected
