@@ -287,8 +287,8 @@ def mrope_forward(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     import torch_npu
     mrope_section = [0, 0, 0] if positions.ndim == 1 else self.mrope_section
-
-    query, key = torch_npu.npu_mrope(positions.clone(),
+    positions = positions.clone().detach().continuous()
+    query, key = torch_npu.npu_mrope(positions,
                                      query.contiguous(),
                                      key.contiguous(),
                                      self.cos_sin_cache.contiguous(),
