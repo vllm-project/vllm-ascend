@@ -24,13 +24,17 @@ import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
+from vllm.config import get_current_vllm_config
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.utils import direct_register_custom_op
 from vllm.v1.core.sched.output import SchedulerOutput
 
+from vllm_ascend.attention.utils import \
+    AscendCommonAttentionMetadata as CommonAttentionMetadata
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
-from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
-                               nd_to_nz_2d, nd_to_nz_spec)
+from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16,
+                               get_graph_params, is_310p, nd_to_nz_2d,
+                               nd_to_nz_spec)
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
 
@@ -132,7 +136,7 @@ class AscendMetadata:
     # tokens + new tokens (is None if it is a decoding).
     # (batch_size,)
     seq_lens: torch.Tensor = None
-
+    seq_lens_list: Optional[list[int]] = None
     query_start_loc: torch.Tensor = None
     query_lens: torch.Tensor = None
     # Maximum query length in the batch (None for decoding).
@@ -168,6 +172,7 @@ class AscendAttentionMetadataBuilder:
               num_reqs,
               num_actual_tokens,
               max_query_len,
+              common_attn_metadata: CommonAttentionMetadata,
               enable_dbo_across_dp: bool = False,
               is_only_prefill: bool = False):
 
@@ -176,15 +181,17 @@ class AscendAttentionMetadataBuilder:
         block_table[:num_reqs, :self.runner.max_num_blocks_per_req] = (
             block_table[:num_reqs])
 
+        query_start_loc = common_attn_metadata.query_start_loc
+        seq_lens = common_attn_metadata.seq_lens
+        # TODO: Refactor this param to common metadata in runners,
+        # preparing for the hybrid KV groups feature
         query_lens = self.runner.query_lens
-        seq_lens = self.runner.seq_lens_cpu[:num_reqs]
-        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
-            self.runner.device, non_blocking=True)
+        # Since FIA for GQA is not active now, we temporarily silence it
+        seq_lens_list = common_attn_metadata.seq_lens_list
+
+        slot_mapping = self.runner.slot_mapping[:num_actual_tokens]
         attn_mask = self.runner.attn_mask
         attn_state = self.runner.attn_state
-        query_start_loc_cpu = self.runner.query_start_loc_cpu[:num_reqs + 1]
-        query_start_loc = query_start_loc_cpu.to(self.runner.device,
-                                                 non_blocking=True)
 
         if is_310p():
             if attn_state == AscendAttentionState.PrefillNoCache:
@@ -202,12 +209,40 @@ class AscendAttentionMetadataBuilder:
             query_start_loc=query_start_loc,
             query_lens=query_lens,
             seq_lens=seq_lens,
+            seq_lens_list=seq_lens_list,
             max_query_len=max_query_len,
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
             attn_state=attn_state,
             enable_dbo_across_dp=enable_dbo_across_dp,
             is_only_prefill=is_only_prefill)
+        return attn_metadata
+
+    def build_dummy_metadata(self, num_actual_tokens, num_reqs,
+                             num_scheduled_tokens, attn_state):
+        if attn_state == AscendAttentionState.DecodeOnly:
+            # NOTE: We only need to pay attention to seq_lens_list and block_table here
+            common_attn_metadata = CommonAttentionMetadata(
+                seq_lens=torch.empty_like(self.runner.seq_lens_cpu).fill_(2))
+
+            block_table = self.runner.input_batch.block_table[0].block_table
+            block_table[:num_reqs, 0] = torch.arange(1,
+                                                     num_reqs + 1,
+                                                     device=block_table.device,
+                                                     dtype=block_table.dtype)
+
+            attn_metadata = self.build(
+                num_reqs=num_reqs,
+                num_actual_tokens=num_actual_tokens,
+                max_query_len=num_scheduled_tokens.max(),
+                common_attn_metadata=common_attn_metadata,
+            )
+        else:
+            raise NotImplementedError(
+                "Currently we only support building dummy metadata for DecodeOnly state"
+            )
+
+        attn_metadata.attn_state = attn_state
         return attn_metadata
 
 
@@ -245,6 +280,10 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.key_cache = None
         self.value_cache = None
+
+        vllm_config = get_current_vllm_config()
+        self.full_graph = vllm_config.compilation_config.full_cuda_graph
+        self.block_size = vllm_config.cache_config.block_size
 
     def _forward_prefill_no_cache(
         self,
@@ -314,22 +353,64 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self,
         query: torch.Tensor,
         attn_metadata: AscendMetadata,
+        num_tokens: int,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        if is_310p():
-            # seq_lens_tensor needs to be transferred to the device for 310P.
-            attn_metadata.seq_lens = \
-                attn_metadata.seq_lens.to(device=query.device)
+        graph_params = get_graph_params()
 
-        torch_npu._npu_paged_attention(query=query,
-                                       key_cache=self.key_cache,
-                                       value_cache=self.value_cache,
-                                       num_kv_heads=self.num_kv_heads,
-                                       num_heads=self.num_heads,
-                                       scale_value=self.scale,
-                                       block_table=attn_metadata.block_tables,
-                                       context_lens=attn_metadata.seq_lens,
-                                       out=output)
+        # TODO(Yizhou): Find another way to handle the
+        # graph capturing mode. Say, GraphCaptureContext?
+        forward_context = get_forward_context()
+        if not forward_context.capturing:
+            if is_310p():
+                # seq_lens_tensor needs to be transferred to the device for 310P
+                attn_metadata.seq_lens = \
+                    attn_metadata.seq_lens.to(device=query.device)
+            torch_npu._npu_paged_attention(
+                query=query,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                num_kv_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale_value=self.scale,
+                block_table=attn_metadata.block_tables,
+                context_lens=attn_metadata.seq_lens,
+                out=output)
+        else:
+            # Handle graph capturing mode
+            stream = torch_npu.npu.current_stream()
+
+            event = torch.npu.ExternalEvent()
+            event.wait(stream)
+            event.reset(stream)
+            graph_params.events[num_tokens].append(event)
+
+            graph_params.attn_params[num_tokens].append((
+                query,
+                self.key_cache,
+                self.value_cache,
+                self.num_kv_heads,
+                self.num_heads,
+                self.scale,
+                attn_metadata.block_tables,
+                attn_metadata.seq_lens,
+                output,
+            ))
+
+            torch.npu.graph_task_group_begin(stream)
+            torch_npu._npu_paged_attention(
+                query=query,
+                key_cache=self.key_cache,
+                value_cache=self.value_cache,
+                num_kv_heads=self.num_kv_heads,
+                num_heads=self.num_heads,
+                scale_value=self.scale,
+                block_table=attn_metadata.block_tables,
+                context_lens=attn_metadata.seq_lens,
+                out=output)
+            handle = torch.npu.graph_task_group_end(stream)
+            graph_params.handles[num_tokens].append(handle)
+
         return output
 
     def _forward_v1_style(
@@ -472,7 +553,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     query, attn_metadata, output)
             elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 output = self._forward_decode_only(query, attn_metadata,
-                                                   output)
+                                                   num_tokens, output)
             # Normal V1 situation.
             else:
                 output = self._forward_v1_style(query, attn_metadata, output)
