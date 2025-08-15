@@ -103,7 +103,7 @@ class AscendQwen2VisionAttention(Qwen2VisionAttention):
             key=k,
             value=v,
             seq_len=self.cu_seqlens,
-            scale_value=self.origin_hidden_size_per_attention_head**-0.5,
+            scale_value=self.hidden_size_per_attention_head**-0.5,
             num_heads=self.num_attention_heads_per_partition,
             num_kv_heads=self.num_attention_heads_per_partition,
             out=context_layer)
