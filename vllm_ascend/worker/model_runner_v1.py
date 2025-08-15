@@ -26,7 +26,7 @@ import types
 import weakref
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Type, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -80,11 +80,11 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
 from vllm_ascend.attention.attention_v1_torchair import AscendTorchairMetadata
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
+from vllm_ascend.attention.utils import \
+    AscendCommonAttentionMetadata as CommonAttentionMetadata
 from vllm_ascend.distributed.moe_comm_method import (AllGatherCommImpl,
                                                      DummyCommImpl,
                                                      MoECommMethod)
-from vllm_ascend.attention.utils import \
-    AscendCommonAttentionMetadata as CommonAttentionMetadata
 from vllm_ascend.multistream.ms_split import compute_split_seq_index
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.sample.rejection_sampler import AscendRejectionSampler
@@ -1887,8 +1887,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output.finished_req_ids)
         return None, None
 
-    def _build_attention_metadata(self, with_prefill, num_tokens, num_reqs,
-                                  num_scheduled_tokens, skip_attn, attn_state):
+    def _build_attention_metadata(
+        self,
+        num_tokens: int,
+        num_reqs: int,
+        num_scheduled_tokens: int,
+        skip_attn: bool,
+        attn_state: AscendAttentionState,
+        **kwargs: Any,
+    ):
         if skip_attn:
             attn_metadata = None
         else:
@@ -1955,10 +1962,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.is_kv_producer:
             with_prefill = True
 
-        attn_metadata = self._build_attention_metadata(with_prefill,
-                                                       num_tokens, num_reqs,
-                                                       num_scheduled_tokens,
-                                                       skip_attn, attn_state)
+        attn_metadata = self._build_attention_metadata(
+            num_reqs=num_reqs,
+            skip_attn=skip_attn,
+            with_prefill=with_prefill,
+            num_tokens=num_tokens,
+            num_scheduled_tokens=num_scheduled_tokens,
+            attn_state=attn_state,
+        )
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):

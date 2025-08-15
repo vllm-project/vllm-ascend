@@ -353,6 +353,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
         self,
         query: torch.Tensor,
         attn_metadata: AscendMetadata,
+        num_tokens: int,
         output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         graph_params = get_graph_params()
@@ -409,7 +410,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                 out=output)
             handle = torch.npu.graph_task_group_end(stream)
             graph_params.handles[num_tokens].append(handle)
-        
+
         return output
 
     def _forward_v1_style(
@@ -552,7 +553,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     query, attn_metadata, output)
             elif attn_metadata.attn_state == AscendAttentionState.DecodeOnly:
                 output = self._forward_decode_only(query, attn_metadata,
-                                                   output)
+                                                   num_tokens, output)
             # Normal V1 situation.
             else:
                 output = self._forward_v1_style(query, attn_metadata, output)

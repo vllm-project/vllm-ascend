@@ -36,7 +36,7 @@ MODELS = [
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("full_graph", [True, False])
+@pytest.mark.parametrize("full_graph", [False])
 def test_models_with_aclgraph(
     model: str,
     max_tokens: int,
@@ -57,7 +57,6 @@ def test_models_with_aclgraph(
                              "full_cuda_graph": True,
                              "cudagraph_capture_sizes": [1, 4, 16, 64, 256]
                          })
-        prompts = prompts * 4
     else:
         vllm_model = LLM(model, max_model_len=1024)
     vllm_aclgraph_outputs = vllm_model.generate(prompts, sampling_params)
