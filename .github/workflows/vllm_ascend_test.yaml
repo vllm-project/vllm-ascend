@@ -111,6 +111,24 @@ jobs:
           python3 -m pip install -r requirements-dev.txt --extra-index https://download.pytorch.org/whl/cpu/
           python3 -m pip install -v . --extra-index https://download.pytorch.org/whl/cpu/
 
+      - name: Run unit test
+        env:
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+          TORCH_DEVICE_BACKEND_AUTOLOAD: 0
+        run: |
+          export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/Ascend/ascend-toolkit/latest/x86_64-linux/devlib
+          pytest -sv --cov --cov-report=xml:unittests-coverage.xml tests/ut
+
+      - name: Upload coverage to Codecov
+        if: ${{ matrix.vllm_version == 'main' }}
+        uses: codecov/codecov-action@v5
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        with:
+          flags: unittests
+          name: vllm-ascend
+          verbose: true
+
   e2e:
     needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
@@ -167,9 +185,6 @@ jobs:
         run: |
           pip install -r requirements-dev.txt
           pip install -v -e .
-          if [[ "${{ matrix.vllm_version }}" == "v0.10.0" ]]; then
-            pip install "transformers<4.54.0"
-          fi
 
       - name: Run e2e test
         env:
