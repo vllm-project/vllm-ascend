@@ -287,8 +287,7 @@ class AscendMLAMetadataBuilder:
             self, common_attn_metadata: AscendCommonAttentionMetadata,) -> AscendMLAMetadata:
         device = self.device
         num_reqs = common_attn_metadata.num_reqs
-        _, max_blocks = self.max_blocks
-        block_table = torch.zeros((num_reqs, max_blocks),
+        block_table = torch.zeros((num_reqs, self.max_blocks),
                                   dtype=torch.int32,
                                   device=device)
         block_table = self._get_graph_runner_block_tables(
