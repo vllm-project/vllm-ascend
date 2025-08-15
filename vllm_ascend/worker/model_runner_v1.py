@@ -1155,11 +1155,25 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 attn_state = AscendAttentionState.ChunkedPrefill
             else:
                 attn_state = AscendAttentionState.SpecDecoding
+        # NOTE: torch._npu_flash_attention_qlens performance is better than 
+        # torch_npu._npu_paged_attention_splitfuse, so let attn_state=PrefillCacheHit when all 
+        # requests are prefill, however, _npu_flash_attention_qlens now only support prefix_len % 128 == 0
+        elif np.all(num_scheduled_tokens > 1) and \
+            np.all(self.input_batch.num_computed_tokens_cpu[:num_reqs] % 128 == 0):
+            attn_state = AscendAttentionState.PrefillCacheHit
         # splitfuse
         elif not ascend_config.ascend_scheduler_config.enabled or self.chunked_prefill_enabled:
             attn_state = AscendAttentionState.ChunkedPrefill
         else:
             attn_state = AscendAttentionState.PrefillCacheHit
+
+        # in mla, both PrefillCacheHit and ChunkedPrefill will use _npu_ring_mla
+        if self.vllm_config.model_config.use_mla and \
+            attn_state in [
+                AscendAttentionState.PrefillCacheHit,
+                AscendAttentionState.ChunkedPrefill
+            ]:
+            attn_state = AscendAttentionState.ChunkedPrefill
 
         self.attn_mask = self._make_attention_mask(
             seq_lens=seq_lens,
