@@ -19,11 +19,8 @@
 from torch import fx as fx
 
 from vllm.config import VllmConfig
-from vllm.platforms import current_platform
-from vllm.logger import init_logger
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
-from vllm.compilation.inductor_pass import get_pass_context, InductorPass
-from quant_fusion_pass import AscendQuantFusionPass
+from vllm.compilation.inductor_pass import get_pass_context
 
 
 class GraphRewritePassManager:
@@ -51,8 +48,8 @@ class GraphRewritePassManager:
         self.passes.append(pass_)
   
     def configure(self, config: VllmConfig):
-        self.pass_config = config.additional_config.ascend_pass_config
-        if self.pass_config.enable_addrms_norm_quant_fusion:
+        self.ascend_compilation_config = config.additional_config.ascend_compilation_config
+        if self.ascend_compilation_config.enable_quantization_fusion:
             from .quant_fusion_pass import AscendQuantFusionPass
             self.passes.append(AscendQuantFusionPass(config))
         # Add more passes here as needed
