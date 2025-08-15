@@ -347,20 +347,22 @@ class TestUtils(TestBase):
     @mock.patch("vllm.model_executor.custom_op.CustomOp")
     @mock.patch("vllm_ascend.ops.activation.AscendQuickGELU")
     @mock.patch("vllm_ascend.ops.activation.AscendSiluAndMul")
-    def test_register_ascend_customop(self, mock_ascend_silu_and_mul,
+    @mock.patch("vllm_ascend.ops.layernorm.AscendRMSNorm")
+    def test_register_ascend_customop(self, mock_ascend_rmsnorm,
+                                      mock_ascend_silu_and_mul,
                                       mock_ascend_quick_gelu, mock_customop):
         utils._ASCEND_CUSTOMOP_IS_REIGISTERED = False
 
         # ascend custom op is not registered
         utils.register_ascend_customop()
-        # should call register_oot twice
-        self.assertEqual(mock_customop.register_oot.call_count, 2)
+        # should call register_oot three
+        self.assertEqual(mock_customop.register_oot.call_count, 3)
         self.assertTrue(utils._ASCEND_CUSTOMOP_IS_REIGISTERED)
 
         # ascend custom op is already registered
         utils.register_ascend_customop()
-        # should not register_oot again, thus only called twice in this ut
-        self.assertEqual(mock_customop.register_oot.call_count, 2)
+        # should not register_oot again, thus only called three in this ut
+        self.assertEqual(mock_customop.register_oot.call_count, 3)
 
 
 class TestProfileExecuteDuration(TestBase):

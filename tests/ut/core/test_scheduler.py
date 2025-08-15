@@ -50,7 +50,7 @@ def create_requests(
             request_id=f"{i}",
             prompt_token_ids=[i] * num_tokens,
             sampling_params=sampling_params,
-            multi_modal_inputs=mm_inputs,
+            multi_modal_kwargs=mm_inputs,
             multi_modal_placeholders=mm_position,
             multi_modal_hashes=None,
             eos_token_id=EOS_TOKEN_ID,
