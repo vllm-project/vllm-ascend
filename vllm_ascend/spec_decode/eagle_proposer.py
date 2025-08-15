@@ -4,8 +4,7 @@ import os
 import torch
 import torch.nn as nn
 from vllm.attention.layer import Attention
-from vllm.config import (CompilationLevel, VllmConfig,
-                         get_layers_from_vllm_config)
+from vllm.config import CompilationLevel, get_layers_from_vllm_config
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import logger
 from vllm.model_executor.model_loader import get_model
@@ -16,34 +15,35 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.spec_decode.interface import Proposer, SpecDcodeType
 
 PADDING_SLOT_ID = -1
+BLOCK_SIZE = 1024
 
 
-class EagleProposer:
+class EagleProposer(Proposer):
 
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 device: torch.device,
-                 runner=None):
+    def __init__(self, vllm_config, device, runner):
+        if vllm_config.speculative_config.method == "eagle3":
+            self.name = SpecDcodeType.EAGLE3
+
+        else:
+            self.name = SpecDcodeType.EAGLE
         self.vllm_config = vllm_config
-        self.speculative_config = vllm_config.speculative_config
-        self.draft_model_config = self.speculative_config.draft_model_config
-        self.method = self.speculative_config.method
+        self.device = device
         self.runner = runner
-        self.model_config = vllm_config.model_config
+
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
         self.block_size = vllm_config.cache_config.block_size
         self.num_speculative_tokens = (
-            self.speculative_config.num_speculative_tokens)
-        self.max_num_tokens = (
-            vllm_config.scheduler_config.max_num_batched_tokens)
-        self.device = device
+            vllm_config.speculative_config.num_speculative_tokens)
+
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
         # hidden size (e.g., Llama 3.3 70B).
-        self.hidden_size = self.draft_model_config.get_hidden_size()
+        self.hidden_size = vllm_config.speculative_config.draft_model_config.get_hidden_size(
+        )
 
         self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE and
@@ -53,14 +53,17 @@ class EagleProposer:
                 self.vllm_config.compilation_config.cudagraph_capture_sizes))
 
         # persistent buffers for cuda graph
-        self.input_ids = torch.zeros(self.max_num_tokens,
-                                     dtype=torch.int32,
-                                     device=device)
-        self.positions = torch.zeros(self.max_num_tokens,
-                                     dtype=torch.int64,
-                                     device=device)
+        self.input_ids = torch.zeros(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            dtype=torch.int32,
+            device=device)
+        self.positions = torch.zeros(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            dtype=torch.int64,
+            device=device)
         self.hidden_states = torch.zeros(
-            (self.max_num_tokens, self.hidden_size),
+            (vllm_config.scheduler_config.max_num_batched_tokens,
+             self.hidden_size),
             dtype=self.dtype,
             device=device)
         # We need +1 here because the arange is used to set query_start_loc,
@@ -69,11 +72,149 @@ class EagleProposer:
                                    1,
                                    device=device,
                                    dtype=torch.int32)
-        mask_len = os.getenv("PAGED_ATTENTION_MASK_LEN", 10000)
-        self.attn_mask_len = min(self.model_config.max_model_len,
-                                 int(mask_len))
+        self.attn_mask_len = min(
+            self.runner.model_config.max_model_len,
+            int(os.getenv("PAGED_ATTENTION_MASK_LEN", 10000)))
         self.attn_mask_builder = AttentionMaskBuilder(self.attn_mask_len,
                                                       self.dtype)
+
+    def load_model(self, target_model: nn.Module) -> None:
+        draft_model_config = \
+            self.vllm_config.speculative_config.draft_model_config
+        target_attn_layer_names = set(
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys())
+
+        self.model = get_model(vllm_config=self.vllm_config,
+                               model_config=draft_model_config)
+
+        draft_attn_layer_names = (
+            get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
+            target_attn_layer_names)
+
+        self.attn_layer_name = next(iter(draft_attn_layer_names))
+        # share embed_tokens with the target model if needed
+        if get_pp_group().world_size == 1:
+            logger.info(
+                "The EAGLE head shares the same vocab embedding" \
+                " with the target model."
+            )
+            self.model.model.embed_tokens = target_model.model.embed_tokens
+        else:
+            logger.info(
+                "Since PP > 1, the EAGLE head loaded its own vocab embedding" \
+                " weights instead of sharing them with the target model."
+            )
+
+        # share lm_head with the target model if needed
+        # some model definition do not define lm_head explicitly
+        # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
+        if self.vllm_config.speculative_config.method != "eagle3" and \
+                hasattr(target_model, "lm_head"):
+            logger.info("Loading EAGLE LM head weights from the target model.")
+            if supports_multimodal(target_model):
+                self.model.lm_head = target_model.get_language_model().lm_head
+            else:
+                self.model.lm_head = target_model.lm_head
+
+    @torch.inference_mode()
+    def dummy_run(self,
+                  num_tokens,
+                  with_prefill=None,
+                  skip_attn=None,
+                  num_reqs=None,
+                  num_tokens_across_dp=None):
+        with set_ascend_forward_context(None,
+                                        self.vllm_config,
+                                        num_tokens=num_tokens):
+            self.model(
+                input_ids=self.input_ids[:num_tokens],
+                positions=self.positions[:num_tokens],
+                hidden_states=self.hidden_states[:num_tokens],
+            )
+
+    def generate_token_ids(self,
+                           valid_sampled_token_ids,
+                           sampling_metadata=None,
+                           scheduler_output=None,
+                           spec_decode_metadata=None,
+                           positions=None,
+                           num_scheduled_tokens=None,
+                           hidden_states=None,
+                           attn_metadata=None,
+                           aux_hidden_states=None,
+                           attn_metadata_builder=None):
+        if self.name == SpecDcodeType.EAGLE:
+            raise NotImplementedError("Eagle Is Not Supported Yet.")
+
+        attn_metadata = self.runner.get_eagle_atten_dict(scheduler_output)
+        next_token_ids: list[int] = []
+        for i, token_ids in enumerate(valid_sampled_token_ids):
+            if token_ids:
+                # Common case.
+                next_token_id = token_ids[-1]
+            else:
+                # Partial prefill (rare case).
+                # Get the next token id from the request state.
+                req_id = self.runner.input_batch.req_ids[i]
+                req_state = self.runner.requests[req_id]
+                seq_len = (req_state.num_computed_tokens +
+                           scheduler_output.num_scheduled_tokens[req_id])
+
+                next_token_id = req_state.get_token_id(seq_len)
+            next_token_ids.append(next_token_id)
+        next_token_ids = torch.tensor(next_token_ids,
+                                      dtype=torch.int32,
+                                      device=self.device)
+        eagle_attn_metadata = attn_metadata[self.attn_layer_name]
+        if spec_decode_metadata is None:
+            # input_ids can be None for multimodal models.
+            target_token_ids = self.input_ids[:num_scheduled_tokens]
+            target_positions = positions[:num_scheduled_tokens]
+            if self.name == SpecDcodeType.EAGLE3:
+                target_hidden_states = torch.cat(
+                    [h[:num_scheduled_tokens] for h in aux_hidden_states],
+                    dim=-1)
+            else:
+                target_hidden_states = hidden_states[:num_scheduled_tokens]
+            target_slot_mapping = eagle_attn_metadata.slot_mapping
+            cu_num_tokens = eagle_attn_metadata.query_start_loc
+        else:
+            num_draft_tokens = spec_decode_metadata.num_draft_tokens
+            num_rejected_tokens = [
+                n + 1 - len(valid_sampled_token_ids[i]) if n > 0 else 0
+                for i, n in enumerate(num_draft_tokens)
+            ]
+            num_rejected_tokens = torch.tensor(
+                num_rejected_tokens,
+                dtype=torch.int32,
+                device=self.device,
+            )
+            num_tokens = num_scheduled_tokens - sum(num_rejected_tokens)
+            cu_num_tokens, token_indices = self._prepare_inputs(
+                eagle_attn_metadata.query_start_loc, num_rejected_tokens,
+                num_tokens)
+            target_token_ids = self.input_ids[token_indices]
+            target_positions = positions[token_indices]
+            if self.name == SpecDcodeType.EAGLE3:
+                target_hidden_states = torch.cat(
+                    [h[token_indices] for h in aux_hidden_states], dim=-1)
+            else:
+                target_hidden_states = hidden_states[token_indices]
+            target_slot_mapping = eagle_attn_metadata.slot_mapping[
+                token_indices]
+
+        draft_token_ids = self._propose(
+            target_token_ids=target_token_ids,
+            target_positions=target_positions,
+            target_hidden_states=target_hidden_states,
+            target_slot_mapping=target_slot_mapping,
+            next_token_ids=next_token_ids,
+            cu_num_tokens=cu_num_tokens,
+            block_table=eagle_attn_metadata.block_tables,
+            sampling_metadata=sampling_metadata,
+            attn_metadata_builder=attn_metadata_builder)
+        spec_token_ids = draft_token_ids.tolist()
+        return spec_token_ids
 
     def _make_attention_mask(
         self,
@@ -84,24 +225,24 @@ class EagleProposer:
         return self.attn_mask_builder.get_splitfuse_attn_mask(
             seq_lens, query_lens, position, self.dtype, self.device)
 
-    def propose(
-        self,
-        # [num_tokens]
-        target_token_ids: torch.Tensor,
-        # [num_tokens]
-        target_positions: torch.Tensor,
-        # [num_tokens, hidden_size]
-        target_hidden_states: torch.Tensor,
-        # [num_tokens]
-        target_slot_mapping: torch.Tensor,
-        # [batch_size]
-        next_token_ids: torch.Tensor,
-        # [batch_size + 1] starting with 0
-        cu_num_tokens: torch.Tensor,
-        # [batch_size, max_num_blocks_per_req]
-        block_table: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
-    ) -> torch.Tensor:
+    def _propose(
+            self,
+            # [num_tokens]
+            target_token_ids: torch.Tensor,
+            # [num_tokens]
+            target_positions: torch.Tensor,
+            # [num_tokens, hidden_size]
+            target_hidden_states: torch.Tensor,
+            # [num_tokens]
+            target_slot_mapping: torch.Tensor,
+            # [batch_size]
+            next_token_ids: torch.Tensor,
+            # [batch_size + 1] starting with 0
+            cu_num_tokens: torch.Tensor,
+            # [batch_size, max_num_blocks_per_req]
+            block_table: torch.Tensor,
+            sampling_metadata: SamplingMetadata,
+            attn_metadata_builder) -> torch.Tensor:
         device = cu_num_tokens.device
         cu_num_tokens = cu_num_tokens.cpu()
         block_table = block_table.cpu()
@@ -109,7 +250,7 @@ class EagleProposer:
         batch_size = next_token_ids.shape[0]
         last_token_indices = cu_num_tokens[1:] - 1
         target_positions = target_positions.cpu()
-        if self.method == "eagle3":
+        if self.name == SpecDcodeType.EAGLE3:
             assert isinstance(self.model, Eagle3LlamaForCausalLM)
             target_hidden_states = self.model.combine_hidden_states(
                 target_hidden_states)
@@ -126,7 +267,7 @@ class EagleProposer:
         max_query_len = query_lens.max().item()
 
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
-        attn_metadata = self.runner.attn_metadata_builder.build(
+        attn_metadata = attn_metadata_builder.build(
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
@@ -258,8 +399,8 @@ class EagleProposer:
         draft_token_ids = draft_token_ids_tensor.swapaxes(0, 1)
         return draft_token_ids
 
-    @staticmethod
-    def prepare_inputs(
+    def _prepare_inputs(
+        self,
         # [batch_size + 1]
         cu_target_query_lens: torch.Tensor,
         # [batch_size]
@@ -289,8 +430,8 @@ class EagleProposer:
             dtype=torch.int32,
             device=cu_target_query_lens.device,
         )
-        BLOCK_SIZE = 1024
-        prepare_eagle_input_sequential(
+
+        self._prepare_eagle_input_sequential(
             token_indices,
             cu_target_query_lens,
             cu_num_tokens,
@@ -298,87 +439,33 @@ class EagleProposer:
         )
         return cu_num_tokens, token_indices
 
-    def load_model(self, target_model: nn.Module) -> None:
-        draft_model_config = \
-            self.vllm_config.speculative_config.draft_model_config
-        target_attn_layer_names = set(
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys())
+    def _prepare_eagle_input_sequential(self, out_tensor: torch.Tensor,
+                                        cu_query_lens: torch.Tensor,
+                                        cu_num_tokens: torch.Tensor,
+                                        block_size: int):
+        num_programs = len(cu_num_tokens) - 1
+        for pid in range(num_programs):
+            start_pos = cu_num_tokens[pid].item()
+            end_pos = cu_num_tokens[pid + 1].item()
+            num_tokens = end_pos - start_pos
+            index_start = cu_query_lens[pid].item()
+            num_blocks = int(
+                torch.ceil(torch.tensor(num_tokens / block_size)).item())
 
-        self.model = get_model(vllm_config=self.vllm_config,
-                               model_config=draft_model_config)
-
-        draft_attn_layer_names = (
-            get_layers_from_vllm_config(self.vllm_config, Attention).keys() -
-            target_attn_layer_names)
-
-        self.attn_layer_names = list(draft_attn_layer_names)
-        self.attn_layer_name = next(iter(draft_attn_layer_names))
-        # share embed_tokens with the target model if needed
-        if get_pp_group().world_size == 1:
-            logger.info(
-                "The EAGLE head shares the same vocab embedding" \
-                " with the target model."
-            )
-            self.model.model.embed_tokens = target_model.model.embed_tokens
-        else:
-            logger.info(
-                "Since PP > 1, the EAGLE head loaded its own vocab embedding" \
-                " weights instead of sharing them with the target model."
-            )
-
-        # share lm_head with the target model if needed
-        # some model definition do not define lm_head explicitly
-        # and reuse embed_tokens for lm_head, e.g., CohereForCausalLM
-        if self.vllm_config.speculative_config.method != "eagle3" and \
-                hasattr(target_model, "lm_head"):
-            logger.info("Loading EAGLE LM head weights from the target model.")
-            if supports_multimodal(target_model):
-                self.model.lm_head = target_model.get_language_model().lm_head
-            else:
-                self.model.lm_head = target_model.lm_head
-
-    @torch.inference_mode()
-    def dummy_run(
-        self,
-        num_tokens: int,
-    ) -> None:
-        with set_ascend_forward_context(None,
-                                        self.vllm_config,
-                                        num_tokens=num_tokens):
-            self.model(
-                input_ids=self.input_ids[:num_tokens],
-                positions=self.positions[:num_tokens],
-                hidden_states=self.hidden_states[:num_tokens],
-            )
-
-
-def prepare_eagle_input_sequential(out_tensor: torch.Tensor,
-                                   cu_query_lens: torch.Tensor,
-                                   cu_num_tokens: torch.Tensor,
-                                   block_size: int):
-    num_programs = len(cu_num_tokens) - 1
-    for pid in range(num_programs):
-        start_pos = cu_num_tokens[pid].item()
-        end_pos = cu_num_tokens[pid + 1].item()
-        num_tokens = end_pos - start_pos
-        index_start = cu_query_lens[pid].item()
-        num_blocks = int(
-            torch.ceil(torch.tensor(num_tokens / block_size)).item())
-
-        for i in range(num_blocks):
-            offset_tensor = torch.arange(0,
-                                         block_size,
-                                         dtype=torch.int32,
-                                         device=out_tensor.device)
-            global_start_offset = i * block_size
-            target_indices = torch.tensor(
-                start_pos + global_start_offset,
-                dtype=torch.int32,
-                device=out_tensor.device) + offset_tensor
-            values_to_store = torch.tensor(
-                index_start, dtype=torch.int32,
-                device=out_tensor.device) + offset_tensor
-            mask = (target_indices >= start_pos) & \
-                   (target_indices < end_pos) & \
-                   (offset_tensor < num_tokens)
-            out_tensor[target_indices[mask]] = values_to_store[mask]
+            for i in range(num_blocks):
+                offset_tensor = torch.arange(0,
+                                             block_size,
+                                             dtype=torch.int32,
+                                             device=out_tensor.device)
+                global_start_offset = i * block_size
+                target_indices = torch.tensor(
+                    start_pos + global_start_offset,
+                    dtype=torch.int32,
+                    device=out_tensor.device) + offset_tensor
+                values_to_store = torch.tensor(
+                    index_start, dtype=torch.int32,
+                    device=out_tensor.device) + offset_tensor
+                mask = (target_indices >= start_pos) & \
+                    (target_indices < end_pos) & \
+                    (offset_tensor < num_tokens)
+                out_tensor[target_indices[mask]] = values_to_store[mask]
