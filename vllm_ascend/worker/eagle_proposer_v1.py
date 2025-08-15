@@ -140,9 +140,10 @@ class EagleProposer:
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
+            decode_token_per_req=self.runner.decode_token_per_req,
         )
         # FIXME(woosuk): The below two ops cause synchronization. Optimize.
-        attn_metadata = self.runner.attn_metadata_builder.build(common_attn_metadata)
+        attn_metadata = self.runner.attn_metadata_builder.build(common_attn_metadata, self.runner.model)
         if self.use_cuda_graph and \
             num_tokens <= self.cudagraph_batch_sizes[-1]:
             num_input_tokens = self.vllm_config.pad_for_cudagraph(num_tokens)

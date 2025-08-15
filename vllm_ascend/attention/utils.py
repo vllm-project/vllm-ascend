@@ -1,7 +1,7 @@
 from dataclasses import dataclass
+from enum import Enum
 
 from vllm.config import SpeculativeConfig
-from vllm_ascend.attention.attention_v1 import AscendAttentionState
 
 import torch
 
@@ -28,18 +28,20 @@ class AscendCommonAttentionMetadata:
     num_actual_tokens: int
     """Total number of tokens in batch"""
 
-    actual_seq_lengths_q: list[int] = None
+    max_query_len: int
+
+    decode_token_per_req: int
 
     block_table_tensor: torch.Tensor
     slot_mapping_cpu: torch.Tensor
+
+    actual_seq_lengths_q: list[int] = None
 
     positions: torch.Tensor = None
 
     attn_mask: torch.Tensor = None
     spec_attn_mask: torch.Tensor = None
-    attn_state: AscendAttentionState = None
-
-    max_query_len: int
+    attn_state: Enum = None
     
     enable_dbo_across_dp: bool = False
 
@@ -60,6 +62,8 @@ class TorchairCommonAttentionMetadata:
     """Number of requests"""
     num_actual_tokens: int
     """Total number of tokens in batch"""
+
+    decode_token_per_req: int
 
     actual_seq_lengths_q: list[int] = None
 
@@ -110,11 +114,3 @@ def split_decodes_and_prefills(
     num_prefill_tokens = num_tokens - num_decode_tokens
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
 
-
-def get_decode_token_per_req(speculative_config: SpeculativeConfig):
-    decode_token_per_req = 1
-    if not speculative_config:
-        return decode_token_per_req
-    spec_token_num = speculative_config.num_speculative_tokens
-    assert spec_token_num > 0
-    return decode_token_per_req + spec_token_num
