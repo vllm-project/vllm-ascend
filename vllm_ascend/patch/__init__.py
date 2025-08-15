@@ -102,3 +102,24 @@
 #       Validate more models in all kinds of scenario,
 #       if performance is always improved, we can enable this patch by default and remove the env
 #       variable `VLLM_ASCEND_ENABLE_FUSE_MATMUL_ALLREDUCE` in the future.
+# ** File: worker/patch_common/patch_compilation.py **
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+#   1. `vllm.compilation.backends.make_compiler`
+#    Why:
+#       We need to use the `GraphRewriterPassManager` at the compiler interface to actually modify the graph. Therefore we 
+#       need to implement our own compiler interface to do our customized operations.
+#    How:
+#       We implement our own compiler interface `AscendAdaptor` to fetch the `GraphRewriterPassManager` and use it to rewrite the 
+#       piecewise graph cutting by vllm's own backend. This function will just return the `AscendAdaptor` to the  `VllmBackend``.
+#    Related PR (if no, explain why):
+#       - We might add PR to make vllm support custom compiler interface. But its not sure yet.
+#    Future Plan:
+#       We might push the customized compiler interface to the vllm main repo, and leave the backend selection to the platform itself.
+#   2. `vllm.compilation.backends.VllmBackend.configure_post_pass`
+#    Why:
+#       We need register the `GraphRewriterPassManager` to the `VllmBackend` and enable it during 
+#       the compilation. Because we can't directly adopt vllm's inductor pass because torch_npu's limited support on
+#       triton and inductor. So we need to patch this function into the `VllmBackend` to use the `GraphRewriterPassManager`.
+#    How：
+#       This function will inject the `GraphRewriterPassManager` into the inductor config, which is a parameter passed to the compiler interface
+#       and in our customized compiler interface, and in our `AscendAdaptor` we will use this to rewrite the fx graph.
