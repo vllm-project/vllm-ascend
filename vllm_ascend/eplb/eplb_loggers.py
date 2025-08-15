@@ -105,19 +105,27 @@ class EplbStatLogger:
             return
         try:
             with self.lock:
-                if moe_load is not None:
-                    torch.add(self.moe_load, moe_load, out=self.moe_load)
-                    self.update_load = True
-
                 if phy2log_map is not None:
                     self.phy2log_map = phy2log_map
                     self.update_map = True
+
+                if moe_load is not None:
+                    torch.add(self.moe_load, moe_load, out=self.moe_load)
+                    self.update_load = True
         except Exception as e:
             logger.debug(f"Record moe_load or phy2log error, error result:{e}")
 
     def record_loop(self):
         while True:
             try:
+                if self.update_map:
+                    with self.lock:
+                        self.update_map = False
+                        phy2log_map = self.phy2log_map
+                    phy2log_map = np.array(phy2log_map).reshape(
+                        self.layers_num, -1)
+                    self.record_phy2log(phy2log_map)
+
                 if self.update_load:
                     with self.lock:
                         self.update_load = False
@@ -129,14 +137,6 @@ class EplbStatLogger:
                     res[..., 1:] = moe_load[..., 1:] - moe_load[..., :-1]
                     res = res.reshape(self.layers_num, -1)
                     self.record_expert_load(res)
-
-                if self.update_map:
-                    with self.lock:
-                        self.update_map = False
-                        phy2log_map = self.phy2log_map
-                    phy2log_map = np.array(phy2log_map).reshape(
-                        self.layers_num, -1)
-                    self.record_phy2log(phy2log_map)
             except Exception as e:
                 logger.debug(
                     f"Record moe_load or phy2log prometheus error, error result:{e}"
