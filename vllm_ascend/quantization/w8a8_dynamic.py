@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 import torch_npu
+from torch.nn.functional import pad
 from vllm.distributed import GroupCoordinator, get_ep_group
 from vllm.forward_context import get_forward_context
 
@@ -33,6 +34,34 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, AscendSocVersion,
                                dispose_tensor, get_ascend_soc_version)
 
 
+def cumsum_group_list(group_list: torch.Tensor,
+                      group_list_type: int,
+                      active_num: int = 0,
+                      expert_num: int = 0) -> torch.Tensor:
+    if group_list_type not in [0, 1, 2]:
+        raise ValueError(
+            f"group_list_type should be in [0, 1, 2], but received {group_list_type}"
+        )
+
+    if group_list_type == 0:
+        return group_list
+    if group_list_type == 1:
+        return group_list.cumsum(dim=0)
+
+    experts = pad(group_list[:, 0], (1, 0))
+    tokens = pad(group_list[:, 1].cumsum(dim=0), (1, 0))
+    cumsum_group_list = torch.full(size=(expert_num, ),
+                                   fill_value=active_num,
+                                   dtype=group_list.dtype,
+                                   device=group_list.device)
+
+    for i, (start, end) in enumerate(zip(experts[:-1], experts[1:])):
+        if end > start:
+            cumsum_group_list[start:end] = tokens[i]
+
+    return cumsum_group_list
+
+
 def apply_mlp_decode(hidden_states: torch.Tensor,
                      w1: torch.Tensor,
                      w1_scale: torch.Tensor,
@@ -40,7 +69,8 @@ def apply_mlp_decode(hidden_states: torch.Tensor,
                      w2_scale: torch.Tensor,
                      group_list: torch.Tensor,
                      dynamic_scale: torch.Tensor = None,
-                     group_list_type: int = 1) -> torch.Tensor:
+                     group_list_type: int = 1,
+                     is_torchair: bool = False) -> torch.Tensor:
     """
     apply MLP: gate_up_proj -> swiglu -> down_proj
     Args:
@@ -72,28 +102,36 @@ def apply_mlp_decode(hidden_states: torch.Tensor,
     else:
         pertoken_scale = dynamic_scale
 
-    # gmm1: gate_up_proj
-    hidden_states = torch_npu.npu_grouped_matmul(
-        x=[hidden_states],
-        weight=[w1],
-        split_item=3,
-        group_list_type=group_list_type,
-        group_type=0,
-        group_list=group_list,
-        output_dtype=torch.int32)[0]
-
-    # act_fn: swiglu
-    hidden_states, swiglu_out_scale = torch_npu.npu_dequant_swiglu_quant(
-        x=hidden_states,
-        weight_scale=w1_scale,
-        activation_scale=pertoken_scale,
-        bias=None,
-        quant_scale=None,
-        quant_offset=None,
-        group_index=group_list,
-        activate_left=True,
-        quant_mode=1,
-    )
+    if not is_torchair:
+        # gmm1: gate_up_proj & act_fn: swiglu
+        hidden_states, swiglu_out_scale, _ = torch_npu.npu_grouped_matmul_swiglu_quant(
+            x=hidden_states,
+            weight=w1,
+            group_list=cumsum_group_list(group_list, group_list_type),
+            weight_scale=w1_scale,
+            x_scale=pertoken_scale)
+    else:
+        # gmm1: gate_up_proj
+        hidden_states = torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=[w1],
+            split_item=3,
+            group_list_type=group_list_type,
+            group_type=0,
+            group_list=group_list,
+            output_dtype=torch.int32)[0]
+        # act_fn: swiglu
+        hidden_states, swiglu_out_scale = torch_npu.npu_dequant_swiglu_quant(
+            x=hidden_states,
+            weight_scale=w1_scale,
+            activation_scale=pertoken_scale,
+            bias=None,
+            quant_scale=None,
+            quant_offset=None,
+            group_index=group_list,
+            activate_left=True,
+            quant_mode=1,
+        )
 
     # gmm2: down_proj
     hidden_states = torch_npu.npu_grouped_matmul(
@@ -118,7 +156,8 @@ def apply_mlp(hidden_states: torch.Tensor,
               dynamic_scale: torch.Tensor = None,
               group_list_type: int = 1,
               w1_scale_bias: torch.Tensor = None,
-              w2_scale_bias: torch.Tensor = None) -> torch.Tensor:
+              w2_scale_bias: torch.Tensor = None,
+              is_torchair: bool = False) -> torch.Tensor:
     """
     apply MLP: gate_up_proj -> swiglu -> down_proj
 
@@ -160,28 +199,37 @@ def apply_mlp(hidden_states: torch.Tensor,
             group_list = torch.cat(
                 [group_list[:1], torch.diff(group_list, dim=0)])
             group_list_type = 1
-        bias1 = [w1_scale_bias]
+        bias1 = [w1_scale_bias] if is_torchair else w1_scale_bias
         bias2 = [w2_scale_bias]
         # TODO w4a8 scene: dynamic acquisition of dtype in the future
         _output_dtype = torch.bfloat16
 
-    # gmm1: gate_up_proj
-    hidden_states = torch_npu.npu_grouped_matmul(
-        x=[hidden_states],
-        weight=[w1],
-        scale=[w1_scale],
-        bias=bias1,
-        per_token_scale=[pertoken_scale],
-        split_item=2,
-        group_list_type=group_list_type,
-        group_type=0,
-        group_list=group_list,
-        output_dtype=_output_dtype)[0]
-
-    # act_fn: swiglu
-    hidden_states = torch_npu.npu_swiglu(hidden_states)
-    hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(
-        hidden_states)
+    if not is_torchair:
+        # gmm1: gate_up_proj & act_fn: swiglu
+        hidden_states, swiglu_out_scale, _ = torch_npu.npu_grouped_matmul_swiglu_quant(
+            x=hidden_states,
+            weight=w1,
+            bias=bias1,
+            group_list=cumsum_group_list(group_list, group_list_type),
+            weight_scale=w1_scale,
+            x_scale=pertoken_scale)
+    else:
+        # gmm1: gate_up_proj
+        hidden_states = torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=[w1],
+            scale=[w1_scale.to(w2_scale.dtype)],
+            bias=bias1,
+            per_token_scale=[pertoken_scale],
+            split_item=2,
+            group_list_type=group_list_type,
+            group_type=0,
+            group_list=group_list,
+            output_dtype=_output_dtype)[0]
+        # act_fn: swiglu
+        hidden_states = torch_npu.npu_swiglu(hidden_states)
+        hidden_states, swiglu_out_scale = torch_npu.npu_dynamic_quant(
+            hidden_states)
 
     # gmm2: down_proj
     hidden_states = torch_npu.npu_grouped_matmul(
@@ -296,7 +344,8 @@ def fused_experts_with_mc2(
                                          w2,
                                          w2_scale,
                                          expert_token_nums,
-                                         dynamic_scale=dynamic_scale)
+                                         dynamic_scale=dynamic_scale,
+                                         is_torchair=is_torchair)
     else:
         # w4a8 scene, cannot use apply_mlp_decode because the operator is not supported
         down_out_list = apply_mlp(expand_x,
@@ -307,7 +356,8 @@ def fused_experts_with_mc2(
                                   expert_token_nums,
                                   dynamic_scale=dynamic_scale,
                                   w1_scale_bias=w1_scale_bias,
-                                  w2_scale_bias=w2_scale_bias)
+                                  w2_scale_bias=w2_scale_bias,
+                                  is_torchair=is_torchair)
 
     # moeCombine
     kwargs_mc2 = {
@@ -405,6 +455,7 @@ def fused_experts_with_all2all(
     global_redundant_expert_num: int = 0,
     w1_scale_bias: torch.Tensor = None,
     w2_scale_bias: torch.Tensor = None,
+    is_torchair: bool = False,
 ):
     if log2phy is not None:
         topk_ids = log2phy[topk_ids]
@@ -492,7 +543,8 @@ def fused_experts_with_all2all(
         dynamic_scale=dynamic_scale,
         group_list_type=group_list_type,
         w1_scale_bias=w1_scale_bias,
-        w2_scale_bias=w2_scale_bias)
+        w2_scale_bias=w2_scale_bias,
+        is_torchair=is_torchair)
 
     if expert_map is not None:
         reordered_outputs = torch.index_select(
@@ -539,7 +591,8 @@ def fused_experts_with_allgather(hidden_states: torch.Tensor,
                                  topk_weights: torch.Tensor,
                                  topk_ids: torch.Tensor,
                                  top_k: int,
-                                 expert_map: torch.Tensor = None):
+                                 expert_map: torch.Tensor = None,
+                                 is_torchair: bool = False):
     original_shape = hidden_states.shape
     if len(original_shape) == 3:
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
@@ -580,27 +633,36 @@ def fused_experts_with_allgather(hidden_states: torch.Tensor,
                               dtype=torch.bfloat16,
                               device="npu")
 
-    hidden_states = torch_npu.npu_grouped_matmul(
-        x=[hidden_states],
-        weight=[w1],
-        split_item=3,
-        group_list_type=group_list_type,
-        group_type=0,
-        group_list=expert_tokens,
-        output_dtype=torch.int32)[0]
-
-    # act_fn: swiglu
-    hidden_states, pertoken_scale = torch_npu.npu_dequant_swiglu_quant(
-        x=hidden_states,
-        weight_scale=w1_scale.to(torch.float32),
-        activation_scale=pertoken_scale,
-        bias=None,
-        quant_scale=None,
-        quant_offset=None,
-        group_index=expert_tokens,
-        activate_left=True,
-        quant_mode=1,
-    )
+    if not is_torchair:
+        hidden_states, pertoken_scale, _ = torch_npu.npu_grouped_matmul_swiglu_quant(
+            x=hidden_states,
+            weight=w1,
+            group_list=cumsum_group_list(group_list=expert_tokens,
+                                         group_list_type=group_list_type,
+                                         active_num=num_tokens * top_k,
+                                         expert_num=global_num_experts),
+            weight_scale=w1_scale,
+            x_scale=pertoken_scale)
+    else:
+        hidden_states = torch_npu.npu_grouped_matmul(
+            x=[hidden_states],
+            weight=[w1],
+            split_item=3,
+            group_list_type=group_list_type,
+            group_type=0,
+            group_list=expert_tokens,
+            output_dtype=torch.int32)[0]
+        hidden_states, pertoken_scale = torch_npu.npu_dequant_swiglu_quant(
+            x=hidden_states,
+            weight_scale=w1_scale,
+            activation_scale=pertoken_scale,
+            bias=None,
+            quant_scale=None,
+            quant_offset=None,
+            group_index=expert_tokens,
+            activate_left=True,
+            quant_mode=1,
+        )
 
     final_hidden_states = torch_npu.npu_grouped_matmul_finalize_routing(
         hidden_states,
@@ -628,7 +690,8 @@ def fused_experts(hidden_states: torch.Tensor,
                   topk_weights: torch.Tensor,
                   topk_ids: torch.Tensor,
                   top_k: int,
-                  expert_map: torch.Tensor = None):
+                  expert_map: torch.Tensor = None,
+                  is_torchair: bool = False):
     original_shape = hidden_states.shape
     if len(original_shape) == 3:
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
@@ -701,7 +764,8 @@ def fused_experts(hidden_states: torch.Tensor,
                               w2,
                               w2_scale,
                               expert_tokens,
-                              group_list_type=group_list_type)
+                              group_list_type=group_list_type,
+                              is_torchair=is_torchair)
 
     if expert_map is not None:
         hidden_states.mul_(sorted_weights.unsqueeze(1))
@@ -937,13 +1001,14 @@ class AscendW8A8DynamicFusedMoEMethod:
             return fused_experts_with_allgather(
                 hidden_states=x,
                 w1=layer.w13_weight,
-                w1_scale=layer.w13_weight_scale,
+                w1_scale=layer.w13_weight_scale_fp32,
                 w2=layer.w2_weight,
                 w2_scale=layer.w2_weight_scale,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
                 top_k=top_k,
-                expert_map=expert_map)
+                expert_map=expert_map,
+                is_torchair=self.torchair_graph_enabled)
         elif fused_moe_state == FusedMoEState.MC2:
             return fused_experts_with_mc2(
                 hidden_states=x,
@@ -968,13 +1033,14 @@ class AscendW8A8DynamicFusedMoEMethod:
         ]:
             return fused_experts(hidden_states=x,
                                  w1=layer.w13_weight,
-                                 w1_scale=layer.w13_weight_scale,
+                                 w1_scale=layer.w13_weight_scale_fp32,
                                  w2=layer.w2_weight,
                                  w2_scale=layer.w2_weight_scale,
                                  topk_weights=topk_weights,
                                  topk_ids=topk_ids,
                                  top_k=top_k,
-                                 expert_map=expert_map)
+                                 expert_map=expert_map,
+                                 is_torchair=self.torchair_graph_enabled)
         else:
             # The current implementation of deepseek moe splits hidden_states
             # according to tp_size before they are feed into layers module.
@@ -983,7 +1049,7 @@ class AscendW8A8DynamicFusedMoEMethod:
             return fused_experts_with_all2all(
                 hidden_states=x,
                 w1=layer.w13_weight,
-                w1_scale=layer.w13_weight_scale,
+                w1_scale=layer.w13_weight_scale_fp32,
                 w2=layer.w2_weight,
                 w2_scale=layer.w2_weight_scale,
                 topk_weights=topk_weights,
@@ -993,6 +1059,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 ep_group=self.ep_group,
                 log2phy=log2phy,
                 global_redundant_expert_num=global_redundant_expert_num,
+                is_torchair=self.torchair_graph_enabled,
             )
 
     def process_weights_after_loading(self, layer):
@@ -1001,6 +1068,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 1, 2).contiguous()
             layer.w2_weight.data = layer.w2_weight.data.transpose(
                 1, 2).contiguous()
+        torch_npu.npu_format_cast_(layer.w13_weight, ACL_FORMAT_FRACTAL_NZ)
         if envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP:
             torch_npu.npu_format_cast_(layer.w2_weight, ACL_FORMAT_FRACTAL_NZ)
         layer.w13_weight_scale.data = layer.w13_weight_scale.data.view(

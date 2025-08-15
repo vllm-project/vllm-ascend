@@ -4,7 +4,8 @@ import torch
 
 from tests.ut.base import TestBase
 from vllm_ascend.quantization.w4a8_dynamic import (
-    AscendW4A8DynamicFusedMoEMethod, AscendW4A8DynamicLinearMethod)
+    AscendW4A8DynamicFusedMoEMethod, AscendW4A8DynamicLinearMethod, apply_mlp,
+    apply_mlp_decode)
 
 
 class TestAscendW4A8DynamicLinearMethod(TestBase):
@@ -69,9 +70,11 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.assertEqual(param_dict["w2_weight_scale_second"].shape,
                          (8, 14, 2))
 
+    @patch('torch_npu.npu_format_cast_')
     @patch('torch_npu.npu_quantize')
     @patch('torch.Tensor.npu')
-    def test_process_weights_after_loading(self, mock_npu, mock_npu_quantize):
+    def test_process_weights_after_loading(self, mock_npu, mock_npu_quantize,
+                                           mock_npu_format_cast):
         layer = torch.nn.Module()
         layer.w13_weight = torch.nn.Parameter(torch.zeros((8, 8, 14),
                                                           dtype=torch.int8),
@@ -100,6 +103,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
 
         mock_npu.return_value = torch.Tensor()
         mock_npu_quantize.return_value = torch.Tensor()
+        mock_npu_format_cast.return_value = torch.Tensor()
         self.quant_method.process_weights_after_loading(layer)
         self.assertTrue(hasattr(layer, "w13_scale_bias"))
         self.assertEqual(layer.w13_scale_bias.data.shape, (8, 8))
@@ -107,3 +111,68 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.assertTrue(hasattr(layer, "w2_scale_bias"))
         self.assertEqual(layer.w2_scale_bias.data.shape, (8, 14))
         self.assertEqual(layer.w2_scale_bias.data.dtype, torch.float32)
+
+    @patch("torch_npu.npu_swiglu")
+    @patch("torch_npu.npu_grouped_matmul")
+    @patch("torch_npu.npu_dynamic_quant")
+    def test_apply_mlp(
+        self,
+        mock_dynamic_quant,
+        mock_grouped_matmul,
+        mock_swiglu,
+    ):
+        placeholder = torch.randn(128, 128, dtype=torch.bfloat16)
+        placeholder_int8 = torch.randint(0, 100, (128, 128), dtype=torch.int8)
+        placeholder_ones = torch.ones(128, dtype=torch.int32)
+
+        mock_dynamic_quant.return_value = (
+            placeholder_int8,
+            placeholder_ones,
+        )
+        mock_grouped_matmul.return_value = [placeholder]
+        mock_swiglu.return_value = placeholder
+
+        result = apply_mlp(
+            hidden_states=placeholder,
+            w1=placeholder,
+            w1_scale=placeholder,
+            w2=placeholder,
+            w2_scale=placeholder,
+            group_list=placeholder,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result.dtype, torch.bfloat16)
+
+    @patch("torch_npu.npu_dequant_swiglu_quant")
+    @patch("torch_npu.npu_grouped_matmul")
+    @patch("torch_npu.npu_dynamic_quant")
+    def test_apply_mlp_decode(
+        self,
+        mock_dynamic_quant,
+        mock_grouped_matmul,
+        mock_dequant_swiglu_quant,
+    ):
+        placeholder = torch.randn(128, 128, dtype=torch.bfloat16)
+        placeholder_int8 = torch.randint(0, 100, (128, 128), dtype=torch.int8)
+        placeholder_ones = torch.ones(128, dtype=torch.int32)
+
+        mock_dynamic_quant.return_value = (
+            placeholder_int8,
+            placeholder_ones,
+        )
+        mock_grouped_matmul.return_value = [placeholder]
+        mock_dequant_swiglu_quant.return_value = (
+            placeholder_int8,
+            placeholder_ones,
+        )
+
+        result = apply_mlp_decode(
+            hidden_states=placeholder,
+            w1=placeholder,
+            w1_scale=placeholder,
+            w2=placeholder,
+            w2_scale=placeholder,
+            group_list=placeholder,
+        )
+        self.assertIsNotNone(result)
+        self.assertEqual(result.dtype, torch.bfloat16)
