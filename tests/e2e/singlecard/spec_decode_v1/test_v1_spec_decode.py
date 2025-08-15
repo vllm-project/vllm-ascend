@@ -43,7 +43,7 @@ def test_prompts():
 
 @pytest.fixture
 def sampling_config():
-    return SamplingParams(temperature=0, max_tokens=10, ignore_eos=False)
+    return SamplingParams(temperature=0, max_tokens=64, ignore_eos=False)
 
 
 @pytest.fixture
@@ -69,7 +69,7 @@ def test_ngram_correctness(
     should be the same when using ngram speculative decoding.
     '''
     pytest.skip("Not current support for the test.")
-    ref_llm = LLM(model=model_name, max_model_len=1024, enforce_eager=True)
+    ref_llm = LLM(model=model_name, max_model_len=512, enforce_eager=True)
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
 
@@ -81,7 +81,7 @@ def test_ngram_correctness(
             "prompt_lookup_min": 3,
             "num_speculative_tokens": 3,
         },
-        max_model_len=1024,
+        max_model_len=512,
         enforce_eager=True,
     )
     spec_outputs = spec_llm.chat(test_prompts, sampling_config)
