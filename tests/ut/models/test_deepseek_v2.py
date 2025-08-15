@@ -104,6 +104,9 @@ def mock_distributed():
     mock_vllm_config.scheduler_config = Mock(max_num_seqs=256)
     mock_vllm_config.model_config = Mock(max_model_len=2048, quant_config=None)
 
+    mock_vllm_config.compilation_config = Mock()
+    mock_vllm_config.compilation_config.static_forward_context = {}
+
     with patch("vllm_ascend.models.deepseek_v2.get_tensor_model_parallel_rank", return_value=0), \
             patch("vllm_ascend.models.deepseek_v2.get_tensor_model_parallel_world_size", return_value=1), \
             patch("vllm_ascend.models.deepseek_v2.get_tp_group", return_value=tp_group), \
