@@ -123,7 +123,7 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         mscale: float = 1,
         mscale_all_dim: float = 0,
     ) -> None:
-
+        print("AscendDeepseekScalingRotaryEmbedding init called")
         # Note: we adopt the native huggingface deepseek rope initialization code from
         # https://huggingface.co/deepseek-ai/DeepSeek-V3-0324/blob/main/modeling_deepseek.py for
         # its more ascend compute friendly
@@ -132,8 +132,6 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         self.attn_factor = attn_factor
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
-        self.cos_cached = None
-        self.sin_cached = None
         # Get n-d magnitude scaling corrected for interpolation.
         self.mscale = float(
             self._yarn_get_mscale(self.scaling_factor, float(mscale)) /
@@ -143,9 +141,10 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
               self).__init__(head_size, rotary_dim, max_position_embeddings,
                              base, is_neox_style, dtype)
         self.max_seq_len = max_position_embeddings
-        self._set_cos_sin_cache(max_position_embeddings,
-                                dtype=dtype,
-                                device=NPUPlatform.device_type)
+        print("Ascend set cos_cache")
+        self._set_cos_sin_cache(seq_len=max_position_embeddings,
+                                device=NPUPlatform.device_type,
+                                dtype=dtype)
 
     def _yarn_get_mscale(self, scale: float = 1, mscale: float = 1) -> float:
         if scale <= 1:
@@ -219,13 +218,14 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         freqs = torch.outer(t, inv_freq)
         cos_cached = torch.cat([freqs, freqs], dim=-1).cos() * self.mscale
         sin_cached = torch.cat([freqs, freqs], dim=-1).sin() * self.mscale
-        self.cos_cached = cos_cached.to(dtype)
-        self.sin_cached = sin_cached.to(dtype)
+        cos_cached = cos_cached.to(dtype)
+        sin_cached = sin_cached.to(dtype)
         cache = torch.cat(
             [freqs.cos() * self.mscale,
              freqs.sin() * self.mscale], dim=-1).to(dtype)
         self.register_buffer("cos_sin_cache", cache, persistent=False)
         self.register_buffer("cos_cached", cos_cached, persistent=False)
+        print("Ascend register buffer cos_cached, sin_cached")
         self.register_buffer("sin_cached", sin_cached, persistent=False)
 
     def forward(self,
@@ -234,6 +234,7 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
                 key: torch.Tensor,
                 offsets: Optional[torch.Tensor] = None,
                 max_seq_len: Optional[int] = None):
+        print("Ascend DeepseekScalingRotaryEmbedding forward called")
         if max_seq_len is not None and max_seq_len > self.max_seq_len:
             self._set_cos_sin_cache(max_seq_len, query.device, query.dtype)
         if len(key.shape) == 2:
