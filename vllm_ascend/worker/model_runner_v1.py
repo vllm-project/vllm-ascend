@@ -1636,7 +1636,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
              finished_recving) = (self._process_reqs(scheduler_output,
                                                      intermediate_tensors))
         kv_connector_output = None
-        if finished_sending is not None and finished_recving is not None:
+        if finished_sending is not None or finished_recving is not None:
             kv_connector_output = KVConnectorOutput(
                 finished_sending=finished_sending,
                 finished_recving=finished_recving)
