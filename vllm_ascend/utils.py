@@ -17,6 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/worker.py
 #
 
+import os
 import atexit
 import functools
 import math
@@ -325,17 +326,28 @@ def update_aclgraph_sizes(vllm_config: VllmConfig) -> None:
         num_hidden_layers = get_max_hidden_layers(hf_config)
     parallel_config = vllm_config.parallel_config
 
+    if os.getenv("HCCL_OP_EXPANSION_MODE")=='AIV':
     # TODO: Find out whether we need to take into account the pp_size
-    parallel_factor = 1 + sum(size > 1 for size in [
-        parallel_config.data_parallel_size_local,
-        parallel_config.tensor_parallel_size,
-    ])
+        parallel_factor = 1 + sum(size > 1 for size in [
+            parallel_config.data_parallel_size,
+            parallel_config.tensor_parallel_size,
+        ])
 
-    # Calculate maximum supported batch sizes considering model architecture
-    max_num_batch_sizes = math.floor(MAX_CAPTURE_SIZE /
-                                     (num_hidden_layers + 1) / parallel_factor)
-    logger.info("Calculated maximum supported batch sizes for ACL graph: %s",
-                max_num_batch_sizes)
+        # Calculate maximum supported batch sizes considering model architecture
+        max_num_batch_sizes = math.floor(MAX_CAPTURE_SIZE /
+                                        (num_hidden_layers + 1) / parallel_factor)
+        logger.info("Calculated maximum supported batch sizes for ACL graph: %s",
+                    max_num_batch_sizes)
+    else:
+        num_comm_groups = sum(size > 1 for size in [
+            parallel_config.data_parallel_size,
+            parallel_config.tensor_parallel_size,
+        ])
+
+        max_num_batch_sizes = math.floor((MAX_CAPTURE_SIZE - num_comm_groups * 40) / (num_hidden_layers + 1) / (1 + num_comm_groups * 2))
+        logger.info("Calculated maximum supported batch sizes for ACL graph: %s",
+                    max_num_batch_sizes)
+        logger.warning("Unset HCCL_OP_EXPANSION_MODE prevents max size capture. Setting HCCL_OP_EXPANSION_MODE=AIV captures max sizes and boosts ACL graph performance.")
 
     # If original sizes exceed maximum, sample a representative subset
     if max_num_batch_sizes < len(original_sizes):
