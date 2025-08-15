@@ -181,9 +181,10 @@ class MtpProposer:
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
-            graph_pad_size=extra_builder_kwargs['graph_pad_size']
+            graph_pad_size=extra_builder_kwargs['graph_pad_size'],
+            decode_token_per_req=self.runner.decode_token_per_req,
         )
-        attn_metadata = self.runner.attn_metadata_builder.build(common_attn_metadata)
+        attn_metadata = self.runner.attn_metadata_builder.build(common_attn_metadata, self.runner.model)
 
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
@@ -294,12 +295,13 @@ class MtpProposer:
             attn_metadata = None
         else:
             common_attn_metadata = TorchairCommonAttentionMetadata(
-            num_reqs=num_reqs,
-            num_actual_tokens=1,
-            actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
-            attn_mask=self.runner.attn_mask,
-            spec_attn_mask=self.runner.spec_attn_mask,
-        )
+                num_reqs=num_reqs,
+                num_actual_tokens=1,
+                actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
+                attn_mask=self.runner.attn_mask,
+                spec_attn_mask=self.runner.spec_attn_mask,
+                decode_token_per_req=self.runner.decode_token_per_req,
+            )
             attn_metadata = self.runner.attn_metadata_builder.build_torchair_graph_dummy(common_attn_metadata)
 
         input_ids = self.input_ids[:num_tokens]

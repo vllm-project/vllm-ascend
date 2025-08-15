@@ -33,7 +33,7 @@ from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d)
 from vllm_ascend.worker.npu_input_batch import InputBatch
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, get_decode_token_per_req
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
 
 class AscendAttentionTorchairBackend(AttentionBackend):
@@ -157,7 +157,7 @@ class AscendAttentionTorchairMetadataBuilder:
         self.device = device
         self.max_num_blocks_per_req = cdiv(self.model_config.max_model_len,
                                            vllm_config.cache_config.block_size)
-        self.decode_token_per_req = get_decode_token_per_req(vllm_config.speculative_config)
+        self.max_blocks = (self.model_config.max_model_len + vllm_config.cache_config.block_size - 1) // vllm_config.cache_config.block_size
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
@@ -175,7 +175,7 @@ class AscendAttentionTorchairMetadataBuilder:
             self, common_attn_metadata: AscendCommonAttentionMetadata) -> AscendTorchairMetadata:
         device = self.device
         num_reqs = common_attn_metadata.num_reqs
-        _, max_blocks = self.runner.graph_block_tables.shape
+        _, max_blocks = self.max_blocks
         block_table = torch.zeros((num_reqs, max_blocks),
                                   dtype=torch.int32,
                                   device=device)
@@ -257,7 +257,7 @@ class AscendAttentionTorchairMetadataBuilder:
                     pad_value = 0
                     num_token_pad_size = graph_pad_size - num_actual_tokens
                     num_reqs_pad_size = (
-                        graph_pad_size // self.decode_token_per_req -
+                        graph_pad_size // common_attn_metadata.decode_token_per_req -
                         num_reqs)
                 pad_value = 1
                 padded_seq_lens = seq_lens.tolist() + [pad_value

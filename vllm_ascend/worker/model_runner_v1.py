@@ -92,7 +92,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, get_decode_token_per_req
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -229,9 +229,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.drafter: Optional[Union[NgramProposer, EagleProposer,
                                      MtpProposer]] = None
         self.actual_seq_lengths_q = []
-        self.decode_token_per_req = get_decode_token_per_req(self.speculative_config)
+        self.decode_token_per_req = 1
         if self.speculative_config:
             self.use_spec_decode = True
+            spec_token_num = self.speculative_config.num_speculative_tokens
+            assert spec_token_num > 0
+            self.decode_token_per_req = 1 + spec_token_num
             self.actual_seq_lengths_q = [
                 len for len in
                 range(self.decode_token_per_req, self.max_num_tokens +
@@ -810,8 +813,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 spec_attn_mask=self.spec_attn_mask,
                 attn_state=self.attn_state,
                 max_num_blocks_per_req=self.max_num_blocks_per_req,
+                decode_token_per_req=self.decode_token_per_req,
             )
-            attn_metadata_i = self.attn_metadata_builder.build(common_attn_metadata)
+            attn_metadata_i = self.attn_metadata_builder.build(common_attn_metadata, self.model)
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
 
@@ -1228,9 +1232,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             attn_state=self.attn_state,
             enable_dbo_across_dp=enable_dbo,
             is_only_prefill=is_only_prefill,
-            graph_pad_size=self.graph_pad_size
+            max_query_len=max_num_scheduled_tokens,
+            graph_pad_size=self.graph_pad_size,
+            decode_token_per_req=self.decode_token_per_req,
         )
-        attn_metadata = self.attn_metadata_builder.build(common_attn_metadata)
+        attn_metadata = self.attn_metadata_builder.build(common_attn_metadata, self.model)
         if self.vllm_config.model_config.use_mla:
             attn_metadata.num_input_tokens = num_input_tokens
 

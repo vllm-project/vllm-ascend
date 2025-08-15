@@ -25,7 +25,7 @@ from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import npu_prefetch
 from vllm_ascend.worker.npu_input_batch import InputBatch
-from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,split_decodes_and_prefills, get_decode_token_per_req)
+from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,split_decodes_and_prefills)
 
 
 if TYPE_CHECKING:
@@ -186,7 +186,6 @@ class AscendMLAMetadataBuilder:
         scheduler_config = vllm_config.scheduler_config
         self.block_size = vllm_config.cache_config.block_size
         self.max_blocks = (vllm_config.model_config.max_model_len + self.block_size - 1) // self.block_size
-        self.decode_token_per_req = get_decode_token_per_req(vllm_config.speculative_config)
         self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
         if self.chunked_prefill_enabled:
             self.chunked_prefill_workspace_size = min(
@@ -288,13 +287,13 @@ class AscendMLAMetadataBuilder:
             self, common_attn_metadata: AscendCommonAttentionMetadata,) -> AscendMLAMetadata:
         device = self.device
         num_reqs = common_attn_metadata.num_reqs
-        _, max_blocks = self.runner.graph_block_tables.shape
+        _, max_blocks = self.max_blocks
         block_table = torch.zeros((num_reqs, max_blocks),
                                   dtype=torch.int32,
                                   device=device)
         block_table = self._get_graph_runner_block_tables(
             num_reqs, block_table)
-        num_tokens = num_reqs * self.decode_token_per_req
+        num_tokens = num_reqs * common_attn_metadata.decode_token_per_req
         seq_lens = torch.zeros(num_reqs, dtype=torch.int32, device=device)
         seq_lens_list = [0] * num_reqs
         input_positions = torch.zeros(num_tokens,
@@ -382,8 +381,8 @@ class AscendMLAMetadataBuilder:
         input_positions = common_attn_metadata.positions[:num_actual_tokens].long()
 
         if self.cos_cache is None:
-            self.cos_cache = model.layers[0].self_attn.rotary_emb.cos_cached
-            self.sin_cache = model.layers[0].self_attn.rotary_emb.sin_cached
+            self.cos_cache = model.model.layers[0].self_attn.rotary_emb.cos_cached
+            self.sin_cache = model.model.layers[0].self_attn.rotary_emb.sin_cached
         if self.cos_cache.dtype != self.model_config.dtype:  # type: ignore
             self.cos_cache = self.cos_cache.to(  # type: ignore
                 self.model_config.dtype)  # type: ignore
@@ -392,10 +391,9 @@ class AscendMLAMetadataBuilder:
 
         query_seq_lens_cpu = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
         query_lens = query_seq_lens_cpu[:num_reqs]
-        num_computed_tokens_cpu = (common_attn_metadata.seq_lens_cpu -
-                                   query_seq_lens_cpu)
-        
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        num_computed_tokens_cpu = (seq_lens - query_lens)
+        
         prefill_metadata = None
         chunked_context_metadata = None
         if num_prefills > 0:
@@ -418,12 +416,12 @@ class AscendMLAMetadataBuilder:
                 assert max_context_chunk > 0
                 num_chunks = cdiv(max_context_len_cpu, max_context_chunk)
                 chunk_starts = torch.arange(num_chunks, dtype=torch.int32) \
-                    .unsqueeze(1).expand(-1, self._num_prefills) * max_context_chunk
+                    .unsqueeze(1).expand(-1, num_prefills) * max_context_chunk
                 chunk_ends = torch.min(context_lens_cpu.unsqueeze(0),
                                        chunk_starts + max_context_chunk)
                 chunk_seq_lens = (chunk_ends - chunk_starts).clamp(min=0)
                 cu_seq_lens_cpu = torch.zeros(num_chunks,
-                                              self._num_prefills + 1,
+                                              num_prefills + 1,
                                               dtype=torch.int32,
                                               pin_memory=True)
                 torch.cumsum(chunk_seq_lens,
