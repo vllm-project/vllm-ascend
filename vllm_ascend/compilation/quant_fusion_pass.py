@@ -72,8 +72,8 @@ class AscendQuantFusionPass(VllmInductorPass):
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
-        self.dump_graph(graph, "before_ascend_quant_fusion")
+        self.dump_graph(graph, "before_ascend_quant_fusion_pass")
         for pattern, replace in self.patterns:
           replace_pattern(graph, pattern, replace)
-        self.dump_graph(graph, "after_ascend_quant_fusion")
+        self.dump_graph(graph, "after_ascend_quant_fusion_pass")
         self.end_and_log()
