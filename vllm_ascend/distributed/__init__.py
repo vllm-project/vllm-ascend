@@ -22,3 +22,9 @@ KVConnectorFactory.register_connector(
     "LLMDataDistCMgrConnector",
     "vllm_ascend.distributed.llmdatadist_c_mgr_connector",
     "LLMDataDistCMgrConnector")
+
+
+KVConnectorFactory.register_connector(
+    "NixlNpuConnector",
+    "vllm_ascend.distributed.nixl_npu_connector",
+    "NixlNpuConnector")
