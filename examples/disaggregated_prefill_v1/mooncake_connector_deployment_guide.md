@@ -16,24 +16,7 @@ The vllm version must be the same as the main branch of vllm-ascend, for example
 
 ## run
 
-### 1. Configure mooncake.json
-
-```
-{
-  "prefill_url": "localhost:15272",
-  "decode_url": "localhost:14012",
-  "metadata_backend": "http",
-  "protocol": "ascend"
-}
-```
-
-"prefill_url": Configure the IP address and prot of the prefill server,<br>
-"decode_url": Set the IP address and prot of the decode server,<br>
-"metadata_backend": Select http,<br>
-"protocol": Configure the HCCL communication mode. Configure the ascending mode to use the HCCL communication mode.<br>
-
-
-### 2.Run `prefill` Node
+### 1.Run `prefill` Node
 
 ```
 bash run_prefill.sh
@@ -88,7 +71,6 @@ vllm serve "/xxxxx/DeepSeek-V2-Lite-Chat" \
 `HCCL_EXEC_TIMEOUT`, `HCCL_CONNECT_TIMEOUT`, and `HCCL_IF_IP` are hccl-related configurations.<br>
 Set `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` to the corresponding NIC.<br>
 `ASCEND_RT_VISIBLE_DEVICES` specifies the cards on which the node run resides. The total number of cards equals `dp_size*tp_size`.<br>
-`BUDGET_CONFIG_PATH` specifies the path of the mooncake.json file.<br>
 `/xxxxx/DeepSeek-V2-Lite-Chat` is configured as a model that requires run.<br>
 `--host`: indicates the IP address of the node to be started.<br>
 `--port`: indicates the port to be started, which corresponds to the port in step 4.<br>
@@ -102,7 +84,7 @@ Set `GLOO_SOCKET_IFNAME`, `TP_SOCKET_IFNAME`, and `HCCL_SOCKET_IFNAME` to the co
 `--kv-transfer-config`: follow kv_connector, kv_connector_module_path: mooncakeconnect, kv_buffer_device, and run on the NPU card. For kv_role, set kv_producer to the p node, kv_consumer to the d node, kv_parallel_size to 1, and kv_port to the port used by the node. For the p node, set engine_id and kv_rank to 0 and for the d node to 1. Configure the distributed parallel policy for the p and d nodes in the kv_connector_extra_config file based on --tensor-parallel-size and --data-parallel-size.<br>
 
 
-### 3. Run `decode` Node
+### 2. Run `decode` Node
 
 ```
 bash run_decode.sh
@@ -154,7 +136,7 @@ vllm serve "/xxxxx/DeepSeek-V2-Lite-Chat" \
   }'
 ```
 
-### 4. Start proxy_server. ###
+### 3. Start proxy_server. ###
 
 ```
 cd /vllm-ascend/examples/disaggregate_prefill_v1/
@@ -168,7 +150,7 @@ python load_balance_proxy_server_example.py --host localhost --prefiller-hosts h
 `--decoder-ports`: Set this parameter to the port number of all d nodes, which is the configuration of the port number for the vllm to start the service in step 4. Set port to the end of the configuration, and leave a blank space between port and port. The sequence must be one-to-one mapping to the IP address of --decoder-hosts.<br>
 
 
-### 5. Run Inference
+### 4. Run Inference
 
 Set the IP address in the inference file to the actual IP address. Set the model variable to the path of the model. Ensure that the path is the same as that in the shell script.
 
