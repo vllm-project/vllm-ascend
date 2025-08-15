@@ -28,7 +28,8 @@ from vllm.platforms import Platform, PlatformEnum
 
 from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
-from vllm_ascend.utils import (ASCEND_QUATIZATION_METHOD, is_310p,
+from vllm_ascend.utils import (ASCEND_QUATIZATION_METHOD,
+                               init_ascend_soc_version, is_310p,
                                register_ascend_customop, update_aclgraph_sizes)
 
 if TYPE_CHECKING:
@@ -75,6 +76,8 @@ class NPUPlatform(Platform):
 
         from vllm_ascend.quantization.quant_config import \
             AscendQuantConfig  # noqa: F401
+
+        init_ascend_soc_version()
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0):
