@@ -119,7 +119,6 @@ class AscendAttentionState(Enum):
 
 @dataclass
 class AscendMetadata:
-
     # **************************** Basic Properties ************************** #
     attn_mask: Optional[torch.Tensor] = None
     # Current state of this attention run.
@@ -155,37 +154,50 @@ class AscendMetadata:
     is_only_prefill: bool = False
 
 
+@dataclass
+class AscendAttentionMetadataBuildInfo:
+    num_actual_tokens: int = 0
+    block_table: torch.Tensor = None
+    query_start_loc: torch.Tensor = None
+    query_lens: torch.Tensor = None
+    seq_lens: torch.Tensor = None
+    max_query_len: int = 0
+    slot_mapping: torch.Tensor = None
+    attn_mask: torch.Tensor = None
+    attn_state: AscendAttentionState = None
+    enable_dbo_across_dp: bool = False
+    is_only_prefill: bool = False
+
+
 class AscendAttentionMetadataBuilder:
 
     def __init__(self, runner):
         self.runner = runner
 
-    def reorder_batch(self, input_batch: "InputBatch",
-                      scheduler_output: "SchedulerOutput") -> bool:
+    def reorder_batch(
+        self,
+        input_batch: "InputBatch",
+        scheduler_output: "SchedulerOutput",
+    ) -> bool:
         return False
 
-    def build(self,
-              num_reqs,
-              num_actual_tokens,
-              max_query_len,
-              enable_dbo_across_dp: bool = False,
-              is_only_prefill: bool = False):
-
-        block_table = self.runner.input_batch.block_table[0].get_device_tensor(
-        )
-        block_table[:num_reqs, :self.runner.max_num_blocks_per_req] = (
-            block_table[:num_reqs])
-
-        query_lens = self.runner.query_lens
-        seq_lens = self.runner.seq_lens_cpu[:num_reqs]
-        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
-            self.runner.device, non_blocking=True)
-        attn_mask = self.runner.attn_mask
-        attn_state = self.runner.attn_state
-        query_start_loc_cpu = self.runner.query_start_loc_cpu[:num_reqs + 1]
-        query_start_loc = query_start_loc_cpu.to(self.runner.device,
-                                                 non_blocking=True)
-
+    def _assemble_build_info(
+        self,
+        num_reqs,
+        num_actual_tokens,
+        max_query_len,
+        enable_dbo_across_dp,
+        is_only_prefill,
+        block_table,
+        query_start_loc,
+        query_lens,
+        seq_lens,
+        slot_mapping,
+        attn_mask,
+        attn_state: "AscendAttentionState",
+        *args,
+        **kwargs,
+    ) -> "AscendAttentionMetadataBuildInfo":
         if is_310p():
             if attn_state == AscendAttentionState.PrefillNoCache:
                 mask_nz = nd_to_nz_2d(attn_mask)
@@ -196,9 +208,9 @@ class AscendAttentionMetadataBuilder:
                 attn_mask = torch_npu.npu_format_cast(mask_nz.contiguous(),
                                                       ACL_FORMAT_FRACTAL_NZ)
 
-        attn_metadata = AscendMetadata(
+        build_info = AscendAttentionMetadataBuildInfo(
             num_actual_tokens=num_actual_tokens,
-            block_tables=block_table,
+            block_table=block_table,
             query_start_loc=query_start_loc,
             query_lens=query_lens,
             seq_lens=seq_lens,
@@ -208,6 +220,61 @@ class AscendAttentionMetadataBuilder:
             attn_state=attn_state,
             enable_dbo_across_dp=enable_dbo_across_dp,
             is_only_prefill=is_only_prefill)
+        return build_info
+
+    def _assemble_attn_metadata(
+        self,
+        build_info: "AscendAttentionMetadataBuildInfo",
+    ) -> "AscendMetadata":
+        attn_metadata = AscendMetadata(
+            num_actual_tokens=build_info.num_actual_tokens,
+            block_tables=build_info.block_table,
+            query_start_loc=build_info.query_start_loc,
+            query_lens=build_info.query_lens,
+            seq_lens=build_info.seq_lens,
+            max_query_len=build_info.max_query_len,
+            slot_mapping=build_info.slot_mapping,
+            attn_mask=build_info.attn_mask,
+            attn_state=build_info.attn_state,
+            enable_dbo_across_dp=build_info.enable_dbo_across_dp,
+            is_only_prefill=build_info.is_only_prefill)
+        return attn_metadata
+
+    def build(
+        self,
+        num_reqs,
+        num_actual_tokens,
+        max_query_len,
+        enable_dbo_across_dp: bool = False,
+        is_only_prefill: bool = False,
+        *args,
+        **kwargs,
+    ) -> "AscendMetadata":
+        device = self.runner.device
+
+        block_table = self.runner.input_batch.block_table[0].get_device_tensor(
+        )
+        block_table[:num_reqs, :self.runner.max_num_blocks_per_req] = (
+            block_table[:num_reqs])
+
+        query_start_loc_cpu = self.runner.query_start_loc_cpu[:num_reqs + 1]
+        query_start_loc = query_start_loc_cpu.to(device, non_blocking=True)
+
+        query_lens = self.runner.query_lens
+        seq_lens = self.runner.seq_lens_cpu[:num_reqs]
+        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
+            device, non_blocking=True)
+        attn_mask = self.runner.attn_mask
+        attn_state = self.runner.attn_state
+
+        build_info = self._assemble_build_info(num_reqs, num_actual_tokens,
+                                               max_query_len, block_table,
+                                               query_start_loc, query_lens,
+                                               seq_lens, slot_mapping,
+                                               attn_mask, attn_state, args,
+                                               kwargs)
+
+        attn_metadata = self._assemble_attn_metadata(build_info)
         return attn_metadata
 
 
