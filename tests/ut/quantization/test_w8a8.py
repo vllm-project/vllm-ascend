@@ -719,7 +719,7 @@ class TestSelectExperts(TestBase):
     def test_softmax_scoring(self):
         """Test softmax scoring function"""
 
-        weights, ids = select_experts(hidden_states=self.hidden_states,
+        weights, ids, _ = select_experts(hidden_states=self.hidden_states,
                                       router_logits=self.router_logits,
                                       top_k=self.top_k,
                                       use_grouped_topk=False,
@@ -732,7 +732,7 @@ class TestSelectExperts(TestBase):
     def test_sigmoid_scoring(self):
         """Test sigmoid scoring function"""
 
-        weights, ids = select_experts(hidden_states=self.hidden_states,
+        weights, ids, _ = select_experts(hidden_states=self.hidden_states,
                                       router_logits=self.router_logits,
                                       top_k=self.top_k,
                                       use_grouped_topk=False,
@@ -760,7 +760,7 @@ class TestSelectExperts(TestBase):
                                               self.top_k,
                                               dtype=torch.long))
 
-        weights, ids = select_experts(hidden_states=self.hidden_states,
+        weights, ids, _ = select_experts(hidden_states=self.hidden_states,
                                       router_logits=self.router_logits,
                                       top_k=self.top_k,
                                       use_grouped_topk=True,
@@ -780,7 +780,7 @@ class TestSelectExperts(TestBase):
                                                     self.num_experts)
 
         e_score_correction_bias = torch.randn(self.num_experts)
-        weights, ids = select_experts(
+        weights, ids, _ = select_experts(
             hidden_states=self.hidden_states,
             router_logits=self.router_logits,
             top_k=self.top_k,
@@ -803,7 +803,7 @@ class TestSelectExperts(TestBase):
                                                         self.top_k,
                                                         dtype=torch.int32))
 
-        weights, ids = select_experts(
+        weights, ids, _ = select_experts(
             hidden_states=self.hidden_states,
             router_logits=self.router_logits,
             top_k=self.top_k,
@@ -844,7 +844,7 @@ class TestSelectExperts(TestBase):
                                               self.top_k,
                                               dtype=torch.long))
 
-        weights, ids = select_experts(
+        weights, ids, _ = select_experts(
             hidden_states=self.hidden_states,
             router_logits=self.router_logits,
             top_k=self.top_k,
