@@ -1,9 +1,12 @@
 import math
 from unittest.mock import MagicMock, patch
 
+import pytest
 import torch
 
 from tests.ut.base import TestBase
+from vllm_ascend.ops.rotary_embedding import \
+    __set_cos_sin_cache as raw__set_cos_sin_cache
 from vllm_ascend.ops.rotary_embedding import (custom_rotary_embedding_enabled,
                                               native_rope_deepseek_forward,
                                               rope_forward_oot, rotate_half,
@@ -312,3 +315,51 @@ class TestYarnGetMscale(TestBase):
                 expected,
                 places=6,
                 msg=f"Failed for scale={scale}, mscale={mscale}")
+
+
+class MockRotaryEmbedding:
+
+    def __init__(self, base, rotary_dim, max_position_embeddings):
+        self.base = base
+        self.rotary_dim = rotary_dim
+        self.max_position_embeddings = max_position_embeddings
+
+
+@pytest.fixture
+def dummy_module():
+    return MockRotaryEmbedding(base=10000.0,
+                               rotary_dim=64,
+                               max_position_embeddings=512)
+
+
+class TestSetCosSinCache:
+
+    def test_set_cos_sin_cache_generates_real_tensors(self, dummy_module):
+        calls = []
+
+        def fake_register_buffer(name, tensor, persistent=True):
+            setattr(dummy_module, name, tensor)
+            calls.append(name)
+
+        dummy_module.register_buffer = fake_register_buffer
+        seq_len = 128
+        device = torch.device("cpu")
+        dtype = torch.float32
+
+        raw__set_cos_sin_cache(dummy_module, seq_len, device, dtype)
+
+        assert calls == ['inv_freq', 'cos', 'sin']
+
+        assert isinstance(dummy_module.inv_freq, torch.Tensor)
+        assert dummy_module.inv_freq.shape == (dummy_module.rotary_dim // 2, )
+        assert dummy_module.inv_freq.device == device
+        assert dummy_module.inv_freq.dtype == torch.float32
+
+        expected_shape = (dummy_module.max_position_embeddings,
+                          dummy_module.rotary_dim)
+        for name in ('cos', 'sin'):
+            buf = getattr(dummy_module, name)
+            assert isinstance(buf, torch.Tensor)
+            assert buf.shape == expected_shape
+            assert buf.device == device
+            assert buf.dtype == torch.float32
