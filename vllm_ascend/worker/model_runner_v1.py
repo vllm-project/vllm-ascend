@@ -24,7 +24,7 @@ import os
 import time
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Type, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -1201,9 +1201,20 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         )
         attn_metadata = self.attn_metadata_builder.build(
             common_attn_metadata, self.model)
-        if self.vllm_config.model_config.use_mla:
-            attn_metadata.num_input_tokens = num_input_tokens
+        
 
+        attn_metadata: dict[str, Any] = {}
+        # Prepare the attention metadata for each KV cache group and make layers
+        # in the same group share the same metadata.
+        for kv_cache_group_id, kv_cache_group_spec in enumerate(
+            self.kv_cache_config.kv_cache_groups):
+            attn_metadata_i = self.attn_metadata_builder.build(
+                common_attn_metadata, self.model)
+            if self.vllm_config.model_config.use_mla:
+                attn_metadata_i.num_input_tokens = num_input_tokens
+            for layer_name in kv_cache_group_spec.layer_names:
+                attn_metadata[layer_name] = attn_metadata_i
+            
         # Prepare input_ids
         token_indices = (positions_np +
                          req_indices * self.input_batch.token_ids_cpu.shape[1])
@@ -1517,9 +1528,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         positions: torch.Tensor,
         num_scheduled_tokens: int,
         hidden_states: torch.Tensor,
-        attn_metadata: Union[AscendMetadata, AscendMLAMetadata,
+        attn_metadata: dict[str, Union[AscendMetadata, AscendMLAMetadata,
                              AscendTorchairMetadata,
-                             AscendMLATorchairMetadata],
+                             AscendMLATorchairMetadata]],
         aux_hidden_states: torch.Tensor = None,
     ) -> Optional[list[list[int]]]:
         if not self.use_spec_decode:
@@ -1913,7 +1924,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             attn_metadata = None
         else:
             # TODO(zzzzwwjj): when aclgraph and full graph mode, we need build attn_metadata
-            attn_metadata = None
+            attn_metadata: dict[str, Any] = {}
+            # Prepare the attention metadata for each KV cache group and make layers
+            # in the same group share the same metadata.
+            for kv_cache_group_spec in self.kv_cache_config.kv_cache_groups:
+                attn_metadata_i = self.attn_metadata_builder.build_dummy(
+                    num_reqs=num_reqs, num_actual_tokens=1)
+                for layer_name in kv_cache_group_spec.layer_names:
+                    attn_metadata[layer_name] = attn_metadata_i
         return attn_metadata
 
     def _generate_dummy_run_hidden_states(self, with_prefill,
@@ -2619,9 +2637,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         positions: torch.Tensor,
         num_scheduled_tokens: int,
         hidden_states: torch.Tensor,
-        attn_metadata: Union[AscendMetadata, AscendMLAMetadata,
+        attn_metadata: dict[str, Union[AscendMetadata, AscendMLAMetadata,
                              AscendTorchairMetadata,
-                             AscendMLATorchairMetadata],
+                             AscendMLATorchairMetadata]],
     ):
         assert isinstance(self.drafter, MtpProposer)
         next_token_ids: list[int] = []
@@ -2642,13 +2660,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                       dtype=torch.int32,
                                       device=self.device)
         accepted_token_indices = None
+        # At this moment, we assume all eagle layers belong to the same KV
+        # cache group, thus using the same attention metadata.
+        eagle_attn_metadata = attn_metadata[self.drafter.attn_layer_names[0]]
+
         if spec_decode_metadata is None:
             # input_ids can be None for multimodal models.
             target_token_ids = self.input_ids[:num_scheduled_tokens]
             target_positions = positions[:num_scheduled_tokens]
             target_hidden_states = hidden_states[:num_scheduled_tokens]
-            target_slot_mapping = attn_metadata.slot_mapping
-            cu_num_tokens = attn_metadata.query_start_loc
+            target_slot_mapping = eagle_attn_metadata.slot_mapping
+            cu_num_tokens = eagle_attn_metadata.query_start_loc
         else:
             # TODO(woosuk): Refactor this.
             num_draft_tokens = spec_decode_metadata.num_draft_tokens
@@ -2663,13 +2685,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             )
             cu_num_tokens, accepted_token_indices, target_token_ids, \
                 target_positions, target_hidden_states, target_slot_mapping = self.drafter.prepare_inputs(
-                attn_metadata.query_start_loc,
+                eagle_attn_metadata.query_start_loc,
                 num_rejected_tokens,
                 self.input_ids[:num_scheduled_tokens],
                 positions[:num_scheduled_tokens],
                 hidden_states[:num_scheduled_tokens],
-                attn_metadata.slot_mapping[:num_scheduled_tokens],
-                is_torchair_graph=self._build_drafter_prepare_inputs_torchair_param(),
+                eagle_attn_metadata.slot_mapping[:num_scheduled_tokens],
+                is_torchair_graph=self.torchair_graph_enabled,
             )
 
         draft_token_ids = self.drafter.propose(
@@ -2679,7 +2701,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             target_slot_mapping=target_slot_mapping,
             next_token_ids=next_token_ids,
             cu_num_tokens=cu_num_tokens,
-            block_table=attn_metadata.block_tables,
+            block_table=eagle_attn_metadata.block_tables,
             sampling_metadata=sampling_metadata,
             token_indices=accepted_token_indices)
         spec_token_ids = draft_token_ids.tolist()
