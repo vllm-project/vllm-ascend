@@ -1,18 +1,14 @@
-import itertools
-from abc import abstractmethod
-from typing import Any, Literal, Optional, Union
+from typing import Optional, Union
 import numpy as np
 import torch.distributed as dist
 
 import torch
-import torch.nn as nn
-from torch.nn.parameter import Parameter, UninitializedParameter
+from torch.nn.parameter import Parameter
 
 from vllm.distributed import divide
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig, QuantizeMethodBase)
-from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
+    QuantizationConfig)
 # yapf: disable
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            BlockQuantScaleParameter,

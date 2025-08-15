@@ -2,18 +2,16 @@ from dataclasses import dataclass
 from typing import Optional, Union, Literal
 import numpy as np
 import torch
-from torch import nn
 import torch.distributed as dist
 from torch.nn.parameter import Parameter, UninitializedParameter
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.distributed.parallel_state import get_dp_group, GroupCoordinator
 from vllm.distributed.utils import (divide, split_tensor_along_last_dim)
 from vllm.model_executor.layers.linear import (
     set_weight_attrs, WEIGHT_LOADER_V2_SUPPORTED)
 from vllm.model_executor.parameter import BasevLLMParameter
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import get_forward_context
 
 ExecuteType = Literal["eager", "graph"]
 
