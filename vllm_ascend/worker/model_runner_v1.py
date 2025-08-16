@@ -77,8 +77,7 @@ from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
 from vllm_ascend.attention.attention import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import \
-    AscendCommonAttentionMetadata as CommonAttentionMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.distributed.utils import is_lmhead_tp
 from vllm_ascend.eplb.adaptor.vllm_adaptor import VllmEplbAdaptor
 from vllm_ascend.eplb.eplb_updator import EplbUpdator
@@ -195,7 +194,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 "Non-Attention backend is not supported by V1 NPUModelRunner.")
 
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
-            weakref.proxy(self))
+            vllm_config=self.vllm_config,
+            device=self.device,
+            runner=weakref.proxy(self))
 
         # Multi-modal data support
         self.input_registry = INPUT_REGISTRY
@@ -978,9 +979,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # We assume it is the decode stage, where prefill occurs but only one token is not hit in cache.
         elif np.all(num_scheduled_tokens == 1):
             attn_state = AscendAttentionState.DecodeOnly
-            if self.speculative_config and self.speculative_config.method == 'deepseek_mtp':
-                # SpecDecoding now supports seq_len=1 and seq_len=2
-                attn_state = AscendAttentionState.SpecDecoding
         # Speculative decoding.
         elif np.all(num_valid_tokens == 1):
             attn_state = AscendAttentionState.SpecDecoding
@@ -1015,19 +1013,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.seq_lens[num_reqs:].fill_(0)
         self.query_start_loc[num_reqs + 1:].fill_(-1)
 
-        query_start_loc = self.query_start_loc[:num_reqs + 1]
         # Use host tensor, other wise error: tensor.hostData is null
-        common_attn_metadata = CommonAttentionMetadata(
-            query_start_loc=query_start_loc,
-            seq_lens=self.seq_lens_cpu[:num_reqs])
-        self.common_attn_metadata = common_attn_metadata
         self.seq_lens_list = self.seq_lens_np.tolist()[:num_input_tokens]
         with_prefill = attn_state not in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
 
         is_only_prefill = bool(np.all(num_valid_tokens != 1))
-        extra_builder_kwargs['is_only_prefill'] = is_only_prefill
 
         enable_dbo = self._check_dbo_is_valid(self.query_lens.tolist(),
                                               attn_state,
@@ -1041,7 +1033,29 @@ class NPUModelRunner(LoRAModelRunnerMixin):
          enable_dbo) = self._get_forward_metadata_across_dp(
              maybe_padded_num_tokens, total_num_scheduled_tokens, with_prefill,
              enable_dbo)
-        extra_builder_kwargs['enable_dbo_across_dp'] = enable_dbo
+
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=self.query_start_loc[:num_reqs + 1],
+            query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
+            seq_lens=self.seq_lens[:num_reqs],
+            seq_lens_cpu=self.seq_lens_cpu[:num_reqs],
+            num_reqs=num_reqs,
+            num_actual_tokens=total_num_scheduled_tokens,
+            max_query_len=max_num_scheduled_tokens,
+            actual_seq_lengths_q=self.actual_seq_lengths_q,
+            block_table_tensor=self.input_batch.block_table[0].
+            get_device_tensor(),
+            slot_mapping_cpu=self.
+            slot_mapping_cpu[:total_num_scheduled_tokens],
+            positions=self.positions[:num_input_tokens],
+            attn_mask=self.attn_mask,
+            spec_attn_mask=self.spec_attn_mask,
+            attn_state=self.attn_state,  # type: ignore
+            decode_token_per_req=self.decode_token_per_req,
+            max_num_blocks_per_req=self.max_num_blocks_per_req,
+            enable_dbo_across_dp=enable_dbo,
+            is_only_prefill=is_only_prefill,
+        )
 
         # TODO(zzzzwwjj): this code need to refactor afterwards.
         self.with_prefill = with_prefill
@@ -1060,25 +1074,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.extra_builder_kwargs = extra_builder_kwargs
         self.num_tokens_across_dp = num_tokens_across_dp
 
-        if self.vllm_config.model_config.use_mla:
-            attn_metadata = self.attn_metadata_builder.build(  # type: ignore
-                num_reqs=num_reqs,
-                num_actual_tokens=total_num_scheduled_tokens,
-                max_query_len=max_num_scheduled_tokens,
-                common_attn_metadata=common_attn_metadata,
-                common_prefix_len=None,
-                **extra_builder_kwargs,
-            )
-        else:
-            attn_metadata = self.attn_metadata_builder.build(  # type: ignore
-                num_reqs=num_reqs,
-                num_actual_tokens=total_num_scheduled_tokens,
-                max_query_len=max_num_scheduled_tokens,
-                common_attn_metadata=common_attn_metadata,
-                common_prefix_len=None,
-                **extra_builder_kwargs,
-            )
-        attn_metadata.num_input_tokens = num_input_tokens
+        attn_metadata = self.attn_metadata_builder.build(  # type: ignore
+            common_attn_metadata=common_attn_metadata,
+            **extra_builder_kwargs,
+        )
+        attn_metadata.num_input_tokens = padded_num_tokens_across_dp
 
         # Prepare input_ids
         token_indices = (positions_np +
@@ -2262,7 +2262,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             cu_num_tokens, token_indices = self.drafter.prepare_inputs(
                 attn_metadata.query_start_loc,
                 num_rejected_tokens,
-                force_one_token=False,
                 is_torchair_graph=self.torchair_graph_enabled)
             if self.torchair_graph_enabled:
                 # the seq len of each bath is padded to 2, thus input is same as the main model
