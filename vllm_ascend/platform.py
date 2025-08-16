@@ -170,7 +170,9 @@ class NPUPlatform(Platform):
 
         check_ascend_config(vllm_config, enforce_eager)
 
-        if envs_ascend.VLLM_ASCEND_ENABLE_DBO and ("deepseek" not in model_config.hf_config.model_type or vllm_config.speculative_config):
+        if envs_ascend.VLLM_ASCEND_ENABLE_DBO and (
+                "deepseek" not in model_config.hf_config.model_type
+                or vllm_config.speculative_config):
             raise ValueError(
                 "DBO only supports deepseek(not included MTP) now. Please `export VLLM_ASCEND_ENABLE_DBO=0`"
             )
