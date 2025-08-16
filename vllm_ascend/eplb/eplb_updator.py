@@ -150,14 +150,21 @@ class EplbUpdator:
             self.update_info_all = self.block_update_queue.get()
 
     def forward_end(self):
+        moe_load = None
         if self.wakeup_eplb_worker_flag():
             self.compute_and_set_moe_load(is_clear=True)
+            moe_load = self.shared_dict.get("moe_load", None)
             self.wakeup_eplb_worker()
 
         if self.update_expert_weight_flag():
             self.eplb_loader.update_expert_map_and_weight(self.reqs)
 
         self.update_iteration()
+
+        if moe_load is not None:
+            return moe_load, self.eplb.get_phy2log()
+        else:
+            return None, None
 
     def compute_and_set_moe_load(self, is_clear=False):
         local_load = self.adaptor.get_rank_expert_workload()
