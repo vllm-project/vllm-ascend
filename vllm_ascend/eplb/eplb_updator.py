@@ -87,6 +87,8 @@ class EplbUpdator:
 
         self.eplb_process = self.eplb._launch_process()
 
+        self.compute_moe_load_async = torch.npu.Stream()
+
         logger.info(
             f"[ModelRunner] Launched EPLB process (pid={self.eplb_process.pid})"
         )
@@ -164,21 +166,20 @@ class EplbUpdator:
 
         self._gather_buffer = None
         if dist.is_initialized():
-            self.world_size = dist.get_world_size()
-            self.device = local_load.device
-            if self._gather_buffer is None:
-                shape = (self.world_size, *local_load.shape)
-                self._gather_buffer = torch.empty(shape,
-                                                  dtype=local_load.dtype,
-                                                  device=self.device)
+            with torch.npu.stream(self.compute_moe_load_async):
+                self.world_size = dist.get_world_size()
+                self.device = local_load.device
+                if self._gather_buffer is None:
+                    shape = (self.world_size, *local_load.shape)
+                    self._gather_buffer = torch.empty(shape,
+                                                      dtype=local_load.dtype,
+                                                      device=self.device)
 
-            dist.all_gather_into_tensor(self._gather_buffer, local_load)
+                dist.all_gather_into_tensor(self._gather_buffer, local_load)
 
-            moe_load = self._gather_buffer.permute(1, 0, 2)
-            self.shared_dict["moe_load"] = moe_load.cpu()
-            logger.debug(
-                f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}"
-            )
+                moe_load = self._gather_buffer.permute(1, 0, 2)
+                self.shared_dict["moe_load"] = moe_load.cpu()
+                logger.debug(f"[ModelRunner] Updated shared_dict['moe_load'] shape={moe_load.shape}")
         else:
             moe_load = local_load.unsqueeze(1)
             self.shared_dict["moe_load"] = moe_load.cpu()

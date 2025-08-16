@@ -220,11 +220,13 @@ def fused_experts_with_mc2(
     hidden_states_for_share: Optional[Any] = None,
     dynamic_scale_for_share: Optional[Any] = None,
     mc2_mask: Optional[torch.Tensor] = None,
+    token_selector: torch.Tensor = None,
 ) -> Union[Tuple[torch.Tensor, torch.Tensor, int], Tuple[
         torch.Tensor, torch.Tensor, torch.Tensor, int]]:
     assert mc2_mask is not None
     if log2phy is not None:
-        topk_ids = log2phy[topk_ids]
+        log2phy_map, num_experts = log2phy
+        topk_ids = log2phy_map[topk_ids, token_selector[: topk_ids.shape[0]] % num_experts[topk_ids]]
     quant_mode = 2
     ep_group = get_mc2_group()
     ep_rank_id = ep_group.rank_in_group
@@ -387,7 +389,11 @@ def fused_prefill_experts_with_mc2(
     hidden_states_for_share: Optional[Any] = None,
     dynamic_scale_for_share: Optional[Any] = None,
     mc2_mask: Optional[torch.Tensor] = None,
+    token_selector: torch.Tensor = None,
 ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    if log2phy is not None:
+        log2phy_map, num_experts = log2phy
+        topk_ids = log2phy_map[topk_ids, token_selector[: topk_ids.shape[0]] % num_experts[topk_ids]]
     assert mc2_mask is not None
     max_num_chunks = get_forward_context().max_num_chunks
 
@@ -496,9 +502,11 @@ def fused_experts_with_all2all(hidden_states: torch.Tensor,
                                log2phy: torch.Tensor = None,
                                global_redundant_expert_num: int = 0,
                                w1_scale_bias: torch.Tensor = None,
-                               w2_scale_bias: torch.Tensor = None):
+                               w2_scale_bias: torch.Tensor = None,
+							   token_selector: torch.Tensor = None,):
     if log2phy is not None:
-        topk_ids = log2phy[topk_ids]
+        log2phy_map, num_experts = log2phy
+        topk_ids = log2phy_map[topk_ids, token_selector[: topk_ids.shape[0]] % num_experts[topk_ids]]
     original_shape = hidden_states.shape
     if len(original_shape) == 3:
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
@@ -829,6 +837,11 @@ class AscendW8A8DynamicFusedMoEMethod:
 
         ascend_config = get_ascend_config()
         self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+
+        from vllm.config import get_current_vllm_config
+        vllm_config = get_current_vllm_config()
+        self.max_token_nums = vllm_config.scheduler_config.max_num_batched_tokens
+        self.token_selector = torch.arange(0, self.max_token_nums, dtype=torch.int32).view(-1, 1).npu()
         self.enable_weight_nz_layout = ascend_config.enable_weight_nz_layout
 
         try:
@@ -978,6 +991,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                     log2phy=log2phy,
                     global_redundant_expert_num=global_redundant_expert_num,
                     shared_experts=shared_experts,
+					token_selector=self.token_selector,
                     is_torchair=self.torchair_graph_enabled,
                     hidden_states_for_share=shared_gate_up,
                     dynamic_scale_for_share=shared_dequant_scale,
@@ -998,6 +1012,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 global_redundant_expert_num=global_redundant_expert_num,
                 shared_experts=shared_experts,
                 is_torchair=self.torchair_graph_enabled,
+                token_selector=self.token_selector,
                 hidden_states_for_share=shared_gate_up,
                 dynamic_scale_for_share=shared_dequant_scale,
                 mc2_mask=kwargs.get("mc2_mask", None))
@@ -1029,6 +1044,7 @@ class AscendW8A8DynamicFusedMoEMethod:
                 ep_group=self.ep_group,
                 log2phy=log2phy,
                 global_redundant_expert_num=global_redundant_expert_num,
+                token_selector=self.token_selector,
             )
 
     def process_weights_after_loading(self, layer):
