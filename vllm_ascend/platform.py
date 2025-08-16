@@ -27,6 +27,7 @@ from torch.distributed.distributed_c10d import PrefixStore
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
 from vllm_ascend.utils import (ASCEND_QUATIZATION_METHOD,
                                check_torchair_cache_exist,
@@ -169,6 +170,10 @@ class NPUPlatform(Platform):
 
         check_ascend_config(vllm_config, enforce_eager)
 
+        if vllm_config.speculative_config and envs_ascend.VLLM_ASCEND_ENABLE_DBO:
+            raise ValueError(
+                "DBO and mtp can't work at the same time. Please `export VLLM_ASCEND_ENABLE_DBO=0`"
+            )
         if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:
             logger.info("Compilation disabled, using eager mode by default")
             compilation_config.level = CompilationLevel.NO_COMPILATION
@@ -194,7 +199,7 @@ class NPUPlatform(Platform):
             logger.warning(
                 "Ray distributed executor backend is not compatible with ACL Graph mode "
                 "right now. Setting level to NO_COMPILATION")
-            compilation_config.level = CompilationLevel.NO_COMPILATION
+            compilation_config.level = CompilationLevel.NfvO_COMPILATION
         else:
             logger.info(
                 "PIECEWISE compilation enabled on NPU. use_inductor not supported - "
