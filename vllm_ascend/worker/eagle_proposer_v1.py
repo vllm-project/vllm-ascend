@@ -128,7 +128,7 @@ class EagleProposer:
 
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=self.runner.query_start_loc[:batch_size + 1],
-            query_start_loc_cpu=self.query_start_loc_cpu[:batch_size + 1],
+            query_start_loc_cpu=self.runner.query_start_loc_cpu[:batch_size + 1],
             seq_lens_cpu=self.runner.seq_lens_cpu,
             max_query_len=max_query_len,
             num_reqs=batch_size,

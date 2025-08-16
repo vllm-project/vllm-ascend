@@ -168,9 +168,9 @@ class MtpProposer:
             num_input_tokens = num_tokens
 
         common_attn_metadata = AscendCommonAttentionMetadata(
-            query_start_loc=self.runner.query_start_loc[:batch_size + 1],
-            query_start_loc_cpu=self.runner.query_start_loc_cpu[:batch_size + 1],
-            seq_lens_cpu=target_positions.cpu()[last_token_indices] + 1,
+            query_start_loc=cu_num_tokens[:batch_size + 1],
+            query_start_loc_cpu=cu_num_tokens[:batch_size + 1].cpu(),
+            seq_lens_cpu=seq_lens.cpu(),
             num_reqs=batch_size,
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
@@ -184,7 +184,7 @@ class MtpProposer:
             graph_pad_size=extra_builder_kwargs['graph_pad_size'],
             decode_token_per_req=self.runner.decode_token_per_req,
         )
-        attn_metadata = self.runner.attn_metadata_builder.build(common_attn_metadata, self.runner.model)
+        attn_metadata = self.runner.attn_metadata_builder.build(common_attn_metadata, self.runner.get_model())
 
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
