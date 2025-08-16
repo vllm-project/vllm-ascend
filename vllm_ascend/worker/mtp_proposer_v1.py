@@ -285,8 +285,12 @@ class MtpProposer:
             else:
                 draft_token_ids_list.append(draft_token_ids)
             
-            # mtp>1: skip last loop
-            if i == self.num_speculative_tokens - 1:
+            # prepare next mtp inputs
+            # mtp>1: prefill skip or decode skip last loop
+            if with_prefill and is_running_torchair:
+                for _ in range(self.num_speculative_tokens - 1):
+                    draft_token_ids_list.append(draft_token_ids)
+            if i == self.num_speculative_tokens - 1 or with_prefill:
                 break
             
             if i == 0:
