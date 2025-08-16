@@ -32,6 +32,8 @@ from tests.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
 
+DIST_EXECUTOR_BACKEND = ["mp", "ray"]
+
 
 def test_models_distributed_QwQ():
     example_prompts = [
@@ -59,6 +61,23 @@ def test_models_distributed_DeepSeek():
             dtype=dtype,
             tensor_parallel_size=4,
             distributed_executor_backend="mp",
+    ) as vllm_model:
+        vllm_model.generate_greedy(example_prompts, max_tokens)
+
+
+@pytest.mark.skipif(os.environ["VLLM_USE_V1"] == "1")
+@pytest.mark.parametrize("distributed_executor_backend", DIST_EXECUTOR_BACKEND)
+def test_v0_pp(distributed_executor_backend):
+    example_prompts = [
+        "Hello, my name is",
+    ]
+    dtype = "half"
+    max_tokens = 5
+    with VllmRunner(
+            "Qwen/Qwen3-0.6B-Base",
+            dtype=dtype,
+            pipeline_parallel_size=2,
+            distributed_executor_backend=distributed_executor_backend,
     ) as vllm_model:
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
