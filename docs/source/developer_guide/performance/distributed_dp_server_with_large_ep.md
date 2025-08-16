@@ -173,7 +173,7 @@ In the PD separation scenario, we provide a recommended optimized configuration.
 - **prefiller node**
 
 1. set HCCL_BUFFSIZE=256
-2. add '--enforce-eager' commond to 'vllm serve'
+2. add '--enforce-eager' command to 'vllm serve'
 3. Take '--additional-config' as follow
 
 ```shell
@@ -231,7 +231,7 @@ python load_balance_proxy_server_example.py \
 ```
 
 :::{note}
-Each node local ip should repeat the same times as its '**dp_size_local**', at the same time, each node has the same number of ports as '**dp_size_local**', and ther ports increase sequentially starting from '**engine_port**'.
+Each node local ip should repeat the same times as its '**dp_size_local**', at the same time, each node has the same number of ports as '**dp_size_local**', and their ports increase sequentially starting from '**engine_port**'.
 :::
 
 You can get the proxy program in the repository's examples, [load\_balance\_proxy\_server\_example.py](https://github.com/vllm-project/vllm-ascend/blob/v0.9.1-dev/examples/disaggregate_prefill_v1/load_balance_proxy_server_example.py)
