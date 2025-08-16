@@ -137,7 +137,7 @@ private:
             }
             break;
         }
-        reqLoRAIndex_ = loraIndicesGm_.GetValue(i);
+        reqLoRAIndex_ = (i < seqLenGm_.GetSize()) ? loraIndicesGm_.GetValue(i) : -1;
     }
 
     __aicore__ inline void ComputeLastIteration()

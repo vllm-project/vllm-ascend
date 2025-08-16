@@ -124,7 +124,7 @@ private:
             }
             break;
         }
-        reqLoRAIndex_ = loraIndicesGm_.GetValue(i);
+        reqLoRAIndex_ = (i < seqLenGm_.GetSize()) ? loraIndicesGm_.GetValue(i) : -1;
     }
 
     __aicore__ inline void CopyInX(const int64_t idx, int32_t colIdx, int32_t numElements = TILE_LENGTH)
