@@ -138,16 +138,8 @@ def test_models_distributed_DeepSeek_w8a8_ep_dbo():
                     tensor_parallel_size=4,
                     enforce_eager=True,
                     enable_expert_parallel=True,
-                    distributed_executor_backend="mp",
-                    additional_config={
-                        "ascend_scheduler_config": {
-                            "enabled": True,
-                        },
-                        "torchair_graph_config": {
-                            "enable": True,
-                            "enable_multistream_moe": True
-                        }
-                    }) as vllm_model:
+                    distributed_executor_backend="mp"
+                    ) as vllm_model:
         model_arch = 'DeepseekV2ForCausalLM'
         registed_models = ModelRegistry.models
         assert registed_models[
