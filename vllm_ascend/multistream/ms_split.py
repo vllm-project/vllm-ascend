@@ -120,17 +120,14 @@ def model_input_split_v1_mla_attn(
         # chunked prefill
         if num_prefills_pre > 0:
             attn_state_pre = attn_state_post = AscendAttentionState.ChunkedPrefill
-            attn_mask_pre = attn_metadata.attn_mask[:token_index, :max(
-                seq_lens_pre)].contiguous()
+            attn_mask_pre = None
             attn_state_post = AscendAttentionState.ChunkedPrefill
-            attn_mask_post = attn_metadata.attn_mask[
-                token_index:, :max(seq_lens_post)].contiguous()
+            attn_mask_post = None
         else:
             attn_state_pre = AscendAttentionState.DecodeOnly
             attn_mask_pre = None
             attn_state_post = AscendAttentionState.ChunkedPrefill
-            attn_mask_post = attn_metadata.attn_mask[
-                token_index:, :max(seq_lens_post)].contiguous()
+            attn_mask_post = None
     from vllm_ascend.attention.mla_v1 import (AscendMLADecodeMetadata,
                                               AscendMLAPrefillMetadata)
     if num_prefills_pre > 0:
