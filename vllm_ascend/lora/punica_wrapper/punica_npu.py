@@ -22,8 +22,8 @@ from vllm.lora.punica_wrapper.punica_base import PunicaWrapperBase
 # inherit this class
 class PunicaWrapperNPU(PunicaWrapperBase):
     """
-    PunicaWrapperNPU is designed to manage and provide metadata for the punica 
-    kernel. The main function is to maintain the state information for 
+    PunicaWrapperNPU is designed to manage and provide metadata for the punica
+    kernel. The main function is to maintain the state information for
     Multi-LoRA, and to provide the interface for the pytorch punica ops.
     """
 
@@ -130,7 +130,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         add_inputs: bool = True,
     ):
         """
-        Perform the ` y[:,y_offset:y_offset+y_slice_size]+=x@w_t_all` 
+        Perform the ` y[:,y_offset:y_offset+y_slice_size]+=x@w_t_all`
         computation, which is suitable for the
         GEMM of lora'b.
         """
@@ -166,11 +166,11 @@ class PunicaWrapperNPU(PunicaWrapperBase):
         prefill stage, and the `_shrink_prefill` function should be called.
         Otherwise, it is the decode stage, and the _shrink_decode function
         should be called.
-            
+
         Semantics:
         for i in range(len(lora_a_stacked)):
             y[i] += (x @ lora_a_stacked[i]) * scale
-        
+
         Args:
             y (Union[Tuple[torch.Tensor, ...], torch.Tensor]): Output tensors
             x (torch.Tensor): Input tensor
@@ -195,19 +195,19 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                    **kwargs) -> None:
         """
         Performs GEMM and bias addition for multiple slices of lora_b.
-      
+
         Semantics:
             for i in range(len(lora_b_stacked)):
                 slice = output_slices[i]
-                y[:, offset:offset+slice] += x[i] @ lora_b_stacked[i] + 
-                    lora_bias_stacked[i] 
+                y[:, offset:offset+slice] += x[i] @ lora_b_stacked[i] +
+                    lora_bias_stacked[i]
                 offset += slice
-            
+
         Args:
             y (torch.Tensor): Output tensor.
             x (Union[Tuple[torch.Tensor, ...], torch.Tensor]): Input tensors
             lora_b_stacked (Tuple[torch.Tensor, ...]): lora_b's weight
-            lora_bias_stacked (Optional[Tuple[torch.Tensor, ...]]): 
+            lora_bias_stacked (Optional[Tuple[torch.Tensor, ...]]):
                 bias's weight
             output_slices (Tuple[int, ...]): Every slice's size
             add_inputs (bool):  Defaults to True.
@@ -266,7 +266,7 @@ class PunicaWrapperNPU(PunicaWrapperBase):
                         buffer: Optional[Tuple[torch.Tensor, ...]] = None,
                         **kwargs) -> None:
         """
-        Applicable to linear-related lora. 
+        Applicable to linear-related lora.
 
         Semantics:
             for i in range(len(lora_a_stacked)):
