@@ -92,6 +92,7 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -215,7 +216,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             use_mla=self.model_config.use_mla,
         )
         self.attn_metadata_builder = self.attn_backend.get_builder_cls()(
-            weakref.proxy(self))
+            vllm_config, device)
         self.attn_mask_builder = AttentionMaskBuilder(
             min(self.model_config.max_model_len,
                 int(os.getenv("PAGED_ATTENTION_MASK_LEN", 10000))), self.dtype)
@@ -228,13 +229,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.drafter: Optional[Union[NgramProposer, EagleProposer,
                                      MtpProposer]] = None
         self.actual_seq_lengths_q = []
-        self.spec_token_num = 0
         self.decode_token_per_req = 1
         if self.speculative_config:
             self.use_spec_decode = True
-            self.spec_token_num = self.speculative_config.num_speculative_tokens
-            assert self.spec_token_num > 0
-            self.decode_token_per_req = 1 + self.spec_token_num
+            spec_token_num = self.speculative_config.num_speculative_tokens
+            assert spec_token_num > 0
+            self.decode_token_per_req = 1 + spec_token_num
             self.actual_seq_lengths_q = [
                 len for len in
                 range(self.decode_token_per_req, self.max_num_tokens +
@@ -798,11 +798,24 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # in the same group share the same metadata.
         for kv_cache_group_id, kv_cache_group_spec in enumerate(
                 self.kv_cache_config.kv_cache_groups):
-            attn_metadata_i = self.attn_metadata_builder.build(
+            common_attn_metadata = AscendCommonAttentionMetadata(
+                query_start_loc=self.query_start_loc[:num_reqs + 1],
+                query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
+                seq_lens_cpu=self.seq_lens_cpu,
                 num_reqs=num_reqs,
-                num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
+                num_actual_tokens=total_num_scheduled_tokens,
+                actual_seq_lengths_q=self.actual_seq_lengths_q,
+                block_table_tensor=self.input_batch.block_table[0].get_device_tensor(),
+                slot_mapping_cpu=self.slot_mapping_cpu,
+                positions=self.positions,
+                attn_mask=self.attn_mask,
+                spec_attn_mask=self.spec_attn_mask,
+                attn_state=self.attn_state,
+                max_num_blocks_per_req=self.max_num_blocks_per_req,
+                decode_token_per_req=self.decode_token_per_req,
             )
+            attn_metadata_i = self.attn_metadata_builder.build(common_attn_metadata, self.get_model())
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
 
@@ -1192,9 +1205,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                               attn_state,
                                               total_num_scheduled_tokens)
 
-        enable_dbo = self._check_dbo_is_valid(self.query_lens.tolist(),
-                                              attn_state,
-                                              total_num_scheduled_tokens)
         (padded_num_tokens_across_dp, num_tokens_across_dp, with_prefill,
          enable_dbo) = self._get_forward_metadata_across_dp_and_pad(
              total_num_scheduled_tokens, with_prefill, enable_dbo)
@@ -1207,24 +1217,28 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 'graph_pad_size'] = self.graph_pad_size  # type: ignore
         else:
             self.graph_pad_size = -1
-
+        common_attn_metadata = AscendCommonAttentionMetadata(
+            query_start_loc=self.query_start_loc[:num_reqs + 1],
+            query_start_loc_cpu=self.query_start_loc_cpu[:num_reqs + 1],
+            seq_lens_cpu=self.seq_lens_cpu,
+            num_reqs=num_reqs,
+            num_actual_tokens=total_num_scheduled_tokens,
+            actual_seq_lengths_q=self.actual_seq_lengths_q,
+            block_table_tensor=self.input_batch.block_table[0].get_device_tensor(),
+            slot_mapping_cpu=self.slot_mapping_cpu,
+            positions=self.positions,
+            attn_mask=self.attn_mask,
+            spec_attn_mask=self.spec_attn_mask,
+            attn_state=self.attn_state,
+            enable_dbo_across_dp=enable_dbo,
+            is_only_prefill=is_only_prefill,
+            max_query_len=max_num_scheduled_tokens,
+            graph_pad_size=self.graph_pad_size,
+            decode_token_per_req=self.decode_token_per_req,
+        )
+        attn_metadata = self.attn_metadata_builder.build(common_attn_metadata, self.model)
         if self.vllm_config.model_config.use_mla:
-            extra_builder_kwargs[
-                "query_start_loc"] = self.query_start_loc[:num_reqs + 1]
-            attn_metadata = self.attn_metadata_builder.build(  # type: ignore
-                num_reqs=num_reqs,
-                num_actual_tokens=total_num_scheduled_tokens,
-                max_query_len=max_num_scheduled_tokens,
-                **extra_builder_kwargs,
-            )
             attn_metadata.num_input_tokens = num_input_tokens
-        else:
-            attn_metadata = self.attn_metadata_builder.build(  # type: ignore
-                num_reqs=num_reqs,
-                num_actual_tokens=total_num_scheduled_tokens,
-                max_query_len=max_num_scheduled_tokens,
-                **extra_builder_kwargs,
-            )
 
         # Prepare input_ids
         token_indices = (positions_np +
