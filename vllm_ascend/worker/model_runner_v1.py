@@ -815,7 +815,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 max_num_blocks_per_req=self.max_num_blocks_per_req,
                 decode_token_per_req=self.decode_token_per_req,
             )
-            attn_metadata_i = self.attn_metadata_builder.build(common_attn_metadata, self.model)
+            attn_metadata_i = self.attn_metadata_builder.build(common_attn_metadata, self.get_model())
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
 
