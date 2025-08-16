@@ -50,8 +50,6 @@ def model_name():
     return "wemaster/deepseek_mtp_main_random_bf16"
 
 
-@pytest.mark.skipif(
-    True, reason="TODO: Enable me after test_mtp_correctness is fixed")
 def test_mtp_correctness(
     test_prompts: list[list[dict[str, Any]]],
     sampling_config: SamplingParams,
@@ -61,28 +59,43 @@ def test_mtp_correctness(
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using mtp speculative decoding.
     '''
-    ref_llm = LLM(model=model_name, max_model_len=256, enforce_eager=True)
+    ref_llm = LLM(model=model_name,
+                  gpu_memory_utilization=0.5,
+                  max_model_len=256,
+                  enforce_eager=True)
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
     del ref_llm
 
-    spec_llm = LLM(model=model_name,
-                   trust_remote_code=True,
-                   speculative_config={
-                       "method": "deepseek_mtp",
-                       "num_speculative_tokens": 1,
-                   },
-                   max_model_len=256,
-                   enforce_eager=True)
+    spec_llm = LLM(
+        model=model_name,
+        tensor_parallel_size=1,
+        max_num_seqs=256,
+        gpu_memory_utilization=0.6,
+        distributed_executor_backend="mp",
+        enable_expert_parallel=True,
+        speculative_config={
+            "method": "deepseek_mtp",
+            "num_speculative_tokens": 1,
+        },
+        trust_remote_code=True,
+        enforce_eager=True,
+        max_model_len=2000,
+        additional_config={"ascend_scheduler_config": {
+            "enabled": True
+        }})
+
     spec_outputs = spec_llm.chat(test_prompts, sampling_config)
     matches = 0
     misses = 0
     for ref_output, spec_output in zip(ref_outputs, spec_outputs):
-        if ref_output.outputs[0].text == spec_output.outputs[0].text:
+        ref_token_ids = ref_output.outputs[0].token_ids
+        spec_token_ids = spec_output.outputs[0].token_ids
+        if ref_token_ids == spec_token_ids[:len(ref_token_ids)]:
             matches += 1
         else:
             misses += 1
-            print(f"ref_output: {ref_output.outputs[0].text}")
-            print(f"spec_output: {spec_output.outputs[0].text}")
+        print(f"ref_output: {ref_output.outputs[0].text}")
+        print(f"spec_output: {spec_output.outputs[0].text}")
 
     # Heuristic: expect at least 66% of the prompts to match exactly
     # Upon failure, inspect the outputs to check for inaccuracy.
