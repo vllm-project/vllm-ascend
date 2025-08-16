@@ -27,6 +27,7 @@ from torch.distributed.distributed_c10d import PrefixStore
 from vllm.logger import logger
 from vllm.platforms import Platform, PlatformEnum
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import check_ascend_config, init_ascend_config
 from vllm_ascend.utils import (ASCEND_QUATIZATION_METHOD,
                                check_torchair_cache_exist,
@@ -168,6 +169,11 @@ class NPUPlatform(Platform):
             enforce_eager = getattr(model_config, "enforce_eager", False)
 
         check_ascend_config(vllm_config, enforce_eager)
+
+        if envs_ascend.VLLM_ASCEND_ENABLE_DBO and ("deepseek" not in model_config.hf_config.model_type or vllm_config.speculative_config):
+            raise ValueError(
+                "DBO only supports deepseek(not included MTP) now. Please `export VLLM_ASCEND_ENABLE_DBO=0`"
+            )
 
         if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:
             logger.info("Compilation disabled, using eager mode by default")
