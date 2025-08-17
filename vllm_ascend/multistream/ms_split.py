@@ -97,7 +97,7 @@ def model_input_split_v1_mla_attn(
                              max(0, seq_index - attn_metadata.num_decodes))
     seq_lens = attn_metadata.seq_lens if attn_metadata.num_prefills > 0 else attn_metadata.decode.seq_lens
     [seq_lens_pre, seq_lens_post
-     ] = split_attn_tensor_type(seq_lens, 
+     ] = split_attn_tensor_type(seq_lens,
                                 max(0, seq_index - attn_metadata.num_decodes))
 
     query_start_loc_pre = query_start_loc_post = None
