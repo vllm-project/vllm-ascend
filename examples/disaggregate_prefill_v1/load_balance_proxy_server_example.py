@@ -7,6 +7,7 @@ import asyncio
 import heapq
 import os
 import sys
+import uuid
 from contextlib import asynccontextmanager
 from typing import List
 
@@ -111,7 +112,7 @@ class ProxyState:
     async def next_req_id(self):
         async with self.req_id_lock:
             self.req_id_counter += 1
-            return str(self.req_id_counter)
+            return str(uuid.uuid4())
 
     def select_prefiller(self, token_count):  # Changed to synchronous
         # No lock needed - entire function is atomic
