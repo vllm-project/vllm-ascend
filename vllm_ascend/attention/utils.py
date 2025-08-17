@@ -1,7 +1,5 @@
 from dataclasses import dataclass
-from enum import Enum
-
-from vllm.config import SpeculativeConfig
+from typing import Any
 
 import torch
 
@@ -29,10 +27,13 @@ class AscendCommonAttentionMetadata:
     """Total number of tokens in batch"""
 
     max_query_len: int
+    """Max token number of request in batch"""
 
     decode_token_per_req: int
+    """decode token number per request"""
 
     block_table_tensor: torch.Tensor
+
     slot_mapping_cpu: torch.Tensor
 
     actual_seq_lengths_q: list[int] = None
@@ -40,14 +41,17 @@ class AscendCommonAttentionMetadata:
     positions: torch.Tensor = None
 
     attn_mask: torch.Tensor = None
+
     spec_attn_mask: torch.Tensor = None
-    attn_state: Enum = None
-    
+
+    attn_state: Any = None
+
     enable_dbo_across_dp: bool = False
 
     is_only_prefill: bool = False
 
     graph_pad_size: int = -1
+
 
 @dataclass
 class TorchairCommonAttentionMetadata:
@@ -60,6 +64,7 @@ class TorchairCommonAttentionMetadata:
 
     num_reqs: int
     """Number of requests"""
+
     num_actual_tokens: int
     """Total number of tokens in batch"""
 
@@ -68,6 +73,7 @@ class TorchairCommonAttentionMetadata:
     actual_seq_lengths_q: list[int] = None
 
     attn_mask: torch.Tensor = None
+
     spec_attn_mask: torch.Tensor = None
 
     graph_pad_size: int = -1
@@ -113,4 +119,3 @@ def split_decodes_and_prefills(
     num_decode_tokens = query_start_loc[first_prefill].item()
     num_prefill_tokens = num_tokens - num_decode_tokens
     return (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens)
-

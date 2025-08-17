@@ -25,13 +25,13 @@ from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 
+from vllm_ascend.attention.utils import TorchairCommonAttentionMetadata
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         write_kv_cache_bytes_to_file)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                maybe_converting_weight_acl_format)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-from vllm_ascend.attention.utils import TorchairCommonAttentionMetadata
 
 
 class NPUTorchairModelRunner(NPUModelRunner):
@@ -78,7 +78,8 @@ class NPUTorchairModelRunner(NPUModelRunner):
                 spec_attn_mask=self.spec_attn_mask,
                 decode_token_per_req=self.decode_token_per_req,
             )
-            attn_metadata = self.attn_metadata_builder.build_torchair_graph_dummy(common_attn_metadata)
+            attn_metadata = self.attn_metadata_builder.build_torchair_graph_dummy(
+                common_attn_metadata)
         else:
             attn_metadata = super()._build_attention_metadata(
                 with_prefill, num_reqs, skip_attn)

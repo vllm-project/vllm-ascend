@@ -3,13 +3,13 @@ from typing import TYPE_CHECKING, Optional, Tuple, Type, TypeVar
 
 import numpy as np
 import torch
-import torch_npu
 import torch.nn as nn
+import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionLayer,
                                               AttentionMetadata,
                                               MLAAttentionImpl)
 from vllm.attention.backends.utils import PAD_SLOT_ID
-from vllm.config import get_current_vllm_config, VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.linear import (LinearBase,
                                                UnquantizedLinearMethod)
@@ -18,6 +18,8 @@ from vllm.utils import cdiv, round_down
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
+                                         split_decodes_and_prefills)
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
@@ -25,8 +27,6 @@ from vllm_ascend.ops.attention import vanilla_chunked_prefill_mla
 from vllm_ascend.torchair.utils import npu_stream_switch, npu_wait_tensor
 from vllm_ascend.utils import npu_prefetch
 from vllm_ascend.worker.npu_input_batch import InputBatch
-from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,split_decodes_and_prefills)
-
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
@@ -185,7 +185,8 @@ class AscendMLAMetadataBuilder:
         self.device = device
         scheduler_config = vllm_config.scheduler_config
         self.block_size = vllm_config.cache_config.block_size
-        self.max_blocks = (vllm_config.model_config.max_model_len + self.block_size - 1) // self.block_size
+        self.max_blocks = (vllm_config.model_config.max_model_len +
+                           self.block_size - 1) // self.block_size
         self.chunked_prefill_enabled = scheduler_config.chunked_prefill_enabled
         if self.chunked_prefill_enabled:
             self.chunked_prefill_workspace_size = min(
@@ -278,13 +279,13 @@ class AscendMLAMetadataBuilder:
     def _get_graph_runner_block_tables(
             self, num_seqs: int, block_tables: torch.Tensor) -> torch.Tensor:
         num_blocks = block_tables.size(1)
-        if num_blocks <= self.max_blocks:
-            return block_tables[:num_seqs, :num_blocks]
-        else:
-            return block_tables[:num_seqs, :self.max_blocks]
+        num_blocks = min(num_blocks, self.max_blocks)
+        return block_tables[:num_seqs, :num_blocks]
 
     def build_torchair_graph_dummy(
-            self, common_attn_metadata: AscendCommonAttentionMetadata,) -> AscendMLAMetadata:
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+    ) -> AscendMLAMetadata:
         device = self.device
         num_reqs = common_attn_metadata.num_reqs
         block_table = torch.zeros((num_reqs, self.max_blocks),
@@ -332,7 +333,8 @@ class AscendMLAMetadataBuilder:
             seq_lens_list=seq_lens_list,
             max_seq_lens=1,
             attn_mask=common_attn_metadata.spec_attn_mask,
-            actual_seq_lengths_q=common_attn_metadata.actual_seq_lengths_q[:num_reqs],
+            actual_seq_lengths_q=common_attn_metadata.
+            actual_seq_lengths_q[:num_reqs],
             sin=sin,
             cos=cos,
         )
@@ -362,9 +364,18 @@ class AscendMLAMetadataBuilder:
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
+        if self.torchair_graph_enabled and common_attn_metadata.attn_state in [
+                AscendAttentionState.DecodeOnly,
+                AscendAttentionState.SpecDecoding
+        ]:
+            decode_threshold = common_attn_metadata.decode_token_per_req
+        else:
+            # TODO(xyx): remove the if condition after mla supports torch mode speculative decoding
+            decode_threshold = 1
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = \
-            split_decodes_and_prefills(common_attn_metadata)
+            split_decodes_and_prefills(common_attn_metadata, decode_threshold=decode_threshold)
         assert num_decodes + num_prefills == num_reqs
+        assert num_decode_tokens + num_prefill_tokens == num_actual_tokens
 
         # Note(simon): be careful about the CPU <> GPU memory movement in this
         # function. We should avoid GPU -> CPU sync as much as possible because
@@ -372,16 +383,23 @@ class AscendMLAMetadataBuilder:
         device = self.device
 
         block_table = (common_attn_metadata.block_table_tensor[:num_reqs])
-        slot_mapping = common_attn_metadata.slot_mapping_cpu[:num_actual_tokens].to(
-            device, non_blocking=True)
+        slot_mapping = common_attn_metadata.slot_mapping_cpu[:
+                                                             num_actual_tokens].to(
+                                                                 device,
+                                                                 non_blocking=
+                                                                 True)
         # input_positions = common_attn_metadata.positions_cpu[:num_actual_tokens].to(
         #     device, non_blocking=True).long()
-        
-        input_positions = common_attn_metadata.positions[:num_actual_tokens].long()
+
+        input_positions = common_attn_metadata.positions[:
+                                                         num_actual_tokens].long(
+                                                         )
 
         if self.cos_cache is None:
-            self.cos_cache = model.model.layers[0].self_attn.rotary_emb.cos_cached
-            self.sin_cache = model.model.layers[0].self_attn.rotary_emb.sin_cached
+            self.cos_cache = model.model.layers[
+                0].self_attn.rotary_emb.cos_cached
+            self.sin_cache = model.model.layers[
+                0].self_attn.rotary_emb.sin_cached
         if self.cos_cache.dtype != self.model_config.dtype:  # type: ignore
             self.cos_cache = self.cos_cache.to(  # type: ignore
                 self.model_config.dtype)  # type: ignore
@@ -392,7 +410,7 @@ class AscendMLAMetadataBuilder:
         query_lens = query_seq_lens_cpu[:num_reqs]
         seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
         num_computed_tokens_cpu = (seq_lens - query_lens)
-        
+
         prefill_metadata = None
         chunked_context_metadata = None
         if num_prefills > 0:
@@ -477,8 +495,8 @@ class AscendMLAMetadataBuilder:
                     pad_value = 0
                     num_token_pad_size = graph_pad_size - num_decode_tokens
                     num_reqs_pad_size = (
-                        graph_pad_size // common_attn_metadata.decode_token_per_req -
-                        num_reqs)
+                        graph_pad_size //
+                        common_attn_metadata.decode_token_per_req - num_reqs)
                     padded_seq_lens = seq_lens.tolist(
                     ) + [pad_value] * num_reqs_pad_size
                 else:
@@ -506,8 +524,8 @@ class AscendMLAMetadataBuilder:
                 input_positions = torch.cat(
                     [input_positions, position_padding])
                 actual_seq_lengths_q = query_start_loc[1:].tolist(
-                ) + common_attn_metadata.actual_seq_lengths_q[num_reqs:num_reqs +
-                                                     num_reqs_pad_size]
+                ) + common_attn_metadata.actual_seq_lengths_q[
+                    num_reqs:num_reqs + num_reqs_pad_size]
             else:
                 seq_lens_list = seq_lens.tolist()
             # mtp torchair + PD scenario, last element of actual_seq_lengths_q must equal to batch_size(num_tokens)

@@ -16,9 +16,10 @@ from vllm.v1.sample.metadata import SamplingMetadata
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.ascend_forward_context import set_ascend_forward_context
+from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
+                                         TorchairCommonAttentionMetadata)
 from vllm_ascend.models.deepseek_mtp import CustomDeepSeekMTP
 from vllm_ascend.utils import ProfileExecuteDuration
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata, TorchairCommonAttentionMetadata
 
 
 class MtpProposer:
@@ -89,7 +90,7 @@ class MtpProposer:
 
             # FIXME(woosuk): Avoid synchronization.
             num_tokens = cu_num_tokens[-1].item()
-            token_indices = torch.empty(
+            token_indices = torch.zeros(
                 num_tokens,
                 dtype=torch.int32,
                 device=cu_num_tokens.device,
@@ -137,9 +138,6 @@ class MtpProposer:
         # E.g., [b1, b2, c1, c2, c3, c3] -> [a2, b2, b3, c2, c3, c4]
         if token_indices is not None and self.runner.torchair_graph_enabled:
             last_token_indices = token_indices
-        else:
-            seq_lens = target_positions[last_token_indices] + 1
-            seq_lens = seq_lens.cpu()
 
         self.input_ids[last_token_indices] = next_token_ids
 
@@ -156,17 +154,16 @@ class MtpProposer:
         #     input_batch=self.runner.input_batch,
         #     scheduler_output=self.runner.scheduler_output,
         # )
-        extra_builder_kwargs = {}
-
         is_running_torchair = self.runner.torchair_graph_enabled and \
             not self.runner.with_prefill
 
         if is_running_torchair:
-            extra_builder_kwargs['graph_pad_size'] = self.runner.graph_pad_size
             num_input_tokens = self.runner.graph_pad_size
         else:
             num_input_tokens = num_tokens
 
+        seq_lens = target_positions[last_token_indices] + 1
+        seq_lens = seq_lens.int()
         common_attn_metadata = AscendCommonAttentionMetadata(
             query_start_loc=cu_num_tokens[:batch_size + 1],
             query_start_loc_cpu=cu_num_tokens[:batch_size + 1].cpu(),
@@ -175,16 +172,18 @@ class MtpProposer:
             num_actual_tokens=num_tokens,
             max_query_len=max_query_len,
             actual_seq_lengths_q=self.runner.actual_seq_lengths_q,
-            block_table_tensor=self.runner.input_batch.block_table[0].get_device_tensor(),
+            block_table_tensor=self.runner.input_batch.block_table[0].
+            get_device_tensor(),
             slot_mapping_cpu=target_slot_mapping,
             positions=target_positions,
             attn_mask=self.runner.attn_mask,
             spec_attn_mask=self.runner.spec_attn_mask,
             attn_state=self.runner.attn_state,
-            graph_pad_size=extra_builder_kwargs['graph_pad_size'],
+            graph_pad_size=self.runner.graph_pad_size,
             decode_token_per_req=self.runner.decode_token_per_req,
         )
-        attn_metadata = self.runner.attn_metadata_builder.build(common_attn_metadata, self.runner.get_model())
+        attn_metadata = self.runner.attn_metadata_builder.build(
+            common_attn_metadata, self.runner.get_model())
 
         self.positions[:num_tokens] = target_positions
         self.hidden_states[:num_tokens] = target_hidden_states
@@ -302,7 +301,8 @@ class MtpProposer:
                 spec_attn_mask=self.runner.spec_attn_mask,
                 decode_token_per_req=self.runner.decode_token_per_req,
             )
-            attn_metadata = self.runner.attn_metadata_builder.build_torchair_graph_dummy(common_attn_metadata)
+            attn_metadata = self.runner.attn_metadata_builder.build_torchair_graph_dummy(
+                common_attn_metadata)
 
         input_ids = self.input_ids[:num_tokens]
         positions = self.positions[:num_tokens]

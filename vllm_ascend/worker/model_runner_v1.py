@@ -23,7 +23,6 @@ import math
 import os
 import time
 import types
-import weakref
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Type, Union, cast
@@ -80,6 +79,7 @@ from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
 from vllm_ascend.attention.attention_v1_torchair import AscendTorchairMetadata
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.distributed.moe_comm_method import (AllGatherCommImpl,
                                                      DummyCommImpl,
                                                      MoECommMethod)
@@ -92,7 +92,6 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
 from vllm_ascend.worker.eagle_proposer_v1 import EagleProposer
 from vllm_ascend.worker.mtp_proposer_v1 import MtpProposer
 from vllm_ascend.worker.npu_input_batch import CachedRequestState, InputBatch
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 
 if TYPE_CHECKING:
     import xgrammar as xgr  # type: ignore[import-untyped]
@@ -806,7 +805,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 max_query_len=max_num_scheduled_tokens,
                 num_actual_tokens=total_num_scheduled_tokens,
                 actual_seq_lengths_q=self.actual_seq_lengths_q,
-                block_table_tensor=self.input_batch.block_table[0].get_device_tensor(),
+                block_table_tensor=self.input_batch.block_table[0].
+                get_device_tensor(),
                 slot_mapping_cpu=self.slot_mapping_cpu,
                 positions=self.positions,
                 attn_mask=self.attn_mask,
@@ -815,7 +815,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 max_num_blocks_per_req=self.max_num_blocks_per_req,
                 decode_token_per_req=self.decode_token_per_req,
             )
-            attn_metadata_i = self.attn_metadata_builder.build(common_attn_metadata, self.get_model())
+            attn_metadata_i = self.attn_metadata_builder.build(
+                common_attn_metadata, self.get_model())
             for layer_name in kv_cache_group_spec.layer_names:
                 attn_metadata[layer_name] = attn_metadata_i
 
@@ -1181,8 +1182,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             attn_state=attn_state)
         self.attn_state = attn_state  # type: ignore
 
-        extra_builder_kwargs = {}
-
         self.query_start_loc_np[0] = 0
         self.query_start_loc_np[1:num_reqs + 1] = cu_num_tokens
         self.query_start_loc[:num_reqs + 1].copy_(
@@ -1199,7 +1198,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         ]
 
         is_only_prefill = bool(np.all(num_valid_tokens != 1))
-        extra_builder_kwargs['is_only_prefill'] = is_only_prefill
 
         enable_dbo = self._check_dbo_is_valid(self.query_lens.tolist(),
                                               attn_state,
@@ -1208,13 +1206,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         (padded_num_tokens_across_dp, num_tokens_across_dp, with_prefill,
          enable_dbo) = self._get_forward_metadata_across_dp_and_pad(
              total_num_scheduled_tokens, with_prefill, enable_dbo)
-        extra_builder_kwargs['enable_dbo_across_dp'] = enable_dbo
         self.with_prefill = with_prefill
         self.num_tokens_across_dp = num_tokens_across_dp
         if self.torchair_graph_enabled and not with_prefill:
             self.graph_pad_size = padded_num_tokens_across_dp
-            extra_builder_kwargs[
-                'graph_pad_size'] = self.graph_pad_size  # type: ignore
         else:
             self.graph_pad_size = -1
         common_attn_metadata = AscendCommonAttentionMetadata(
@@ -1224,7 +1219,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             num_reqs=num_reqs,
             num_actual_tokens=total_num_scheduled_tokens,
             actual_seq_lengths_q=self.actual_seq_lengths_q,
-            block_table_tensor=self.input_batch.block_table[0].get_device_tensor(),
+            block_table_tensor=self.input_batch.block_table[0].
+            get_device_tensor(),
             slot_mapping_cpu=self.slot_mapping_cpu,
             positions=self.positions,
             attn_mask=self.attn_mask,
@@ -1236,7 +1232,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             graph_pad_size=self.graph_pad_size,
             decode_token_per_req=self.decode_token_per_req,
         )
-        attn_metadata = self.attn_metadata_builder.build(common_attn_metadata, self.model)
+        attn_metadata = self.attn_metadata_builder.build(
+            common_attn_metadata, self.model)
         if self.vllm_config.model_config.use_mla:
             attn_metadata.num_input_tokens = num_input_tokens
 
