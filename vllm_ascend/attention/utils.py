@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 import torch
 
@@ -36,7 +36,7 @@ class AscendCommonAttentionMetadata:
 
     slot_mapping_cpu: torch.Tensor
 
-    actual_seq_lengths_q: list[int] = None
+    actual_seq_lengths_q: Optional[list[int]] = None
 
     positions: torch.Tensor = None
 
@@ -70,7 +70,7 @@ class TorchairCommonAttentionMetadata:
 
     decode_token_per_req: int
 
-    actual_seq_lengths_q: list[int] = None
+    actual_seq_lengths_q: Optional[list[int]] = None
 
     attn_mask: torch.Tensor = None
 

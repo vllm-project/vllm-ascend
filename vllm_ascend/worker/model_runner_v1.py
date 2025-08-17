@@ -812,7 +812,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 attn_mask=self.attn_mask,
                 spec_attn_mask=self.spec_attn_mask,
                 attn_state=self.attn_state,
-                max_num_blocks_per_req=self.max_num_blocks_per_req,
                 decode_token_per_req=self.decode_token_per_req,
             )
             attn_metadata_i = self.attn_metadata_builder.build(
