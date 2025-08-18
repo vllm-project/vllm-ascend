@@ -1062,7 +1062,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                                               expert_map=expert_map,
                                               ep_group=get_ep_group())
 
-    def forward(
+    def forward_oot(
             self,
             layer: torch.nn.Module,
             x: torch.Tensor,
