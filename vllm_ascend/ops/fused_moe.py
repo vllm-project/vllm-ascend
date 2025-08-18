@@ -759,6 +759,7 @@ def fused_experts(
     expert_map: torch.Tensor = None,
     apply_router_weight_on_input: bool = False,
     max_num_tokens: Optional[int] = None,
+    row_idx: torch.Tensor = None,
 ) -> torch.Tensor:
     """
     Fused experts with top-k routing.
@@ -846,12 +847,13 @@ def fused_experts(
         # Rearrange hidden_states
         sorted_hidden_states = hidden_states[sorted_token_indices]
     else:
-        row_idx_len = num_tokens * top_k
-        row_idx = (torch.arange(0,
-                                row_idx_len,
-                                dtype=torch.int32,
-                                device=device).view(top_k, -1).permute(
-                                    1, 0).contiguous())
+        if row_idx is None:
+            row_idx_len = num_tokens * top_k
+            row_idx = (torch.arange(0,
+                                    row_idx_len,
+                                    dtype=torch.int32,
+                                    device=device).view(top_k, -1).permute(
+                                        1, 0).contiguous())
         active_num = max_num_tokens if max_num_tokens is not None else num_tokens
         sorted_hidden_states, expanded_row_idx, expanded_expert_idx = torch_npu.npu_moe_init_routing(
             hidden_states,
@@ -975,7 +977,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
         **kwargs,
     ) -> torch.Tensor:
 
-        topk_weights, topk_ids = select_experts(
+        topk_weights, topk_ids, row_idx = select_experts(
             hidden_states=x,
             router_logits=router_logits,
             top_k=top_k,
@@ -1020,7 +1022,8 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                                  topk_weights=topk_weights,
                                  topk_ids=topk_ids,
                                  top_k=top_k,
-                                 expert_map=expert_map)
+                                 expert_map=expert_map,
+                                 row_idx=row_idx)
         elif MOE_ALL2ALL_BUFFER:
             return fused_experts_with_all2all_buffer(
                 hidden_states=x,

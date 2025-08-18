@@ -241,7 +241,7 @@ class AscendW8A8FusedMoEMethod:
         assert router_logits.shape[
             1] == global_num_experts, "Number of global experts mismatch"
 
-        topk_weights, topk_ids = select_experts(
+        topk_weights, topk_ids, _ = select_experts(
             hidden_states=x,
             router_logits=router_logits,
             top_k=top_k,

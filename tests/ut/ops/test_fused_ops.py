@@ -400,7 +400,7 @@ class TestExpertsSelector:
 
         x = torch.randn(8, 2)
         router_logits = torch.randn(8, 2)
-        topk_weights, topk_ids = select_experts(
+        topk_weights, topk_ids, row_idx = select_experts(
             hidden_states=x,
             router_logits=router_logits,
             top_k=2,
@@ -415,3 +415,4 @@ class TestExpertsSelector:
 
         assert topk_weights.shape == (8, 2)
         assert topk_ids.shape == (8, 2)
+        assert row_idx.shape == (8, 2)

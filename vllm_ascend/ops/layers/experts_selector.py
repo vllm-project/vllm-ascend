@@ -56,7 +56,7 @@ def select_experts(hidden_states: torch.Tensor,
         topk_ids: selected expert IDs of shape (num_tokens, top_k).
     """
 
-    topk_weights, topk_ids = _select_experts_with_fusion_ops(
+    topk_weights, topk_ids, row_idx = _select_experts_with_fusion_ops(
         router_logits=router_logits,
         top_k=top_k,
         use_grouped_topk=use_grouped_topk,
@@ -83,7 +83,7 @@ def select_experts(hidden_states: torch.Tensor,
             e_score_correction_bias=e_score_correction_bias,
             global_num_experts=global_num_experts,
         )
-    return topk_weights, topk_ids
+    return topk_weights, topk_ids, row_idx
 
 
 def _native_grouped_topk(
@@ -168,7 +168,7 @@ def _select_experts_with_fusion_ops(
         global_num_experts: int = -1,
         is_unquantized: bool = False):
 
-    topk_weights, topk_ids = None, None
+    topk_weights, topk_ids, row_idx = None, None, None
     # NOTE: now npu_moe_gating_top_k can only support 'group_count=256' pattern
     is_deepseek_v3_r1 = global_num_experts == 256
     if is_deepseek_v3_r1:
@@ -186,14 +186,13 @@ def _select_experts_with_fusion_ops(
             # y2_flag=False, # old api; should the third output be output
             routed_scaling_factor=1,
             eps=float(1e-20))
-
-    if not use_grouped_topk and custom_routing_function is None and scoring_func == "softmax" and is_unquantized:
-        topk_weights, topk_ids, _ = torch_npu.npu_moe_gating_top_k_softmax(
+    elif not use_grouped_topk and custom_routing_function is None and scoring_func == "softmax" and is_unquantized:
+        topk_weights, topk_ids, row_idx = torch_npu.npu_moe_gating_top_k_softmax(
             x=router_logits, finished=None, k=top_k)
         topk_ids = topk_ids.to(torch.int32)
         topk_weights = _renormalize_topk_weights(topk_weights, renormalize)
 
-    return topk_weights, topk_ids
+    return topk_weights, topk_ids, row_idx
 
 
 def _native_select_experts(
