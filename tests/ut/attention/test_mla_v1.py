@@ -1,6 +1,5 @@
 from unittest.mock import MagicMock, patch
 
-import numpy as np
 import torch
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase
@@ -195,9 +194,11 @@ class TestAscendMLAMetadataBuilder(TestBase):
                    return_value=ascend_config):
             builder = AscendMLAMetadataBuilder(mock_vllm_config, mock_device)
 
-            self.assertEqual(builder.block_size, mock_vllm_config.cache_config.block_size)
-            self.assertEqual(builder.chunked_prefill_enabled,
-                             mock_vllm_config.scheduler_config.chunked_prefill_enabled)
+            self.assertEqual(builder.block_size,
+                             mock_vllm_config.cache_config.block_size)
+            self.assertEqual(
+                builder.chunked_prefill_enabled,
+                mock_vllm_config.scheduler_config.chunked_prefill_enabled)
             self.assertEqual(builder.torchair_graph_enabled, True)
 
     @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
@@ -363,7 +364,7 @@ class TestAscendMLAMetadataBuilder(TestBase):
                 num_reqs=3,
                 num_actual_tokens=3,
                 decode_token_per_req=1,
-                actual_seq_lengths_q=[0,1,2],
+                actual_seq_lengths_q=[0, 1, 2],
                 attn_mask=torch.zeros((1, 1), dtype=torch.bool),
                 spec_attn_mask=torch.zeros((1, 1), dtype=torch.bool),
             )

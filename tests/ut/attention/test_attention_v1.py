@@ -72,7 +72,8 @@ class TestAscendAttentionMetadataBuilder(TestBase):
         self.mock_vllm_config.model_config.max_model_len = 640
         self.mock_vllm_config.cache_config.block_size = 64
         self.mock_device = 'cpu:0'
-        self.builder = AscendAttentionMetadataBuilder(self.mock_vllm_config, self.mock_device)
+        self.builder = AscendAttentionMetadataBuilder(self.mock_vllm_config,
+                                                      self.mock_device)
 
     def test_reorder_batch(self):
         mock_input_batch = MagicMock()
@@ -104,18 +105,14 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             positions=torch.tensor([10, 10]),
             attn_mask=torch.ones((10, 10)),
             spec_attn_mask=None,
-            attn_state=AscendAttentionState.PrefillNoCache
-        )
+            attn_state=AscendAttentionState.PrefillNoCache)
 
         mock_nz_tensor = MagicMock()
         mock_model = MagicMock()
         mock_nd_to_nz_2d.return_value = mock_nz_tensor
         mock_npu_format_cast.return_value = mock_nz_tensor
 
-        self.builder.build(
-            common_attn_metadata,
-            mock_model
-        )
+        self.builder.build(common_attn_metadata, mock_model)
 
     @patch('vllm_ascend.attention.attention_v1.AscendMetadata')
     @patch('torch_npu.npu_format_cast')
@@ -139,8 +136,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             positions=torch.tensor([10, 10]),
             attn_mask=torch.ones((15, 15)),
             spec_attn_mask=None,
-            attn_state=AscendAttentionState.ChunkedPrefill
-        )
+            attn_state=AscendAttentionState.ChunkedPrefill)
 
         mock_ascend_attention_state = MagicMock()
         mock_ascend_attention_state.PrefillNoCache = 0
@@ -169,8 +165,7 @@ class TestAscendAttentionMetadataBuilder(TestBase):
             positions=torch.tensor([10, 10]),
             attn_mask=torch.ones((15, 15)),
             spec_attn_mask=None,
-            attn_state=AscendAttentionState.ChunkedPrefill
-        )
+            attn_state=AscendAttentionState.ChunkedPrefill)
         mock_model = MagicMock()
 
         self.builder.build(common_attn_metadata, mock_model)

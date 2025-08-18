@@ -282,8 +282,8 @@ class AscendMLAMetadataBuilder:
         max_blocks = self.max_blocks
 
         graph_block_tables = torch.zeros((num_seqs, max_blocks),
-                                             dtype=block_tables.dtype,
-                                             device=block_tables.device)
+                                         dtype=block_tables.dtype,
+                                         device=block_tables.device)
 
         num_blocks = block_tables.size(1)
         if num_blocks <= max_blocks:
