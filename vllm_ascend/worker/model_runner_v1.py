@@ -338,6 +338,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                              == CompilationLevel.PIECEWISE
                              and not self.model_config.enforce_eager and
                              not ascend_config.torchair_graph_config.enabled)
+
+        self.aclgraph_batch_sizes = []
         if self.compilation_config.cudagraph_capture_sizes and \
                 self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
             self.aclgraph_batch_sizes = list(
