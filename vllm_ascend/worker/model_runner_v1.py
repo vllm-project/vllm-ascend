@@ -36,7 +36,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
@@ -58,12 +58,13 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, SupportedTask
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler,
-                        LazyLoader, cdiv)
+                        LazyLoader, cdiv, is_pin_memory_available)
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheSpec)
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
+from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -156,6 +157,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
         self.parallel_config = vllm_config.parallel_config
+        self.compilation_config = vllm_config.compilation_config
+        self.pin_memory = is_pin_memory_available()
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.block_size = vllm_config.cache_config.block_size
@@ -335,9 +338,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                              == CompilationLevel.PIECEWISE
                              and not self.model_config.enforce_eager and
                              not ascend_config.torchair_graph_config.enabled)
-        self.aclgraph_batch_sizes = list(
-            reversed(
-                self.vllm_config.compilation_config.cudagraph_capture_sizes))
+        self.aclgraph_batch_sizes = []
+        if self.compilation_config.cudagraph_capture_sizes and \
+                self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            self.aclgraph_batch_sizes = list(
+                reversed(self.compilation_config.cudagraph_capture_sizes))
 
         self.new_kv_cache_bytes = -1
         self.torchair_compiled_model = None  # type: ignore
@@ -405,12 +410,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             )
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
-        """Update the cached states and the persistent batch with the scheduler
-        output.
-
-        The SamplingMetadata is updated and copied to the NPU if there is a
-        new/resumed/paused/finished request in the batch.
-        """
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
@@ -421,11 +420,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # then resubmitted with the same ID. In this case, we treat them as two
         # distinct requests - clearing the cached states for the first request
         # and handling the second as a new request.
-        removed_req_indices: List[int] = []
         for req_id in scheduler_output.finished_req_ids:
-            req_index = self.input_batch.remove_request(req_id)
-            if req_index is not None:
-                removed_req_indices.append(req_index)
+            self.input_batch.remove_request(req_id)
 
         # Free the cached encoder outputs.
         for req_id, input_id in scheduler_output.free_encoder_input_ids:
@@ -448,16 +444,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         # have low request overlap (e.g., alternating between two distinct
         # sets of requests), this optimization becomes very inefficient.
         for req_id in unscheduled_req_ids:
-            req_index = self.input_batch.remove_request(req_id)
-            assert req_index is not None
-            removed_req_indices.append(req_index)
+            self.input_batch.remove_request(req_id)
 
-        req_ids_to_add: List[str] = []
+        req_ids_to_add: list[str] = []
         # Add new requests to the cached states.
         for new_req_data in scheduler_output.scheduled_new_reqs:
             req_id = new_req_data.req_id
             sampling_params = new_req_data.sampling_params
             pooling_params = new_req_data.pooling_params
+
             if sampling_params and \
                 sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
@@ -468,7 +463,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             if pooling_params:
                 assert (task := pooling_params.task) is not None, (
                     "You did not set `task` in the API")
-                model = cast(VllmModelForPooling, self.model)
+
+                model = cast(VllmModelForPooling, self.get_model())
                 to_update = model.pooler.get_pooling_updates(task)
                 to_update.apply(pooling_params)
 
@@ -478,7 +474,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 mm_kwargs=new_req_data.mm_kwargs,
                 mm_positions=new_req_data.mm_positions,
                 sampling_params=sampling_params,
-                pooling_params=new_req_data.pooling_params,
+                pooling_params=pooling_params,
                 generator=generator,
                 block_ids=new_req_data.block_ids,
                 num_computed_tokens=new_req_data.num_computed_tokens,
@@ -493,9 +489,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 second_per_grid_ts = []
                 audio_feature_lengths = []
                 use_audio_in_video = False
-
-                for item in self.requests[req_id].mm_kwargs:
-                    mm_input = item.require_data()
+                for mm_item in self.requests[req_id].mm_kwargs:
+                    mm_input = mm_item.get_data()
                     if mm_input.get("image_grid_thw") is not None:
                         image_grid_thw.append(
                             mm_input["image_grid_thw"].tolist())
@@ -528,19 +523,24 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             req_ids_to_add.append(req_id)
 
         # Update the states of the running/resumed requests.
-        req_data = scheduler_output.scheduled_cached_reqs
         is_last_rank = get_pp_group().is_last_rank
+        req_data = scheduler_output.scheduled_cached_reqs
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
             new_block_ids = req_data.new_block_ids[i]
             resumed_from_preemption = req_data.resumed_from_preemption[i]
 
+            # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
+
             if not is_last_rank:
+                # When using PP, the scheduler sends the sampled tokens back,
+                # because there's no direct communication between the first-
+                # stage worker and the last-stage worker.
                 new_token_ids = req_data.new_token_ids[i]
                 # Add the sampled token(s) from the previous step (if any).
-                # This doesn't include "unverified" tokens like spec decode tokens.
+                # This doesn't include "unverified" tokens like spec tokens.
                 num_new_tokens = (num_computed_tokens + len(new_token_ids) -
                                   req_state.num_tokens)
                 if num_new_tokens == 1:
@@ -549,11 +549,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 elif num_new_tokens > 0:
                     req_state.output_token_ids.extend(
                         new_token_ids[-num_new_tokens:])
+
             # Update the block IDs.
             if not resumed_from_preemption:
                 # Append the new blocks to the existing block IDs.
-                for block_ids, new_ids in zip(  # type: ignore[call-overload]
-                        req_state.block_ids, new_block_ids):
+                for block_ids, new_ids in zip(req_state.block_ids,
+                                              new_block_ids):
                     block_ids.extend(new_ids)
             else:
                 # The request is resumed from preemption.
@@ -571,9 +572,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # Update the persistent batch.
             self.input_batch.num_computed_tokens_cpu[req_index] = (
                 num_computed_tokens)
-
             self.input_batch.block_table.append_row(new_block_ids, req_index)
 
+            # For the last rank, we don't need to update the token_ids_cpu
+            # because the sampled tokens are already cached.
             if not is_last_rank:
                 # Add new_token_ids to token_ids_cpu.
                 start_token_index = num_computed_tokens
@@ -583,9 +585,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     start_token_index:end_token_index] = new_token_ids
                 self.input_batch.num_tokens_no_spec[
                     req_index] = end_token_index
+                self.input_batch.num_tokens[req_index] = end_token_index
+
             # Add spec_token_ids to token_ids_cpu.
-            spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
-                req_id, ())
+            spec_token_ids = (
+                scheduler_output.scheduled_spec_decode_tokens.get(req_id, ()))
             if spec_token_ids:
                 num_spec_tokens = len(spec_token_ids)
                 start_index = self.input_batch.num_tokens_no_spec[req_index]
@@ -595,39 +599,17 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 # NOTE(woosuk): `num_tokens` here may include spec tokens.
                 self.input_batch.num_tokens[req_index] += num_spec_tokens
 
-        # Check if the batch has changed. If not, we can skip copying the
-        # sampling metadata from CPU to GPU.
-        batch_changed = len(removed_req_indices) > 0 or len(req_ids_to_add) > 0
-
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
-        removed_req_indices.sort(reverse=True)
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
-            if removed_req_indices:
-                # Fill the empty index.
-                req_index = removed_req_indices.pop()
-            else:
-                # Append to the end.
-                req_index = None
-            self.input_batch.add_request(req_state, req_index)
-            spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
-                req_id, ())
-            if spec_token_ids:
-                req_index = self.input_batch.num_reqs - 1
-                start_index = len(req_state.prompt_token_ids) + len(
-                    req_state.output_token_ids)
-                end_token_index = start_index + len(spec_token_ids)
-                self.input_batch.token_ids_cpu[
-                    req_index, start_index:end_token_index] = spec_token_ids
-                self.input_batch.num_tokens[req_index] = end_token_index
+            self.input_batch.add_request(req_state)
 
-        # Condense the batched states if there are empty indices.
-        if removed_req_indices:
-            self.input_batch.condense(removed_req_indices)
+        # Condense the batched states if there are gaps left by removed requests
+        self.input_batch.condense()
 
-        if batch_changed:
-            self.input_batch.refresh_sampling_metadata()
+        # Refresh batch metadata with any pending updates.
+        self.input_batch.refresh_metadata()
 
     def _get_forward_metadata_across_dp(
             self, num_tokens: int, with_prefill: bool,
@@ -1062,11 +1044,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         num_pad, num_tokens_across_dp_native = self.get_dp_padding(
             num_input_tokens)
         num_input_tokens += num_pad
-
-        modified_batch = self.attn_metadata_builder.reorder_batch(
-            self.input_batch, scheduler_output)
-        if modified_batch:
-            self.input_batch.refresh_sampling_metadata()
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
@@ -2199,10 +2176,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             max_model_len=self.model_config.max_model_len,
             max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
-            pin_memory=True,
+            pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[self.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
+            logitsprocs=build_logitsprocs(
+                self.vllm_config, self.device, self.pin_memory,
+                self.is_pooling_model,
+                self.vllm_config.model_config.logits_processors),
+            is_pooling_model=self.is_pooling_model,
         )
 
         kv_cache_sizes = {}
