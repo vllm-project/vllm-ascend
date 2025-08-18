@@ -36,7 +36,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
-from vllm.config import CompilationLevel, VllmConfig
+from vllm.config import CompilationLevel, CUDAGraphMode, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
@@ -155,6 +155,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
+        self.compilation_config = vllm_config.compilation_config
         self.lora_config = vllm_config.lora_config
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
@@ -351,9 +352,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                              == CompilationLevel.PIECEWISE
                              and not self.model_config.enforce_eager and
                              not ascend_config.torchair_graph_config.enabled)
-        self.aclgraph_batch_sizes = list(
-            reversed(
-                self.vllm_config.compilation_config.cudagraph_capture_sizes))
+
+        if self.compilation_config.cudagraph_capture_sizes and \
+                self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+            self.aclgraph_batch_sizes = list(
+                reversed(self.compilation_config.cudagraph_capture_sizes))
 
         self.new_kv_cache_bytes = -1
         self.torchair_compiled_model = None  # type: ignore
