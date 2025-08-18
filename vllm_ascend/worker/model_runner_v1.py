@@ -410,15 +410,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             )
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
-        """Update the cached states and the persistent batch with the scheduler
-        output.
-
-        The updated states are used by the `_prepare_inputs` function to create
-        the input GPU tensors for the model.
-
-        The SamplingMetadata is updated and copied to the GPU if there is a
-        new/resumed/paused/finished request in the batch.
-        """
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
