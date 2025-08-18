@@ -1,6 +1,8 @@
 import numpy as np
 import torch
+from vllm.config import VllmConfig
 from vllm.sampling_params import SamplingParams
+from vllm.v1.sample.logits_processor import LogitsProcessors, build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 
@@ -38,9 +40,13 @@ class TestInputBatch(TestBase):
             max_model_len=self.max_model_len,
             max_num_batched_tokens=self.max_num_batched_tokens,
             device=self.device,
-            pin_memory=False,
+            pin_memory=True,
             vocab_size=self.vocab_size,
             block_sizes=self.block_sizes,
+            is_spec_decode=False,
+            logitsprocs=build_logitsprocs(VllmConfig(), self.device, True,
+                                          False, LogitsProcessors()),
+            is_pooling_model=False,
         )
         self.cached_request_state = mock_cached_request_state()
 
