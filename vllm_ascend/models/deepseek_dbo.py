@@ -65,7 +65,8 @@ from vllm.sequence import IntermediateTensors
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.models.deepseek_v2 import (CustomDeepseekV2MLP,
-                                            Oproj_RowParallelLinear)
+                                            CustomDeepseekV2RowParallelLinear,
+                                            OprojCustomRowParallelLinear)
 from vllm_ascend.multistream.base import MSEventKey
 from vllm_ascend.multistream.context import (
     advance_step_multistream_layer_context, get_multistream_comm_context,
@@ -76,7 +77,7 @@ from vllm_ascend.multistream.metadata import (MultiStreamConfig,
                                               MultiStreamStepMetadata,
                                               make_multistream_metadata_ds)
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
-from vllm_ascend.utils import dispose_tensor
+from vllm_ascend.utils import dispose_tensor, oproj_tp_enable
 
 VLLM_ASCEND_ENABLE_DBO: bool = envs_ascend.VLLM_ASCEND_ENABLE_DBO
 
@@ -317,11 +318,21 @@ class CustomDeepseekDBOMLAAttention(DeepseekV2MLAAttention):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.kv_b_proj")
-        self.o_proj = Oproj_RowParallelLinear(self.num_heads * self.v_head_dim,
-                                              self.hidden_size,
-                                              bias=False,
-                                              quant_config=quant_config,
-                                              prefix=f"{prefix}.o_proj")
+
+        if oproj_tp_enable():
+            self.o_proj = OprojCustomRowParallelLinear(
+                self.num_heads * self.v_head_dim,
+                self.hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.o_proj")
+        else:
+            self.o_proj = CustomDeepseekV2RowParallelLinear(
+                self.num_heads * self.v_head_dim,
+                self.hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.o_proj")
 
         if rope_scaling:
             rope_scaling["rope_type"] = 'deepseek_yarn'

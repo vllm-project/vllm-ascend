@@ -138,6 +138,7 @@ class AscendMlpRowParallelLinear(RowParallelLinear):
         self,
         input_size: int,
         output_size: int,
+        custom_tp_group: GroupCoordinator,
         bias: bool = True,
         input_is_parallel: bool = True,
         skip_bias_add: bool = False,

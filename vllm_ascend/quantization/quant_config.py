@@ -35,10 +35,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
-from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.ops.fused_moe import AscendUnquantizedFusedMoEMethod
-from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD, _enable_oproj_tp
+from vllm_ascend.ops.linear import OprojCustomRowParallelLinear
+from vllm_ascend.utils import ASCEND_QUATIZATION_METHOD
 
 from .quantizer import AscendQuantizer
 
@@ -225,7 +225,7 @@ class AscendLinearMethod(LinearMethodBase):
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         if isinstance(layer, RowParallelLinear):
-            if _enable_oproj_tp():
+            if isinstance(layer, OprojCustomRowParallelLinear):
                 tp_rank = get_otp_group().rank_in_group
             else:
                 tp_rank = get_tensor_model_parallel_rank()

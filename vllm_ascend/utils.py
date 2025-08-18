@@ -525,5 +525,5 @@ def get_ascend_soc_version():
     return _ascend_soc_version
 
 
-def _enable_oproj_tp() -> bool:
+def oproj_tp_enable() -> bool:
     return get_ascend_config().oproj_tensor_parallel_size is not None
