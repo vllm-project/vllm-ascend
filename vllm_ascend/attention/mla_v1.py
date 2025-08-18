@@ -19,6 +19,7 @@ import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
+                                         TorchairCommonAttentionMetadata,
                                          split_decodes_and_prefills)
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
@@ -278,13 +279,27 @@ class AscendMLAMetadataBuilder:
 
     def _get_graph_runner_block_tables(
             self, num_seqs: int, block_tables: torch.Tensor) -> torch.Tensor:
+        max_blocks = self.max_blocks
+
+        graph_block_tables = torch.zeros((num_seqs, max_blocks),
+                                             dtype=block_tables.dtype,
+                                             device=block_tables.device)
+
         num_blocks = block_tables.size(1)
-        num_blocks = min(num_blocks, self.max_blocks)
-        return block_tables[:num_seqs, :num_blocks]
+        if num_blocks <= max_blocks:
+            graph_block_tables[:num_seqs, :
+                               num_blocks] = block_tables[:num_seqs, :
+                                                          num_blocks]
+        else:
+            graph_block_tables[:num_seqs, :
+                               max_blocks] = block_tables[:num_seqs, :
+                                                          max_blocks]
+
+        return graph_block_tables[:, :max_blocks]
 
     def build_torchair_graph_dummy(
         self,
-        common_attn_metadata: AscendCommonAttentionMetadata,
+        common_attn_metadata: TorchairCommonAttentionMetadata,
     ) -> AscendMLAMetadata:
         device = self.device
         num_reqs = common_attn_metadata.num_reqs

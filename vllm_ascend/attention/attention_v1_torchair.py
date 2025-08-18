@@ -30,7 +30,8 @@ from vllm.utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
 
 from vllm_ascend.attention.attention_v1 import AscendAttentionState
-from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
+from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
+                                         TorchairCommonAttentionMetadata)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d)
 from vllm_ascend.worker.npu_input_batch import InputBatch
@@ -169,12 +170,26 @@ class AscendAttentionTorchairMetadataBuilder:
 
     def _get_graph_runner_block_tables(
             self, num_seqs: int, block_tables: torch.Tensor) -> torch.Tensor:
+        max_blocks = self.max_blocks
+
+        graph_block_tables = torch.zeros((num_seqs, max_blocks),
+                                             dtype=block_tables.dtype,
+                                             device=block_tables.device)
+
         num_blocks = block_tables.size(1)
-        num_blocks = min(num_blocks, self.max_blocks)
-        return block_tables[:num_seqs, :num_blocks]
+        if num_blocks <= max_blocks:
+            graph_block_tables[:num_seqs, :
+                               num_blocks] = block_tables[:num_seqs, :
+                                                          num_blocks]
+        else:
+            graph_block_tables[:num_seqs, :
+                               max_blocks] = block_tables[:num_seqs, :
+                                                          max_blocks]
+
+        return graph_block_tables[:, :max_blocks]
 
     def build_torchair_graph_dummy(
-        self, common_attn_metadata: AscendCommonAttentionMetadata
+        self, common_attn_metadata: TorchairCommonAttentionMetadata
     ) -> AscendTorchairMetadata:
         device = self.device
         num_reqs = common_attn_metadata.num_reqs
