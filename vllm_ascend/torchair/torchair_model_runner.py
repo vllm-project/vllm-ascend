@@ -27,6 +27,7 @@ from vllm.logger import logger
 
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
+                                        register_torchair_model,
                                         write_kv_cache_bytes_to_file)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                maybe_converting_weight_acl_format)
@@ -37,6 +38,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+        register_torchair_model()
 
     def _get_forward_metadata_across_dp_and_pad(
             self, num_tokens: int, with_prefill: bool, enable_dbo: bool
