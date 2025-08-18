@@ -57,6 +57,11 @@ class NpuInputBatch(InputBatch):
             is_pooling_model,
             is_spec_decode,
         )
+        self.min_p_cpu_tensor = torch.empty((max_num_reqs, ),
+                                            dtype=torch.float32,
+                                            device="cpu",
+                                            pin_memory=pin_memory)
+        self.min_p_cpu = self.min_p_cpu_tensor.numpy()
 
     def refresh_sampling_metadata(self):
         self.sampling_metadata = self._make_sampling_metadata()
