@@ -1157,6 +1157,7 @@ class AscendFusedMoE(FusedMoE):
     ):
         # TODO: This could not initialize FusedMoE baseclass,
         # fixme and make __init__() of AscendFusedMoE more clear
+        print("AscendFusedMoE is being used")
         super().__init__(
             num_experts=num_experts,
             top_k=top_k,
