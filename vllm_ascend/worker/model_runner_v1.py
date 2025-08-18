@@ -261,6 +261,21 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                                      f"{self.speculative_config.method}")
                 self.rejection_sampler = AscendRejectionSampler()
 
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=self.model_config.max_model_len,
+            max_num_batched_tokens=self.max_num_tokens,
+            device=self.device,
+            pin_memory=True,
+            vocab_size=self.model_config.get_vocab_size(),
+            block_sizes=[self.cache_config.block_size],
+            is_spec_decode=bool(self.vllm_config.speculative_config),
+            logitsprocs=build_logitsprocs(
+                self.vllm_config, self.device, True, self.is_pooling_model,
+                self.vllm_config.model_config.logits_processors),
+            is_pooling_model=self.is_pooling_model,
+        )
+
         # Persistent batch.
         self.input_ids = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int32,
@@ -2193,21 +2208,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             aligned_addr = (data_ptr + alignment - 1) // alignment * alignment
             offset = (aligned_addr - data_ptr) // tensor.element_size()
             return tensor[int(offset):]
-
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            max_model_len=self.model_config.max_model_len,
-            max_num_batched_tokens=self.max_num_tokens,
-            device=self.device,
-            pin_memory=True,
-            vocab_size=self.model_config.get_vocab_size(),
-            block_sizes=[self.cache_config.block_size],
-            is_spec_decode=bool(self.vllm_config.speculative_config),
-            logitsprocs=build_logitsprocs(
-                self.vllm_config, self.device, True, self.is_pooling_model,
-                self.vllm_config.model_config.logits_processors),
-            is_pooling_model=self.is_pooling_model,
-        )
 
         kv_cache_sizes = {}
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
