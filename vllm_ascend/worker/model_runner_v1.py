@@ -1276,7 +1276,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
 
-        positions, input_ids = self._update_input_ids_and_positions(
+        input_ids, positions = self._update_input_ids_and_positions(
             input_ids, positions, num_input_tokens, with_prefill,
             padded_num_tokens_across_dp)
 
