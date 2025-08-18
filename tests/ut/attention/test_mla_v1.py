@@ -333,16 +333,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         ascend_config = MagicMock()
         mock_ascend_config.return_value = ascend_config
         ascend_config.torchair_graph_config.enabled = False
-        # runner = MagicMock()
-        # runner.model_config = MagicMock()
-        # runner.device = "cpu"
-        # runner.graph_block_tables = torch.zeros((8, 64), dtype=torch.int32)
-        # runner.model_config.get_head_size.return_value = 64
-        # runner.chunked_prefill_enabled = False
-        # runner.attn_mask = torch.zeros((1, 1), dtype=torch.bool)
-        # runner.spec_attn_mask = torch.zeros((1, 1), dtype=torch.bool)
-        # runner.dtype = torch.float16
-        # runner.decode_token_per_req = 1
 
         mock_vllm_config = MagicMock()
         mock_vllm_config.model_config.max_model_len = 1024

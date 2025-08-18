@@ -259,9 +259,6 @@ class AscendAttentionTorchairMetadataBuilder:
         query_start_loc = query_start_loc_cpu.to(self.device,
                                                  non_blocking=True)
         query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        # input_positions = common_attn_metadata.positions_cpu[:num_actual_tokens].to(
-        #     device, non_blocking=True).long()
-
         input_positions = common_attn_metadata.positions[:
                                                          num_actual_tokens].long(
                                                          )
