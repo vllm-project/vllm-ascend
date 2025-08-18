@@ -19,16 +19,11 @@
 
 from typing import Optional, cast
 
-import numpy as np
 import torch
-from vllm.lora.request import LoRARequest
-from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.gpu_input_batch import InputBatch
-
-_SAMPLING_EPS = 1e-5
 
 
 class NpuInputBatch(InputBatch):
@@ -46,7 +41,22 @@ class NpuInputBatch(InputBatch):
         is_pooling_model: bool = False,
         is_spec_decode: bool = False,
     ):
-        super.__init__()
+        """
+        TODO: The NPUInputBatch is currently identical to the InputBatch.
+        we temporarily retain this class for Interface compatibility and will remove it later.
+        """
+        super().__init__(
+            max_num_reqs,
+            max_model_len,
+            max_num_batched_tokens,
+            device,
+            pin_memory,
+            vocab_size,
+            block_sizes,
+            logitsprocs,
+            is_pooling_model,
+            is_spec_decode,
+        )
 
     def refresh_sampling_metadata(self):
         self.sampling_metadata = self._make_sampling_metadata()
@@ -114,25 +124,6 @@ class NpuInputBatch(InputBatch):
             logitsprocs=self.logitsprocs,
         )
 
-    @property
-    def pooling_metadata(self) -> PoolingMetadata:
-        if len(self.pooling_params) == 0:
-            pooling_params = []
-        else:
-            # Note, for now this assumes that all request in the batch
-            # are either sampling or pooling requests
-            assert len(self.req_ids) == len(self.pooling_params)
-            pooling_params = [
-                self.pooling_params[req_id] for req_id in self.req_ids
-            ]
-
-        return PoolingMetadata(
-            prompt_lens=torch.from_numpy(
-                self.num_prompt_tokens[:self.num_reqs]).to(self.device),
-            prompt_token_ids=self.sampling_metadata.prompt_token_ids,
-            pooling_params=pooling_params,
-        )
-
     def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
         max_prompt_len = self.num_prompt_tokens[:self.num_reqs].max()
         prompt_token_ids_cpu_tensor = torch.empty(
@@ -150,68 +141,3 @@ class NpuInputBatch(InputBatch):
             prompt_token_ids[i, self.num_prompt_tokens[i]:] = self.vocab_size
         return prompt_token_ids_cpu_tensor.to(device=self.device,
                                               non_blocking=True)
-
-    def make_lora_inputs(
-        self, num_scheduled_tokens: np.ndarray
-    ) -> tuple[tuple[int, ...], tuple[int, ...], set[LoRARequest]]:
-        """
-        Given the num_scheduled_tokens for each request in the batch, return
-        datastructures used to activate the current LoRAs.
-        Returns:
-            1. prompt_lora_mapping: A tuple of size self.num_reqs where,
-               prompt_lora_mapping[i] is the LoRA id to use for the ith prompt.
-            2. token_lora_mapping: A tuple of size np.sum(num_scheduled_tokens)
-               where, token_lora_mapping[i] is the LoRA id to use for ith token.
-            3. lora_requests: Set of relevant LoRA requests.
-        """
-
-        req_lora_mapping = self.request_lora_mapping[:self.num_reqs]
-        prompt_lora_mapping = tuple(req_lora_mapping)
-        token_lora_mapping = tuple(
-            req_lora_mapping.repeat(num_scheduled_tokens))
-        active_lora_requests: set[LoRARequest] = set(
-            self.lora_id_to_lora_request.values())
-
-        return prompt_lora_mapping, token_lora_mapping, active_lora_requests
-
-    @property
-    def num_reqs(self) -> int:
-        return len(self.req_id_to_index)
-
-    @property
-    def all_greedy(self) -> bool:
-        return len(self.random_reqs) == 0
-
-    @property
-    def all_random(self) -> bool:
-        return len(self.greedy_reqs) == 0
-
-    @property
-    def no_top_p(self) -> bool:
-        return len(self.top_p_reqs) == 0
-
-    @property
-    def no_top_k(self) -> bool:
-        return len(self.top_k_reqs) == 0
-
-    @property
-    def no_min_p(self) -> bool:
-        return len(self.min_p_reqs) == 0
-
-    @property
-    def no_penalties(self) -> bool:
-        return (len(self.presence_penalties_reqs) == 0
-                and len(self.frequency_penalties_reqs) == 0
-                and len(self.repetition_penalties_reqs) == 0)
-
-    @property
-    def max_num_logprobs(self) -> Optional[int]:
-        return max(self.num_logprobs.values()) if self.num_logprobs else None
-
-    @property
-    def no_prompt_logprob(self) -> bool:
-        return not self.num_prompt_logprobs
-
-    @property
-    def no_allowed_token_ids(self) -> bool:
-        return len(self.has_allowed_token_ids) == 0
