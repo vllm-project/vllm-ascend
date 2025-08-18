@@ -17,12 +17,10 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_input_batch.py
 #
 
-from typing import Optional, cast
+from typing import Optional
 
 import torch
 from vllm.v1.sample.logits_processor import LogitsProcessors
-from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.utils import copy_slice
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
 
@@ -57,138 +55,139 @@ class NpuInputBatch(InputBatch):
             is_pooling_model,
             is_spec_decode,
         )
-        self.min_p = torch.empty((max_num_reqs, ),
-                                 dtype=torch.float32,
-                                 device=device)
-        self.min_p_cpu_tensor = torch.empty((max_num_reqs, ),
-                                            dtype=torch.float32,
-                                            device="cpu",
-                                            pin_memory=pin_memory)
-        self.min_p_cpu = self.min_p_cpu_tensor.numpy()
-        self.min_p_reqs: set[str] = set()
 
-    def refresh_sampling_metadata(self):
-        self.sampling_metadata = self._make_sampling_metadata()
+    #     self.min_p = torch.empty((max_num_reqs, ),
+    #                              dtype=torch.float32,
+    #                              device=device)
+    #     self.min_p_cpu_tensor = torch.empty((max_num_reqs, ),
+    #                                         dtype=torch.float32,
+    #                                         device="cpu",
+    #                                         pin_memory=pin_memory)
+    #     self.min_p_cpu = self.min_p_cpu_tensor.numpy()
+    #     self.min_p_reqs: set[str] = set()
 
-    def _make_sampling_metadata(self) -> SamplingMetadata:
-        num_reqs = self.num_reqs
-        if not self.all_greedy:
-            temperature = copy_slice(self.temperature_cpu_tensor,
-                                     self.temperature, num_reqs)
-        else:
-            temperature = None
-        if not self.no_top_p:
-            copy_slice(self.top_p_cpu_tensor, self.top_p, num_reqs)
-        if not self.no_top_k:
-            copy_slice(self.top_k_cpu_tensor, self.top_k, num_reqs)
-        if not self.no_min_p:
-            copy_slice(self.min_p_cpu_tensor, self.min_p, num_reqs)
+    # def refresh_sampling_metadata(self):
+    #     self.sampling_metadata = self._make_sampling_metadata()
 
-        if not self.no_penalties:
-            # Since syncing these tensors is expensive only copy them
-            # if necessary i.e. if there are requests which require
-            # penalties to be applied during sampling.
-            copy_slice(self.frequency_penalties_cpu_tensor,
-                       self.frequency_penalties, num_reqs)
-            copy_slice(self.presence_penalties_cpu_tensor,
-                       self.presence_penalties, num_reqs)
-            copy_slice(self.repetition_penalties_cpu_tensor,
-                       self.repetition_penalties, num_reqs)
+    # def _make_sampling_metadata(self) -> SamplingMetadata:
+    #     num_reqs = self.num_reqs
+    #     if not self.all_greedy:
+    #         temperature = copy_slice(self.temperature_cpu_tensor,
+    #                                  self.temperature, num_reqs)
+    #     else:
+    #         temperature = None
+    #     if not self.no_top_p:
+    #         copy_slice(self.top_p_cpu_tensor, self.top_p, num_reqs)
+    #     if not self.no_top_k:
+    #         copy_slice(self.top_k_cpu_tensor, self.top_k, num_reqs)
+    #     if not self.no_min_p:
+    #         copy_slice(self.min_p_cpu_tensor, self.min_p, num_reqs)
 
-        needs_prompt_token_ids = (
-            not self.no_penalties
-            or self.logits_processing_needs_token_ids[:num_reqs].any())
-        if needs_prompt_token_ids:
-            # The prompt tokens are used only for applying penalties or
-            # step pooling during the sampling/pooling process.
-            # Hence copy these tensors only when there are requests which
-            # need penalties/step_pooler to be applied.
-            prompt_token_ids = self._make_prompt_token_ids_tensor()
-        else:
-            prompt_token_ids = None
+    #     if not self.no_penalties:
+    #         # Since syncing these tensors is expensive only copy them
+    #         # if necessary i.e. if there are requests which require
+    #         # penalties to be applied during sampling.
+    #         copy_slice(self.frequency_penalties_cpu_tensor,
+    #                    self.frequency_penalties, num_reqs)
+    #         copy_slice(self.presence_penalties_cpu_tensor,
+    #                    self.presence_penalties, num_reqs)
+    #         copy_slice(self.repetition_penalties_cpu_tensor,
+    #                    self.repetition_penalties, num_reqs)
 
-        allowed_token_ids_mask: Optional[torch.Tensor] = None
-        if not self.no_allowed_token_ids:
-            assert self.allowed_token_ids_mask is not None
-            copy_slice(self.allowed_token_ids_mask_cpu_tensor,
-                       self.allowed_token_ids_mask, num_reqs)
-            allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
+    #     needs_prompt_token_ids = (
+    #         not self.no_penalties
+    #         or self.logits_processing_needs_token_ids[:num_reqs].any())
+    #     if needs_prompt_token_ids:
+    #         # The prompt tokens are used only for applying penalties or
+    #         # step pooling during the sampling/pooling process.
+    #         # Hence copy these tensors only when there are requests which
+    #         # need penalties/step_pooler to be applied.
+    #         prompt_token_ids = self._make_prompt_token_ids_tensor()
+    #     else:
+    #         prompt_token_ids = None
 
-        return SamplingMetadata(
-            temperature=temperature,
-            all_greedy=self.all_greedy,
-            all_random=self.all_random,
-            top_p=None if self.no_top_p else self.top_p[:num_reqs],
-            top_k=None if self.no_top_k else self.top_k[:num_reqs],
-            generators=self.generators,
-            max_num_logprobs=self.max_num_logprobs,
-            prompt_token_ids=prompt_token_ids,
-            frequency_penalties=self.frequency_penalties[:num_reqs],
-            presence_penalties=self.presence_penalties[:num_reqs],
-            repetition_penalties=self.repetition_penalties[:num_reqs],
-            output_token_ids=cast(list[list[int]], self.req_output_token_ids),
-            no_penalties=self.no_penalties,
-            allowed_token_ids_mask=allowed_token_ids_mask,
-            bad_words_token_ids=self.bad_words_token_ids,
-            logitsprocs=self.logitsprocs,
-        )
+    #     allowed_token_ids_mask: Optional[torch.Tensor] = None
+    #     if not self.no_allowed_token_ids:
+    #         assert self.allowed_token_ids_mask is not None
+    #         copy_slice(self.allowed_token_ids_mask_cpu_tensor,
+    #                    self.allowed_token_ids_mask, num_reqs)
+    #         allowed_token_ids_mask = self.allowed_token_ids_mask[:num_reqs]
 
-    def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
-        max_prompt_len = self.num_prompt_tokens[:self.num_reqs].max()
-        prompt_token_ids_cpu_tensor = torch.empty(
-            (self.num_reqs, max_prompt_len),
-            device="cpu",
-            dtype=torch.int64,
-            pin_memory=self.pin_memory,
-        )
-        prompt_token_ids = prompt_token_ids_cpu_tensor.numpy()
-        prompt_token_ids[:] = self.token_ids_cpu[:self.
-                                                 num_reqs, :max_prompt_len]
-        # Use the value of vocab_size as a pad since we don't have a
-        # token_id of this value.
-        for i in range(self.num_reqs):
-            prompt_token_ids[i, self.num_prompt_tokens[i]:] = self.vocab_size
-        return prompt_token_ids_cpu_tensor.to(device=self.device,
-                                              non_blocking=True)
+    #     return SamplingMetadata(
+    #         temperature=temperature,
+    #         all_greedy=self.all_greedy,
+    #         all_random=self.all_random,
+    #         top_p=None if self.no_top_p else self.top_p[:num_reqs],
+    #         top_k=None if self.no_top_k else self.top_k[:num_reqs],
+    #         generators=self.generators,
+    #         max_num_logprobs=self.max_num_logprobs,
+    #         prompt_token_ids=prompt_token_ids,
+    #         frequency_penalties=self.frequency_penalties[:num_reqs],
+    #         presence_penalties=self.presence_penalties[:num_reqs],
+    #         repetition_penalties=self.repetition_penalties[:num_reqs],
+    #         output_token_ids=cast(list[list[int]], self.req_output_token_ids),
+    #         no_penalties=self.no_penalties,
+    #         allowed_token_ids_mask=allowed_token_ids_mask,
+    #         bad_words_token_ids=self.bad_words_token_ids,
+    #         logitsprocs=self.logitsprocs,
+    #     )
 
-    @property
-    def num_reqs(self) -> int:
-        return len(self.req_id_to_index)
+    # def _make_prompt_token_ids_tensor(self) -> torch.Tensor:
+    #     max_prompt_len = self.num_prompt_tokens[:self.num_reqs].max()
+    #     prompt_token_ids_cpu_tensor = torch.empty(
+    #         (self.num_reqs, max_prompt_len),
+    #         device="cpu",
+    #         dtype=torch.int64,
+    #         pin_memory=self.pin_memory,
+    #     )
+    #     prompt_token_ids = prompt_token_ids_cpu_tensor.numpy()
+    #     prompt_token_ids[:] = self.token_ids_cpu[:self.
+    #                                              num_reqs, :max_prompt_len]
+    #     # Use the value of vocab_size as a pad since we don't have a
+    #     # token_id of this value.
+    #     for i in range(self.num_reqs):
+    #         prompt_token_ids[i, self.num_prompt_tokens[i]:] = self.vocab_size
+    #     return prompt_token_ids_cpu_tensor.to(device=self.device,
+    #                                           non_blocking=True)
 
-    @property
-    def all_greedy(self) -> bool:
-        return len(self.random_reqs) == 0
+    # @property
+    # def num_reqs(self) -> int:
+    #     return len(self.req_id_to_index)
 
-    @property
-    def all_random(self) -> bool:
-        return len(self.greedy_reqs) == 0
+    # @property
+    # def all_greedy(self) -> bool:
+    #     return len(self.random_reqs) == 0
 
-    @property
-    def no_top_p(self) -> bool:
-        return len(self.top_p_reqs) == 0
+    # @property
+    # def all_random(self) -> bool:
+    #     return len(self.greedy_reqs) == 0
 
-    @property
-    def no_top_k(self) -> bool:
-        return len(self.top_k_reqs) == 0
+    # @property
+    # def no_top_p(self) -> bool:
+    #     return len(self.top_p_reqs) == 0
 
-    @property
-    def no_min_p(self) -> bool:
-        return len(self.min_p_reqs) == 0
+    # @property
+    # def no_top_k(self) -> bool:
+    #     return len(self.top_k_reqs) == 0
 
-    @property
-    def no_penalties(self) -> bool:
-        return (len(self.presence_penalties_reqs) == 0
-                and len(self.frequency_penalties_reqs) == 0
-                and len(self.repetition_penalties_reqs) == 0)
+    # @property
+    # def no_min_p(self) -> bool:
+    #     return len(self.min_p_reqs) == 0
 
-    @property
-    def max_num_logprobs(self) -> Optional[int]:
-        return max(self.num_logprobs.values()) if self.num_logprobs else None
+    # @property
+    # def no_penalties(self) -> bool:
+    #     return (len(self.presence_penalties_reqs) == 0
+    #             and len(self.frequency_penalties_reqs) == 0
+    #             and len(self.repetition_penalties_reqs) == 0)
 
-    @property
-    def no_prompt_logprob(self) -> bool:
-        return not self.num_prompt_logprobs
+    # @property
+    # def max_num_logprobs(self) -> Optional[int]:
+    #     return max(self.num_logprobs.values()) if self.num_logprobs else None
 
-    @property
-    def no_allowed_token_ids(self) -> bool:
-        return len(self.has_allowed_token_ids) == 0
+    # @property
+    # def no_prompt_logprob(self) -> bool:
+    #     return not self.num_prompt_logprobs
+
+    # @property
+    # def no_allowed_token_ids(self) -> bool:
+    #     return len(self.has_allowed_token_ids) == 0

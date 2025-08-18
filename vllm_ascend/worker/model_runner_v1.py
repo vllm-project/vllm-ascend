@@ -628,11 +628,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self.input_batch.num_tokens[req_index] = end_token_index
 
         # Condense the batched states if there are empty indices.
-        if removed_req_indices:
-            self.input_batch.condense(removed_req_indices)
-
-        if batch_changed:
-            self.input_batch.refresh_sampling_metadata()
+        # Condense the batched states if there are gaps left by removed requests
+        self.input_batch.condense()
+        # Refresh batch metadata with any pending updates.
+        self.input_batch.refresh_metadata()
 
     def _get_forward_metadata_across_dp(
             self, num_tokens: int, with_prefill: bool,
