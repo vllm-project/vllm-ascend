@@ -22,7 +22,6 @@ import gc
 import math
 import os
 import time
-import types
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Type, Union, cast
@@ -1277,7 +1276,9 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
 
-        positions, input_ids = self._update_input_ids_and_positions(input_ids, positions, num_input_tokens, with_prefill, padded_num_tokens_across_dp)
+        positions, input_ids = self._update_input_ids_and_positions(
+            input_ids, positions, num_input_tokens, with_prefill,
+            padded_num_tokens_across_dp)
 
         if get_pp_group().is_first_rank:
             intermediate_tensors = None
@@ -1315,8 +1316,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_actual_tokens=total_num_scheduled_tokens):
             with ProfileExecuteDuration().capture_async("forward"):
                 self.maybe_setup_kv_connector(scheduler_output)
-                
-                hidden_states = self._generate_process_reqs_hidden_states(attn_metadata, with_prefill, padded_num_tokens_across_dp, input_ids, positions, intermediate_tensors, inputs_embeds)
+
+                hidden_states = self._generate_process_reqs_hidden_states(
+                    attn_metadata, with_prefill, padded_num_tokens_across_dp,
+                    input_ids, positions, intermediate_tensors, inputs_embeds)
 
         self.maybe_wait_for_kv_save()
         finished_sending, finished_recving = self.get_finished_kv_transfer(
@@ -1351,21 +1354,24 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         return (attn_metadata, hidden_states, spec_decode_metadata, positions,
                 total_num_scheduled_tokens, logits_indices, aux_hidden_states,
                 num_scheduled_tokens, finished_sending, finished_recving)
-    
+
     def _update_graph_pad_size(self, with_prefill, graph_pad_size):
         self.graph_pad_size = -1
-    
+
     def _update_input_ids_and_positions(self, input_ids, positions,
                                         num_input_tokens, with_prefill,
                                         padded_num_tokens_across_dp):
         if self.uses_mrope:
             positions = self.mrope_positions[:, :num_input_tokens]
         return input_ids, positions
-    
-    def _generate_process_reqs_hidden_states(self, attn_metadata, with_prefill, padded_num_tokens_across_dp, input_ids, positions, intermediate_tensors, inputs_embeds):
+
+    def _generate_process_reqs_hidden_states(self, attn_metadata, with_prefill,
+                                             padded_num_tokens_across_dp,
+                                             input_ids, positions,
+                                             intermediate_tensors,
+                                             inputs_embeds):
         assert self.model is not None
-        maybe_converting_weight_acl_format(self.model,
-                                            ACL_FORMAT_FRACTAL_ND)
+        maybe_converting_weight_acl_format(self.model, ACL_FORMAT_FRACTAL_ND)
 
         hidden_states = self.model(
             input_ids=input_ids,

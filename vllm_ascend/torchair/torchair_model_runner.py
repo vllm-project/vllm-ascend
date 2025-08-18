@@ -17,12 +17,13 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
-from typing import Optional
 import types
+from typing import Optional
 
 import torch
-import torch_npu
 import torch.nn as nn
+import torch_npu
+import vllm.envs as envs_vllm
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
@@ -33,10 +34,8 @@ from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         write_kv_cache_bytes_to_file)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
-                               maybe_converting_weight_acl_format, is_310p)
+                               is_310p, maybe_converting_weight_acl_format)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-
-import vllm.envs as envs_vllm
 
 
 class NPUTorchairModelRunner(NPUModelRunner):
@@ -202,12 +201,19 @@ class NPUTorchairModelRunner(NPUModelRunner):
             input_ids = self.input_ids[:padded_num_tokens_across_dp]
             positions = self.positions[:padded_num_tokens_across_dp]
         return input_ids, positions
-    
-    def _generate_process_reqs_hidden_states(self, attn_metadata, with_prefill, padded_num_tokens_across_dp, input_ids, positions, intermediate_tensors, inputs_embeds):
-        model_kwargs = {"kv_caches": self.kv_caches, "attn_metadata": attn_metadata}
+
+    def _generate_process_reqs_hidden_states(self, attn_metadata, with_prefill,
+                                             padded_num_tokens_across_dp,
+                                             input_ids, positions,
+                                             intermediate_tensors,
+                                             inputs_embeds):
+        model_kwargs = {
+            "kv_caches": self.kv_caches,
+            "attn_metadata": attn_metadata
+        }
         if not with_prefill:
             maybe_converting_weight_acl_format(self.model,
-                                                ACL_FORMAT_FRACTAL_NZ)
+                                               ACL_FORMAT_FRACTAL_NZ)
 
             compiled_model = self._get_torchair_lazy_compiled_model(
                 padded_num_tokens_across_dp)
@@ -221,7 +227,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         else:
             assert self.model is not None
             maybe_converting_weight_acl_format(self.model,
-                                                ACL_FORMAT_FRACTAL_ND)
+                                               ACL_FORMAT_FRACTAL_ND)
 
             hidden_states = self.model(
                 input_ids=input_ids,
@@ -231,7 +237,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
                 **model_kwargs,
             )
         return hidden_states
-    
+
     def _get_torchair_lazy_compiled_model(self, batch_size: int):
         if batch_size < 0 or batch_size > self.torchair_graph_batch_sizes[-1]:
             raise ValueError(
@@ -297,7 +303,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
                     config=config,
                     ge_cache=False)
             return self.torchair_compiled_models[batch_size]
-    
+
     def _select_torchair_padded_batch_size(self, batch_size: int):
         for padded_batch_size in self.torchair_graph_batch_sizes:
             if batch_size <= padded_batch_size:
