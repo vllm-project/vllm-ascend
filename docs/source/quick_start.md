@@ -5,6 +5,9 @@
 ### Supported Devices
 - Atlas A2 Training series (Atlas 800T A2, Atlas 900 A2 PoD, Atlas 200T A2 Box16, Atlas 300T A2)
 - Atlas 800I A2 Inference series (Atlas 800I A2)
+- Atlas A3 Training series (Atlas 800T A3, Atlas 900 A3 SuperPoD, Atlas 9000 A3 SuperPoD)
+- Atlas 800I A3 Inference series (Atlas 800I A3)
+- [Experimental] Atlas 300I Inference series (Atlas 300I Duo)
 
 ## Setup environment using container
 

@@ -13,8 +13,6 @@ setuptools-scm>=8
 torch>=2.7.1
 torchvision
 wheel
-# Remove after https://github.com/vllm-project/vllm-ascend/issues/2034
-transformers<4.54.0
 
 # requirements for disaggregated prefill
 msgpack

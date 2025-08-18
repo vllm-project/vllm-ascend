@@ -20,10 +20,12 @@ import torch
 import torch.nn as nn
 import torch_npu
 from pytest_mock import MockerFixture
+from vllm.model_executor.layers.fused_moe import FusedMoEMethodBase
 
 from vllm_ascend.ascend_forward_context import _get_fused_moe_state
 from vllm_ascend.ops.fused_moe import (AscendFusedMoE,
                                        AscendUnquantizedFusedMoEMethod)
+from vllm_ascend.ops.layers.experts_selector import select_experts
 from vllm_ascend.utils import AscendSocVersion, adapt_patch  # noqa E402
 
 adapt_patch(True)
@@ -59,6 +61,7 @@ def mock_dist_env(mocker: MockerFixture):
          patch('vllm_ascend.ops.fused_moe.get_tp_group', return_value=mock_dp_and_tp_group(mocker)), \
          patch('vllm.distributed.parallel_state.get_tp_group', return_value=mock_dp_and_tp_group(mocker)), \
          patch('vllm_ascend.ops.fused_moe.get_dp_group', return_value=mock_dp_and_tp_group(mocker)), \
+         patch('vllm.model_executor.layers.fused_moe.layer.get_dp_group', return_value=mock_dp_and_tp_group(mocker)), \
          patch('torch.distributed.all_gather', return_value=MagicMock(return_value=torch.randn(10,32))), \
          patch('torch.distributed.all_to_all_single', return_value=torch.randn(8, 32)), \
          patch('vllm_ascend.ops.fused_moe.tensor_model_parallel_all_reduce',
@@ -112,7 +115,7 @@ def mock_moe_env(mocker: MockerFixture):
                 torch.randn(16, 2)
         )), \
         patch("torch_npu.npu_grouped_matmul", return_value=(
-                (torch.randn(8, 2), torch.randn(8, 2))
+                [torch.randn(16, 2)]
         )), \
         patch("torch_npu.npu_swiglu", return_value=(
                 torch.randn(16, 2)
@@ -180,6 +183,18 @@ class MockQuantMethod(nn.Module):
             self.apply = MagicMock(return_value=(torch.randn(num_tokens, 32)))
 
 
+class MockFusedMoEMethod(FusedMoEMethodBase):
+
+    def create_weights(self, layer: torch.nn.Module, num_experts: int,
+                       hidden_size: int, intermediate_size_per_partition: int,
+                       params_dtype: torch.dtype, **extra_weight_attrs):
+        pass
+
+    def apply(self, hidden_states: torch.Tensor,
+              expert_weights: torch.Tensor) -> torch.Tensor:
+        pass
+
+
 class TestAscendFusedMoe:
 
     def test_init_no_quant(self, mock_dist_env, default_moe_config):
@@ -213,7 +228,7 @@ class TestAscendFusedMoe:
 
     def test_init_with_quant(self, mock_dist_env, default_moe_config):
         mock_quant_config = MagicMock()
-        mock_quant_method = MagicMock()
+        mock_quant_method = MockFusedMoEMethod()
         mock_quant_config.get_quant_method.return_value = mock_quant_method
 
         moe = AscendFusedMoE(**default_moe_config,
@@ -375,3 +390,28 @@ class TestAscendUnquantizedFusedMoEMethod:
                 assert result.shape == (16, 2)
             else:
                 assert result.shape == x.shape
+
+
+class TestExpertsSelector:
+
+    @pytest.mark.parametrize("global_num_experts", [[256], [128]])
+    def test_select_experts(self, mock_dist_env, mock_moe_env,
+                            global_num_experts):
+
+        x = torch.randn(8, 2)
+        router_logits = torch.randn(8, 2)
+        topk_weights, topk_ids = select_experts(
+            hidden_states=x,
+            router_logits=router_logits,
+            top_k=2,
+            use_grouped_topk=False,
+            renormalize=True,
+            topk_group=None,
+            num_expert_group=None,
+            custom_routing_function=None,
+            scoring_func="softmax",
+            e_score_correction_bias=None,
+            global_num_experts=global_num_experts)
+
+        assert topk_weights.shape == (8, 2)
+        assert topk_ids.shape == (8, 2)

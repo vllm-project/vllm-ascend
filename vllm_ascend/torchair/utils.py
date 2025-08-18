@@ -96,3 +96,22 @@ def npu_wait_tensor(self: torch.Tensor,
                     *,
                     enabled: bool = True):
     return _npu_wait_tensor(self, dependency) if enabled else self
+
+
+def register_torchair_model():
+    from vllm import ModelRegistry
+
+    ModelRegistry.register_model(
+        "DeepSeekMTPModel",
+        "vllm_ascend.torchair.models.torchair_deepseek_mtp:TorchairDeepSeekMTP"
+    )
+
+    ModelRegistry.register_model(
+        "DeepseekV2ForCausalLM",
+        "vllm_ascend.torchair.models.torchair_deepseek_v2:TorchairDeepseekV2ForCausalLM"
+    )
+
+    ModelRegistry.register_model(
+        "DeepseekV3ForCausalLM",
+        "vllm_ascend.torchair.models.torchair_deepseek_v3:TorchairDeepseekV3ForCausalLM"
+    )

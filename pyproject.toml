@@ -19,8 +19,6 @@ requires = [
     "msgpack",
     "quart",
     "numba",
-    # Remove after https://github.com/vllm-project/vllm-ascend/issues/2034
-    "transformers<4.54.0",
 ]
 build-backend = "setuptools.build_meta"
 

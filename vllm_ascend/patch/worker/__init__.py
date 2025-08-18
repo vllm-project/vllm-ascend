@@ -15,12 +15,5 @@
 # limitations under the License.
 #
 
-from vllm_ascend.utils import vllm_version_is
-
-# Import specific patches for different versions
-if vllm_version_is("0.10.0"):
-    from vllm_ascend.patch.worker import patch_0_10_0  # noqa: F401
-    from vllm_ascend.patch.worker import patch_common  # noqa: F401
-else:
-    from vllm_ascend.patch.worker import patch_common  # noqa: F401
-    from vllm_ascend.patch.worker import patch_main  # noqa: F401
+from vllm_ascend.patch.worker import patch_common  # noqa: F401
+from vllm_ascend.patch.worker import patch_main  # noqa: F401

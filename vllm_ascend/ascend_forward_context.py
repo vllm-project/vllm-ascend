@@ -5,11 +5,12 @@ from typing import Any, Optional
 
 import torch
 from vllm.config import VllmConfig
-from vllm.distributed import get_dp_group, get_ep_group, get_tp_group
+from vllm.distributed import (get_dp_group, get_ep_group,
+                              get_tensor_model_parallel_world_size)
 from vllm.forward_context import get_forward_context, set_forward_context
 
-import vllm_ascend.envs as envs
-from vllm_ascend.platform import NPUPlatform
+import vllm_ascend.envs as envs_ascend
+from vllm_ascend.distributed.moe_comm_method import MoECommMethod
 
 
 class FusedMoEState(Enum):
@@ -26,7 +27,7 @@ def _get_fused_moe_state(ep_size: int, with_prefill: bool,
                          is_deepseek_v3_r1: bool):
     # the fusion operator torch_npu.npu_grouped_matmul_finalize_routing called by allgather ep
     # only supports deepseek v3/r1
-    if (envs.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
+    if (envs_ascend.VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP and ep_size > 1
             and is_deepseek_v3_r1):
         return FusedMoEState.AllGatherEP
     elif ep_size == 1:
@@ -34,7 +35,7 @@ def _get_fused_moe_state(ep_size: int, with_prefill: bool,
             return FusedMoEState.NaiveMulticast
         else:
             return FusedMoEState.AllGather
-    elif envs.VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ:
+    elif envs_ascend.VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ:
         # MC2 Dispatch/Combine performs better than alltoall_seq in decoding stage.
         return (FusedMoEState.All2AllSeq if
                 (ep_size < 16 or with_prefill) else FusedMoEState.MC2)
@@ -54,6 +55,8 @@ def set_ascend_forward_context(
     num_tokens_across_dp: Optional[torch.Tensor] = None,
     with_prefill: bool = True,
     in_profile_run: bool = False,
+    reserved_mc2_mask: Optional[torch.Tensor] = None,
+    moe_comm_method: Optional[MoECommMethod] = None,
     num_actual_tokens: Optional[int] = None,
 ):
     """A context manager that stores the current forward context,
@@ -66,6 +69,7 @@ def set_ascend_forward_context(
                              num_tokens=num_tokens,
                              num_tokens_across_dp=num_tokens_across_dp):
         forward_context = get_forward_context()
+        forward_context.moe_comm_method = moe_comm_method
         forward_context.with_prefill = with_prefill
         ep_size = (get_ep_group().world_size if
                    vllm_config.parallel_config.enable_expert_parallel else 1)
@@ -97,16 +101,17 @@ def set_ascend_forward_context(
         if num_tokens is not None:
             if num_actual_tokens is None:
                 num_actual_tokens = num_tokens
-            tp_world_size = get_tp_group().world_size
+            tp_world_size = get_tensor_model_parallel_world_size()
             # NOTE: token num which need to pad to when mc2
             forward_context.padded_num_tokens = math.ceil(
                 max_tokens_across_dp / tp_world_size) * tp_world_size
 
-            mc2_mask = torch.zeros(forward_context.padded_num_tokens,
-                                   dtype=torch.bool,
-                                   device=NPUPlatform.device_type)
-            mc2_mask[:num_actual_tokens] = True
-            forward_context.mc2_mask = mc2_mask
+            if reserved_mc2_mask is not None:
+                mc2_mask = reserved_mc2_mask[:forward_context.
+                                             padded_num_tokens]
+                mc2_mask[:num_actual_tokens] = True
+                mc2_mask[num_actual_tokens:] = False
+                forward_context.mc2_mask = mc2_mask
 
         try:
             yield
