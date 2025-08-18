@@ -924,7 +924,6 @@ def fused_experts(
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def __init__(self, moe: FusedMoEConfig = None):
-        print("Using AscendUnquantizedFusedMoEMethod")
 
         super().__init__(moe=moe)
 
@@ -1063,70 +1062,6 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
                                               expert_map=expert_map,
                                               ep_group=get_ep_group())
 
-    def forward_oot(
-            self,
-            layer: torch.nn.Module,
-            x: torch.Tensor,
-            use_grouped_topk: bool,
-            top_k: int,
-            router_logits: torch.Tensor,
-            renormalize: bool,
-            topk_group: Optional[int] = None,
-            num_expert_group: Optional[int] = None,
-            custom_routing_function: Optional[Callable] = None,
-            scoring_func: str = "softmax",
-            e_score_correction_bias: Optional[torch.Tensor] = None,
-            global_num_experts: int = -1,
-            expert_map: Optional[torch.Tensor] = None,
-            apply_router_weight_on_input: bool = False,
-            activation: str = "silu",
-            enable_eplb: bool = False,
-            expert_load_view: Optional[torch.Tensor] = None,
-            logical_to_physical_map: Optional[torch.Tensor] = None,
-            logical_replica_count: Optional[torch.Tensor] = None
-    ) -> torch.Tensor:
-        print("Using forward_oot of AscendUnquantizedFusedMoEMethod")
-
-        topk_weights, topk_ids = select_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            top_k=top_k,
-            use_grouped_topk=use_grouped_topk,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-            global_num_experts=global_num_experts)
-
-        if topk_ids.shape[1] < top_k or is_310p():
-            assert global_num_experts is not None
-            return fused_experts_moge(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                moe_parallel_config=self.moe.moe_parallel_config,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                top_k=top_k,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input)
-
-        moe_comm_method = get_forward_context().moe_comm_method
-
-        return unified_fused_experts(
-            hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-            moe_comm_method=moe_comm_method,
-        )
-
 
 class AscendFusedMoE(FusedMoE):
 
@@ -1162,7 +1097,6 @@ class AscendFusedMoE(FusedMoE):
     ):
         # TODO: This could not initialize FusedMoE baseclass,
         # fixme and make __init__() of AscendFusedMoE more clear
-        print("AscendFusedMoE is being used")
         super().__init__(
             num_experts=num_experts,
             top_k=top_k,
@@ -1344,7 +1278,6 @@ class AscendFusedMoE(FusedMoE):
                 gate=None,
                 replace_allreduce: bool = False,
                 _metadata_for_padding: Optional[MetadataForPadding] = None):
-        print("Using forward of AscendFusedMoE")
 
         assert self.quant_method is not None
 

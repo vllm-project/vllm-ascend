@@ -480,8 +480,7 @@ def register_ascend_customop():
                                         AscendMlpRowParallelLinear)
     from vllm_ascend.ops.rotary_embedding import (
         AscendDeepseekScalingRotaryEmbedding, AscendRotaryEmbedding)
-    from vllm_ascend.ops.fused_moe import (AscendFusedMoE,
-                                           AscendUnquantizedFusedMoEMethod)
+    from vllm_ascend.ops.fused_moe import AscendFusedMoE
     from vllm_ascend.ops.layernorm import AscendRMSNorm
     CustomOp.register_oot(_decorated_op_cls=AscendQuickGELU, name="QuickGELU")
     CustomOp.register_oot(_decorated_op_cls=AscendSiluAndMul,
@@ -502,8 +501,6 @@ def register_ascend_customop():
 
     CustomOp.register_oot(_decorated_op_cls=AscendRMSNorm, name="RMSNorm")
     CustomOp.register_oot(_decorated_op_cls=AscendFusedMoE, name="FusedMoE")
-    CustomOp.register_oot(_decorated_op_cls=AscendUnquantizedFusedMoEMethod,
-                          name="UnquantizedFusedMoEMethod")
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
