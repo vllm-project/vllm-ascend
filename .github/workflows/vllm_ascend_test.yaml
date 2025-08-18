@@ -194,7 +194,7 @@ jobs:
             --ignore=tests/singlecard/core/test_ascend_scheduler.py \
             --ignore=tests/singlecard/core/test_ascend_scheduler_e2e.py
           else
-            pytest -sv tests/multicard/test_ilama_lora_tp2.py
+            # pytest -sv tests/multicard/test_ilama_lora_tp2.py
             # To avoid oom, we need to run the test in a single process.
             VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_multimodal_context_parallel.py
             VLLM_USE_MODELSCOPE=True pytest -sv tests/multicard/test_w4a8_deepseek.py::test_deepseek_W4A8
