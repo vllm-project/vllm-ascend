@@ -64,6 +64,7 @@ from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
 from vllm.v1.outputs import (EMPTY_MODEL_RUNNER_OUTPUT, LogprobsTensors,
                              ModelRunnerOutput)
 from vllm.v1.pool.metadata import PoolingMetadata
+from vllm.v1.sample.logits_processor import build_logitsprocs
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
@@ -2200,8 +2201,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             device=self.device,
             pin_memory=True,
             vocab_size=self.model_config.get_vocab_size(),
-            block_sizes=[self.block_size],
+            block_sizes=[self.cache_config.block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
+            logitsprocs=build_logitsprocs(
+                self.vllm_config, self.device, True, self.is_pooling_model,
+                self.vllm_config.model_config.logits_processors),
+            is_pooling_model=self.is_pooling_model,
         )
 
         kv_cache_sizes = {}
