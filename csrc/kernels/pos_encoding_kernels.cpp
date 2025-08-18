@@ -15,11 +15,6 @@
  */
 
 #include "kernel_operator.h"
-#include "kernel_tpipe_impl.h"
-#include "kernel_tensor_impl.h"
-#include "kernel_type.h"
-#include "kernel_operator_intf.h"
-#include "inner_interface/inner_kernel_operator_intf.h"
 #include <stdio.h>
 #include "types.h"
 #include "utils.h"
