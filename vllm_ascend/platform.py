@@ -29,7 +29,7 @@ from vllm.platforms import Platform, PlatformEnum
 from vllm_ascend.ascend_config import (check_ascend_config, get_ascend_config,
                                        init_ascend_config)
 from vllm_ascend.utils import (ASCEND_QUATIZATION_METHOD, is_310p,
-                               register_ascend_customop, update_aclgraph_sizes)
+                               update_aclgraph_sizes)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig, VllmConfig
@@ -200,9 +200,6 @@ class NPUPlatform(Platform):
                 raise NotImplementedError(
                     "For better performance in Qwen3 MoE, SP only works exclusively with MC2, AllToAll, and AllToAllV."
                 )
-
-        # register Ascend CustomOp
-        register_ascend_customop()
 
     @classmethod
     def get_attn_backend_cls(cls,
