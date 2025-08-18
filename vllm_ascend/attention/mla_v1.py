@@ -202,7 +202,6 @@ class AscendMLAMetadataBuilder:
                 device=runner.device,
             )
         ascend_config = get_ascend_config()
-        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.rope_dim = self.runner.model_config.hf_text_config.qk_rope_head_dim
         self.cos_cache = None
         self.sin_cache = None
@@ -224,22 +223,13 @@ class AscendMLAMetadataBuilder:
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_spec_tokens = len(
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id, []))
-            # For torch air graph mode we treat spec decoding as decode.
-            if self.torchair_graph_enabled:
-                if num_tokens - num_spec_tokens == 1:
-                    decodes.append(i)
-                    num_decode_tokens += num_tokens
-                else:
-                    prefills.append(i)
-                    num_prefill_tokens += num_tokens
-            # For eager mode we treat spec decoding as chunked prefill.
+            # We treat spec decoding as decode.
+            if num_tokens - num_spec_tokens == 1:
+                decodes.append(i)
+                num_decode_tokens += num_tokens
             else:
-                if num_tokens == 1:
-                    decodes.append(i)
-                    num_decode_tokens += num_tokens
-                else:
-                    prefills.append(i)
-                    num_prefill_tokens += num_tokens
+                prefills.append(i)
+                num_prefill_tokens += num_tokens
 
         # We hope that this is fairly minimal since decodes
         # should be around for a number of iterations so hopefully they are
@@ -750,19 +740,19 @@ class AscendMLAImpl(MLAAttentionImpl):
             kv_c_normed = torch.empty(toks,
                                       num_heads,
                                       latent_kv_dim,
-                                      dtype=query.dtype,
-                                      device=query.device)
+                                      dtype=q_nope.dtype,
+                                      device=q_nope.device)
             k_pe = torch.empty(toks,
                                num_heads,
                                rope_dim,
-                               dtype=query.dtype,
-                               device=query.device)
+                               dtype=q_nope.dtype,
+                               device=q_nope.device)
 
             torch_npu.atb.npu_paged_cache_load(
                 cache_kv_c,
                 cache_k_pe,
                 prefill_metadata.block_table,
-                seq_len2.to(query.device),
+                seq_len2.to(q_nope.device),
                 seq_starts=prefill_metadata.chunked_context.starts[i],
                 key=kv_c_normed,
                 value=k_pe,
@@ -775,7 +765,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
             mask = torch.triu(
-                torch.ones(512, 512, device=query.device, dtype=query.dtype),
+                torch.ones(512, 512, device=q_nope.device, dtype=q_nope.dtype),
                 1)
             torch_npu.atb.npu_ring_mla(
                 q_nope=q_nope,
