@@ -48,8 +48,8 @@ class GraphRewritePassManager:
         self.passes.append(pass_)
   
     def configure(self, config: VllmConfig):
-        self.ascend_compilation_config = config.additional_config.ascend_compilation_config
-        if self.ascend_compilation_config.enable_quantization_fusion:
+        self.ascend_compilation_config = config.additional_config["ascend_compilation_config"]
+        if self.ascend_compilation_config["enable_quantization_fusion"]:
             from .quant_fusion_pass import AscendQuantFusionPass
             self.passes.append(AscendQuantFusionPass(config))
         # Add more passes here as needed

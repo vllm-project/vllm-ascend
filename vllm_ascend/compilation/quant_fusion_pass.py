@@ -31,17 +31,17 @@ class AddRMSNormQuantPattern:
 
     def register(self, patterns: List[Tuple[callable]]):
 
-      def pattern(self, rms_norm_input, residual, rms_norm_weight, scale, offset):
+      def pattern(rms_norm_input, residual, rms_norm_weight, scale, offset):
           """
           Pattern for AddRMSNormQuant fusion.
           """
           output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, 1e-6)
-          new_output = output[0]
-          residual = output[2]
-          quantized_output = torch.ops.npu.npu_quantize(new_output, scale, offset, torch.qint8, -1, False)
-          return quantized_output, residual
+          out0 = output[0]
+          out1 = output[2]
+          quantized_output = torch.ops.npu.npu_quantize(out0, scale, offset, torch.qint8, -1, False)
+          return quantized_output, out1
 
-      def replace(self, rms_norm_input, residual, rms_norm_weight, scale, offset):
+      def replace(rms_norm_input, residual, rms_norm_weight, scale, offset):
           """
           Replacement for the AddRMSNormQuant fusion.
           """
@@ -53,8 +53,8 @@ class AddRMSNormQuantPattern:
               offset, 
               epsilon=1e-6)
           quantized_output = output[0]
-          residual = output[2]
-          return quantized_output, residual
+          out1 = output[2]
+          return quantized_output, out1
 
       patterns.append((pattern, replace))
 
@@ -72,8 +72,6 @@ class AscendQuantFusionPass(VllmInductorPass):
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
-        self.dump_graph(graph, "before_ascend_quant_fusion_pass")
         for pattern, replace in self.patterns:
           replace_pattern(graph, pattern, replace)
-        self.dump_graph(graph, "after_ascend_quant_fusion_pass")
         self.end_and_log()

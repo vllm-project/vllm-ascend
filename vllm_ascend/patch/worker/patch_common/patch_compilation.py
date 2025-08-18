@@ -31,12 +31,12 @@ def configure_post_pass(self):
     # Post-grad custom passes are run using the post_grad_custom_post_pass
     # hook. If a pass for that hook exists, add it to the pass manager.
     inductor_config = config.inductor_compile_config
-    PASS_KEY = "graph_rewriter_pass"
-    inductor_config[PASS_KEY] = self.post_grad_pass_manager
+    PASS_KEY = "graph_rewriter_manager"
+    inductor_config[PASS_KEY] = self.graph_rewriter_pass_manager
 
 
 def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
-    return AscendAdaptor
+    return AscendAdaptor()
 
 
 vllm.compilation.backends.make_compiler = make_compiler
