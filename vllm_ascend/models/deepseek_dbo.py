@@ -64,6 +64,7 @@ from vllm.sequence import IntermediateTensors
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.models.deepseek_v2 import (CustomDeepseekV2MLP,
                                             CustomDeepseekV2RowParallelLinear,
                                             OprojCustomRowParallelLinear)
@@ -320,9 +321,11 @@ class CustomDeepseekDBOMLAAttention(DeepseekV2MLAAttention):
             prefix=f"{prefix}.kv_b_proj")
 
         if oproj_tp_enable():
+            otp_comm_group = get_otp_group()
             self.o_proj = OprojCustomRowParallelLinear(
                 self.num_heads * self.v_head_dim,
                 self.hidden_size,
+                otp_comm_group,
                 bias=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.o_proj")

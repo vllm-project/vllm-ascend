@@ -18,14 +18,17 @@ limitations under the License.
 from typing import Optional, Union
 
 import torch
+import torch.distributed as dist
 from torch.nn.parameter import Parameter
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
+                              tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
+from vllm.distributed.parallel_state import GroupCoordinator, get_tp_group
+from vllm.lora.utils import LinearBase
 from vllm.model_executor.layers.linear import (WEIGHT_LOADER_V2_SUPPORTED,
                                                ColumnParallelLinear,
-                                               LinearBase,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization.base_config import \
@@ -35,21 +38,6 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm_ascend.distributed.parallel_state import (
     get_mlp_tensor_model_parallel_rank,
     get_mlp_tensor_model_parallel_world_size, get_mlp_tp_group)
-
-
-from typing import Optional
-
-import torch
-import torch.distributed as dist
-from torch.nn.parameter import Parameter
-from vllm.distributed import divide, split_tensor_along_last_dim
-from vllm.distributed.parallel_state import GroupCoordinator, get_tp_group
-from vllm.model_executor.layers.linear import (WEIGHT_LOADER_V2_SUPPORTED,
-                                               LinearBase, RowParallelLinear,
-                                               set_weight_attrs)
-from vllm.model_executor.layers.quantization.base_config import \
-    QuantizationConfig
-
 
 
 class AscendMlpColumnParallelLinear(ColumnParallelLinear):
@@ -138,13 +126,13 @@ class AscendMlpRowParallelLinear(RowParallelLinear):
         self,
         input_size: int,
         output_size: int,
-        custom_tp_group: GroupCoordinator,
         bias: bool = True,
         input_is_parallel: bool = True,
         skip_bias_add: bool = False,
         params_dtype: Optional[torch.dtype] = None,
         reduce_results: bool = True,
         quant_config: Optional[QuantizationConfig] = None,
+        custom_comm_group: Optional[GroupCoordinator] = None,
         prefix: str = "",
         *,
         return_bias: bool = True,
@@ -322,10 +310,6 @@ class AscendMlpMergedColumnParallelLinear(MergedColumnParallelLinear):
         if not self.return_bias:
             return output
         return output, output_bias
-
-
-
-
 
 
 class CustomRowParallelLinear(RowParallelLinear):
