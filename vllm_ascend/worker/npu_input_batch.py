@@ -141,3 +141,45 @@ class NpuInputBatch(InputBatch):
             prompt_token_ids[i, self.num_prompt_tokens[i]:] = self.vocab_size
         return prompt_token_ids_cpu_tensor.to(device=self.device,
                                               non_blocking=True)
+
+    @property
+    def num_reqs(self) -> int:
+        return len(self.req_id_to_index)
+
+    @property
+    def all_greedy(self) -> bool:
+        return len(self.random_reqs) == 0
+
+    @property
+    def all_random(self) -> bool:
+        return len(self.greedy_reqs) == 0
+
+    @property
+    def no_top_p(self) -> bool:
+        return len(self.top_p_reqs) == 0
+
+    @property
+    def no_top_k(self) -> bool:
+        return len(self.top_k_reqs) == 0
+
+    @property
+    def no_min_p(self) -> bool:
+        return len(self.min_p_reqs) == 0
+
+    @property
+    def no_penalties(self) -> bool:
+        return (len(self.presence_penalties_reqs) == 0
+                and len(self.frequency_penalties_reqs) == 0
+                and len(self.repetition_penalties_reqs) == 0)
+
+    @property
+    def max_num_logprobs(self) -> Optional[int]:
+        return max(self.num_logprobs.values()) if self.num_logprobs else None
+
+    @property
+    def no_prompt_logprob(self) -> bool:
+        return not self.num_prompt_logprobs
+
+    @property
+    def no_allowed_token_ids(self) -> bool:
+        return len(self.has_allowed_token_ids) == 0
