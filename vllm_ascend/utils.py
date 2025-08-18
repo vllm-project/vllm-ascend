@@ -502,9 +502,8 @@ def register_ascend_customop():
 
     CustomOp.register_oot(_decorated_op_cls=AscendRMSNorm, name="RMSNorm")
     CustomOp.register_oot(_decorated_op_cls=AscendFusedMoE, name="FusedMoE")
-    AscendUnquantizedFusedMoEMethod.register_oot(
-        _decorated_op_cls=AscendUnquantizedFusedMoEMethod,
-        name="UnquantizedFusedMoEMethod")
+    CustomOp.register_oot(_decorated_op_cls=AscendUnquantizedFusedMoEMethod,
+                          name="UnquantizedFusedMoEMethod")
 
     # NOTE: Keep this at last to ensure all custom actions are registered
     _ASCEND_CUSTOMOP_IS_REIGISTERED = True
