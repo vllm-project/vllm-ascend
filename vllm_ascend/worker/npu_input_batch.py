@@ -42,7 +42,7 @@ class NpuInputBatch(InputBatch):
         is_spec_decode: bool = False,
     ):
         """
-        TODO: The NPUInputBatch is currently identical to the InputBatch.
+        TODO: The NPUInputBatch is currently inherit to the InputBatch.
         we temporarily retain this class for Interface compatibility and will remove it later.
         """
         super().__init__(
