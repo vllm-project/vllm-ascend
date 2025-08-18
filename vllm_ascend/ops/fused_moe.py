@@ -1156,6 +1156,9 @@ class AscendFusedMoE(FusedMoE):
         e_score_correction_bias: Optional[torch.Tensor] = None,
         activation: str = "silu",
         apply_router_weight_on_input: bool = False,
+        enable_eplb: bool = False,
+        num_redundant_experts: int = 0,
+        has_bias: bool = False,
     ):
         # TODO: This could not initialize FusedMoE baseclass,
         # fixme and make __init__() of AscendFusedMoE more clear
@@ -1181,6 +1184,9 @@ class AscendFusedMoE(FusedMoE):
             e_score_correction_bias=e_score_correction_bias,
             activation=activation,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            enable_eplb=enable_eplb,
+            num_redundant_experts=num_redundant_experts,
+            has_bias=has_bias,
         )
         AscendFusedMoE.moe_counter += 1
         self.moe_instance_id = AscendFusedMoE.moe_counter
