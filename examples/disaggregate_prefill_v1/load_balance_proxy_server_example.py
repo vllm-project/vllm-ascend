@@ -239,7 +239,9 @@ async def listen_for_disconnect(request: Request) -> None:
         if message["type"] == "http.disconnect":
             break
 
+
 def with_cancellation(handler_func):
+
     @functools.wraps(handler_func)
     async def wrapper(*args, **kwargs):
         request = kwargs["request"]
@@ -250,8 +252,9 @@ def with_cancellation(handler_func):
         for task in pending:
             task.cancel()
         if handler_task in done:
-            return handler_task.result
+            return handler_task.result()
         return None
+    
     return wrapper
 
 
@@ -460,3 +463,4 @@ if __name__ == '__main__':
     global_args = parse_args()
     import uvicorn
     uvicorn.run(app, host=global_args.host, port=global_args.port)
+    
