@@ -51,6 +51,7 @@ class GPTOSSConfig(PretrainedConfig):
     """GPT-OSS model configuration."""
     
     model_type = "gpt_oss"
+    keys_to_ignore_at_inference = ["past_key_values"]
     
     def __init__(
         self,
@@ -65,6 +66,7 @@ class GPTOSSConfig(PretrainedConfig):
         experts_per_token: int = 4,
         sliding_window: int = 128,
         initial_context_length: int = 4096,
+        max_position_embeddings: int = 4096,
         rope_theta: float = 150000.0,
         rope_scaling_factor: float = 32.0,
         rope_ntk_alpha: float = 1.0,
@@ -72,6 +74,10 @@ class GPTOSSConfig(PretrainedConfig):
         swiglu_limit: float = 7.0,
         rms_norm_eps: float = 1e-5,
         use_bias: bool = True,
+        bos_token_id: int = 1,
+        eos_token_id: int = 2,
+        pad_token_id: Optional[int] = None,
+        tie_word_embeddings: bool = False,
         **kwargs,
     ):
         self.vocab_size = vocab_size
@@ -85,6 +91,7 @@ class GPTOSSConfig(PretrainedConfig):
         self.experts_per_token = experts_per_token
         self.sliding_window = sliding_window
         self.initial_context_length = initial_context_length
+        self.max_position_embeddings = max_position_embeddings
         self.rope_theta = rope_theta
         self.rope_scaling_factor = rope_scaling_factor
         self.rope_ntk_alpha = rope_ntk_alpha
@@ -93,7 +100,22 @@ class GPTOSSConfig(PretrainedConfig):
         self.rms_norm_eps = rms_norm_eps
         self.use_bias = use_bias
         
-        super().__init__(**kwargs)
+        super().__init__(
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
+            pad_token_id=pad_token_id,
+            tie_word_embeddings=tie_word_embeddings,
+            **kwargs,
+        )
+
+
+# Register the config with transformers
+try:
+    from transformers import AutoConfig
+    AutoConfig.register("gpt_oss", GPTOSSConfig)
+except ImportError:
+    # If transformers is not available, skip registration
+    pass
 
 
 class GPTOSSAttention(nn.Module):
@@ -414,14 +436,19 @@ class GPTOSSModel(nn.Module):
 class GPTOSSForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     """GPT-OSS for causal language modeling."""
     
-    def __init__(
-        self,
-        config: GPTOSSConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional = None,
-    ) -> None:
+    # 用于防止模型拆分的模块列表
+    _no_split_modules = ["GPTOSSDecoderLayer", "GPTOSSAttention", "GPTOSSMoELayer"]
+    
+    # 添加 supports_multimodal 属性
+    supports_multimodal = False
+    
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
         
         self.config = config
         self.lora_config = lora_config
@@ -430,7 +457,7 @@ class GPTOSSForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             config,
             cache_config,
             quant_config,
-            prefix="model",
+            prefix=maybe_prefix(prefix, "model"),
         )
         
         # Language model head
@@ -439,7 +466,7 @@ class GPTOSSForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 vocab_size=config.vocab_size,
                 hidden_size=config.hidden_size,
                 quant_config=quant_config,
-                prefix="lm_head",
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
             self.logits_processor = LogitsProcessor(config.vocab_size)
             self.sampler = get_sampler()
