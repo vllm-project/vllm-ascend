@@ -204,22 +204,6 @@ def check_ascend_config(vllm_config, enforce_eager):
                 "Ascend scheduler is only supported for V1 Engine.")
     # for v1 engine
     else:
-        # TODO(yexiong): Currently deepseek_mtp can be enabled with original vllm
-        # scheduler only in disaggregated prefill scenarios. Otherwise, it should
-        # be enabled with only ascend scheduler. This block will be removed once
-        # mtp is completely compatible with all scenarios.
-        if (not ascend_config.ascend_scheduler_config.enabled
-                and vllm_config.speculative_config
-                and vllm_config.speculative_config.method == 'deepseek_mtp'):
-            if vllm_config.kv_transfer_config is None:
-                raise NotImplementedError(
-                    "Using deepseek_mtp without the ascend scheduler is only supported for disaggregated prefill deployments now."
-                )
-            else:
-                logger.warning(
-                    "Deepseek MTP model is enabled without ascend scheduler. Combination of deepseek MTP and original vllm "
-                    "scheduler is an experimental setting in disaggregated prefill scenarios and will be completely released soon."
-                )
         # for eager mode
         if enforce_eager:
             # torchair_graph cannot be enabled with eager mode.
