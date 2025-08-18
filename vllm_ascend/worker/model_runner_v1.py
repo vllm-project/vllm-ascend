@@ -1316,7 +1316,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             with ProfileExecuteDuration().capture_async("forward"):
                 self.maybe_setup_kv_connector(scheduler_output)
                 
-                self._generate_process_reqs_hidden_states(attn_metadata, with_prefill, padded_num_tokens_across_dp, input_ids, positions, intermediate_tensors, inputs_embeds)
+                hidden_states = self._generate_process_reqs_hidden_states(attn_metadata, with_prefill, padded_num_tokens_across_dp, input_ids, positions, intermediate_tensors, inputs_embeds)
 
         self.maybe_wait_for_kv_save()
         finished_sending, finished_recving = self.get_finished_kv_transfer(
