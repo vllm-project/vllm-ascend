@@ -13,7 +13,7 @@ The rank table is a JSON file that specifies the mapping of Ascend NPU ranks to 
 
 Run the following command on every node to generate the rank table:
 ```shell
-cd vllm-ascend/examples/disaggregated_prefill_v1/
+cd /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/
 bash gen_ranktable.sh --ips 172.19.32.175 172.19.241.49 172.19.123.51 172.19.190.36 \
   --npus-per-node 8 --network-card-name eth0 --prefill-device-cnt 16 --decode-device-cnt 16
 ```
