@@ -29,7 +29,9 @@ from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import swap_dict_values
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.pool.metadata import PoolingMetadata
-from vllm.v1.sample.logits_processor import init_builtin_logitsprocs
+from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
+                                             LogitsProcessors,
+                                             MoveDirectionality)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
@@ -83,8 +85,11 @@ class InputBatch:
         pin_memory: bool,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
+        logitsprocs: Optional[LogitsProcessors] = None,
+        is_pooling_model: bool = False,
         is_spec_decode: bool = False,
     ):
+        self.is_pooling_model = is_pooling_model
         self.is_spec_decode = is_spec_decode
         self.max_num_reqs = max_num_reqs
         self.max_model_len = max_model_len
@@ -234,6 +239,11 @@ class InputBatch:
         # To accumulate prompt logprobs tensor chunks across prefill steps.
         self.in_progress_prompt_logprobs_cpu: dict[str, LogprobsTensors] = {}
 
+        # Internal representation of per-step batch state changes, used for
+        # reordering persistent batch and generating logitsprocs batch state
+        # updates. Should reset each step.
+        self.batch_update_builder = BatchUpdateBuilder()
+
         self.logit_bias: list[Optional[dict[int,
                                             float]]] = [None] * max_num_reqs
         self.has_allowed_token_ids: set[str] = set()
@@ -249,13 +259,9 @@ class InputBatch:
 
         self.req_output_token_ids: list[Optional[list[int]]] = []
 
-        # Define logits processors.
-        # TODO(andy): logits processor list should be extensible via engine
-        # constructor argument; for now the list is fixed.
-        self.logitsprocs = init_builtin_logitsprocs(
-            pin_memory_available=pin_memory,
-            max_num_reqs=max_num_reqs + 1,
-            device=device)
+        # Store provided logitsprocs. If none are provided, initialize empty
+        # data structure
+        self.logitsprocs = logitsprocs or LogitsProcessors()
 
         # This is updated each time the batch constituents change.
         self.sampling_metadata = self._make_sampling_metadata()
@@ -273,9 +279,11 @@ class InputBatch:
         request: "CachedRequestState",
         req_index: Optional[int] = None,
     ) -> None:
-        if req_index is None:
+        if not self.is_pooling_model:
+            # New request index bookkeeping for autoregressive models.
+            req_index = self._register_add_request(request)
+        else:
             req_index = self.num_reqs
-        assert req_index < self.max_num_reqs
 
         req_id = request.req_id
         if req_index == len(self._req_ids):
@@ -402,12 +410,36 @@ class InputBatch:
             # No LoRA
             self.request_lora_mapping[req_index] = 0
 
+    def _register_add_request(self, request: "CachedRequestState") -> int:
+        """Track add-request operations for logits processors.
+        Not applicable to pooling models.
+        """
+
+        # Detailed added request metadata is only required for non-pooling
+        # models, to support logitsprocs
+        assert request.sampling_params
+
+        # Fill the next empty index if there is one.
+        if (new_req_index := self.batch_update_builder.pop_removed()) is None:
+            # Append to end otherwise.
+            new_req_index = self.num_reqs
+
+        assert new_req_index < self.max_num_reqs
+        self.batch_update_builder.added.append(
+            (new_req_index, request.sampling_params, request.prompt_token_ids,
+             request.output_token_ids))
+        return new_req_index
+
     def remove_request(self, req_id: str) -> Optional[int]:
         """This method must always be followed by a call to condense()."""
 
         req_index = self.req_id_to_index.pop(req_id, None)
         if req_index is None:
             return None
+        if not self.is_pooling_model:
+            # Autoregressive models require bookkeeping of removed requests to
+            # support logitsprocs.
+            self.batch_update_builder.removed_append(req_index)
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
 
@@ -445,6 +477,10 @@ class InputBatch:
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
+        # For autoregressive models, track detailed request reordering info
+        # to support logitsprocs
+        self.batch_update_builder.moved.append(
+            (i1, i2, MoveDirectionality.SWAP))
         old_id_i1 = self._req_ids[i1]
         old_id_i2 = self._req_ids[i2]
         self._req_ids[i1], self._req_ids[i2] =\
@@ -503,12 +539,30 @@ class InputBatch:
         self.block_table.swap_row(i1, i2)
 
     def condense(self, empty_req_indices: list[int]) -> None:
-        """Move non-empty requests down into lower, empty indices.
-        
+        """Slide non-empty requests down into lower, empty indices.
+
+        Any consecutive empty indices at the very end of the list are not
+        filled.
+
         Args:
-          empty_req_indices: empty batch indices, sorted descending.
+          empty_req_indices: empty indices which may be filled.
+
+        Returns:
+          swaps: list of (from,to) swap tuples for moved requests
+          empty_req_indices: indices not filled by condensation
         """
         num_reqs = self.num_reqs
+
+        if self.is_pooling_model:
+            # Will be contiguous in pooling case, just trim the lists.
+            del self._req_ids[num_reqs:]
+            del self.req_output_token_ids[num_reqs:]
+            return
+
+        if not (empty_req_indices := self.batch_update_builder.removed):
+            # All removed requests were replaced by added requests, or else no
+            # requests were removed at all. No condense() needed
+            return
         if num_reqs == 0:
             # The batched states are empty.
             self._req_ids.clear()
@@ -524,9 +578,19 @@ class InputBatch:
                 last_req_index -= 1
 
             # Find the smallest empty index.
-            empty_index = empty_req_indices.pop()
+            empty_index = self.batch_update_builder.peek_removed()
+            assert empty_index is not None
             if empty_index >= last_req_index:
                 break
+
+            # Move active request down into empty request
+            # index.
+            self.batch_update_builder.pop_removed()
+            # Autoregressive models require detailed tracking of condense
+            # operations to support logitsprocs
+            self.batch_update_builder.moved.append(
+                (last_req_index, empty_index,
+                 MoveDirectionality.UNIDIRECTIONAL))
 
             # Swap the states.
             req_id = self._req_ids[last_req_index]
@@ -586,8 +650,8 @@ class InputBatch:
             last_req_index -= 1
 
         # Trim lists to the batch size.
-        del self._req_ids[self.num_reqs:]
-        del self.req_output_token_ids[self.num_reqs:]
+        del self._req_ids[num_reqs:]
+        del self.req_output_token_ids[num_reqs:]
 
     def refresh_sampling_metadata(self):
         self.sampling_metadata = self._make_sampling_metadata()
