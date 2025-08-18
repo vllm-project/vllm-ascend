@@ -139,7 +139,31 @@ class NPUPlatform(Platform):
             enforce_eager = getattr(model_config, "enforce_eager", False)
 
         check_ascend_config(vllm_config, enforce_eager)
+        from vllm.config.compilation import CUDAGraphMode
 
+        # TODO(cmq): update the post init in vllmconfig
+        # if cudagraph_mode is not explicitly set by users, set default value
+        if envs_vllm.VLLM_USE_V1 and compilation_config.level \
+            == CompilationLevel.PIECEWISE:
+            compilation_config.cudagraph_mode = \
+                CUDAGraphMode.PIECEWISE
+        else:
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+        # disable cudagraph when enforce eager execution
+        if model_config is not None and \
+                model_config.enforce_eager:
+            logger.info("Cudagraph is disabled under eager mode")
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        elif envs_vllm.VLLM_USE_V1:
+            compilation_config.cudagraph_num_of_warmups = 1
+
+        if envs_vllm.VLLM_USE_V1 and \
+            compilation_config.level == CompilationLevel.PIECEWISE:
+            compilation_config.set_splitting_ops_for_v1()
+        vllm_config._set_cudagraph_sizes()
+
+        # TODO(cmq): update the compilation level config to be determined by CUDAGraphMode
         if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:
             logger.info("Compilation disabled, using eager mode by default")
             compilation_config.level = CompilationLevel.NO_COMPILATION
@@ -249,11 +273,11 @@ class NPUPlatform(Platform):
         return True
 
     @classmethod
-    def get_piecewise_backend_cls(cls) -> str:
+    def get_static_graph_wrapper_cls(cls) -> str:
         """
         Get piecewise backend class for piecewise graph.
         """
-        return "vllm_ascend.compilation.piecewise_backend.NPUPiecewiseBackend"  # noqa
+        return "vllm_ascend.compilation.acl_graph.ACLGraphWrapper"  # noqa
 
     @classmethod
     def stateless_init_device_torch_dist_pg(
