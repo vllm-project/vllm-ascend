@@ -924,6 +924,7 @@ def fused_experts(
 class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
 
     def __init__(self, moe: FusedMoEConfig = None):
+        print("Using AscendUnquantizedFusedMoEMethod")
 
         super().__init__(moe=moe)
 
@@ -1084,6 +1085,7 @@ class AscendUnquantizedFusedMoEMethod(UnquantizedFusedMoEMethod):
             logical_to_physical_map: Optional[torch.Tensor] = None,
             logical_replica_count: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
+        print("Using forward_oot of AscendUnquantizedFusedMoEMethod")
 
         topk_weights, topk_ids = select_experts(
             hidden_states=x,
@@ -1336,6 +1338,7 @@ class AscendFusedMoE(FusedMoE):
                 gate=None,
                 replace_allreduce: bool = False,
                 _metadata_for_padding: Optional[MetadataForPadding] = None):
+        print("Using forward of AscendFusedMoE")
 
         assert self.quant_method is not None
 
