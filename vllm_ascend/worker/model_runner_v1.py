@@ -23,7 +23,6 @@ import math
 import os
 import time
 import types
-import weakref
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Type, Union, cast
@@ -1075,7 +1074,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             num_input_tokens)
         num_input_tokens += num_pad
 
-        modified_batch = self.attn_metadata_builder.reorder_batch(self.input_batch, scheduler_output)
+        modified_batch = self.attn_metadata_builder.reorder_batch(
+            self.input_batch, scheduler_output)
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
@@ -1611,7 +1611,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=[],
-            spec_token_ids=None,
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
@@ -2489,6 +2488,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             uniform_decode=uniform_decode)
 
     def _capture_model(self):
+        if not self.use_aclgraph:
+            logger.warning(
+                "Skipping ACL graph capture. To turn on ACL graph capture, "
+                "ensure `aclraph_mode` was not manually set to `NONE`")
+            return
+        else:
+            self.initialize_aclgraph_capture()
+
         set_cudagraph_capturing_enabled(True)
         # Trigger ACL graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
@@ -2512,13 +2519,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         set_cudagraph_capturing_enabled(False)
 
     def capture_model(self) -> None:
-        if not self.use_aclgraph:
-            logger.warning(
-                "Skipping ACL graph capture. To turn on ACL graph capture, "
-                "ensure `aclraph_mode` was not manually set to `NONE`")
-            return
-        else:
-            self.initialize_aclgraph_capture()
 
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
