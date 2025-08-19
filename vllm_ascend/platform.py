@@ -218,7 +218,7 @@ class NPUPlatform(Platform):
         if use_mla:
             return "vllm_ascend.attention.mla_v1.AscendMLABackend"
         elif use_torchair:
-            return "vllm_ascend.attention.attention_v1_torchair.AscendAttentionTorchairBackend"
+            return "vllm_ascend.torchair.torchair_attention.AscendAttentionTorchairBackend"
         else:
             return "vllm_ascend.attention.attention_v1.AscendAttentionBackend"
 
