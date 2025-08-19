@@ -169,7 +169,9 @@ class AscendAttentionMetadataBuilder:
               num_actual_tokens,
               max_query_len,
               enable_dbo_across_dp: bool = False,
-              is_only_prefill: bool = False):
+              is_only_prefill: bool = False,
+              *args,
+              **kwargs):
 
         block_table = self.runner.input_batch.block_table[0].get_device_tensor(
         )
