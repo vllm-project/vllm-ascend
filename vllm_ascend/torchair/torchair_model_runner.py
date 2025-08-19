@@ -17,7 +17,7 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_model_runner.py
 #
 
-from typing import Optional
+from typing import Any, Optional
 
 import torch
 import torch_npu
@@ -25,6 +25,7 @@ from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
 from vllm_ascend.platform import NPUPlatform
 from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
                                         register_torchair_model,
@@ -67,7 +68,17 @@ class NPUTorchairModelRunner(NPUModelRunner):
 
         return maybe_padded_num_tokens, num_tokens_across_dp, with_prefill, enable_dbo
 
-    def _build_attention_metadata(self, with_prefill, num_reqs, skip_attn):
+    def _build_attention_metadata(
+        self,
+        num_tokens: int,
+        num_reqs: int,
+        num_scheduled_tokens: int,
+        skip_attn: bool,
+        attn_state: AscendAttentionState,
+        *,
+        with_prefill: bool = False,
+        **kwargs: Any,
+    ):
         # NOTE: If torchair graph mode and not with_prefill,
         # we can't skip_attn, it will cause graph recompile.
         if not with_prefill:
@@ -75,7 +86,13 @@ class NPUTorchairModelRunner(NPUModelRunner):
                 num_reqs=num_reqs, num_actual_tokens=1)
         else:
             attn_metadata = super()._build_attention_metadata(
-                with_prefill, num_reqs, skip_attn)
+                num_tokens=num_tokens,
+                num_reqs=num_reqs,
+                num_scheduled_tokens=num_scheduled_tokens,
+                skip_attn=skip_attn,
+                attn_state=attn_state,
+                **kwargs,
+            )
         return attn_metadata
 
     def _generate_dummy_run_hidden_states(self, with_prefill,

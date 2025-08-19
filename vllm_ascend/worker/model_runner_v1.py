@@ -26,7 +26,7 @@ import types
 import weakref
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Type, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union, cast
 
 import numpy as np
 import numpy.typing as npt
@@ -79,6 +79,8 @@ from vllm_ascend.attention.attention_mask import AttentionMaskBuilder
 from vllm_ascend.attention.attention_v1 import (AscendAttentionState,
                                                 AscendMetadata)
 from vllm_ascend.attention.mla_v1 import AscendMLAMetadata
+from vllm_ascend.attention.utils import \
+    AscendCommonAttentionMetadata as CommonAttentionMetadata
 from vllm_ascend.distributed.moe_comm_method import (AllGatherCommImpl,
                                                      DummyCommImpl,
                                                      MoECommMethod)
@@ -273,6 +275,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.seq_lens = torch.zeros(self.max_num_reqs,
                                     dtype=torch.int32,
                                     device=self.device)
+        self.slot_mapping = torch.zeros(self.max_num_tokens,
+                                        dtype=torch.int32,
+                                        device=self.device)
+        self.query_lens = torch.zeros(self.max_num_reqs,
+                                      dtype=torch.int32,
+                                      device=self.device)
 
         self.uses_mrope = self.model_config.uses_mrope
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -1176,11 +1184,21 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             self.query_start_loc_cpu[:num_reqs + 1], non_blocking=True)
         self.seq_lens[:num_reqs].copy_(self.seq_lens_cpu[:num_reqs],
                                        non_blocking=True)
+        self.slot_mapping[:total_num_scheduled_tokens].copy_(
+            self.slot_mapping_cpu[:total_num_scheduled_tokens],
+            non_blocking=True)
 
         # Fill unused with -1. Needed for reshape_and_cache
+        self.slot_mapping[total_num_scheduled_tokens:].fill_(-1)
         self.seq_lens[num_reqs:].fill_(0)
         self.query_start_loc[num_reqs + 1:].fill_(-1)
 
+        query_start_loc = self.query_start_loc[:num_reqs + 1]
+        # Use host tensor, other wise error: tensor.hostData is null
+        common_attn_metadata = CommonAttentionMetadata(
+            query_start_loc=query_start_loc,
+            seq_lens=self.seq_lens_cpu[:num_reqs])
+        self.seq_lens_list = self.seq_lens_np.tolist()[:num_input_tokens]
         with_prefill = attn_state not in [
             AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding
         ]
@@ -1223,6 +1241,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs=num_reqs,
                 num_actual_tokens=total_num_scheduled_tokens,
                 max_query_len=max_num_scheduled_tokens,
+                common_attn_metadata=common_attn_metadata,
                 **extra_builder_kwargs,
             )
 
@@ -1869,12 +1888,24 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 scheduler_output.finished_req_ids)
         return None, None
 
-    def _build_attention_metadata(self, with_prefill, num_reqs, skip_attn):
+    def _build_attention_metadata(
+        self,
+        num_tokens: int,
+        num_reqs: int,
+        num_scheduled_tokens: int,
+        skip_attn: bool,
+        attn_state: AscendAttentionState,
+        **kwargs: Any,
+    ):
         if skip_attn:
             attn_metadata = None
         else:
-            # TODO(zzzzwwjj): when aclgraph and full graph mode, we need build attn_metadata
-            attn_metadata = None
+            attn_metadata = self.attn_metadata_builder.build_dummy_metadata(
+                num_actual_tokens=num_tokens,
+                num_reqs=num_reqs,
+                num_scheduled_tokens=num_scheduled_tokens,
+                attn_state=attn_state,
+            )
         return attn_metadata
 
     def _generate_dummy_run_hidden_states(self, with_prefill,
@@ -1902,6 +1933,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         with_prefill: bool = False,
         is_torchair_compile: bool = False,
         moe_comm_method: Type[MoECommMethod] = DummyCommImpl,
+        attn_state: AscendAttentionState = AscendAttentionState.DecodeOnly,
     ) -> torch.Tensor:
         # Padding for DP
         (num_tokens, num_tokens_across_dp, with_prefill,
@@ -1931,8 +1963,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         if self.is_kv_producer:
             with_prefill = True
 
-        attn_metadata = self._build_attention_metadata(with_prefill, num_reqs,
-                                                       skip_attn)
+        attn_metadata = self._build_attention_metadata(
+            num_reqs=num_reqs,
+            skip_attn=skip_attn,
+            with_prefill=with_prefill,
+            num_tokens=num_tokens,
+            num_scheduled_tokens=num_scheduled_tokens,
+            attn_state=attn_state,
+        )
 
         with self.maybe_dummy_run_with_lora(self.lora_config,
                                             num_scheduled_tokens):
