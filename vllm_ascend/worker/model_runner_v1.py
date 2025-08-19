@@ -23,7 +23,6 @@ import math
 import os
 import time
 import types
-import weakref
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Type, Union, cast
@@ -1075,7 +1074,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             num_input_tokens)
         num_input_tokens += num_pad
 
-        modified_batch = self.attn_metadata_builder.reorder_batch(self.input_batch, scheduler_output)
+        modified_batch = self.attn_metadata_builder.reorder_batch(
+            self.input_batch, scheduler_output)
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
