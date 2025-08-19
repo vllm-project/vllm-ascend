@@ -16,7 +16,7 @@ def test_concurrent_partial_prefill():
                         },
                     },
                     max_num_seqs=3,
-                    max_num_batched_tokens=200,
+                    max_num_batched_tokens=2048,
                     enforce_eager=True,
                     max_model_len=2048,
                     gpu_memory_utilization=0.7) as vllm_model:
@@ -35,7 +35,7 @@ def test_prefix_cache_stats_is_recorded():
                         },
                     },
                     max_num_seqs=3,
-                    max_num_batched_tokens=200,
+                    max_num_batched_tokens=2048,
                     enforce_eager=True,
                     max_model_len=2048,
                     gpu_memory_utilization=0.7) as vllm_model:
