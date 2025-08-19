@@ -2489,6 +2489,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                             uniform_decode=uniform_decode)
 
     def _capture_model(self):
+        if not self.use_aclgraph:
+            logger.warning(
+                "Skipping ACL graph capture. To turn on ACL graph capture, "
+                "ensure `aclraph_mode` was not manually set to `NONE`")
+            return
+        else:
+            self.initialize_aclgraph_capture()
+
         set_cudagraph_capturing_enabled(True)
         # Trigger ACL graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
@@ -2512,13 +2520,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         set_cudagraph_capturing_enabled(False)
 
     def capture_model(self) -> None:
-        if not self.use_aclgraph:
-            logger.warning(
-                "Skipping ACL graph capture. To turn on ACL graph capture, "
-                "ensure `aclraph_mode` was not manually set to `NONE`")
-            return
-        else:
-            self.initialize_aclgraph_capture()
 
         compilation_counter.num_gpu_runner_capture_triggers += 1
 
