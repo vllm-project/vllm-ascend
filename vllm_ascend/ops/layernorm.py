@@ -33,7 +33,7 @@ class AddRMSNormW8A8Quant(RMSNorm):
         has_weight: bool = True,
         dtype: Optional[torch.dtype] = None,
     ) -> None:
-        super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
+        super().__init__(hidden_size=hidden_size, eps=eps, var_hidden_size=var_hidden_size, has_weight=has_weight, dtype=dtype)
         self.layer = layer
 
     def forward(
