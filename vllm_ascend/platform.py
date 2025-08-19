@@ -133,7 +133,7 @@ class NPUPlatform(Platform):
         
         if parallel_config:
             parallel_config.oproj_tensor_parallel_size = \
-                ascend_scheduler_config.oproj_tensor_parallel_size
+                ascend_config.oproj_tensor_parallel_size
 
         if model_config is None:
             logger.warning("Model config is missing. This may indicate "
