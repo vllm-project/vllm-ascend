@@ -2,6 +2,7 @@ import fcntl
 import os
 import shutil
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 
 import torch
 
@@ -18,6 +19,32 @@ KV_CACHE_BYTES_CACHE_FILE_NAME = "kv_cache_bytes"
 TORCHAIR_CACHE_PATH_NAME = ".torchair_cache"
 TORCHAIR_CACHE_DIR = os.getenv(
     'TORCHAIR_CACHE_HOME', os.path.join(os.getcwd(), TORCHAIR_CACHE_PATH_NAME))
+
+
+@dataclass
+class TorchairCommonAttentionMetadata:
+    """
+    Per-batch attention metadata, shared across layers and backends.
+    AttentionMetadataBuilder instances use it to construct per-layer metadata.
+    
+    For many of the tensors we keep both GPU and CPU versions.
+    """
+
+    num_reqs: int
+    """Number of requests"""
+
+    num_actual_tokens: int
+    """Total number of tokens in batch"""
+
+    decode_token_per_req: int
+
+    actual_seq_lengths_q: list[int]
+
+    attn_mask: torch.Tensor = None
+
+    spec_attn_mask: torch.Tensor = None
+
+    graph_pad_size: int = -1
 
 
 @contextmanager
