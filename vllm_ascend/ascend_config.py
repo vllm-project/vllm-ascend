@@ -50,6 +50,15 @@ class AscendConfig:
         self.enable_shared_expert_dp = additional_config.get(
             "enable_shared_expert_dp", True
         ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel
+        self.oproj_tensor_parallel_size = additional_config.get("oproj_tensor_parallel_size", None)
+        if self.oproj_tensor_parallel_size:
+            logger.info(
+                f"Enable oproj independent tp sharding and oproj_tensor_parallel_size is {self.oproj_tensor_parallel_size}.")
+            assert (vllm_config.parallel_config.tensor_parallel_size == 1, 
+                "oproj_tensor_parallel_size is only supported in the pure DP scenario.")
+            assert (self.oproj_tensor_parallel_size > 1 and 
+                    vllm_config.parallel_config.world_size % self.oproj_tensor_parallel_size == 0,
+                "`oproj_tensor_parallel_size` should be greater than 1 and divisible by the world size.")
 
 
 class TorchairGraphConfig:

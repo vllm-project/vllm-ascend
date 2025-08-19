@@ -17,11 +17,12 @@
 # Adapted from vllm/model_executor/models/qwen3_moe.py
 # This file is a part of the vllm-ascend project.
 
-from typing import Optional, Union
+from typing import Optional, Union, Any, List
 
 import torch
 from torch import nn
 from transformers import PretrainedConfig
+from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, CompilationLevel, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -30,9 +31,10 @@ from vllm.distributed.parallel_state import (get_dp_group, get_ep_group,
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import ReplicatedLinear, QKVParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.models.interfaces import (MixtureOfExperts,
@@ -47,9 +49,15 @@ from vllm.model_executor.models.utils import (
     make_empty_intermediate_tensors_factory, make_layers, maybe_prefix)
 from vllm.sequence import IntermediateTensors
 
+from vllm_ascend import envs
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.attention.attention_v1 import AscendAttentionState
+from vllm_ascend.distributed.parallel_state import get_otp_group
 from vllm_ascend.ops.fused_moe import AscendFusedMoE
+from vllm_ascend.ops.independent_tp_sharding import DownProjectionParallelLinear, ExecutionConfig
 from vllm_ascend.ops.sequence_parallel import (MetadataForPadding,
                                                init_metadata_for_sp)
+from vllm_ascend.utils import oproj_tp_enable
 
 
 class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
@@ -123,6 +131,142 @@ class CustomSparseMoeBlock(Qwen3MoeSparseMoeBlock):
         )
 
         return hidden_states
+    
+
+class CustomQwen3MoeAttention(Qwen3MoeAttention):
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        num_kv_heads: int,
+        rope_theta: float = 10000,
+        rope_scaling: Optional[dict[str, Any]] = None,
+        max_position_embeddings: int = 8192,
+        head_dim: Optional[int] = None,
+        rms_norm_eps: float = 1e-06,
+        qkv_bias: bool = False,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
+        nn.Module.__init__(self)
+        self.hidden_size = hidden_size
+        tp_size = get_tensor_model_parallel_world_size()
+        self.total_num_heads = num_heads
+        assert self.total_num_heads % tp_size == 0
+        self.num_heads = self.total_num_heads // tp_size
+        self.total_num_kv_heads = num_kv_heads
+        if self.total_num_kv_heads >= tp_size:
+            # Number of KV heads is greater than TP size, so we partition
+            # the KV heads across multiple tensor parallel GPUs.
+            assert self.total_num_kv_heads % tp_size == 0
+        else:
+            # Number of KV heads is less than TP size, so we replicate
+            # the KV heads across multiple tensor parallel GPUs.
+            assert tp_size % self.total_num_kv_heads == 0
+        self.num_kv_heads = max(1, self.total_num_kv_heads // tp_size)
+        self.head_dim = head_dim or (hidden_size // self.total_num_heads)
+        self.q_size = self.num_heads * self.head_dim
+        self.kv_size = self.num_kv_heads * self.head_dim
+        self.scaling = self.head_dim**-0.5
+        self.rope_theta = rope_theta
+        self.max_position_embeddings = max_position_embeddings
+
+        self.qkv_proj = QKVParallelLinear(hidden_size,
+                                        self.head_dim,
+                                        self.total_num_heads,
+                                        self.total_num_kv_heads,
+                                        bias=qkv_bias,
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.qkv_proj")
+
+
+        if oproj_tp_enable():
+            self.o_proj = DownProjectionParallelLinear(self.total_num_heads * self.head_dim,
+                                            hidden_size,
+                                            bias=False,
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.o_proj",
+                                            tp_group_cls=get_otp_group(),
+                                            execute_config=ExecutionConfig(prefill_mode="eager", decode_mode="graph"))
+        else:
+            self.o_proj = RowParallelLinear(self.total_num_heads * self.head_dim,
+                                            hidden_size,
+                                            bias=False,
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.o_proj")
+
+        self.rotary_emb = get_rope(
+            self.head_dim,
+            rotary_dim=self.head_dim,
+            max_position=max_position_embeddings,
+            base=rope_theta,
+            rope_scaling=rope_scaling,
+        )
+        self.attn = Attention(self.num_heads,
+                              self.head_dim,
+                              self.scaling,
+                              num_kv_heads=self.num_kv_heads,
+                              cache_config=cache_config,
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
+
+        self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+        self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+        ascend_config = get_ascend_config()
+        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
+
+    def forward(
+            self,
+            positions: torch.Tensor,
+            hidden_states: torch.Tensor,
+            kv_cache: Optional[torch.Tensor] = None,
+            attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
+        qkv, _ = self.qkv_proj(hidden_states)
+        if isinstance(qkv, List):
+            q, k, v = qkv
+        else:
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+        # Add qk-norm
+        q_by_head = q.view(*q.shape[:-1], q.shape[-1] // self.head_dim,
+                           self.head_dim)
+
+        q_by_head = self.q_norm(q_by_head)
+        q = q_by_head.view(q.shape)
+
+        k_by_head = k.view(*k.shape[:-1], k.shape[-1] // self.head_dim,
+                           self.head_dim)
+
+        k_by_head = self.k_norm(k_by_head)
+        k = k_by_head.view(k.shape)
+
+        if (self.torchair_graph_enabled and attn_metadata is not None and
+                attn_metadata.attn_state == AscendAttentionState.DecodeOnly):
+            q, k = self.rotary_emb(positions, q, k, is_prefill=False)
+            forward_kwargs = {}
+            if envs.VLLM_USE_V1:
+                output_shape = q.shape
+                output = torch.empty(output_shape,
+                                     dtype=q.dtype,
+                                     device=q.device)
+                forward_kwargs['output'] = output
+
+            attn_output = self.attn.impl.forward(self.attn,
+                                                 q,
+                                                 k,
+                                                 v,
+                                                 kv_cache=kv_cache,
+                                                 attn_metadata=attn_metadata,
+                                                 trace_flag=False,
+                                                 **forward_kwargs)
+            output, _ = self.o_proj(attn_output)
+            return output
+        else:
+            q, k = self.rotary_emb(positions, q, k)
+            attn_output = self.attn(q, k, v)
+            output, _ = self.o_proj(attn_output)
+            return output
 
 
 class CustomQwen3MoeDecoderLayer(Qwen3MoeDecoderLayer):

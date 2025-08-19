@@ -130,6 +130,10 @@ class NPUPlatform(Platform):
             "kv_cache_dtype", None)
         if kv_cache_dtype is not None:
             vllm_config.cache_config.cache_dtype = kv_cache_dtype
+        
+        if parallel_config:
+            parallel_config.oproj_tensor_parallel_size = \
+                ascend_scheduler_config.oproj_tensor_parallel_size
 
         if model_config is None:
             logger.warning("Model config is missing. This may indicate "
