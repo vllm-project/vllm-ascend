@@ -80,23 +80,18 @@ def get_masked_input_and_mask_meta(input: torch.Tensor,
 
     return masked_input, mask
 
-def bgmv_expand_meta(x: torch.Tensor,
-                                   weight: torch.Tensor,
-                                   indices: torch.Tensor,
-                                   y: torch.Tensor,
-                                   slice_offset: int,
-                                   slice_size: int):
+
+def bgmv_expand_meta(x: torch.Tensor, weight: torch.Tensor,
+                     indices: torch.Tensor, y: torch.Tensor, slice_offset: int,
+                     slice_size: int):
 
     y_out = torch.empty_like(y)
     return y_out
 
-def sgmv_expand_meta(x: torch.Tensor,
-                                   weight: torch.Tensor,
-                                   lora_indices: torch.Tensor,
-                                   seq_len: torch.Tensor,
-                                   y: torch.Tensor,
-                                   slice_offset: int,
-                                   slice_size: int):
+
+def sgmv_expand_meta(x: torch.Tensor, weight: torch.Tensor,
+                     lora_indices: torch.Tensor, seq_len: torch.Tensor,
+                     y: torch.Tensor, slice_offset: int, slice_size: int):
 
     y_out = torch.empty_like(y)
     return y_out
