@@ -1074,8 +1074,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             num_input_tokens)
         num_input_tokens += num_pad
 
-        modified_batch = self.attn_metadata_builder.reorder_batch(
-            self.input_batch, scheduler_output)
+        self.attn_metadata_builder.reorder_batch(self.input_batch,
+                                                 scheduler_output)
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
         self.input_batch.block_table.commit_block_table(num_reqs)
@@ -2482,10 +2482,12 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 self._dummy_run(num_tokens,
                                 aclgraph_runtime_mode=CUDAGraphMode.NONE,
                                 force_attention=force_attention,
-                                uniform_decode=uniform_decode)
+                                uniform_decode=uniform_decode,
+                                moe_comm_method=self.moe_comm_method)
             self._dummy_run(num_tokens,
                             aclgraph_runtime_mode=aclgraph_runtime_mode,
-                            uniform_decode=uniform_decode)
+                            uniform_decode=uniform_decode,
+                            moe_comm_method=self.moe_comm_method)
 
     def _capture_model(self):
         if not self.use_aclgraph:

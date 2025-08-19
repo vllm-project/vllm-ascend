@@ -40,8 +40,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # lint:
-  #   uses: ./.github/workflows/pre-commit.yml
+  lint:
+    uses: ./.github/workflows/pre-commit.yml
 
   changes:
     runs-on: ubuntu-latest
