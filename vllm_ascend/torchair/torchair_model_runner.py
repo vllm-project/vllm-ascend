@@ -23,10 +23,13 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch_npu
+import torch.distributed as dist
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.logger import logger
+from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed.parallel_state import get_dp_group
 
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import TorchairCommonAttentionMetadata
@@ -37,11 +40,35 @@ from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                is_310p, maybe_converting_weight_acl_format)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
 
+import vllm_ascend.envs as envs_ascend
+
 
 class NPUTorchairModelRunner(NPUModelRunner):
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
+
+        ascend_config = get_ascend_config()
+
+        self.new_kv_cache_bytes = -1
+        self.torchair_compiled_model = None  # type: ignore
+        self.torchair_compiled_models = {}  # type: ignore
+        self.use_cached_npu_graph = ascend_config.torchair_graph_config.use_cached_graph
+        self.torchair_graph_batch_sizes = ascend_config.torchair_graph_config.graph_batch_sizes
+        if ascend_config.torchair_graph_config.graph_batch_sizes_init:
+            self._init_torchair_graph_batch_sizes()
+
+        self._check_torchair_graph_batch_sizes()
+
+        torch._dynamo.cache_size.config.cache_size_limit += len(
+            self.torchair_graph_batch_sizes)
+        torch._dynamo.cache_size.config.cache_size_limit += len(
+            self.torchair_graph_batch_sizes)
+        torch._dynamo.config.capture_dynamic_output_shape_ops = True
+        torch._logging.set_logs(
+            recompiles=envs_ascend.VLLM_ASCEND_TRACE_RECOMPILES)
+        
+        self._check_batch_sizes_consistency()
 
     def _get_forward_metadata_across_dp_and_pad(
             self, num_tokens: int, with_prefill: bool, enable_dbo: bool
@@ -313,3 +340,94 @@ class NPUTorchairModelRunner(NPUModelRunner):
             f"cur batch_size is invalid, torchair_graph_batch_sizes is "
             f"{self.torchair_graph_batch_sizes}, but cur batch_size is {batch_size}."
         )
+    
+    def _init_torchair_graph_batch_sizes(self):
+        start_graph_batch_size = 4
+        tp_size = get_tensor_model_parallel_world_size()
+
+        # NOTE: When use all2all | mc2, We need to slice the `num_tokens` dimension into `tp_size` blocks
+        start_graph_batch_size = max(start_graph_batch_size, tp_size)
+
+        while (start_graph_batch_size <= self.max_num_reqs):
+            self.torchair_graph_batch_sizes.append(start_graph_batch_size)
+            start_graph_batch_size *= 2
+
+    def _check_torchair_graph_batch_sizes(self):
+        # return graph_batch_sizes according to the max number of tokens
+        # first pad according to the number of requests
+        if len(self.torchair_graph_batch_sizes) == 0:
+            self.torchair_graph_batch_sizes = [1, self.max_num_reqs]
+        else:
+            self.torchair_graph_batch_sizes = sorted(
+                self.torchair_graph_batch_sizes)
+            while self.torchair_graph_batch_sizes[-1] > self.max_num_reqs:
+                self.torchair_graph_batch_sizes.pop()
+                if len(self.torchair_graph_batch_sizes) == 0:
+                    logger.warning(
+                        "torch_graph_batch_sizes is invalid, reset it to [1, max_num_seqs]"
+                    )
+                    self.torchair_graph_batch_sizes = [1, self.max_num_reqs]
+            if self.torchair_graph_batch_sizes[-1] < self.max_num_reqs:
+                self.torchair_graph_batch_sizes.append(self.max_num_reqs)
+
+        # padded max number tokens = max_num_req * decode_token_per_req
+        self.torchair_graph_batch_sizes = [
+            graph_batch_size * self.decode_token_per_req
+            for graph_batch_size in self.torchair_graph_batch_sizes
+        ]
+
+        # NOTE: when enable_expert_parallel, we need to check if `graph_batch_size` is divisible by `tp_size`
+        tp_size = self.parallel_config.tensor_parallel_size
+        if self.parallel_config.enable_expert_parallel:
+            new_graph_batch_sizes = []
+            for graph_batch_size in self.torchair_graph_batch_sizes:
+                cur_graph_batch_size = (graph_batch_size + tp_size -
+                                        1) // tp_size * tp_size
+                if cur_graph_batch_size not in new_graph_batch_sizes and \
+                    cur_graph_batch_size <= self.scheduler_config.max_num_batched_tokens:
+                    new_graph_batch_sizes.append(cur_graph_batch_size)
+                elif cur_graph_batch_size > self.scheduler_config.max_num_batched_tokens \
+                        and self.decode_token_per_req > 1:
+                    logger.warning(
+                        f"torchair_graph_batch_sizes {cur_graph_batch_size} is bigger than max_num_batched_tokens",
+                        f"{self.scheduler_config.max_num_batched_tokens} will skip this batch size."
+                    )
+            self.torchair_graph_batch_sizes = new_graph_batch_sizes
+    
+    def _drafter_prepare_inputs(self, attn_metadata, num_rejected_tokens, positions, hidden_states, num_scheduled_tokens):
+        cu_num_tokens, accepted_token_indices, target_token_ids, \
+            target_positions, target_hidden_states, target_slot_mapping = self.drafter.prepare_inputs(
+            attn_metadata.query_start_loc,
+            num_rejected_tokens,
+            self.input_ids[:num_scheduled_tokens],
+            positions[:num_scheduled_tokens],
+            hidden_states[:num_scheduled_tokens],
+            attn_metadata.slot_mapping[:num_scheduled_tokens],
+            is_torchair_graph=True,
+        )
+        return cu_num_tokens, accepted_token_indices, target_token_ids, target_positions, target_hidden_states, target_slot_mapping
+    
+    def _use_aclgraph(self) -> bool:
+        return False
+    
+    def _check_batch_sizes_consistency(self) -> None:
+        if not dist.is_initialized():
+            return
+
+        local = torch.tensor(self.torchair_graph_batch_sizes,
+                             device="cpu",
+                             dtype=torch.int32)
+        gathered_graph_batch_size = local.clone()
+        dist.all_reduce(gathered_graph_batch_size,
+                        group=get_dp_group().cpu_group)
+        expected = local * self.dp_size
+
+        if not torch.equal(gathered_graph_batch_size, expected):
+            diff_idxs = (gathered_graph_batch_size != expected).nonzero(
+                as_tuple=False).flatten().tolist()
+            raise AssertionError(
+                f"[Graph BatchSize Mismatch] Found mismatches at indices {diff_idxs}.\n"
+                f"Local (rank {self.dp_rank}): {local.tolist()}\n"
+                f"Sum over ranks:     {gathered_graph_batch_size.tolist()}\n"
+                f"Expected if all equal: {[v * self.dp_size for v in local.tolist()]}"
+            )
