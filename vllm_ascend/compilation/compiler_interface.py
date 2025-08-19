@@ -36,7 +36,25 @@ from vllm.utils import is_torch_equal_or_newer
 from vllm.compilation.inductor_pass import pass_context
 
 
+def get_dtype_from_args(args: list[Any]) -> list[torch.dtype]:
+    """
+    Extract the dtype from the kwargs dictionary.
+    """
+    dtype_list = []
+    for value in args:
+        if isinstance(value, torch.Tensor):
+            dtype_list.append(value.dtype)
+    return dtype_list
 
+def get_shapes_from_args(args: list[Any]) -> list[torch.Size]:
+    """
+    Extract the shapes from the kwargs dictionary.
+    """
+    shape_list = []
+    for value in args:
+        if isinstance(value, torch.Tensor):
+            shape_list.append(value.shape)
+    return shape_list
 class AscendAdaptor(CompilerInterface):
     name = "ascend_adaptor"
 
@@ -50,7 +68,13 @@ class AscendAdaptor(CompilerInterface):
     ) -> tuple[Optional[Callable], Optional[Any]]:
 
         graph_rewriter_manager = compiler_config["graph_rewriter_manager"]
-        graph = graph_rewriter_manager(graph)
+        arg_dtypes = get_dtype_from_args(example_inputs)
+        arg_shapes = get_shapes_from_args(example_inputs)
+        kwargs = {
+            "runtime_shape": runtime_shape,
+            "arg_shapes": arg_shapes,
+            "arg_dtypes": arg_dtypes}
+        graph = graph_rewriter_manager(graph, **kwargs)
 
         compilation_counter.num_eager_compiles += 1
         # we don't need to compile the graph, just return the graph itself.

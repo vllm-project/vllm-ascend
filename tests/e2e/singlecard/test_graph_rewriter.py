@@ -22,6 +22,7 @@ import torch.nn as nn
 import torch_npu
 import random
 import copy
+import re
 from vllm.config import VllmConfig
 from vllm import LLM, SamplingParams
 from vllm_ascend.compilation.quant_fusion_pass import AscendQuantFusionPass
@@ -82,15 +83,31 @@ def test_quant_fusion_pass(
     num_tokens: int,
     hidden_size: int,
 ) -> None:
+    fusion_pattern_regex = re.compile(
+        r".*: \[num_users=2\] = call_function\[target=torch\.ops\.npu\.npu_add_rms_norm\]\(.*\)"
+        r".*: \[num_users=1\] = call_function\[target=operator\.getitem\]\(.*\)"
+        r".*: \[num_users=1\] = call_function\[target=operator\.getitem\]\(.*\)"
+        r".*: \(num_users=1\] = call_function\[target=torch\.ops\.npu\.npu_quantize\]\(.*\)",
+        re.DOTALL
+    )
+
+    fusion_replace_regex = re.compile(
+        r".*: \[num_users=2\] = call_function\[target=torch\.ops\.npu\.npu_add_rms_norm_quant\]\(.*\)"
+        r".*: \[num_users=1\] = call_function\[target=operator\.getitem\]\(.*\)"
+        r".*: \[num_users=1\] = call_function\[target=operator\.getitem\]\(.*\)",
+        re.DOTALL
+    )
+
     checking_string_for_fusion_pass = {
-        "quant_fusion_pass": (["torch.ops.npu.npu_add_rms_norm", "torch.ops.npu_quantize"],["torch.ops.npu.npu_add_rms_norm_quant"])
+        "quant_fusion_pass": (fusion_pattern_regex, fusion_replace_regex)
     }
     # Create a random input tensor
-    input_tensor = torch.randn(num_tokens, hidden_size)
+    input_tensor = torch.randn(num_tokens, hidden_size).to("npu").to(torch.bfloat16)
     vllm_config = VllmConfig()
     # Open the compilation fusion config and enable the graph rewriter on quantization
-    vllm_config.additional_config.ascend_compilation_config.enable_graph_rewriter = True
-    vllm_config.additional_config.ascend_compilation_config.enable_quantization_fusion = True
+    config = {"ascend_compilation_config": {"enable_graph_rewriter": True, "enable_quantization_fusion": True}}
+    vllm_config.additional_config.update(config)
+
 
     # 1. Checking if the pass is added to the pass manager when related config is enabled
     compilation_interface = CustomizeCompilationInterface(vllm_config, checking_fusion_pass=checking_string_for_fusion_pass)
@@ -103,7 +120,7 @@ def test_quant_fusion_pass(
 
     # 2, Check if the pass is applied correctly，the checking process happens in the `__call__` method of `CustomizeCompilationInterface`
     # Initialize the model with RMSNorm quantization
-    model = ModelWithRMSNormQuant(hidden_size=hidden_size)
+    model = ModelWithRMSNormQuant(hidden_size=hidden_size).to("npu").to(torch.bfloat16)
     new_model = copy.deepcopy(model)
     compiled_model = torch.compile(model, backend=compilation_interface)
     for i in range(3):

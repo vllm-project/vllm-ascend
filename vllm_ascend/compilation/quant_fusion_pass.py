@@ -75,3 +75,16 @@ class AscendQuantFusionPass(VllmInductorPass):
         for pattern, replace in self.patterns:
           replace_pattern(graph, pattern, replace)
         self.end_and_log()
+    
+    def is_applicable(self, **kwargs):
+        """
+        Check if the pass is applicable for the current configuration.
+        """
+        arg_dtypes = kwargs.get("arg_dtypes", None)
+        if arg_dtypes is None:
+            return False
+        # We assume the first tensor's dtype is the data type of this model, update this solution when there is 
+        # better solution.
+        dtype = arg_dtypes[0] if isinstance(arg_dtypes, list) and len(arg_dtypes) > 0 else arg_dtypes
+        return dtype in (torch.bfloat16)
+

@@ -35,10 +35,9 @@ class GraphRewritePassManager:
     def __init__(self):
         self.passes: list[VllmInductorPass] = []
 
-    def __call__(self, graph: fx.Graph):
-        shape = get_pass_context().runtime_shape
+    def __call__(self, graph: fx.Graph, **kwargs) -> fx.Graph:
         for pass_ in self.passes:
-            if pass_.is_applicable_for_shape(shape):
+            if pass_.is_applicable(**kwargs):
                 pass_(graph)
         graph.recompile()
         return graph
@@ -48,8 +47,9 @@ class GraphRewritePassManager:
         self.passes.append(pass_)
   
     def configure(self, config: VllmConfig):
-        self.ascend_compilation_config = config.additional_config["ascend_compilation_config"]
-        if self.ascend_compilation_config["enable_quantization_fusion"]:
+        # By default, we enable the graph rewriter and quantization fusion pass.
+        self.ascend_compilation_config: dict = config.additional_config.get("ascend_compilation_config", {})
+        if self.ascend_compilation_config.get("enable_quantization_fusion", True):
             from .quant_fusion_pass import AscendQuantFusionPass
             self.passes.append(AscendQuantFusionPass(config))
         # Add more passes here as needed
