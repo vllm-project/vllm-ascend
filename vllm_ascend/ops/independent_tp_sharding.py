@@ -4,6 +4,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parameter import Parameter, UninitializedParameter
+from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.distributed.parallel_state import get_dp_group, GroupCoordinator
@@ -26,6 +27,7 @@ class ExecutionConfig:
         if self.decode_mode not in ["eager", "graph"]:
             raise ValueError(f"Invalid decode_mode: {self.decode_mode}, must be 'eager' or 'graph'")
 
+@CustomOp.register("down_projection_parallel_linear")
 class DownProjectionParallelLinear(LinearBase):
     def __init__(
         self,
