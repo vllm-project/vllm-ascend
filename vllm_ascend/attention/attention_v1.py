@@ -368,8 +368,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                     # Construct mask 
                     if self.sliding_window is not None and \
                         attn_metadata.attn_mask.shape[0] > self.sliding_window:
-
-                        for i in range(self.sliding_window, seq_len):
+                        N = attn_metadata.attn_mask.shape[0]
+                        for i in range(self.sliding_window, N):
                             attn_metadata.attn_mask[i][0:i - self.sliding_window + 1] = 1
                     mn = torch.finfo(torch.bfloat16).min
                     mask_seqs = attn_metadata.attn_mask.masked_fill(attn_metadata.attn_mask == 1, mn)[None, ...]
@@ -454,23 +454,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
                         seq_len = int(attn_metadata.seq_lens[seq_idx])
 
-                        # prepare indices to select kv_cache
-                        key_cache_indices = torch.empty(seq_len, 
-                                                        device=self.key_cache.device, dtype=torch.int32)
-                        value_cache_indices = torch.empty(seq_len, 
-                                                        device=self.value_cache.device, dtype=torch.int32)
+                        # # prepare indices to select kv_cache
+                        # key_cache_indices = torch.empty(seq_len, 
+                        #                                 device=self.key_cache.device, dtype=torch.int32)
+                        # value_cache_indices = torch.empty(seq_len, 
+                        #                                 device=self.value_cache.device, dtype=torch.int32)
 
                         # Construct the kv_cache indices for each request
-                        for token_idx in range(seq_len):
+                        token_idx = torch.arange(seq_len, device=block_table.device)
+                        block_logic_idx = token_idx // block_size
+                        block_physic_idx = block_table[block_logic_idx]
+                        block_offsets = token_idx % block_size
 
-                            # Convert logic token position to physical position in device memory
-                            block_logic_idx = token_idx // block_size
-                            block_physic_idx = int(block_table[block_logic_idx])
-                            block_offsets = token_idx % block_size
-
-                            # Construct kv_cache_indices
-                            key_cache_indices[token_idx] = block_physic_idx * block_size + block_offsets
-                            value_cache_indices[token_idx] = block_physic_idx * block_size + block_offsets
+                        cache_indices = block_physic_idx * block_size + block_offsets
+                        key_cache_indices = cache_indices
+                        value_cache_indices = cache_indices.clone()
 
                         # Select the kv_cache using kv_cache_indices
                         # After select, key_cache and value_cache shape is (seq_len, num_kv_heads, head_size)
@@ -494,8 +492,6 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         if self.sliding_window is not None and seq_len > self.sliding_window:
                             mn = torch.finfo(torch.bfloat16).min
                             mask[..., 0 : seq_len - self.sliding_window] = mn
-
-                        
 
                         attn_weights = torch.matmul(q, k.transpose(1, 2)) * self.scale
                         attn_weights = attn_weights + mask
@@ -537,20 +533,21 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         seq_len = int(attn_metadata.seq_lens[seq_idx])
                         query_len = int(query_lens[seq_idx])
 
-                        # prepare indices to select kv_cache
-                        key_cache_indices = torch.empty(seq_len, 
-                                                        device=self.key_cache.device, dtype=torch.int32)
-                        value_cache_indices = torch.empty(seq_len, 
-                                                        device=self.value_cache.device, dtype=torch.int32)
+                        # # prepare indices to select kv_cache
+                        # key_cache_indices = torch.empty(seq_len, 
+                        #                                 device=self.key_cache.device, dtype=torch.int32)
+                        # value_cache_indices = torch.empty(seq_len, 
+                        #                                 device=self.value_cache.device, dtype=torch.int32)
 
-                        # Construct the kv_cache indices for retrieving previous kv_cache
-                        for token_idx in range(seq_len):
-                            block_logic_idx = token_idx // block_size
-                            block_physic_idx = int(block_table[block_logic_idx])
-                            block_offsets = token_idx % block_size
+                        # Construct the kv_cache indices for each request
+                        token_idx = torch.arange(seq_len, device=block_table.device)
+                        block_logic_idx = token_idx // block_size
+                        block_physic_idx = block_table[block_logic_idx]
+                        block_offsets = token_idx % block_size
 
-                            key_cache_indices[token_idx] = block_physic_idx * block_size + block_offsets
-                            value_cache_indices[token_idx] = block_physic_idx * block_size + block_offsets
+                        cache_indices = block_physic_idx * block_size + block_offsets
+                        key_cache_indices = cache_indices
+                        value_cache_indices = cache_indices.clone()
 
                         # Select the kv_cache using kv_cache_indices
                         key_cache = self.key_cache.flatten(0, 1)[key_cache_indices]
@@ -574,7 +571,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         if self.sliding_window is not None and seq_len > self.sliding_window:
                             begin = max(self.sliding_window, seq_len - query_len)
                             for i in range(begin, seq_len):
-                                mask_seq[0][start + i - begin][0:i - self.sliding_window + 1] = mn
+                                mask_seq[0][start + i][0:i - self.sliding_window + 1] = mn
 
                         # Slice mask to match the attn_weights shape
                         mask_seq = mask_seq[:, start:end, :seq_len]
