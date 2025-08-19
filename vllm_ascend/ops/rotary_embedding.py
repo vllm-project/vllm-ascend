@@ -123,7 +123,6 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
         mscale: float = 1,
         mscale_all_dim: float = 0,
     ) -> None:
-        print("AscendDeepseekScalingRotaryEmbedding init called")
         # Note: we adopt the native huggingface deepseek rope initialization code from
         # https://huggingface.co/deepseek-ai/DeepSeek-V3-0324/blob/main/modeling_deepseek.py for
         # its more ascend compute friendly
@@ -141,7 +140,6 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
               self).__init__(head_size, rotary_dim, max_position_embeddings,
                              base, is_neox_style, dtype)
         self.max_seq_len = max_position_embeddings
-        print("Ascend set cos_cache")
         self._set_cos_sin_cache(seq_len=max_position_embeddings,
                                 device=NPUPlatform.device_type,
                                 dtype=dtype)
@@ -225,7 +223,6 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
              freqs.sin() * self.mscale], dim=-1).to(dtype)
         self.register_buffer("cos_sin_cache", cache, persistent=False)
         self.register_buffer("cos_cached", cos_cached, persistent=False)
-        print("Ascend register buffer cos_cached, sin_cached")
         self.register_buffer("sin_cached", sin_cached, persistent=False)
 
     def forward(self,
@@ -234,7 +231,6 @@ class AscendDeepseekScalingRotaryEmbedding(DeepseekScalingRotaryEmbedding):
                 key: torch.Tensor,
                 offsets: Optional[torch.Tensor] = None,
                 max_seq_len: Optional[int] = None):
-        print("Ascend DeepseekScalingRotaryEmbedding forward called")
         if max_seq_len is not None and max_seq_len > self.max_seq_len:
             self._set_cos_sin_cache(max_seq_len, query.device, query.dtype)
         if len(key.shape) == 2:
