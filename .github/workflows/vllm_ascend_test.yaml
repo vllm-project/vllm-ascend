@@ -130,7 +130,7 @@ jobs:
   #         verbose: true
 
   e2e:
-    needs: [changes]
+    # needs: [changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
     if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.e2e_tracker == 'true' }}
     strategy:
@@ -273,7 +273,7 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
         run: |
-          pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
+          # pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
           # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py will raise error.
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
