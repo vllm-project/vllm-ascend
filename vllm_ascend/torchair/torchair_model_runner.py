@@ -21,16 +21,17 @@ import types
 from typing import Optional
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch_npu
-import torch.distributed as dist
 import vllm.envs as envs_vllm
 from vllm.config import VllmConfig
-from vllm.forward_context import get_forward_context
-from vllm.logger import logger
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_dp_group
+from vllm.forward_context import get_forward_context
+from vllm.logger import logger
 
+import vllm_ascend.envs as envs_ascend
 from vllm_ascend.ascend_config import get_ascend_config
 from vllm_ascend.attention.utils import TorchairCommonAttentionMetadata
 from vllm_ascend.platform import NPUPlatform
@@ -39,8 +40,6 @@ from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
                                is_310p, maybe_converting_weight_acl_format)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-
-import vllm_ascend.envs as envs_ascend
 
 
 class NPUTorchairModelRunner(NPUModelRunner):
@@ -67,7 +66,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
         torch._dynamo.config.capture_dynamic_output_shape_ops = True
         torch._logging.set_logs(
             recompiles=envs_ascend.VLLM_ASCEND_TRACE_RECOMPILES)
-        
+
         self._check_batch_sizes_consistency()
 
     def _get_forward_metadata_across_dp_and_pad(
@@ -340,7 +339,7 @@ class NPUTorchairModelRunner(NPUModelRunner):
             f"cur batch_size is invalid, torchair_graph_batch_sizes is "
             f"{self.torchair_graph_batch_sizes}, but cur batch_size is {batch_size}."
         )
-    
+
     def _init_torchair_graph_batch_sizes(self):
         start_graph_batch_size = 4
         tp_size = get_tensor_model_parallel_world_size()
@@ -393,8 +392,10 @@ class NPUTorchairModelRunner(NPUModelRunner):
                         f"{self.scheduler_config.max_num_batched_tokens} will skip this batch size."
                     )
             self.torchair_graph_batch_sizes = new_graph_batch_sizes
-    
-    def _drafter_prepare_inputs(self, attn_metadata, num_rejected_tokens, positions, hidden_states, num_scheduled_tokens):
+
+    def _drafter_prepare_inputs(self, attn_metadata, num_rejected_tokens,
+                                positions, hidden_states,
+                                num_scheduled_tokens):
         cu_num_tokens, accepted_token_indices, target_token_ids, \
             target_positions, target_hidden_states, target_slot_mapping = self.drafter.prepare_inputs(
             attn_metadata.query_start_loc,
@@ -406,10 +407,10 @@ class NPUTorchairModelRunner(NPUModelRunner):
             is_torchair_graph=True,
         )
         return cu_num_tokens, accepted_token_indices, target_token_ids, target_positions, target_hidden_states, target_slot_mapping
-    
+
     def _use_aclgraph(self) -> bool:
         return False
-    
+
     def _check_batch_sizes_consistency(self) -> None:
         if not dist.is_initialized():
             return

@@ -35,7 +35,6 @@ import torch.nn as nn
 from vllm.attention import AttentionType, get_attn_backend
 from vllm.attention.layer import Attention
 from vllm.config import CompilationLevel, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group)
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
@@ -350,7 +349,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         )
 
         self.moe_comm_method = AllGatherCommImpl
-    
+
     def _use_aclgraph(self) -> bool:
         return self.vllm_config.compilation_config.level == CompilationLevel.PIECEWISE \
             and not self.model_config.enforce_eager
@@ -1006,8 +1005,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> tuple[Union[AscendMetadata, AscendMLAMetadata,
-                     AscendTorchairMetadata], torch.Tensor, np.ndarray, int, torch.Tensor, int, torch.Tensor, SpecDecodeMetadata, Optional[torch.Tensor],
-               Optional[torch.Tensor], Optional[torch.Tensor]]:
+                     AscendTorchairMetadata], torch.Tensor, np.ndarray, int,
+               torch.Tensor, int, torch.Tensor, SpecDecodeMetadata,
+               Optional[torch.Tensor], Optional[torch.Tensor],
+               Optional[torch.Tensor]]:
         # Check input valid
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -1108,7 +1109,8 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.seq_lens[num_reqs:].fill_(0)
         self.query_start_loc[num_reqs + 1:].fill_(-1)
 
-        attn_state = self._build_attn_state(num_reqs, num_scheduled_tokens, num_valid_tokens)
+        attn_state = self._build_attn_state(num_reqs, num_scheduled_tokens,
+                                            num_valid_tokens)
 
         self.attn_mask = self._make_attention_mask(
             seq_lens=seq_lens,
@@ -1223,7 +1225,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             num_tokens_across_dp = num_tokens_across_dp_native
         else:
             num_input_tokens = padded_num_tokens_across_dp
-        
+
         use_spec_decode = len(
             scheduler_output.scheduled_spec_decode_tokens) > 0
         if not use_spec_decode:
@@ -1233,13 +1235,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             # We will ignore the sampled tokens from the partial requests.
             # TODO: Support prompt logprobs.
             spec_decode_metadata = None
-            logits_indices = torch.from_numpy(cu_num_tokens - 1).to(self.device,
-                                                             non_blocking=True)
+            logits_indices = torch.from_numpy(cu_num_tokens - 1).to(
+                self.device, non_blocking=True)
         else:
             # Get the number of draft tokens for each request.
             # Iterate over the dictionary rather than all requests since not all
             # requests have draft tokens.
-            num_draft_tokens = np.zeros(self.input_batch.num_reqs, dtype=np.int32)
+            num_draft_tokens = np.zeros(self.input_batch.num_reqs,
+                                        dtype=np.int32)
             for req_id, draft_token_ids in (
                     scheduler_output.scheduled_spec_decode_tokens.items()):
                 req_idx = self.input_batch.req_id_to_index[req_id]
@@ -1249,9 +1252,14 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_draft_tokens, cu_num_tokens)
             logits_indices = spec_decode_metadata.logits_indices
 
-        return (attn_metadata, positions, num_scheduled_tokens, num_input_tokens, num_tokens_across_dp, padded_num_tokens_across_dp, logits_indices, spec_decode_metadata, input_ids, inputs_embeds, intermediate_tensors)
-    
-    def _build_attn_state(self, num_reqs, num_scheduled_tokens, num_valid_tokens):
+        return (attn_metadata, positions, num_scheduled_tokens,
+                num_input_tokens, num_tokens_across_dp,
+                padded_num_tokens_across_dp, logits_indices,
+                spec_decode_metadata, input_ids, inputs_embeds,
+                intermediate_tensors)
+
+    def _build_attn_state(self, num_reqs, num_scheduled_tokens,
+                          num_valid_tokens):
         ascend_config = get_ascend_config()
 
         if np.array_equal(self.seq_lens_np[:num_reqs], num_scheduled_tokens):
@@ -1557,9 +1565,13 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                     return EMPTY_MODEL_RUNNER_OUTPUT
                 return self.kv_connector_no_forward(scheduler_output)
 
-            (attn_metadata, positions, num_scheduled_tokens_np, num_input_tokens, num_tokens_across_dp, padded_num_tokens_across_dp, logits_indices, spec_decode_metadata, input_ids, inputs_embeds, intermediate_tensors) = (self._prepare_inputs(scheduler_output,
-                                                     intermediate_tensors))
-        
+            (attn_metadata, positions, num_scheduled_tokens_np,
+             num_input_tokens, num_tokens_across_dp,
+             padded_num_tokens_across_dp, logits_indices, spec_decode_metadata,
+             input_ids, inputs_embeds,
+             intermediate_tensors) = (self._prepare_inputs(
+                 scheduler_output, intermediate_tensors))
+
         # Run forward pass
         with set_ascend_forward_context(
                 attn_metadata,
@@ -1568,15 +1580,16 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens_across_dp=num_tokens_across_dp,
                 with_prefill=self.with_prefill,
                 reserved_mc2_mask=self.reserved_mc2_mask,
-                moe_comm_method=self.moe_comm_method(self.device, self.dtype,
-                                                self.model_config.hf_config),
+                moe_comm_method=self.moe_comm_method(
+                    self.device, self.dtype, self.model_config.hf_config),
                 num_actual_tokens=scheduler_output.total_num_scheduled_tokens):
             with ProfileExecuteDuration().capture_async("forward"):
                 self.maybe_setup_kv_connector(scheduler_output)
 
                 hidden_states = self._generate_process_reqs_hidden_states(
-                    attn_metadata, self.with_prefill, padded_num_tokens_across_dp,
-                    input_ids, positions, intermediate_tensors, inputs_embeds)
+                    attn_metadata, self.with_prefill,
+                    padded_num_tokens_across_dp, input_ids, positions,
+                    intermediate_tensors, inputs_embeds)
 
         self.maybe_wait_for_kv_save()
         finished_sending, finished_recving = self.get_finished_kv_transfer(
@@ -1615,10 +1628,11 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 logits = None
             else:
                 if self.input_batch.pooling_params:
-                    return self._pool(hidden_states, scheduler_output.total_num_scheduled_tokens,
-                                      num_scheduled_tokens_np,
-                                      finished_sending, finished_recving,
-                                      kv_connector_output)
+                    return self._pool(
+                        hidden_states,
+                        scheduler_output.total_num_scheduled_tokens,
+                        num_scheduled_tokens_np, finished_sending,
+                        finished_recving, kv_connector_output)
                 sample_hidden_states = hidden_states[logits_indices]
                 logits = self.model.compute_logits(sample_hidden_states, None)
             if broadcast_pp_output:
@@ -2462,8 +2476,10 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             token_indices=accepted_token_indices)
         spec_token_ids = draft_token_ids.tolist()
         return spec_token_ids
-    
-    def _drafter_prepare_inputs(self, attn_metadata, num_rejected_tokens, positions, hidden_states, num_scheduled_tokens):
+
+    def _drafter_prepare_inputs(self, attn_metadata, num_rejected_tokens,
+                                positions, hidden_states,
+                                num_scheduled_tokens):
         cu_num_tokens, accepted_token_indices, target_token_ids, \
             target_positions, target_hidden_states, target_slot_mapping = self.drafter.prepare_inputs(
             attn_metadata.query_start_loc,
