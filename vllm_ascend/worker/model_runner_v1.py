@@ -166,7 +166,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         self.load_config = vllm_config.load_config
         self.lora_config = vllm_config.lora_config
         self.parallel_config = vllm_config.parallel_config
-        self.compilation_config = vllm_config.compilation_config
         self.pin_memory = is_pin_memory_available()
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
