@@ -495,6 +495,8 @@ class AscendAttentionBackendImpl(AttentionImpl):
                             mn = torch.finfo(torch.bfloat16).min
                             mask[..., 0 : seq_len - self.sliding_window] = mn
 
+                        
+
                         attn_weights = torch.matmul(q, k.transpose(1, 2)) * self.scale
                         attn_weights = attn_weights + mask
 
@@ -533,7 +535,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         block_table = attn_metadata.block_tables[seq_idx]
 
                         seq_len = int(attn_metadata.seq_lens[seq_idx])
-                        query_len = query_lens[seq_idx]
+                        query_len = int(query_lens[seq_idx])
 
                         # prepare indices to select kv_cache
                         key_cache_indices = torch.empty(seq_len, 
@@ -549,7 +551,7 @@ class AscendAttentionBackendImpl(AttentionImpl):
 
                             key_cache_indices[token_idx] = block_physic_idx * block_size + block_offsets
                             value_cache_indices[token_idx] = block_physic_idx * block_size + block_offsets
-                        
+
                         # Select the kv_cache using kv_cache_indices
                         key_cache = self.key_cache.flatten(0, 1)[key_cache_indices]
                         value_cache = self.value_cache.flatten(0, 1)[value_cache_indices]
@@ -562,14 +564,23 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         k = key_cache.transpose(0, 1)
                         v = value_cache.transpose(0, 1)
 
-                        # Construct mask matrix
-                        mask = attn_metadata.attn_mask[start:end]
+                        # Repeat the kv cache
+                        k = self._repeat_kv(k, self.num_heads // self.num_kv_heads)
+                        v = self._repeat_kv(v, self.num_heads // self.num_kv_heads)
+
+                        # Construct mask matrix for chunked prefill
+                        mn = torch.finfo(torch.bfloat16).min
+                        mask_seq = attn_metadata.attn_mask.masked_fill(attn_metadata.attn_mask != 0, mn)[None, ...]
                         if self.sliding_window is not None and seq_len > self.sliding_window:
-                            mn = torch.finfo(torch.bfloat16).min
-                            mask[..., 0 : seq_len - self.sliding_window] = mn
+                            begin = max(self.sliding_window, seq_len - query_len)
+                            for i in range(begin, seq_len):
+                                mask_seq[0][start + i - begin][0:i - self.sliding_window + 1] = mn
+
+                        # Slice mask to match the attn_weights shape
+                        mask_seq = mask_seq[:, start:end, :seq_len]
 
                         attn_weights = torch.matmul(q, k.transpose(1, 2)) * self.scale
-                        attn_weights = attn_weights + mask
+                        attn_weights = attn_weights + mask_seq
 
                         sinks = self.sinks.reshape(-1, 1, 1).expand(-1, q.shape[-2], -1)
                         combined_logits = torch.cat([attn_weights, sinks], dim=-1)
