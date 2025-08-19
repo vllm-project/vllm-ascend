@@ -1611,7 +1611,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids=[],
-            spec_token_ids=None,
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
