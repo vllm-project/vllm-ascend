@@ -364,7 +364,7 @@ setup(
     version=VERSION,
     author="vLLM-Ascend team",
     license="Apache 2.0",
-    description=("vLLM Ascend backend plugin"),
+    description="vLLM Ascend backend plugin",
     long_description=read_readme(),
     long_description_content_type="text/markdown",
     url="https://github.com/vllm-project/vllm-ascend",
