@@ -139,7 +139,6 @@ class ProxyState:
         ]
         self.req_to_prefiller = {}
         self.req_id_lock = asyncio.Lock()
-        self.req_id_counter = 0
         # Removed selection locks - no longer needed for synchronous methods
 
         # Initialize priority queues for efficient server selection
@@ -195,7 +194,6 @@ class ProxyState:
 
     async def next_req_id(self):
         async with self.req_id_lock:
-            self.req_id_counter += 1
             return str(uuid.uuid4())
 
     def select_prefiller(self, token_count):  # Changed to synchronous
