@@ -19,12 +19,13 @@ Compare the outputs of vLLM with and without aclgraph.
 
 Run `pytest tests/compile/test_aclgraph.py`.
 """
-
 import pytest
 import torch
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 
-MODELS = ["deepseek-ai/DeepSeek-V2-Lite"]
+from tests.e2e.conftest import VllmRunner
+
+MODELS = ["Qwen/Qwen2.5-0.5B-Instruct"]
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -32,36 +33,43 @@ MODELS = ["deepseek-ai/DeepSeek-V2-Lite"]
 def test_models(
     model: str,
     max_tokens: int,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    return
-
-    prompts = "The president of the United States is"
+    prompts = ["The president of the United States is"]
 
     sampling_params = SamplingParams(
         max_tokens=max_tokens,
         temperature=0.0,
     )
 
-    vllm_model = LLM(model, long_prefill_token_threshold=4, enforce_eager=True)
-    output_chunked = vllm_model.generate(prompts, sampling_params)
-    logprobs_chunked = output_chunked.outputs[0].logprobs
-    del vllm_model
-    torch.npu.empty_cache()
+    with VllmRunner(model, long_prefill_token_threshold=20,
+                    enforce_eager=True) as vllm_model:
+        output1 = vllm_model.generate(prompts, sampling_params)
 
-    vllm_model = LLM(model,
-                     enforce_eager=True,
-                     additional_config={
-                         'ascend_scheduler_config': {
-                             'enabled': True
-                         },
-                     })
-    output = vllm_model.generate(prompts, sampling_params)
-    logprobs = output.outputs[0].logprobs
-    del vllm_model
-    torch.npu.empty_cache()
+    with VllmRunner(model,
+                    enforce_eager=True,
+                    additional_config={
+                        'ascend_scheduler_config': {
+                            'enabled': True
+                        },
+                    }) as vllm_model:
+        output2 = vllm_model.generate(prompts, sampling_params)
 
-    logprobs_similarity = torch.cosine_similarity(logprobs_chunked.flatten(),
-                                                  logprobs.flatten(),
-                                                  dim=0)
-    assert logprobs_similarity > 0.95
+    # Extract the generated token IDs for comparison
+    token_ids1 = output1[0][0][0]
+    token_ids2 = output2[0][0][0]
+
+    print(f"Token IDs 1: {token_ids1}")
+    print(f"Token IDs 2: {token_ids2}")
+
+    # Convert token IDs to tensors and calculate cosine similarity
+    # Take the length of a shorter sequence to ensure consistent dimensions
+    min_len = min(len(token_ids1), len(token_ids2))
+
+    tensor1 = torch.tensor(token_ids1[:min_len], dtype=torch.float32)
+    tensor2 = torch.tensor(token_ids2[:min_len], dtype=torch.float32)
+
+    # Calculate similarity using torch.cosine_similarity
+    similarity = torch.cosine_similarity(tensor1, tensor2, dim=0)
+    print(f"Token IDs cosine similarity: {similarity.item()}")
+
+    assert similarity > 0.95
