@@ -69,6 +69,18 @@ std::tuple<at::Tensor, at::Tensor> get_masked_input_and_mask_meta(
     return {masked_input, mask};
 }
 
+at::Tensor bgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &indices, at::Tensor &y,
+                       int64_t slice_offset, int64_t slice_size) {
+    at::Tensor y_out = at::empty_like(y);
+    return y_out;
+}
+
+at::Tensor sgmv_expand_meta(at::Tensor &x, at::Tensor &weight, at::Tensor &lora_indices, at::Tensor &seq_len,
+                       at::Tensor &y, int64_t slice_offset, int64_t slice_size) {
+    at::Tensor y_out = at::empty_like(y);
+    return y_out;
+}
+
 
 } // namespace meta
 } // namespace vllm_ascend
@@ -81,6 +93,10 @@ namespace {
     ops.impl("rotary_embedding", &vllm_ascend::meta::rotary_embedding_meta);
     // Masked input and mask meta implementation
     ops.impl("get_masked_input_and_mask", &vllm_ascend::meta::get_masked_input_and_mask_meta);
+    // Bgmv expand
+    ops.impl("bgmv_expand", &vllm_ascend::meta::bgmv_expand_meta);
+    // Sgmv expand
+    ops.impl("sgmv_expand", &vllm_ascend::meta::sgmv_expand_meta);
 
 }
 }
