@@ -41,4 +41,3 @@ def make_compiler(compilation_config: CompilationConfig) -> CompilerInterface:
 
 vllm.compilation.backends.make_compiler = make_compiler
 vllm.compilation.backends.VllmBackend.configure_post_pass = configure_post_pass
-

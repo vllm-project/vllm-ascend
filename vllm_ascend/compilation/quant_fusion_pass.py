@@ -16,47 +16,50 @@
 # limitations under the License.
 #
 
-import torch
-from torch.fx.subgraph_rewriter import replace_pattern
-import torch_npu
 from typing import List, Tuple
+
+import torch
+import torch_npu
+from torch.fx.subgraph_rewriter import replace_pattern
 from vllm.compilation.vllm_inductor_pass import VllmInductorPass
 
 
-
 class AddRMSNormQuantPattern:
+
     def __init__(self, vllm_config):
         self.vllm_config = vllm_config
 
-
     def register(self, patterns: List[Tuple[callable]]):
 
-      def pattern(rms_norm_input, residual, rms_norm_weight, scale, offset):
-          """
+        def pattern(rms_norm_input, residual, rms_norm_weight, scale, offset):
+            """
           Pattern for AddRMSNormQuant fusion.
           """
-          output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, 1e-6)
-          out0 = output[0]
-          out1 = output[2]
-          quantized_output = torch.ops.npu.npu_quantize(out0, scale, offset, torch.qint8, -1, False)
-          return quantized_output, out1
+            output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual,
+                                                    rms_norm_weight, 1e-6)
+            out0 = output[0]
+            out1 = output[2]
+            quantized_output = torch.ops.npu.npu_quantize(
+                out0, scale, offset, torch.qint8, -1, False)
+            return quantized_output, out1
 
-      def replace(rms_norm_input, residual, rms_norm_weight, scale, offset):
-          """
+        def replace(rms_norm_input, residual, rms_norm_weight, scale, offset):
+            """
           Replacement for the AddRMSNormQuant fusion.
           """
-          output = torch.ops.npu.npu_add_rms_norm_quant(
-              rms_norm_input, 
-              residual, 
-              rms_norm_weight, 
-              1. / scale, 
-              offset, 
-              epsilon=1e-6)
-          quantized_output = output[0]
-          out1 = output[2]
-          return quantized_output, out1
+            output = torch.ops.npu.npu_add_rms_norm_quant(
+                rms_norm_input,
+                residual,
+                rms_norm_weight,
+                1. /
+                scale,  # The inverse of scale is required by npu_add_rms_norm_quant kernel which is opposite to the npu_quantize kernel.
+                offset,
+                epsilon=1e-6)
+            quantized_output = output[0]
+            out1 = output[2]
+            return quantized_output, out1
 
-      patterns.append((pattern, replace))
+        patterns.append((pattern, replace))
 
 
 class AscendQuantFusionPass(VllmInductorPass):
@@ -73,9 +76,9 @@ class AscendQuantFusionPass(VllmInductorPass):
     def __call__(self, graph: torch.fx.Graph):
         self.begin()
         for pattern, replace in self.patterns:
-          replace_pattern(graph, pattern, replace)
+            replace_pattern(graph, pattern, replace)
         self.end_and_log()
-    
+
     def is_applicable(self, **kwargs):
         """
         Check if the pass is applicable for the current configuration.
@@ -83,8 +86,8 @@ class AscendQuantFusionPass(VllmInductorPass):
         arg_dtypes = kwargs.get("arg_dtypes", None)
         if arg_dtypes is None:
             return False
-        # We assume the first tensor's dtype is the data type of this model, update this solution when there is 
+        # We assume the first tensor's dtype is the data type of this model, update this solution when there is
         # better solution.
-        dtype = arg_dtypes[0] if isinstance(arg_dtypes, list) and len(arg_dtypes) > 0 else arg_dtypes
+        dtype = arg_dtypes[0] if isinstance(
+            arg_dtypes, list) and len(arg_dtypes) > 0 else arg_dtypes
         return dtype in (torch.bfloat16)
-

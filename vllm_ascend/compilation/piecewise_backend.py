@@ -71,8 +71,10 @@ class NPUPiecewiseBackend:
         """
         self.graph = graph
         self.vllm_config = vllm_config
-        self.ascend_compilation_config: dict = vllm_config.additional_config.get("ascend_compilation_config", {})
-        self.fx_graph_eager = self.ascend_compilation_config.get("fx_graph_eager", False)
+        self.ascend_compilation_config: dict = vllm_config.additional_config.get(
+            "ascend_compilation_config", {})
+        self.fx_graph_eager = self.ascend_compilation_config.get(
+            "fx_graph_eager", False)
         self.compilation_config = vllm_config.compilation_config
         self.graph_pool = graph_pool
         self.piecewise_compile_index = piecewise_compile_index
@@ -108,7 +110,8 @@ class NPUPiecewiseBackend:
             self.concrete_size_entries[shape] = ConcreteSizeEntry(
                 runtime_shape=shape,
                 need_to_compile=shape in self.compile_sizes,
-                use_aclgraph=not self.fx_graph_eager and shape in self.aclgraph_capture_sizes,
+                use_aclgraph=not self.fx_graph_eager
+                and shape in self.aclgraph_capture_sizes,
             )
 
     def check_for_ending_compilation(self):
