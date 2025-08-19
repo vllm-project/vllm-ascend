@@ -149,6 +149,7 @@ class NPUPlatform(Platform):
                 CUDAGraphMode.PIECEWISE
         else:
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+        vllm_config._set_cudagraph_sizes()
 
         # TODO(cmq): update the compilation level config to be determined by CUDAGraphMode
         if enforce_eager or compilation_config.level == CompilationLevel.NO_COMPILATION:
@@ -180,7 +181,6 @@ class NPUPlatform(Platform):
             if envs_vllm.VLLM_USE_V1 and \
                 compilation_config.level == CompilationLevel.PIECEWISE:
                 compilation_config.set_splitting_ops_for_v1()
-            vllm_config._set_cudagraph_sizes()
             compilation_config.use_inductor = False
             compilation_config.splitting_ops.extend(
                 ["vllm.unified_ascend_attention_with_output"])
