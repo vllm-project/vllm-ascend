@@ -90,4 +90,6 @@ class AscendQuantFusionPass(VllmInductorPass):
         # better solution.
         dtype = arg_dtypes[0] if isinstance(
             arg_dtypes, list) and len(arg_dtypes) > 0 else arg_dtypes
-        return dtype in (torch.bfloat16)
+        # We found that the kernel npu_add_rms_norm_quant accept varying data format for different dtypes, therefore, we only
+        # provide the solution on bfloat16 here.
+        return dtype in (torch.bfloat16, )
