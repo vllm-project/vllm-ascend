@@ -656,6 +656,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.layers = config.num_hidden_layers
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tp_group().rank_in_group
+        self.layer_name = prefix
         ascend_config = get_ascend_config()
         # TODO: enable mla in vllm-ascend
         if model_config.use_mla:
@@ -714,7 +715,8 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
         kv_cache: Optional[torch.Tensor] = None,
-        attn_metadata: Optional[AttentionMetadata] = None,
+        attn_metadata: Optional[Union["AttentionMetadata",
+                        dict[str, "AttentionMetadata"]]] = None,
         replace_allreduce: bool = False,
     ) -> torch.Tensor:
         # Self Attention
@@ -737,6 +739,10 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
             hidden_states = tensor_model_parallel_all_gather(hidden_states,
                                                              dim=0)
 
+        if attn_metadata is None:
+            attn_metadata = get_forward_context().attn_metadata
+        if isinstance(attn_metadata, dict):
+            attn_metadata = attn_metadata[f"{self.layer_name}.self_attn.attn"]
         hidden_states = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
@@ -860,6 +866,7 @@ class CustomDeepseekV2Model(nn.Module):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
+        self.layer_prefix = f"{prefix}.layers"
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -869,10 +876,15 @@ class CustomDeepseekV2Model(nn.Module):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: Optional[List[torch.Tensor]] = None,
-        attn_metadata: Optional[AttentionMetadata] = None,
+        attn_metadata: Optional[Union["AttentionMetadata",
+                        dict[str, "AttentionMetadata"]]] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
+        if attn_metadata is None:
+            attn_metadata = get_forward_context().attn_metadata
+        if isinstance(attn_metadata, dict):
+            attn_metadata = attn_metadata[f"{self.layer_prefix}.0.self_attn.attn"]
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -1038,7 +1050,8 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: Optional[List[torch.Tensor]] = None,
-        attn_metadata: Optional[AttentionMetadata] = None,
+        attn_metadata: Optional[Union["AttentionMetadata",
+                        dict[str, "AttentionMetadata"]]] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
