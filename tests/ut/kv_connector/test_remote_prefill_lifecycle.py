@@ -42,7 +42,8 @@ def test_basic_lifecycle():
 
     request = create_request(request_id=1,
                              num_tokens=NUM_TOKENS,
-                             do_remote_prefill=True)
+                             do_remote_prefill=True,
+                             block_size=BLOCK_SIZE)
 
     scheduler.add_request(request)
     request_id = request.request_id

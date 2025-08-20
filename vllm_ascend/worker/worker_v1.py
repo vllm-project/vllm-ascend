@@ -236,7 +236,9 @@ class NPUWorker(WorkerBase):
             self.model_runner.load_model()
 
     def compile_or_warm_up_model(self) -> None:
-        warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
+        # Note: need to adapt for graph mode.
+        warmup_sizes = (self.vllm_config.compilation_config.compile_sizes
+                        or []).copy()
         if not self.model_config.enforce_eager:
             warmup_sizes = [
                 x for x in warmup_sizes if x not in
