@@ -4,10 +4,11 @@ from enum import Enum
 from typing import Any, Optional
 
 import torch
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed import (get_dp_group, get_ep_group,
                               get_tensor_model_parallel_world_size)
-from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.forward_context import (BatchDescriptor, get_forward_context,
+                                  set_forward_context)
 
 import vllm_ascend.envs as envs_ascend
 from vllm_ascend.distributed.moe_comm_method import MoECommMethod
@@ -48,26 +49,31 @@ def _get_fused_moe_state(ep_size: int, with_prefill: bool,
 
 @contextmanager
 def set_ascend_forward_context(
-    attn_metadata: Any,
-    vllm_config: VllmConfig,
-    virtual_engine: int = 0,
-    num_tokens: Optional[int] = None,
-    num_tokens_across_dp: Optional[torch.Tensor] = None,
-    with_prefill: bool = True,
-    in_profile_run: bool = False,
-    reserved_mc2_mask: Optional[torch.Tensor] = None,
-    moe_comm_method: Optional[MoECommMethod] = None,
-    num_actual_tokens: Optional[int] = None,
-):
+        attn_metadata: Any,
+        vllm_config: VllmConfig,
+        virtual_engine: int = 0,
+        num_tokens: Optional[int] = None,
+        num_tokens_across_dp: Optional[torch.Tensor] = None,
+        with_prefill: bool = True,
+        in_profile_run: bool = False,
+        reserved_mc2_mask: Optional[torch.Tensor] = None,
+        moe_comm_method: Optional[MoECommMethod] = None,
+        num_actual_tokens: Optional[int] = None,
+        aclgraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        batch_descriptor: Optional[BatchDescriptor] = None):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
     We add some additional param into forward_context.
     """
-    with set_forward_context(attn_metadata,
-                             vllm_config,
-                             virtual_engine=virtual_engine,
-                             num_tokens=num_tokens,
-                             num_tokens_across_dp=num_tokens_across_dp):
+    with set_forward_context(
+            attn_metadata,
+            vllm_config,
+            virtual_engine=virtual_engine,
+            num_tokens=num_tokens,
+            num_tokens_across_dp=num_tokens_across_dp,
+            cudagraph_runtime_mode=aclgraph_runtime_mode,
+            batch_descriptor=batch_descriptor,
+    ):
         forward_context = get_forward_context()
         forward_context.moe_comm_method = moe_comm_method
         forward_context.with_prefill = with_prefill
