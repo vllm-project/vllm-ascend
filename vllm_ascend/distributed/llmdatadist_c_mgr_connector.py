@@ -884,7 +884,7 @@ class LLMDataDistCMgrConnectorWorker():
                 if now < expires:
                     break
                 logger.warning(
-                    "Some requests in prefill node fail to receive KV Cache transfer done signal. "
+                    f"Some requests in prefill node fail to receive KV Cache transfer done signal in {envs.VLLM_LLMDD_ABORT_REQUEST_TIMEOUT}s. "
                     "If a greater mean TTFT is acceptable, you can 'export VLLM_LLMDD_ABORT_REQUEST_TIMEOUT=600' (10 minutes) to relax the timeout condition. "
                 )
                 if req_id in self.reqs_to_send:

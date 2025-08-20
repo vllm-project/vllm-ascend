@@ -252,7 +252,7 @@ def with_cancellation(handler_func):
         if handler_task in done:
             return handler_task.result()
         return None
-    
+
     return wrapper
 
 
@@ -461,4 +461,3 @@ if __name__ == '__main__':
     global_args = parse_args()
     import uvicorn
     uvicorn.run(app, host=global_args.host, port=global_args.port)
-    
