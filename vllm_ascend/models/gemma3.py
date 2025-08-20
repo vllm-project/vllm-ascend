@@ -1,34 +1,35 @@
 from collections.abc import Iterable
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 from torch import nn
 from transformers import Gemma3TextConfig
+from vllm_ascend.ops.layernorm import AddRMSNormW8A8Quant, AscendRMSNorm
+from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
+from vllm.model_executor.layers.vocab_parallel_embedding import \
+    VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.model_executor.models.gemma3 import (Gemma3Attention,
+                                               Gemma3DecoderLayer,
+                                               Gemma3ForCausalLM, Gemma3MLP,
+                                               Gemma3Model)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
+from .utils import (is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
-from vllm.model_executor.models.gemma3 import (Gemma3DecoderLayer, Gemma3Model, Gemma3Attention,
-                                               Gemma3MLP, Gemma3ForCausalLM)
 
-from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
-from vllm_ascend.ops.layernorm import AddRMSNormW8A8Quant, AscendRMSNorm
 
 class AscendGemma3DecoderLayer(Gemma3DecoderLayer):
-
     def __init__(
         self,
         config: Gemma3TextConfig,
@@ -58,34 +59,32 @@ class AscendGemma3DecoderLayer(Gemma3DecoderLayer):
             quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
-        
+
         self.input_layernorm = AscendRMSNorm(config.hidden_size,
-                                            eps=config.rms_norm_eps)
+                                             eps=config.rms_norm_eps)
         self.post_attention_layernorm = AscendRMSNorm(config.hidden_size,
-                                                     eps=config.rms_norm_eps)
-        self.pre_feedforward_layernorm = AscendRMSNorm(config.hidden_size,
                                                       eps=config.rms_norm_eps)
-        self.post_feedforward_layernorm = AscendRMSNorm(config.hidden_size,
+        self.pre_feedforward_layernorm = AscendRMSNorm(config.hidden_size,
                                                        eps=config.rms_norm_eps)
-        
+        self.post_feedforward_layernorm = AscendRMSNorm(
+            config.hidden_size, eps=config.rms_norm_eps)
+
         if isinstance(self.self_attn.qkv_proj.quant_method.quant_method,
                       AscendW8A8LinearMethod):
             self.input_layernorm = AddRMSNormW8A8Quant(
                 config.hidden_size,
                 layer=self.self_attn.qkv_proj,
-                eps=config.rms_norm_eps
-            )
+                eps=config.rms_norm_eps)
         if isinstance(self.mlp.gate_up_proj.quant_method.quant_method,
                       AscendW8A8LinearMethod):
             self.pre_feedforward_layernorm = AddRMSNormW8A8Quant(
                 config.hidden_size,
                 layer=self.mlp.gate_up_proj,
-                eps=config.rms_norm_eps
-            )
+                eps=config.rms_norm_eps)
+
 
 @support_torch_compile
 class AscendGemma3Model(Gemma3Model):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
@@ -117,7 +116,7 @@ class AscendGemma3Model(Gemma3Model):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
-    
+
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
@@ -175,6 +174,7 @@ class AscendGemma3Model(Gemma3Model):
 
         return loaded_params
 
+
 class AscendGemma3ForCausalLM(Gemma3ForCausalLM):
     packed_modules_mapping = {
         "qkv_proj": [
@@ -201,9 +201,8 @@ class AscendGemma3ForCausalLM(Gemma3ForCausalLM):
         assert config.tie_word_embeddings
         self.quant_config = quant_config
         self.model = AscendGemma3Model(vllm_config=vllm_config,
-                                 prefix=maybe_prefix(prefix, "model"))
+                                       prefix=maybe_prefix(prefix, "model"))
         self.logits_processor = LogitsProcessor(
             config.vocab_size, soft_cap=config.final_logit_softcapping)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
-        
