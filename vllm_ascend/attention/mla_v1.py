@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional, Tuple, Type, TypeVar
+from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Type, TypeVar
 
 import torch
 import torch_npu
@@ -415,6 +415,21 @@ class AscendMLAMetadataBuilder:
         )
 
 
+class DecodeMLAPreprocessResult(NamedTuple):
+    ql_nope: Optional[torch.Tensor] = None
+    q_pe: Optional[torch.Tensor] = None
+    k_nope: Optional[torch.Tensor] = None
+    k_pe: Optional[torch.Tensor] = None
+
+
+class PrefillMLAPreprocessResult(NamedTuple):
+    q_nope: Optional[torch.Tensor] = None
+    q_pe: Optional[torch.Tensor] = None
+    k_nope: Optional[torch.Tensor] = None
+    k_pe: Optional[torch.Tensor] = None
+    value: Optional[torch.Tensor] = None
+
+
 class AscendMLAImpl(MLAAttentionImpl):
     """
     NOTE: Please read the comment at the top of the file before trying to
@@ -456,9 +471,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         self.kv_a_layernorm = kwargs.get('kv_a_layernorm', None)
         self.q_a_proj = kwargs.get('q_a_proj', None)
         self.q_a_layernorm = kwargs.get('q_a_layernorm', None)
-        self.debug_layer_idx = kwargs["debug_layer_idx"]
-        self.first_k_dense_replace = kwargs["first_k_dense_replace"]
-        self.num_layers = kwargs["layers"]
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.tp_size = get_tensor_model_parallel_world_size()
 
@@ -551,7 +563,8 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _compute_prefill_context(
         self,
-        query: torch.Tensor,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
         kv_c_and_k_pe_cache: Tuple[torch.Tensor],
         rope_dim: int,
         attn_metadata: AscendMLAMetadata,
@@ -564,8 +577,6 @@ class AscendMLAImpl(MLAAttentionImpl):
             return prefix_output, prefix_lse
 
         iters = len(prefill_metadata.chunked_context.seq_tot)
-        q_pe = query[..., self.qk_nope_head_dim:]
-        q_nope = query[..., :self.qk_nope_head_dim]
 
         seq_len1 = torch.tensor(prefill_metadata.query_lens, dtype=torch.int32)
         cache_kv_c = kv_c_and_k_pe_cache[0]
@@ -630,31 +641,26 @@ class AscendMLAImpl(MLAAttentionImpl):
 
     def _forward_prefill(
         self,
-        query: torch.Tensor,
-        kv_c_normed: torch.Tensor,
+        q_nope: torch.Tensor,
+        q_pe: torch.Tensor,
+        k_nope: torch.Tensor,
         k_pe: torch.Tensor,
+        value: torch.Tensor,
         kv_c_and_k_pe_cache: Tuple[torch.Tensor],
         attn_metadata: AscendMLAMetadata,
     ) -> torch.Tensor:
         assert attn_metadata.prefill is not None
         assert len(kv_c_and_k_pe_cache) > 1
-
         num_tokens = query.size(0)
         attn_output = torch.empty(num_tokens,
                                   self.num_heads,
                                   self.v_head_dim,
-                                  dtype=query.dtype,
-                                  device=query.device)
-        k_nope, value = self.kv_b_proj(kv_c_normed)[0].view(
-            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim).split(
-                [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
+                                  dtype=q_nope.dtype,
+                                  device=q_nope.device)
         attn_lse = torch.empty(self.num_heads,
                                 num_tokens,
                                 dtype=torch.float32,
-                                device=query.device)
-        q_pe = query[..., self.qk_nope_head_dim:]
-        q_nope = query[..., :self.qk_nope_head_dim]
+                                device=q_nope.device)
         mask = torch.triu(
             torch.ones(512, 512, device=query.device, dtype=query.dtype),
             1)  # 512: mask only support 512
@@ -682,13 +688,13 @@ class AscendMLAImpl(MLAAttentionImpl):
             output=attn_output,
             softmax_lse=attn_lse)
         attn_output, attn_lse = self._compute_prefill_context( \
-            query, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse)
+            q_nope, q_pe, kv_c_and_k_pe_cache, self.qk_rope_head_dim, attn_metadata, attn_output, attn_lse)
 
         attn_output = attn_output.reshape(
             [num_tokens, self.num_heads * self.v_head_dim])
         return attn_output
 
-    def exec_kv(
+    def exec_kv_decode(
         self,
         kv_no_split: torch.Tensor,
         cos: torch.Tensor,
@@ -696,7 +702,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_cache: Tuple,
         slots: torch.Tensor,
     ):
-
         B = kv_no_split.shape[0]
         N = self.num_kv_heads
         S = 1
@@ -724,7 +729,6 @@ class AscendMLAImpl(MLAAttentionImpl):
         kv_cache: Tuple,
         slots: torch.Tensor,
     ):
-
         B = kv_no_split.shape[0]
         N = self.num_kv_heads
         S = 1
@@ -832,29 +836,25 @@ class AscendMLAImpl(MLAAttentionImpl):
                 current_ms_metadata.before_comm_event.wait()
                 return self._v_up_proj(attn_output)
 
-    def forward(
+    def _mla_preprocess(
         self,
-        hidden_states: torch.Tensor,  # query in unified attn
-        kv_cache: Tuple[torch.Tensor],
-        attn_metadata: M,
-        output: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        assert output is not None, "Output tensor must be provided."
-        if attn_metadata is None:
-            # Profiling run.
-            return output
-        num_actual_tokens = attn_metadata.num_actual_tokens
-        assert attn_metadata.num_decodes is not None and \
-        attn_metadata.num_prefills is not None and \
-        attn_metadata.num_decode_tokens is not None
+        hidden_states,
+        kv_cache,
+        attn_metadata,
+        need_gather_q_kv
+    ):
+        # MLA Preprocess:
+        # 1. Perform q_a_proj and q_a_layernorm to obtain q_c
+        # 2. Perform kv_a_proj_with_mqa to obtain kv_no_split
+        # 3. If need_gather_q_kv, perform all_gather.
+        # 4. Preprocess decode tokens, write kv cache and get:
+        # decode_ql_nope, decode_q_pe, decode_k_pe, decode_k_nope
+        # 5. Preprocess prefill tokens, write kv cache and get:
+        # prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value
         has_decode = attn_metadata.num_decodes > 0
         has_prefill = attn_metadata.num_prefills > 0
         num_decode_tokens = attn_metadata.num_decode_tokens
-        # Inputs and outputs may be padded for CUDA graphs
-        output_padded = output
-        output = output[:num_actual_tokens, ...]
-
-        # MLA Preprocess
+        num_actual_tokens = attn_metadata.num_actual_tokens
         if self.q_a_proj is not None:
             npu_prefetch(self.q_a_proj.weight,
                          hidden_states,
@@ -864,44 +864,30 @@ class AscendMLAImpl(MLAAttentionImpl):
         else:
             q_c = hidden_states
 
-        # Process for shared_expert_dp
         kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]
-        if self.enable_shared_expert_dp and self.debug_layer_idx > self.first_k_dense_replace and self.debug_layer_idx < self.num_layers:
+        # Process for shared_expert_dp
+        if need_gather_q_kv:
             q_c = get_tp_group().all_gather(
                 q_c, 0)
             kv_no_split = get_tp_group().all_gather(kv_no_split, 0)
-        o_proj_input_shape = (num_actual_tokens,
-                              self.num_heads * self.v_head_dim)
-        o_proj_input = torch.empty(o_proj_input_shape,
-                                   dtype=q_c.dtype,
-                                   device=q_c.device)
+        decode_preprocess_res = None
+        prefill_preprocess_res = None
+        # Preprocess for decode tokens
         if has_decode:
-            # MLA Preprocess for decoding
             decode_q_c = q_c[:num_decode_tokens]
             cos = attn_metadata.decode.cos
             sin = attn_metadata.decode.sin
             decode_ql_nope, decode_q_pe = \
                 self._q_proj_and_k_up_proj(decode_q_c)
+            decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
             decode_slots = attn_metadata.slot_mapping[:num_decode_tokens]
             decode_kv_no_split = kv_no_split[:num_decode_tokens]
-            decode_k_pe, decode_k_nope = self.exec_kv(
+            decode_k_pe, decode_k_nope = self.exec_kv_decode(
                 decode_kv_no_split, cos, sin, kv_cache,
                 decode_slots)
-            decode_q_pe = self.rope_single(decode_q_pe, cos, sin)
-            output_decode = self._forward_decode(decode_ql_nope,
-                                                 decode_q_pe,
-                                                 decode_k_nope,
-                                                 decode_k_pe,
-                                                 kv_cache[0].shape[1],
-                                                 attn_metadata)
-            current_ms_metadata = get_multistream_comm_context()
-            if current_ms_metadata is not None:
-                with torch.npu.stream(current_ms_metadata.comm_stream):
-                    o_proj_input[:num_decode_tokens] = output_decode
-                    current_ms_metadata.after_comm_event.record()
-            else:
-                o_proj_input[:num_decode_tokens] = output_decode
-
+            decode_preprocess_res = DecodeMLAPreprocessResult(
+                decode_ql_nope, decode_q_pe, decode_k_nope, decode_k_pe)
+        # Preprocess for prefill tokens
         if has_prefill:
             prefill_kv_no_split = kv_no_split[num_decode_tokens:num_actual_tokens]
             prefill_q_c = q_c[num_decode_tokens:num_actual_tokens]
@@ -918,13 +904,70 @@ class AscendMLAImpl(MLAAttentionImpl):
                 prefill_slots)
             prefill_k_pe = prefill_k_pe.view(prefill_q_c.shape[0], self.num_kv_heads,
                                                 -1)
-            prefill_q = torch.cat([prefill_q_nope, prefill_q_pe], dim=-1)
+            prefill_k_nope, prefill_value = self.kv_b_proj(prefill_k_c_normed)[0].view(
+                -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim).split(
+                    [self.qk_nope_head_dim, self.v_head_dim], dim=-1)
+            prefill_k_pe = prefill_k_pe.expand((*prefill_k_nope.shape[:-1], -1))
+            prefill_preprocess_res = PrefillMLAPreprocessResult(
+                prefill_q_nope, prefill_q_pe, prefill_k_nope, prefill_k_pe, prefill_value)
+        return decode_preprocess_res, prefill_preprocess_res
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,  # query in unified attn
+        kv_cache: Tuple[torch.Tensor],
+        attn_metadata: M,
+        need_gather_q_kv: bool = False,
+        output: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        assert output is not None, "Output tensor must be provided."
+        if attn_metadata is None:
+            # Profiling run.
+            return output
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        assert attn_metadata.num_decodes is not None and \
+        attn_metadata.num_prefills is not None and \
+        attn_metadata.num_decode_tokens is not None
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        # Inputs and outputs may be padded for CUDA graphs
+        output_padded = output
+        output = output[:num_actual_tokens, ...]
+        o_proj_input_shape = (num_actual_tokens,
+                              self.num_heads * self.v_head_dim)
+        o_proj_input = torch.empty(o_proj_input_shape,
+                                   dtype=hidden_states.dtype,
+                                   device=hidden_states.device)
+
+        # MLA Preprocess
+        decode_preprocess_res, prefill_preprocess_res = self._mla_preprocess(
+            hidden_states, kv_cache, attn_metadata, need_gather_q_kv)
+
+        if decode_preprocess_res is not None:
+            # MLA Preprocess for decoding
+            output_decode = self._forward_decode(decode_preprocess_res.ql_nope,
+                                                 decode_preprocess_res.q_pe,
+                                                 decode_preprocess_res.k_nope,
+                                                 decode_preprocess_res.k_pe,
+                                                 kv_cache[0].shape[1],
+                                                 attn_metadata)
+            current_ms_metadata = get_multistream_comm_context()
+            if current_ms_metadata is not None:
+                with torch.npu.stream(current_ms_metadata.comm_stream):
+                    o_proj_input[:num_decode_tokens] = output_decode
+                    current_ms_metadata.after_comm_event.record()
+            else:
+                o_proj_input[:num_decode_tokens] = output_decode
+
+        if prefill_preprocess_res is not None:
             # FIX: aicore move should be also placed on the comm stream in dbo,
             # otherwise it may affect the accuracy
             # TODO: use an elegant way to overlap
-            output_prefill = self._forward_prefill(prefill_q,
-                                                   prefill_k_c_normed,
-                                                   prefill_k_pe, kv_cache,
+            output_prefill = self._forward_prefill(prefill_preprocess_res.q_nope,
+                                                   prefill_preprocess_res.q_pe,
+                                                   prefill_preprocess_res.k_nope,
+                                                   prefill_preprocess_res.k_pe,
+                                                   prefill_preprocess_res.value,
+                                                   kv_cache,
                                                    attn_metadata)
             current_ms_metadata = get_multistream_comm_context()
             if current_ms_metadata is not None:
@@ -943,7 +986,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
             output[...] = self.o_proj(
                 o_proj_input,
-                is_prefill=has_prefill,
+                is_prefill=prefill_preprocess_res is not None,
                 is_force_scatter=self.enable_shared_expert_dp)[0]
         else:
             with torch.npu.stream(current_ms_metadata.comm_stream):
@@ -953,7 +996,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                              enabled=self.enable_mla_prefetch)
                 output[...] = self.o_proj(
                     o_proj_input,
-                    is_prefill=has_prefill,
+                    is_prefill=prefill_preprocess_res is not None,
                     is_force_scatter=self.enable_shared_expert_dp)[0]
                 current_ms_metadata.after_comm_event.record()
         del o_proj_input

@@ -371,8 +371,11 @@ class TestAscendMLAImpl(TestBase):
         metadata.prefill = None
         prefix_out = torch.randn(2, 16, 128)
         prefix_lse = torch.randn(2, 16, 8)
-        out, lse = self.impl._compute_prefill_context(query, kv_cache, 32,
-                                                      metadata, prefix_out,
+        q_pe = query[..., self.impl.qk_nope_head_dim:]
+        q_nope = query[..., :self.impl.qk_nope_head_dim]
+
+        out, lse = self.impl._compute_prefill_context(q_nope, q_pe, kv_cache,
+                                                      32, metadata, prefix_out,
                                                       prefix_lse)
 
         self.assertTrue(torch.equal(prefix_out, out))
@@ -386,6 +389,8 @@ class TestAscendMLAImpl(TestBase):
         latent_kv_dim = self.impl.kv_lora_rank
         num_blocks, block_size = 100, 20
         query = torch.randn(S, N, D)
+        q_nope = query[..., :self.impl.qk_nope_head_dim]
+        q_pe = query[..., self.impl.qk_nope_head_dim:]
         kv_cache_0 = torch.randn(num_blocks, block_size, N, latent_kv_dim)
         kv_cache_1 = torch.randn(num_blocks, block_size, N, D)
         kv_cache = [kv_cache_0, kv_cache_1]
@@ -407,7 +412,7 @@ class TestAscendMLAImpl(TestBase):
         meta = MagicMock()
         meta.prefill = prefill_meta
 
-        out, lse = self.impl._compute_prefill_context(query, kv_cache, 32,
+        out, lse = self.impl._compute_prefill_context(q_nope, q_pe, kv_cache, 32,
                                                       meta, prefix_out,
                                                       prefix_lse)
 
