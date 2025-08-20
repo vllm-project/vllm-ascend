@@ -79,7 +79,7 @@ class AscendGemma3DecoderLayer(Gemma3DecoderLayer):
                       AscendW8A8LinearMethod):
             self.pre_feedforward_layernorm = AddRMSNormW8A8Quant(
                 config.hidden_size,
-                layer=self.self_attn.qkv_proj,
+                layer=self.mlp.gate_up_proj,
                 eps=config.rms_norm_eps
             )
 
