@@ -492,7 +492,7 @@ class AscendMLAMetadataBuilder:
         graph_pad_size = common_attn_metadata.graph_pad_size
         use_torchair_graph = graph_pad_size != -1
         if num_decodes > 0:
-            actual_seq_lengths_q = query_start_loc[1:num_decodes+1].tolist()
+            actual_seq_lengths_q = query_start_loc[1:num_decodes + 1].tolist()
             max_seq_lens = seq_lens[:num_decodes].max().item()
             seq_lens = seq_lens[:num_decode_tokens]
             input_positions = input_positions[:num_decode_tokens]
@@ -535,9 +535,10 @@ class AscendMLAMetadataBuilder:
                                                device=input_positions.device)
                 input_positions = torch.cat(
                     [input_positions, position_padding])
-                actual_seq_lengths_q = (actual_seq_lengths_q
-                                        + common_attn_metadata.actual_seq_lengths_q[
-                                          num_reqs:num_reqs + num_reqs_pad_size])
+                actual_seq_lengths_q = (
+                        actual_seq_lengths_q+ common_attn_metadata.
+                        actual_seq_lengths_q[num_reqs:num_reqs +
+                                             num_reqs_pad_size])
             else:
                 seq_lens_list = seq_lens.tolist()
             # mtp torchair + PD scenario, last element of actual_seq_lengths_q must equal to batch_size(num_tokens)
