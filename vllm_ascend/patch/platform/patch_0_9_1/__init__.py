@@ -23,3 +23,4 @@ import vllm_ascend.patch.platform.patch_0_9_1.patch_configs  # noqa
 import vllm_ascend.patch.platform.patch_0_9_1.patch_core  # noqa
 import vllm_ascend.patch.platform.patch_0_9_1.patch_core_client  # noqa
 import vllm_ascend.patch.platform.patch_0_9_1.patch_decorator  # noqa
+import vllm_ascend.patch.platform.patch_0_9_1.patch_scheduler  # noqa
