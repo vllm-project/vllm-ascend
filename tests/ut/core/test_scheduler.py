@@ -8,6 +8,8 @@ from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingParams
+from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
+                                         init_none_hash)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
@@ -36,7 +38,10 @@ def create_requests(
     mm_positions: Optional[list[PlaceholderRange]] = None,
     max_tokens: int = 16,
     stop_token_ids: Optional[list[int]] = None,
+    block_size: int = 3,
+    hash_fn=hash,
 ):
+    init_none_hash(hash_fn)
     prompt_logprobs = PROMPT_LOGPROBS
     sampling_params = SamplingParams(ignore_eos=False,
                                      max_tokens=max_tokens,
@@ -46,16 +51,16 @@ def create_requests(
     for i in range(num_requests):
         mm_position = None
         mm_inputs = None
-        request = Request(
-            request_id=f"{i}",
-            prompt_token_ids=[i] * num_tokens,
-            sampling_params=sampling_params,
-            multi_modal_kwargs=mm_inputs,
-            multi_modal_placeholders=mm_position,
-            multi_modal_hashes=None,
-            eos_token_id=EOS_TOKEN_ID,
-            pooling_params=None,
-        )
+        request = Request(request_id=f"{i}",
+                          prompt_token_ids=[i] * num_tokens,
+                          sampling_params=sampling_params,
+                          multi_modal_kwargs=mm_inputs,
+                          multi_modal_placeholders=mm_position,
+                          multi_modal_hashes=None,
+                          eos_token_id=EOS_TOKEN_ID,
+                          pooling_params=None,
+                          block_hasher=get_request_block_hasher(
+                              block_size, hash_fn))
         requests.append(request)
     return requests
 
