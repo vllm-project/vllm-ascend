@@ -13,11 +13,11 @@ The rank table is a JSON file that specifies the mapping of Ascend NPU ranks to 
 
 Run the following command on every node to generate the rank table:
 ```shell
-cd vllm-ascend/examples/disaggregate_prefill_v1/
+cd /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/
 bash gen_ranktable.sh --ips 172.19.32.175 172.19.241.49 172.19.123.51 172.19.190.36 \
   --npus-per-node 8 --network-card-name eth0 --prefill-device-cnt 16 --decode-device-cnt 16
 ```
-Rank table will generated at `/vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1/ranktable.json`
+Rank table will generated at `/vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/ranktable.json`
 
 ## Start disaggregated vLLM-ascend service
 For demonstration purposes, we will utilize the quantized version of Deepseek-R1. Recommended Parallelization Strategies:
@@ -38,7 +38,7 @@ export HCCL_IF_IP=172.19.32.175  # node ip
 export GLOO_SOCKET_IFNAME="eth0"  # network card name
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1/ranktable.json
+export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/ranktable.json
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
@@ -81,7 +81,7 @@ export HCCL_IF_IP=172.19.241.49
 export GLOO_SOCKET_IFNAME="eth0"
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1/ranktable.json
+export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/ranktable.json
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
@@ -127,7 +127,7 @@ export HCCL_IF_IP=172.19.123.51
 export GLOO_SOCKET_IFNAME="eth0"
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1/ranktable.json
+export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/ranktable.json
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
@@ -169,7 +169,7 @@ export HCCL_IF_IP=172.19.190.36
 export GLOO_SOCKET_IFNAME="eth0"
 export TP_SOCKET_IFNAME="eth0"
 export HCCL_SOCKET_IFNAME="eth0"
-export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1/ranktable.json
+export DISAGGREGATED_PREFILL_RANK_TABLE_PATH=/vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1/ranktable.json
 export OMP_PROC_BIND=false
 export OMP_NUM_THREADS=100
 export VLLM_USE_V1=1
@@ -208,7 +208,7 @@ vllm serve /models/deepseek_r1_w8a8 \
 
 Run proxy server on the first node:
 ```shell
-cd /vllm-workspace/vllm-ascend/examples/disaggregate_prefill_v1
+cd /vllm-workspace/vllm-ascend/examples/disaggregated_prefill_v1
 python toy_proxy_server.py --host 172.19.32.175 --port 1025 --prefiller-hosts 172.19.241.49 --prefiller-port 20002 --decoder-hosts 172.19.123.51 --decoder-ports 20002
 ```
 
