@@ -57,7 +57,7 @@ class TestAscendW4A8DynamicFusedMoEMethod(TestBase):
         self.quant_method = AscendW4A8DynamicFusedMoEMethod()
 
     def test_get_weight(self):
-        # old quant version weight
+        # old quant version w4a8 weight
         param_dict = self.quant_method.get_weight(self.experts,
                                                   self.input_size,
                                                   self.output_size,
