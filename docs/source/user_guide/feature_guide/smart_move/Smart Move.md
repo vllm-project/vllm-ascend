@@ -32,7 +32,7 @@
 
 首先，在纯DP模式下，将 Attention 的输出按照OTP切分组进行一次 all-gather通信操作，将OTP组内所有的数据进行汇聚。随后，将转换后的数据与 O 矩阵的列切分部分进行矩阵乘法运算。最后，对计算结果执行 all-to-all 操作，将其重新分布并恢复到原始的 DP 并行状态。
 
-![image.png](Smart Move.assets/1754638573978-35a64d97-9502-4447-83a8-e3d529a76274.png)
+![image.png](Smart Move.assets/1754638573978-35a64d97-9502-4447-83a8-e3d529a76274.png?raw=true)
 
 根据上述流程进行通信量分析：
 
