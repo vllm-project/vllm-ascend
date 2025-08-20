@@ -51,7 +51,6 @@ class NPUTorchairModelRunner(NPUModelRunner):
         self.new_kv_cache_bytes = -1
         self.torchair_compiled_model = None  # type: ignore
         self.torchair_compiled_models = {}  # type: ignore
-        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
         self.use_cached_npu_graph = ascend_config.torchair_graph_config.use_cached_graph
         self.torchair_graph_batch_sizes = ascend_config.torchair_graph_config.graph_batch_sizes
         if ascend_config.torchair_graph_config.graph_batch_sizes_init:
@@ -417,17 +416,5 @@ class NPUTorchairModelRunner(NPUModelRunner):
                     )
             self.torchair_graph_batch_sizes = new_graph_batch_sizes
 
-    def _drafter_prepare_inputs(self, attn_metadata, num_rejected_tokens,
-                                positions, hidden_states,
-                                num_scheduled_tokens):
-        cu_num_tokens, accepted_token_indices, target_token_ids, \
-            target_positions, target_hidden_states, target_slot_mapping = self.drafter.prepare_inputs(
-            attn_metadata.query_start_loc,
-            num_rejected_tokens,
-            self.input_ids[:num_scheduled_tokens],
-            positions[:num_scheduled_tokens],
-            hidden_states[:num_scheduled_tokens],
-            attn_metadata.slot_mapping[:num_scheduled_tokens],
-            is_torchair_graph=True,
-        )
-        return cu_num_tokens, accepted_token_indices, target_token_ids, target_positions, target_hidden_states, target_slot_mapping
+    def _build_drafter_prepare_inputs_torchair_param(self):
+        return True

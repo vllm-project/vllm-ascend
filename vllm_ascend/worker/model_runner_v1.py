@@ -1208,8 +1208,6 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 for k, v in self.intermediate_tensors.items()
             })
 
-        moe_comm_method = self.moe_comm_method
-
         # NOTE: Currently this padding logic is really messy,
         # MC2 may not be available in eager mode
         # TODO: Unify the padding logic between TorchAir and ACL Graph ASAP
@@ -1542,8 +1540,7 @@ class NPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, torch.Tensor]:
-        with ProfileExecuteDuration().capture_async(
-                "prepare input"):
+        with ProfileExecuteDuration().capture_async("prepare input"):
             self._update_states(scheduler_output)
             if not scheduler_output.total_num_scheduled_tokens:
                 if not has_kv_transfer_group():
@@ -2584,8 +2581,15 @@ class NPUModelRunner(LoRAModelRunnerMixin):
                 device=self.device,
             )
             cu_num_tokens, accepted_token_indices, target_token_ids, \
-                target_positions, target_hidden_states, target_slot_mapping = self._drafter_prepare_inputs(
-                    attn_metadata, num_rejected_tokens, positions, hidden_states, num_scheduled_tokens)
+                target_positions, target_hidden_states, target_slot_mapping = self.drafter.prepare_inputs(
+                attn_metadata.query_start_loc,
+                num_rejected_tokens,
+                self.input_ids[:num_scheduled_tokens],
+                positions[:num_scheduled_tokens],
+                hidden_states[:num_scheduled_tokens],
+                attn_metadata.slot_mapping[:num_scheduled_tokens],
+                is_torchair_graph=self._build_drafter_prepare_inputs_torchair_param(),
+            )
 
         draft_token_ids = self.drafter.propose(
             target_token_ids=target_token_ids,
@@ -2702,17 +2706,5 @@ class NPUModelRunner(LoRAModelRunnerMixin):
 
         return list(model.pooler.get_supported_tasks())
 
-    def _drafter_prepare_inputs(self, attn_metadata, num_rejected_tokens,
-                                positions, hidden_states,
-                                num_scheduled_tokens):
-        cu_num_tokens, accepted_token_indices, target_token_ids, \
-            target_positions, target_hidden_states, target_slot_mapping = self.drafter.prepare_inputs(
-            attn_metadata.query_start_loc,
-            num_rejected_tokens,
-            self.input_ids[:num_scheduled_tokens],
-            positions[:num_scheduled_tokens],
-            hidden_states[:num_scheduled_tokens],
-            attn_metadata.slot_mapping[:num_scheduled_tokens],
-            is_torchair_graph=False,
-        )
-        return cu_num_tokens, accepted_token_indices, target_token_ids, target_positions, target_hidden_states, target_slot_mapping
+    def _build_drafter_prepare_inputs_torchair_param(self):
+        return False
