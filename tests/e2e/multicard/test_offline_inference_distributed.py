@@ -31,6 +31,10 @@ from vllm.model_executor.models.registry import ModelRegistry
 from tests.e2e.conftest import VllmRunner
 
 os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
+DEEPSEEK_W4A8_MODELS = [
+    "vllm-ascend/DeepSeek-V3-W4A8-Pruing",
+    "vllm-ascend/DeepSeek-R1-w4a8-pruning"
+]
 
 
 def test_models_distributed_QwQ():
@@ -211,14 +215,15 @@ def test_models_distributed_Qwen3_W4A8DYNAMIC():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
+@pytest.mark.parametrize("model", DEEPSEEK_W4A8_MODELS)
 @patch.dict(os.environ, {"VLLM_ASCEND_MLA_PA": "1"})
-def test_models_distributed_DeepSeek_W4A8DYNAMIC():
+def test_models_distributed_DeepSeek_W4A8DYNAMIC(model):
     prompts = [
         "Hello, my name is",
     ]
     max_tokens = 5
     with VllmRunner(
-            snapshot_download("vllm-ascend/DeepSeek-R1-w4a8-pruning"),
+            snapshot_download(model),
             dtype="auto",
             tensor_parallel_size=2,
             quantization="ascend",
