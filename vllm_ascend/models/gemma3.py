@@ -9,7 +9,6 @@ from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
-from vllm.model_executor.layers.layernorm import GemmaRMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import \
@@ -20,13 +19,10 @@ from vllm.model_executor.models.gemma3 import (Gemma3Attention,
                                                Gemma3DecoderLayer,
                                                Gemma3ForCausalLM, Gemma3MLP,
                                                Gemma3Model)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors
-
-from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers,
-                    maybe_prefix)
+from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
+from vllm.model_executor.models.utils import (
+    is_pp_missing_parameter, make_empty_intermediate_tensors_factory,
+    make_layers, maybe_prefix)
 
 
 class AscendGemma3DecoderLayer(Gemma3DecoderLayer):
@@ -51,7 +47,6 @@ class AscendGemma3DecoderLayer(Gemma3DecoderLayer):
             attn_logits_soft_cap=None,
             prefix=f"{prefix}.self_attn",
         )
-        self.hidden_size = config.hidden_size
         self.mlp = Gemma3MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
@@ -87,23 +82,21 @@ class AscendGemma3DecoderLayer(Gemma3DecoderLayer):
 class AscendGemma3Model(Gemma3Model):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
-        self.config = config
-        self.quant_config = quant_config
+        self.config = vllm_config.model_config.hf_config
+        self.quant_config = vllm_config.quant_config
 
         self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
+            self.config.vocab_size,
+            self.config.hidden_size,
             prefix=f"{prefix}.embed_tokens",
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers,
+            self.config.num_hidden_layers,
             lambda prefix: AscendGemma3DecoderLayer(
-                config, cache_config, quant_config, prefix=prefix),
+                self.config, cache_config, self.quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
-        self.norm = AscendRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.norm = AscendRMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
 
         # Normalize the embedding by sqrt(hidden_size)
         # The normalizer's data type should be downcasted to the model's
@@ -115,7 +108,7 @@ class AscendGemma3Model(Gemma3Model):
                              persistent=False)
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
-                ["hidden_states", "residual"], config.hidden_size))
+                ["hidden_states", "residual"], self.config.hidden_size))
 
     def load_weights(self, weights: Iterable[tuple[str,
                                                    torch.Tensor]]) -> set[str]:
@@ -189,20 +182,17 @@ class AscendGemma3ForCausalLM(Gemma3ForCausalLM):
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
-        del lora_config  # Unused.
+        self.config = vllm_config.model_config.hf_config
+        self.quant_config = vllm_config.quant_config
         nn.Module.__init__(self)
         SupportsLoRA.__init__(self)
         SupportsPP.__init__(self)
-        self.config = config
         # currently all existing Gemma models have `tie_word_embeddings` enabled
-        assert config.tie_word_embeddings
-        self.quant_config = quant_config
+        assert self.config.tie_word_embeddings
         self.model = AscendGemma3Model(vllm_config=vllm_config,
                                        prefix=maybe_prefix(prefix, "model"))
         self.logits_processor = LogitsProcessor(
-            config.vocab_size, soft_cap=config.final_logit_softcapping)
+            self.config.vocab_size,
+            soft_cap=self.config.final_logit_softcapping)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
