@@ -335,7 +335,7 @@ def with_cancellation(handler_func):
         if handler_task in done:
             return handler_task.result()
         return None
-    
+
     return wrapper
 
 
