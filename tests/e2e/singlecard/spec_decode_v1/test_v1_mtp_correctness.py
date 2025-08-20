@@ -81,7 +81,7 @@ def test_mtp_correctness(
         enforce_eager=True,
         max_model_len=2000,
         additional_config={"ascend_scheduler_config": {
-            "enabled": True
+            "enabled": False
         }})
 
     spec_outputs = spec_llm.chat(test_prompts, sampling_config)
