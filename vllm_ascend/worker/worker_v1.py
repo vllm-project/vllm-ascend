@@ -304,8 +304,23 @@ class NPUWorker(WorkerBase):
         ensure_model_parallel_initialized(
             self.parallel_config.tensor_parallel_size,
             self.parallel_config.pipeline_parallel_size)
+        
+        # TODO 后面配置参数需要写到parallel_config中
+        additional_config = self.vllm_config.additional_config
+        oproj_tensor_parallel_size = 1
+        if additional_config is not None and "oproj_tensor_parallel_size" in additional_config:
+            oproj_tensor_parallel_size = additional_config.get(
+                "oproj_tensor_parallel_size", 1)
+        
+        qkvproj_tensor_parallel_size = 1
+        if additional_config is not None and "qkvproj_tensor_parallel_size" in additional_config:
+            qkvproj_tensor_parallel_size = additional_config.get(
+                "qkvproj_tensor_parallel_size", 1)
+            
         init_ascend_model_parallel(self.parallel_config.expert_parallel_size,
-                                   self.parallel_config.lmhead_tp_size)
+                                   self.parallel_config.lmhead_tp_size,
+                                   oproj_tensor_parallel_size,
+                                   qkvproj_tensor_parallel_size)
         ensure_kv_transfer_initialized(self.vllm_config)
 
     def _init_profiler(self):
