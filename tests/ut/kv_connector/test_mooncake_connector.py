@@ -1152,8 +1152,6 @@ class TestMooncakeConnectorWorker(unittest.TestCase):
                   MagicMock()),
             patch.dict('sys.modules',
                        {'vllm_ascend.envs': self.envs_ascend_mock}),
-            patch('vllm_ascend.distributed.mooncake_connector.envs_ascend',
-                  self.envs_ascend_mock),
         ]
 
         for p in self.patches:
