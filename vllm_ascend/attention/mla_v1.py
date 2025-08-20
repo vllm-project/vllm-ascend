@@ -536,9 +536,9 @@ class AscendMLAMetadataBuilder:
                 input_positions = torch.cat(
                     [input_positions, position_padding])
                 actual_seq_lengths_q = (
-                        actual_seq_lengths_q + common_attn_metadata.
-                        actual_seq_lengths_q[num_reqs:num_reqs +
-                                             num_reqs_pad_size])
+                    actual_seq_lengths_q + common_attn_metadata.
+                    actual_seq_lengths_q[num_reqs:num_reqs +
+                                         num_reqs_pad_size])
             else:
                 seq_lens_list = seq_lens.tolist()
             # mtp torchair + PD scenario, last element of actual_seq_lengths_q must equal to batch_size(num_tokens)
