@@ -162,3 +162,65 @@ def test_e2e_pangu_with_torchair():
         },
     }
     _pangu_torchair_test_fixture(additional_config)
+
+
+def _qwen_torchair_test_fixture(
+    model,
+    tp,
+    enable_expert_parallel,
+):
+    # The current access control does not support 16 cards,
+    # so the MC2 operator in Qwen's graph mode cannot run.
+    # Once 16-card support is available,
+    # this e2e can be switched to graph mode.
+    example_prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
+
+    additional_config = {
+        "torchair_graph_config": {
+            "enabled": False,
+        },
+        "ascend_scheduler_config": {
+            "enabled": True,
+        },
+        "refresh": True,
+    }
+
+    with VllmRunner(
+            model,
+            dtype="half",
+            tensor_parallel_size=tp,
+            distributed_executor_backend="mp",
+            enforce_eager=True,
+            additional_config=additional_config,
+            enable_expert_parallel=enable_expert_parallel,
+    ) as vllm_model:
+        # use greedy sampler to make sure the generated results are fix
+        vllm_output = vllm_model.generate_greedy(example_prompts, 5)
+
+    # NOTE: vllm-ascend/pangu-pro-moe-pruing is only part of PanguProMoE
+    # with 2 hidden layers, thus the golden results seems inaccurate.
+    # This will only change if accuracy changes with the official weights
+    # of PanguProMoE.
+    golden_results = [
+        'Hello, my name is Remempondeprecatedmiot忱',
+        'The president of the United States is Remem下的一个 rever ceremoni Segnali',
+        'The capital of France is Rememvoud administrativ Remem投',
+        'The future of AI isotope Segnali Zoeken精细化 supus',
+    ]
+
+    assert len(golden_results) == len(vllm_output)
+    for i in range(len(vllm_output)):
+        print(f"Generated text: {vllm_output[i][1]!r}")
+
+
+def test_e2e_qwen2_with_torchair():
+    _qwen_torchair_test_fixture("Qwen/Qwen2.5-0.5B-Instruct", 2, False)
+
+
+def test_e2e_qwen3_moe_with_torchair():
+    _qwen_torchair_test_fixture("Qwen/Qwen3-30B-A3B", 2, True)

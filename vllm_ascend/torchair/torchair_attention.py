@@ -332,8 +332,9 @@ class AscendAttentionTorchairBackendImpl(AttentionImpl):
             shape = [batch_size * seq_len, num_heads, head_size]
         """
         num_tokens = query.shape[0]
-        use_kv_cache_quant = kv_cache is not None and kv_cache[0].numel(
-        ) > 0 and kv_cache[0].dtype == torch.int8
+        use_kv_cache_quant = (kv_cache is not None and len(kv_cache) > 0
+                              and kv_cache[0].numel() > 0
+                              and kv_cache[0].dtype == torch.int8)
         if output is None:
             output = torch.empty(num_tokens,
                                  self.num_heads,
