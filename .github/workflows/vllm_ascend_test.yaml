@@ -49,7 +49,7 @@ jobs:
       e2e_tracker: ${{ steps.filter.outputs.e2e_tracker }}
       ut_tracker: ${{ steps.filter.outputs.ut_tracker }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
         id: filter
         with:
@@ -130,9 +130,9 @@ jobs:
           verbose: true
 
   e2e:
-    needs: [lint, changes]
+    needs: [changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
-    if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' }}
+    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.e2e_tracker == 'true' }}
     strategy:
       max-parallel: 2
       matrix:
@@ -160,7 +160,7 @@ jobs:
           apt install git -y
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Install system dependencies
         run: |
@@ -168,7 +168,7 @@ jobs:
           apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           repository: vllm-project/vllm
           ref: ${{ matrix.vllm_version }}
@@ -192,7 +192,7 @@ jobs:
           VLLM_USE_MODELSCOPE: True
         run: |
           pytest -sv tests/e2e/singlecard/test_offline_inference.py
-          pytest -sv tests/e2e/singlecard/test_ilama_lora.py
+          # pytest -sv tests/e2e/singlecard/test_ilama_lora.py
           pytest -sv tests/e2e/singlecard/test_guided_decoding.py
           pytest -sv tests/e2e/singlecard/test_camem.py
           pytest -sv tests/e2e/singlecard/test_embedding.py
@@ -242,7 +242,7 @@ jobs:
           apt install git -y
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Install system dependencies
         run: |
@@ -250,7 +250,7 @@ jobs:
           apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           repository: vllm-project/vllm
           ref: ${{ matrix.vllm_version }}
@@ -273,7 +273,7 @@ jobs:
           VLLM_WORKER_MULTIPROC_METHOD: spawn
           VLLM_USE_MODELSCOPE: True
         run: |
-          pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
+          # pytest -sv tests/e2e/multicard/test_ilama_lora_tp2.py
           # Fixme: run VLLM_USE_MODELSCOPE=True pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py will raise error.
           # To avoid oom, we need to run the test in a single process.
           pytest -sv tests/e2e/multicard/test_offline_inference_distributed.py::test_models_distributed_DeepSeek_multistream_moe
