@@ -1,6 +1,5 @@
 from unittest.mock import MagicMock, patch
 
-import numpy as np
 import torch
 from vllm.distributed.parallel_state import GroupCoordinator
 from vllm.model_executor.layers.linear import LinearBase
@@ -12,6 +11,7 @@ from vllm_ascend.attention.mla_v1 import (AscendMLABackend,
                                           AscendMLAImpl, AscendMLAMetadata,
                                           AscendMLAMetadataBuilder,
                                           AscendMLAPrefillMetadata)
+from vllm_ascend.torchair.utils import TorchairCommonAttentionMetadata
 
 
 class TestAscendMLABackend(TestBase):
@@ -178,40 +178,41 @@ class TestAscendMLAMetadata(TestBase):
 class TestAscendMLAMetadataBuilder(TestBase):
 
     def test_ascend_mla_metadata_builder_default(self):
-        runner = MagicMock()
-        runner.scheduler_config = MagicMock()
-        runner.model_config = MagicMock()
-        runner.scheduler_config.max_num_seqs = 4
-        runner.model_config.max_model_len = 1024
-        runner.model_config.get_head_size.return_value = 64
-        runner.model_config.dtype = torch.float16
-        runner.chunked_prefill_enabled = False
-        runner.device = "cpu"
-        runner.block_size = 16
-        runner.decode_token_per_req = 1
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.model_config.get_head_size.return_value = 64
+        mock_vllm_config.model_config.dtype = torch.float16
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
+        mock_device = 'cpu'
 
         ascend_config = MagicMock()
         ascend_config.torchair_graph_config = MagicMock()
         ascend_config.torchair_graph_config.enabled = True
         with patch("vllm_ascend.attention.mla_v1.get_ascend_config",
                    return_value=ascend_config):
-            builder = AscendMLAMetadataBuilder(runner)
+            builder = AscendMLAMetadataBuilder(mock_vllm_config, mock_device)
 
-            self.assertEqual(builder.runner, runner)
-            self.assertEqual(builder.block_size, runner.block_size)
-            self.assertEqual(builder.chunked_prefill_enabled,
-                             runner.chunked_prefill_enabled)
+            self.assertEqual(builder.block_size,
+                             mock_vllm_config.cache_config.block_size)
+            self.assertEqual(
+                builder.chunked_prefill_enabled,
+                mock_vllm_config.scheduler_config.chunked_prefill_enabled)
             self.assertEqual(builder.torchair_graph_enabled, True)
 
     @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
     def test_reorder_batch_with_torchair_graph(self, ascend_config):
-        runner = MagicMock()
-        runner.chunked_prefill_enabled = False
-        runner.decode_token_per_req = 1
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
+        mock_device = 'cpu'
         ascend_config.torchair_graph_config = MagicMock()
         ascend_config.torchair_graph_config.enabled = True
 
-        builder = AscendMLAMetadataBuilder(runner)
+        builder = AscendMLAMetadataBuilder(mock_vllm_config, mock_device)
 
         input_batch = MagicMock()
         input_batch.req_ids = [0, 1, 2, 3]
@@ -230,22 +231,23 @@ class TestAscendMLAMetadataBuilder(TestBase):
         modified = builder.reorder_batch(input_batch, scheduler_output)
 
         self.assertFalse(modified)
-        self.assertEqual(builder._num_decodes, 4)
-        self.assertEqual(builder._num_prefills, 0)
-        self.assertEqual(builder._num_decode_tokens, 7)
-        self.assertEqual(builder._num_prefill_tokens, 0)
         input_batch.swap_states.assert_not_called()
 
     def test_reorder_batch_without_torchair_graph(self):
         ascend_config = MagicMock()
-        runner = MagicMock()
-        runner.chunked_prefill_enabled = False
-        runner.decode_token_per_req = 1
         ascend_config.torchair_graph_config = MagicMock()
         ascend_config.torchair_graph_config.enabled = False
+
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.max_num_seqs = 4
+        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
+        mock_device = 'cpu'
+
         with patch("vllm_ascend.attention.mla_v1.get_ascend_config",
                    return_value=ascend_config):
-            builder = AscendMLAMetadataBuilder(runner)
+            builder = AscendMLAMetadataBuilder(mock_vllm_config, mock_device)
 
         input_batch = MagicMock()
         input_batch.req_ids = [0, 1, 2, 3]
@@ -264,10 +266,6 @@ class TestAscendMLAMetadataBuilder(TestBase):
         modified = builder.reorder_batch(input_batch, scheduler_output)
 
         self.assertTrue(modified)
-        self.assertEqual(builder._num_decodes, 2)
-        self.assertEqual(builder._num_prefills, 2)
-        self.assertEqual(builder._num_decode_tokens, 2)
-        self.assertEqual(builder._num_prefill_tokens, 5)
         input_batch.swap_states.assert_called_once_with(1, 2)
 
     @patch("vllm_ascend.attention.mla_v1.get_ascend_config")
@@ -275,11 +273,13 @@ class TestAscendMLAMetadataBuilder(TestBase):
         ascend_config = MagicMock()
         mock_ascend_config.return_value = ascend_config
         ascend_config.torchair_graph_config.enabled = False
-        runner = MagicMock()
-        runner.graph_block_tables = torch.zeros((8, 64), dtype=torch.int32)
-        runner.chunked_prefill_enabled = False
-        runner.decode_token_per_req = 1
-        builder = AscendMLAMetadataBuilder(runner=runner)
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
+        mock_device = 'cpu'
+
+        builder = AscendMLAMetadataBuilder(mock_vllm_config, mock_device)
         block_tables = torch.randint(0, 100, (3, 10), dtype=torch.int32)
 
         result = builder._get_graph_runner_block_tables(3, block_tables)
@@ -292,11 +292,13 @@ class TestAscendMLAMetadataBuilder(TestBase):
         ascend_config = MagicMock()
         mock_ascend_config.return_value = ascend_config
         ascend_config.torchair_graph_config.enabled = False
-        runner = MagicMock()
-        runner.graph_block_tables = torch.zeros((8, 4), dtype=torch.int32)
-        runner.chunked_prefill_enabled = False
-        runner.decode_token_per_req = 1
-        builder = AscendMLAMetadataBuilder(runner=runner)
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 64
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
+        mock_device = 'cpu'
+
+        builder = AscendMLAMetadataBuilder(mock_vllm_config, mock_device)
         block_tables = torch.randint(0, 100, (3, 10), dtype=torch.int32)
 
         result = builder._get_graph_runner_block_tables(3, block_tables)
@@ -310,11 +312,13 @@ class TestAscendMLAMetadataBuilder(TestBase):
         ascend_config = MagicMock()
         mock_ascend_config.return_value = ascend_config
         ascend_config.torchair_graph_config.enabled = False
-        runner = MagicMock()
-        runner.graph_block_tables = np.zeros((8, 64), dtype=np.int32)
-        runner.chunked_prefill_enabled = False
-        runner.decode_token_per_req = 1
-        builder = AscendMLAMetadataBuilder(runner=runner)
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
+        mock_device = 'cpu'
+
+        builder = AscendMLAMetadataBuilder(mock_vllm_config, mock_device)
 
         block_tables = torch.randint(0, 100, (3, 10), dtype=torch.int32)
 
@@ -329,38 +333,45 @@ class TestAscendMLAMetadataBuilder(TestBase):
         ascend_config = MagicMock()
         mock_ascend_config.return_value = ascend_config
         ascend_config.torchair_graph_config.enabled = False
-        runner = MagicMock()
-        runner.model_config = MagicMock()
-        runner.device = "cpu"
-        runner.graph_block_tables = torch.zeros((8, 64), dtype=torch.int32)
-        runner.model_config.get_head_size.return_value = 64
-        runner.chunked_prefill_enabled = False
-        runner.attn_mask = torch.zeros((1, 1), dtype=torch.bool)
-        runner.spec_attn_mask = torch.zeros((1, 1), dtype=torch.bool)
-        runner.dtype = torch.float16
-        runner.decode_token_per_req = 1
 
-        builder = AscendMLAMetadataBuilder(runner=runner,
+        mock_vllm_config = MagicMock()
+        mock_vllm_config.model_config.max_model_len = 1024
+        mock_vllm_config.cache_config.block_size = 16
+        mock_vllm_config.scheduler_config.chunked_prefill_enabled = False
+        mock_vllm_config.get_head_size.return_value = 64
+        mock_vllm_config.model_config.dtype = torch.float16
+        mock_device = 'cpu'
+
+        builder = AscendMLAMetadataBuilder(mock_vllm_config,
+                                           mock_device,
                                            metadata_cls=AscendMLAMetadata)
         builder.rope_dim = 64
 
         with patch.object(builder,
                           "_get_graph_runner_block_tables",
                           side_effect=lambda x, y: y):
-            metadata = builder.build_torchair_graph_dummy(3, 3)
+            common_attn_metadata = TorchairCommonAttentionMetadata(
+                num_reqs=3,
+                num_actual_tokens=3,
+                decode_token_per_req=1,
+                actual_seq_lengths_q=[0, 1, 2],
+                attn_mask=torch.zeros((1, 1), dtype=torch.bool),
+                spec_attn_mask=torch.zeros((1, 1), dtype=torch.bool),
+            )
+            metadata = builder.build_torchair_graph_dummy(common_attn_metadata)
 
         sin_golden = torch.ones(3,
                                 1,
                                 1,
                                 64,
-                                dtype=runner.dtype,
-                                device=runner.device)
+                                dtype=torch.float16,
+                                device=mock_device)
         cos_golden = torch.ones(3,
                                 1,
                                 1,
                                 64,
-                                dtype=runner.dtype,
-                                device=runner.device)
+                                dtype=torch.float16,
+                                device=mock_device)
 
         self.assertIsInstance(metadata, AscendMLAMetadata)
         self.assertEqual(metadata.num_input_tokens, 3)

@@ -26,7 +26,8 @@ from vllm.forward_context import get_forward_context
 from vllm.logger import logger
 
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.torchair.utils import (check_torchair_cache_exist,
+from vllm_ascend.torchair.utils import (TorchairCommonAttentionMetadata,
+                                        check_torchair_cache_exist,
                                         register_torchair_model,
                                         write_kv_cache_bytes_to_file)
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_ND, ACL_FORMAT_FRACTAL_NZ,
@@ -71,8 +72,16 @@ class NPUTorchairModelRunner(NPUModelRunner):
         # NOTE: If torchair graph mode and not with_prefill,
         # we can't skip_attn, it will cause graph recompile.
         if not with_prefill:
+            common_attn_metadata = TorchairCommonAttentionMetadata(
+                num_reqs=num_reqs,
+                num_actual_tokens=1,
+                actual_seq_lengths_q=self.actual_seq_lengths_q,
+                attn_mask=self.attn_mask,
+                spec_attn_mask=self.spec_attn_mask,
+                decode_token_per_req=self.decode_token_per_req,
+            )
             attn_metadata = self.attn_metadata_builder.build_torchair_graph_dummy(
-                num_reqs=num_reqs, num_actual_tokens=1)
+                common_attn_metadata)
         else:
             attn_metadata = super()._build_attention_metadata(
                 with_prefill, num_reqs, skip_attn)

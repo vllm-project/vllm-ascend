@@ -536,10 +536,10 @@ class TestNPUPlatform(TestBase):
         mock_config = MagicMock(spec=ModelConfig)
         self.assertTrue(self.platform.supports_v1(mock_config))
 
-    def test_get_piecewise_backend_cls_returns_correct_value(self):
+    def test_get_static_graph_wrapper_cls_returns_correct_value(self):
         self.assertEqual(
-            self.platform.get_piecewise_backend_cls(),
-            "vllm_ascend.compilation.piecewise_backend.NPUPiecewiseBackend",
+            self.platform.get_static_graph_wrapper_cls(),
+            "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
 
     @patch("torch.distributed.is_hccl_available", return_value=True)
