@@ -55,7 +55,6 @@ def assert_scheduler_empty(scheduler: Scheduler):
 
 
 def create_vllm_config(
-    model: str = "facebook/opt-125m",
     max_num_seqs: int = 16,
     max_num_batched_tokens: int = 1024,
     block_size: int = 128,
@@ -66,14 +65,11 @@ def create_vllm_config(
         max_num_batched_tokens=max_num_batched_tokens,
         max_model_len=max_num_batched_tokens,
     )
+    fake_weight_path = os.path.join(os.path.dirname(__file__), "..",
+                                    "fake_weight")
     model_config = ModelConfig(
-        model=model,
-        task="auto",
-        tokenizer=model,
-        tokenizer_mode="auto",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
+        model=fake_weight_path,
+        skip_tokenizer_init=True,
     )
     # Cache config, optionally force APC
     cache_config = CacheConfig(
