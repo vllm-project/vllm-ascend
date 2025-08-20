@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 import torch
 from vllm.sampling_params import SamplingParams
-from vllm.utils import is_pin_memory_available, make_tensor_with_pad
+from vllm.utils import make_tensor_with_pad
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -237,7 +237,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         max_model_len=1024,
         max_num_batched_tokens=1024,
         device=torch.device(device),
-        pin_memory=is_pin_memory_available(),
+        pin_memory=False,
         vocab_size=1024,
         block_sizes=[1],
     )
@@ -298,7 +298,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
     assert (expected_sampling_metadata.output_token_ids ==
             sampling_metadata.output_token_ids)
     assert expected_sampling_metadata.no_penalties == \
-           sampling_metadata.no_penalties
+        sampling_metadata.no_penalties
     if sampling_metadata.allowed_token_ids_mask:
         assert torch.allclose(
             expected_sampling_metadata.allowed_token_ids_mask,
@@ -328,7 +328,7 @@ def test_swap_states_in_input_batch(device: str, batch_size: int,
         max_model_len=1024,
         max_num_batched_tokens=1024,
         device=torch.device(device),
-        pin_memory=is_pin_memory_available(),
+        pin_memory=False,
         vocab_size=1024,
         block_sizes=[1],
     )
@@ -337,7 +337,7 @@ def test_swap_states_in_input_batch(device: str, batch_size: int,
         max_model_len=1024,
         max_num_batched_tokens=1024,
         device=torch.device(device),
-        pin_memory=is_pin_memory_available(),
+        pin_memory=False,
         vocab_size=1024,
         block_sizes=[1],
     )
