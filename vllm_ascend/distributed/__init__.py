@@ -19,14 +19,10 @@ from vllm.distributed.kv_transfer.kv_connector.factory import \
     KVConnectorFactory
 
 KVConnectorFactory.register_connector(
-    "AscendHcclConnector", "vllm_ascend.distributed.llmdatadist_connector",
-    "LLMDataDistConnector")
-
-KVConnectorFactory.register_connector(
-    "AscendSimpleConnector",
-    "vllm_ascend.distributed.kv_transfer.simple_connector", "SimpleConnector")
-
-KVConnectorFactory.register_connector(
     "LLMDataDistCMgrConnector",
     "vllm_ascend.distributed.llmdatadist_c_mgr_connector",
     "LLMDataDistCMgrConnector")
+
+KVConnectorFactory.register_connector(
+    "MooncakeConnectorV1", "vllm_ascend.distributed.mooncake_connector",
+    "MooncakeConnector")

@@ -15,10 +15,6 @@
 # limitations under the License.
 # This file is a part of the vllm-ascend project.
 #
-# By using quantization case, this file is called before worker patch achieve,
-# we need to import patch_utils here first to make sure the patch is applied.
-import vllm_ascend.patch.worker.patch_common.patch_utils  # type: ignore[import]  # isort: skip  # noqa
-
 from types import MappingProxyType
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
@@ -34,6 +30,8 @@ from vllm.model_executor.layers.quantization import \
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    UnquantizedEmbeddingMethod, VocabParallelEmbedding)
 from vllm.model_executor.parameter import PerTensorScaleParameter
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -46,7 +44,7 @@ from .quantizer import AscendQuantizer
 @register_quantization_config(ASCEND_QUATIZATION_METHOD)
 class AscendQuantConfig(QuantizationConfig):
     """Config class for Ascend
-    
+
     This class is a general class that parse quantization configs
     that are supported on ascend hardware.
     """
@@ -104,9 +102,15 @@ class AscendQuantConfig(QuantizationConfig):
         elif isinstance(layer, FusedMoE):
             if self.is_layer_skipped_ascend(prefix,
                                             self.packed_modules_mapping):
-                return AscendUnquantizedFusedMoEMethod()
+                return AscendUnquantizedFusedMoEMethod(layer.moe)
             return AscendFusedMoEMethod(self, prefix,
                                         self.packed_modules_mapping)
+        elif isinstance(layer, VocabParallelEmbedding):
+            if self.is_layer_skipped_ascend(prefix,
+                                            self.packed_modules_mapping):
+                return UnquantizedEmbeddingMethod()
+            return AscendEmbeddingMethod(self, prefix,
+                                         self.packed_modules_mapping)
         return None
 
     def is_layer_skipped_ascend(
@@ -197,6 +201,17 @@ class AscendLinearMethod(LinearMethodBase):
             layer.register_parameter(perchannel_name, param)
             set_weight_attrs(param, extra_weight_attrs)
 
+        pergroup_dict = self.quant_method.get_pergroup_param(
+            input_size_per_partition, output_size_per_partition, params_dtype)
+        for pergroup_name, pergroup_param in pergroup_dict.items():
+            param = torch.nn.Parameter(pergroup_param, requires_grad=False)
+            set_weight_attrs(param, {"output_dim": 0})
+            layer.register_parameter(pergroup_name, param)
+            set_weight_attrs(param, extra_weight_attrs)
+            if "weight_scale_second" in pergroup_name or "weight_offset_second" in pergroup_name:
+                setattr(param, "input_dim", 1)
+                param.input_dim = 1
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
@@ -280,6 +295,9 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
 
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value})
+        per_group_param = [
+            "weight_scale_second", "weight_offset_second", "scale_bias"
+        ]
         dynamic_quant_param = self.quant_method.get_dynamic_quant_param(
             num_experts, intermediate_size_per_partition, hidden_size,
             params_dtype)
@@ -287,6 +305,9 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
             param = torch.nn.Parameter(param_value, requires_grad=False)
             layer.register_parameter(param_key, param)
             set_weight_attrs(param, extra_weight_attrs)
+            if any(fields in param_key for fields in per_group_param):
+                setattr(param, "quant_method",
+                        FusedMoeWeightScaleSupported.GROUP.value)
 
     def apply(
         self,
@@ -319,3 +340,18 @@ class AscendFusedMoEMethod(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if hasattr(self.quant_method, "process_weights_after_loading"):
             self.quant_method.process_weights_after_loading(layer)
+
+
+class AscendEmbeddingMethod(AscendLinearMethod):
+    """Embedding method for Ascend quantization.
+      This class calls AscendQuantizer to search a specific quantization
+      implementations supported on ascend hardware for Embedding methods.
+      Args:
+          quant_config: The Ascend quantization config.
+    """
+
+    def __init__(self, quant_config: AscendQuantConfig, prefix: str,
+                 packed_modules_mapping: Dict[str, Any]) -> None:
+        self.quantizer = AscendQuantizer.get_quantizer(
+            quant_config.quant_description, prefix, packed_modules_mapping)
+        self.quant_method = self.quantizer.build_linear_method()

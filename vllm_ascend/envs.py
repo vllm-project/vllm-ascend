@@ -62,28 +62,10 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # /usr/local/Ascend/ascend-toolkit/latest
     "ASCEND_HOME_PATH":
     lambda: os.getenv("ASCEND_HOME_PATH", None),
-    # The path for HCCN Tool, the tool will be called by disaggregated prefilling
-    # case.
-    "HCCN_PATH":
-    lambda: os.getenv("HCCN_PATH", "/usr/local/Ascend/driver/tools/hccn_tool"),
     # The path for HCCL library, it's used by pyhccl communicator backend. If
     # not set, the default value is libhccl.so。
     "HCCL_SO_PATH":
-    # The prefill device id for disaggregated prefilling case.
     lambda: os.environ.get("HCCL_SO_PATH", None),
-    "PROMPT_DEVICE_ID":
-    lambda: os.getenv("PROMPT_DEVICE_ID", None),
-    # The decode device id for disaggregated prefilling case.
-    "DECODE_DEVICE_ID":
-    lambda: os.getenv("DECODE_DEVICE_ID", None),
-    # The port number for llmdatadist communication. If not set, the default
-    # value is 26000.
-    "LLMDATADIST_COMM_PORT":
-    lambda: os.getenv("LLMDATADIST_COMM_PORT", "26000"),
-    # The wait time for llmdatadist sync cache. If not set, the default value is
-    # 5000ms.
-    "LLMDATADIST_SYNC_CACHE_WAIT_TIME":
-    lambda: os.getenv("LLMDATADIST_SYNC_CACHE_WAIT_TIME", "5000"),
     # The version of vllm is installed. This value is used for developers who
     # installed vllm from source locally. In this case, the version of vllm is
     # usually changed. For example, if the version of vllm is "0.9.0", but when
@@ -100,6 +82,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP":
     lambda: bool(int(os.getenv("VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP", '0'))
                  ),
+    # Whether to enable DBO feature for deepseek model.
     "VLLM_ASCEND_ENABLE_DBO":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_DBO", '0'))),
     # Whether to enable the model execute time observe profile. Disable it when
@@ -117,23 +100,17 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # value to False to disable the optimized model.
     "USE_OPTIMIZED_MODEL":
     lambda: bool(int(os.getenv('USE_OPTIMIZED_MODEL', '1'))),
-    # SELECT_GATING_TOPK_SOTFMAX_EXPERTS is the equivalent of select_experts in non-quantized scenarios.
-    # In theory, it should have better performance than select_experts.
-    # Subsequent versions will remove the SELECT_GATING_TOPK_SOTFMAX_EXPERTS tag and use it as the default mode.
-    "SELECT_GATING_TOPK_SOTFMAX_EXPERTS":
-    lambda: bool(int(os.getenv("SELECT_GATING_TOPK_SOTFMAX_EXPERTS", '0'))),
     # The tolerance of the kv cache size, if the difference between the
     # actual kv cache size and the cached kv cache size is less than this value,
     # then the cached kv cache size will be used.
     "VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE":
     lambda: int(
         os.getenv("VLLM_ASCEND_KV_CACHE_MEGABYTES_FLOATING_TOLERANCE", 64)),
-    # Whether to enable the topk optimization. It's disabled by default for experimental support
-    # We'll make it enabled by default in the future.
+    # Whether to enable the topk optimization. It's enabled by default. Please set to False if you hit any issue.
+    # We'll remove this flag in the future once it's stable enough.
     "VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION":
     lambda: bool(
-        int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION", '0'))),
-
+        int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION", '1'))),
     # `LLMDataDistCMgrConnector` required variable. `DISAGGREGATED_PREFILL_RANK_TABLE_PATH` is
     # used for llmdatadist to build the communication topology for kv cache transfer, it is
     # a required variable if `LLMDataDistCMgrConnector` is used as kv connector for disaggregated
@@ -146,11 +123,11 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # remote worker.
     "VLLM_ASCEND_LLMDD_RPC_IP":
     lambda: os.getenv("VLLM_ASCEND_LLMDD_RPC_IP", "0.0.0.0"),
-    # `LLMDataDistCMgrConnector` required variable. `VLLM_LLMDD_RPC_PORT` is used as the
+    # `LLMDataDistCMgrConnector` required variable. `VLLM_ASCEND_LLMDD_RPC_PORT` is used as the
     # rpc communication listening port, which will be used to receive the agent metadata from the
     # remote worker.
-    "VLLM_LLMDD_RPC_PORT":
-    lambda: int(os.getenv("VLLM_LLMDD_RPC_PORT", 5557)),
+    "VLLM_ASCEND_LLMDD_RPC_PORT":
+    lambda: int(os.getenv("VLLM_ASCEND_LLMDD_RPC_PORT", 5557)),
     # Whether to enable mla_pa for deepseek mla decode, this flag will be removed after its available torch_npu is public accessible
     # and the mla_pa will be the default path of deepseek decode path.
     "VLLM_ASCEND_MLA_PA":
@@ -159,6 +136,11 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # this feature is supported in A2, and eager mode will get better performance.
     "VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_MATMUL_ALLREDUCE", '0'))),
+    # Whether to enable the alltoall_seq flag, this provides a basic framework on the basis of alltoall for easy expansion.
+    #   0: default, normal init.
+    #   1: enable moe all2all seq.
+    "VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ":
+    lambda: bool(int(os.getenv('VLLM_ASCEND_ENABLE_MOE_ALL2ALL_SEQ', '0'))),
 }
 
 # end-env-vars-definition

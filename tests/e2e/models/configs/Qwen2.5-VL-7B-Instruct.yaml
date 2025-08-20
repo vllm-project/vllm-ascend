@@ -1,0 +1,8 @@
+model_name: "Qwen/Qwen2.5-VL-7B-Instruct"
+model: "vllm-vlm"
+tasks:
+- name: "mmmu_val"
+  metrics:
+  - name: "acc,none"
+    value: 0.51
+max_model_len: 8192

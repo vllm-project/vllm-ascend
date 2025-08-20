@@ -28,8 +28,8 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import get_sampler
-from vllm.model_executor.layers.vocab_parallel_embedding import \
-    VocabParallelEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.models.deepseek_mtp import (
     DeepSeekMTP, DeepSeekMultiTokenPredictor, DeepSeekMultiTokenPredictorLayer,
     SharedHead)
@@ -38,6 +38,20 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .deepseek_v2 import CustomDeepseekV2DecoderLayer
+
+
+class CustomDeepSeekShareHead(SharedHead):
+
+    def __init__(self,
+                 config: PretrainedConfig,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "") -> None:
+        nn.Module.__init__(self)
+        self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        self.head = ParallelLMHead(config.vocab_size,
+                                   config.hidden_size,
+                                   quant_config=quant_config,
+                                   prefix=maybe_prefix(prefix, "head"))
 
 
 class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
@@ -51,17 +65,16 @@ class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
         quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         nn.Module.__init__(self)
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-        )
 
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2,
                                  config.hidden_size,
                                  bias=False)
-        self.shared_head = SharedHead(config=config, quant_config=quant_config)
+        self.shared_head = CustomDeepSeekShareHead(config=config,
+                                                   quant_config=quant_config,
+                                                   prefix=maybe_prefix(
+                                                       prefix, "shared_head"))
         self.mtp_block = CustomDeepseekV2DecoderLayer(config, prefix,
                                                       model_config,
                                                       cache_config,
@@ -77,8 +90,6 @@ class CustomDeepSeekMultiTokenPredictorLayer(DeepSeekMultiTokenPredictorLayer):
         inputs_embeds: Optional[torch.Tensor] = None,
         spec_step_index: int = 0,
     ) -> torch.Tensor:
-        if inputs_embeds is None:
-            inputs_embeds = self.embed_tokens(input_ids)
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
         inputs_embeds = torch.where((positions == 0).unsqueeze(-1),
@@ -119,6 +130,10 @@ class CustomDeepSeekMultiTokenPredictor(DeepSeekMultiTokenPredictor):
             for idx in range(self.mtp_start_layer_idx,
                              self.mtp_start_layer_idx + self.num_mtp_layers)
         })
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+        )
 
         # Note: torch._dynamo.exc.Unsupported: builtin: str
         self.layers_list = [
@@ -138,6 +153,8 @@ class CustomDeepSeekMultiTokenPredictor(DeepSeekMultiTokenPredictor):
         inputs_embeds: Optional[torch.Tensor] = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(input_ids)
         current_step_idx = (spec_step_idx % self.num_mtp_layers)
         step_kv_cache = kv_caches[
             current_step_idx] if kv_caches is not None else None

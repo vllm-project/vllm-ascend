@@ -17,37 +17,38 @@
 # Adapted from vllm-project/vllm/vllm/worker/gpu_worker.py
 #
 
+import copy
 from typing import Optional
 
 import torch
 import torch.nn as nn
 import torch_npu
+import vllm.envs as envs_vllm
 from torch_npu.op_plugin.atb._atb_ops import _register_atb_extensions
-from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
-from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
+from vllm.distributed.kv_transfer import (ensure_kv_transfer_initialized,
+                                          has_kv_transfer_group)
 from vllm.distributed.parallel_state import get_pp_group, get_tp_group
 from vllm.logger import logger
 from vllm.lora.request import LoRARequest
 from vllm.sequence import IntermediateTensors
+from vllm.tasks import SupportedTask
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, GiB_bytes
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheSpec
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, ModelRunnerOutput
 from vllm.v1.worker.worker_base import WorkerBase
 
 from vllm_ascend.ascend_config import init_ascend_config
 from vllm_ascend.device_allocator.camem import CaMemAllocator
 from vllm_ascend.distributed.parallel_state import init_ascend_model_parallel
 from vllm_ascend.platform import NPUPlatform
-from vllm_ascend.utils import (init_ascend_soc_version, sleep_mode_enabled,
-                               try_register_lib, vllm_version_is)
+from vllm_ascend.utils import (init_ascend_soc_version,
+                               register_ascend_customop, sleep_mode_enabled,
+                               try_register_lib)
 from vllm_ascend.worker.model_runner_v1 import NPUModelRunner
-
-if not vllm_version_is("0.10.0"):
-    from vllm.tasks import SupportedTask
 
 
 class NPUWorker(WorkerBase):
@@ -69,8 +70,10 @@ class NPUWorker(WorkerBase):
         from vllm_ascend import ops
         ops.register_dummy_fusion_op()
         _register_atb_extensions()
-        # init ascend config
+        register_ascend_customop()
+        # init ascend config and soc version
         init_ascend_config(vllm_config)
+        init_ascend_soc_version()
 
         super().__init__(vllm_config=vllm_config,
                          local_rank=local_rank,
@@ -79,9 +82,6 @@ class NPUWorker(WorkerBase):
                          is_driver_worker=is_driver_worker)
 
         # Try to import mindie_turbo to accelerate vLLM inference.
-        local_dp_rank = self.vllm_config.parallel_config.data_parallel_rank_local
-        world_size = self.vllm_config.parallel_config.world_size
-        self.local_rank_across_dp = local_dp_rank * world_size + self.local_rank
         try_register_lib(
             "mindie_turbo",
             "MindIE Turbo is installed. vLLM inference will be accelerated with MindIE Turbo."
@@ -129,18 +129,19 @@ class NPUWorker(WorkerBase):
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
 
-    def init_device(self):
+    def _init_device(self):
         device = torch.device(f"npu:{self.local_rank}")
         NPUPlatform.set_device(device)
         NPUPlatform.empty_cache()
         self.init_npu_memory = NPUPlatform.mem_get_info()[0]
-
-        init_ascend_soc_version()
         # Initialize the distributed environment.
         self._init_worker_distributed_environment()
         # Set random seed.
         NPUPlatform.seed_everything(self.model_config.seed)
+        return device
 
+    def init_device(self):
+        device = self._init_device()
         # Init ModelRunner here, so that we have access to self.device.
         self.model_runner = NPUModelRunner(self.vllm_config, device)
 
@@ -204,9 +205,22 @@ class NPUWorker(WorkerBase):
             assert isinstance(output, IntermediateTensors)
             get_pp_group().send_tensor_dict(output.tensors,
                                             all_gather_group=get_tp_group())
-            return None
+            if not has_kv_transfer_group():
+                return None
+
+            kv_connector_output = output.kv_connector_output
+            finished_sending = kv_connector_output.finished_sending
+            finished_recving = kv_connector_output.finished_recving
+
+            if not finished_sending and not finished_recving:
+                return EMPTY_MODEL_RUNNER_OUTPUT
+
+            new_output = copy.copy(EMPTY_MODEL_RUNNER_OUTPUT)
+            new_output.kv_connector_output = kv_connector_output
+            return new_output
+
         assert isinstance(output, ModelRunnerOutput)
-        return output if self.is_driver_worker else None
+        return output
 
     def load_model(self) -> None:
         if self.vllm_config.model_config.enable_sleep_mode:
@@ -222,7 +236,9 @@ class NPUWorker(WorkerBase):
             self.model_runner.load_model()
 
     def compile_or_warm_up_model(self) -> None:
-        warmup_sizes = self.vllm_config.compilation_config.compile_sizes.copy()
+        # Note: need to adapt for graph mode.
+        warmup_sizes = (self.vllm_config.compilation_config.compile_sizes
+                        or []).copy()
         if not self.model_config.enforce_eager:
             warmup_sizes = [
                 x for x in warmup_sizes if x not in
@@ -291,8 +307,8 @@ class NPUWorker(WorkerBase):
     def _init_profiler(self):
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
-        if envs.VLLM_TORCH_PROFILER_DIR:
-            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
+        if envs_vllm.VLLM_TORCH_PROFILER_DIR:
+            torch_profiler_trace_dir = envs_vllm.VLLM_TORCH_PROFILER_DIR
             logger.info("Profiling enabled. Traces will be saved to: %s",
                         torch_profiler_trace_dir)
 

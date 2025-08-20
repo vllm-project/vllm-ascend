@@ -19,16 +19,15 @@ from typing import Callable, Optional
 
 import torch
 from vllm.config import CompilationLevel, get_current_vllm_config
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.layer import \
     UnquantizedFusedMoEMethod
 
-import vllm_ascend.envs as envs_ascend
-from vllm_ascend.ops.fused_moe import (fused_experts, fused_experts_moge,
-                                       select_experts,
-                                       select_gating_top_k_softmax_experts)
+from vllm_ascend.ascend_config import get_ascend_config
+from vllm_ascend.ops.fused_moe import fused_experts_moge, unified_fused_experts
+from vllm_ascend.ops.layers.experts_selector import select_experts
 from vllm_ascend.utils import is_310p
 
-SELECT_GATING_TOPK_SOTFMAX_EXPERTS: bool = envs_ascend.SELECT_GATING_TOPK_SOTFMAX_EXPERTS
 original_unquantized_fused_moe_init_func = UnquantizedFusedMoEMethod.__init__
 
 
@@ -36,7 +35,15 @@ def unquantized_fused_moe_init_func(self, *args, **kwargs):
     original_unquantized_fused_moe_init_func(self, *args, **kwargs)
     vllm_config = get_current_vllm_config()
     self.max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-    self.use_aclgraph = vllm_config.compilation_config.level == CompilationLevel.PIECEWISE and not vllm_config.model_config.enforce_eager
+
+    ascend_config = get_ascend_config()
+
+    if ascend_config.torchair_graph_config.enabled:
+        self.use_aclgraph = False
+    else:
+        self.use_aclgraph = (vllm_config.compilation_config.level
+                             == CompilationLevel.PIECEWISE
+                             and not vllm_config.model_config.enforce_eager)
 
 
 def forward_oot(
@@ -52,7 +59,7 @@ def forward_oot(
         custom_routing_function: Optional[Callable] = None,
         scoring_func: str = "softmax",
         e_score_correction_bias: Optional[torch.Tensor] = None,
-        global_num_experts: Optional[int] = None,
+        global_num_experts: int = -1,
         expert_map: Optional[torch.Tensor] = None,
         apply_router_weight_on_input: bool = False,
         activation: str = "silu",
@@ -61,26 +68,18 @@ def forward_oot(
         logical_to_physical_map: Optional[torch.Tensor] = None,
         logical_replica_count: Optional[torch.Tensor] = None) -> torch.Tensor:
 
-    if SELECT_GATING_TOPK_SOTFMAX_EXPERTS:
-        topk_weights, topk_ids = select_gating_top_k_softmax_experts(
-            hidden_states=x,
-            router_logits=router_logits,
-            top_k=top_k,
-            renormalize=renormalize)
-    else:
-        topk_weights, topk_ids = select_experts(
-            global_num_experts=global_num_experts,
-            hidden_states=x,
-            router_logits=router_logits,
-            top_k=top_k,
-            use_grouped_topk=use_grouped_topk,
-            renormalize=renormalize,
-            topk_group=topk_group,
-            num_expert_group=num_expert_group,
-            custom_routing_function=custom_routing_function,
-            scoring_func=scoring_func,
-            e_score_correction_bias=e_score_correction_bias,
-        )
+    topk_weights, topk_ids = select_experts(
+        hidden_states=x,
+        router_logits=router_logits,
+        top_k=top_k,
+        use_grouped_topk=use_grouped_topk,
+        renormalize=renormalize,
+        topk_group=topk_group,
+        num_expert_group=num_expert_group,
+        custom_routing_function=custom_routing_function,
+        scoring_func=scoring_func,
+        e_score_correction_bias=e_score_correction_bias,
+        global_num_experts=global_num_experts)
 
     if topk_ids.shape[1] < top_k or is_310p():
         assert global_num_experts is not None
@@ -96,20 +95,18 @@ def forward_oot(
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input)
 
-    # If use aclgraph, we need to set max_num_tokens to make
-    # the input shape of `npu_moe_init_routing` fixed
-    max_num_tokens = self.max_num_batched_tokens if self.use_aclgraph else None
+    moe_comm_method = get_forward_context().moe_comm_method
 
-    return fused_experts(
+    return unified_fused_experts(
         hidden_states=x,
         w1=layer.w13_weight,
         w2=layer.w2_weight,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        top_k=top_k,
+        global_num_experts=global_num_experts,
         expert_map=expert_map,
-        apply_router_weight_on_input=apply_router_weight_on_input,
-        max_num_tokens=max_num_tokens)
+        moe_comm_method=moe_comm_method,
+    )
 
 
 UnquantizedFusedMoEMethod.__init__ = unquantized_fused_moe_init_func

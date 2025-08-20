@@ -29,35 +29,15 @@ on:
     types: [ labeled ]
   workflow_dispatch:
     inputs:
-      vllm-version:
-        description: 'vllm version:'
+      vllm-ascend-version:
+        description: 'vllm-ascend:'
         required: true
         type: choice
-        # Please also update this when bump matched version
         # Current supported vLLM versions
         options:
+          - latest
           - main
-          - v0.10.0
-          - v0.9.1
-          - v0.7.3
-      vllm-ascend-version:
-        description: 'vllm-ascend version:'
-        required: true
-        type: choice
-        options:
-          - main
-          - v0.9.1-dev
-          - v0.7.3-dev
-      models:
-        description: 'model:'
-        required: true
-        type: choice
-        options:
-          - all
-          - Qwen/Qwen2.5-VL-7B-Instruct
-          - Qwen/Qwen3-8B-Base
-          - Qwen/Qwen3-30B-A3B
-        default: 'all'
+        default: main
 
 # Bash shells do not use ~/.profile or ~/.bashrc so these shells need to be explicitly
 # declared as "shell: bash -el {0}" on steps that need to be properly activated.
@@ -76,58 +56,29 @@ jobs:
     # test will be triggered when tag '*-accuracy-test' & 'ready-for-test' or workflow_dispatch job
     if:  >-
       ${{
-      (contains(github.event.pull_request.labels.*.name, 'accuracy-test') ||
-      contains(github.event.pull_request.labels.*.name, 'vl-accuracy-test') ||
-      contains(github.event.pull_request.labels.*.name, 'moe-accuracy-test') ||
-      contains(github.event.pull_request.labels.*.name, 'dense-accuracy-test')) &&
+      contains(github.event.pull_request.labels.*.name, 'accuracy-test') &&
       contains(github.event.pull_request.labels.*.name, 'ready-for-test') ||
       github.event_name == 'workflow_dispatch' || github.event_name == 'schedule'
       }}
-    runs-on: >-
-      ${{
-          (matrix.model_name == 'Qwen/Qwen3-30B-A3B' && 'linux-arm64-npu-4') ||
-          'linux-arm64-npu-2'
-      }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        # the accuracy test will run:
-        # 1. workflow_dispatch with models input
-        #   - all: Qwen/Qwen3-30B-A3B, Qwen/Qwen2.5-VL-7B-Instruct, Qwen/Qwen3-8B-Base
-        #   - specified but not all: Qwen/Qwen3-30B-A3B, Qwen/Qwen2.5-VL-7B-Instruct, Qwen/Qwen3-8B-Base
-        # 2. PR labeled with "*-accuracy-test"
-        #   - accuracy-test: Qwen/Qwen3-8B-Base, Qwen/Qwen2.5-VL-7B-Instruct, Qwen/Qwen3-30B-A3B
-        #   - dense-accuracy-test: Qwen/Qwen3-8B-Base
-        #   - vl-accuracy-test: Qwen/Qwen2.5-VL-7B-Instruct
-        #   - moe-accuracy-test: Qwen/Qwen3-30B-A3B
-        model_name: ${{ fromJSON(
-          (github.event_name == 'schedule' &&
-            '["Qwen/Qwen3-30B-A3B","Qwen/Qwen2.5-VL-7B-Instruct","Qwen/Qwen3-8B-Base"]') ||
-          (github.event.inputs.models == 'all' &&
-            '["Qwen/Qwen3-30B-A3B","Qwen/Qwen2.5-VL-7B-Instruct","Qwen/Qwen3-8B-Base"]') ||
-          (github.event.inputs.models == 'Qwen/Qwen3-30B-A3B' &&
-            '["Qwen/Qwen3-30B-A3B"]') ||
-          (github.event.inputs.models == 'Qwen/Qwen2.5-VL-7B-Instruct' &&
-            '["Qwen/Qwen2.5-VL-7B-Instruct"]') ||
-          (github.event.inputs.models == 'Qwen/Qwen3-8B-Base' &&
-            '["Qwen/Qwen3-8B-Base"]') ||
-          contains(github.event.pull_request.labels.*.name, 'accuracy-test') &&
-            '["Qwen/Qwen3-8B-Base","Qwen/Qwen2.5-VL-7B-Instruct", "Qwen/Qwen3-30B-A3B"]' ||
-          contains(github.event.pull_request.labels.*.name, 'dense-accuracy-test') &&
-            '["Qwen/Qwen3-8B-Base"]' ||
-          contains(github.event.pull_request.labels.*.name, 'vl-accuracy-test') &&
-            '["Qwen/Qwen2.5-VL-7B-Instruct"]' ||
-          contains(github.event.pull_request.labels.*.name, 'moe-accuracy-test') &&
-            '["Qwen/Qwen3-30B-A3B"]'
-         ) }}
-
+        include:
+          - model_name: Qwen3-8B-Base
+            runner: linux-aarch64-a2-1
+          - model_name: Qwen2.5-VL-7B-Instruct
+            runner: linux-aarch64-a2-1
+          - model_name: Qwen3-30B-A3B
+            runner: linux-aarch64-a2-2
+          - model_name: DeepSeek-V2-Lite
+            runner: linux-aarch64-a2-2
       fail-fast: false
+
     name: ${{ matrix.model_name }} accuracy
     container:
       image: swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-910b-ubuntu22.04-py3.11
       env:
-        DATASET_SOURCE: ModelScope
         VLLM_USE_MODELSCOPE: True
-        USE_MODELSCOPE_HUB: 1
         # 1. If version specified (work_dispatch), do specified branch accuracy test
         # 2. If no version (labeled PR), do accuracy test by default ref:
         # The branch, tag or SHA to checkout. When checking out the repository that
@@ -137,12 +88,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
-      - name: Check npu and CANN info
+      - name: Set model name as output
+        id: set_output
         run: |
-          npu-smi info
-          cat /usr/local/Ascend/ascend-toolkit/latest/"$(uname -i)"-linux/ascend_toolkit_install.info
+          echo "model_name=${{ matrix.model_name }}" >> $GITHUB_OUTPUT
 
       - name: Config mirrors
         run: |
@@ -158,22 +109,22 @@ jobs:
           apt-get -y install gcc g++ cmake libnuma-dev
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: vllm-project/vllm
+          ref: v0.10.0
           path: ./vllm-empty
-          # Please also update this when bump matched version
-          ref: ${{ github.event.inputs.vllm-version || 'v0.10.0' }}
 
       - name: Install vllm-project/vllm from source
         working-directory: ./vllm-empty
-        run: VLLM_TARGET_DEVICE=empty pip install -e .
+        run: |
+          VLLM_TARGET_DEVICE=empty pip install -e .
 
       - name: Resolve vllm-ascend version
         run: |
           VERSION_INPUT="${{ github.event.inputs.vllm-ascend-version }}"
           
-          if [[ "$VERSION_INPUT" == "main" ]]; then
+          if [[ "$VERSION_INPUT" == "latest" ]]; then
             TAGS=$(git ls-remote --tags --sort=-v:refname https://github.com/vllm-project/vllm-ascend "v*" | cut -f2 | sed 's|refs/tags/||')
             LATEST_TAG=$(echo "$TAGS" | head -n1)
             if [[ -z "$LATEST_TAG" ]]; then
@@ -187,7 +138,7 @@ jobs:
           echo "GHA_VLLM_ASCEND_VERSION=$RESOLVED_VERSION" >> $GITHUB_ENV
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: vllm-project/vllm-ascend
           path: ./vllm-ascend
@@ -199,8 +150,8 @@ jobs:
           PIP_EXTRA_INDEX_URL: https://mirrors.huaweicloud.com/ascend/repos/pypi
         run: |
           pip install -r requirements-dev.txt
-          pip install -v -e . 
-            
+          pip install -v -e .
+
       - name: Get vLLM commit hash and URL
         working-directory: ./vllm-empty
         run: |
@@ -212,15 +163,6 @@ jobs:
         run: |
           VLLM_ASCEND_COMMIT=$(git rev-parse --short=7 HEAD)
           echo "VLLM_ASCEND_COMMIT=$VLLM_ASCEND_COMMIT" >> $GITHUB_ENV
-
-      - name: Print resolved hashes
-        run: |
-          echo "vLLM       : ${{ env.VLLM_COMMIT }}"
-          echo "vLLM-Ascend: ${{ env.VLLM_ASCEND_COMMIT }}"
-
-      - name: Install lm-eval, ray, and datasets
-        run: |
-            pip install lm-eval==0.4.8
 
       - name: Collect version info
         run: |
@@ -242,37 +184,26 @@ jobs:
             pip show torch_npu | grep "Version:" | awk '{print "GHA_TORCH_NPU_VERSION="$2}'
             pip show vllm | grep "Version:" | awk '{print "GHA_VLLM_VERSION="$2}' | sed 's/+.*//'
           } >> "$GITHUB_ENV"
-      
-      - name: Print versions
-        run: |
-          echo "CANN: ${{ env.GHA_CANN_VERSION }}"
-          echo "Torch NPU: ${{ env.GHA_TORCH_NPU_VERSION }}"
-          echo "Torch: ${{ env.GHA_TORCH_VERSION }}"
-          echo "vLLM: ${{ env.GHA_VLLM_VERSION }}"
-          echo "vLLM Ascend: ${{ env.GHA_VLLM_ASCEND_VERSION }}"
 
-      - name: Run Accuracy Test
+      - name: Run accuracy test
         id: report
-        working-directory: ./benchmarks
         env:
-          PYTORCH_NPU_ALLOC_CONF: max_split_size_mb:256
+          VLLM_WORKER_MULTIPROC_METHOD: spawn
+          VLLM_USE_MODELSCOPE: True
+          VLLM_VERSION: ${{ env.GHA_VLLM_VERSION }}
+          VLLM_COMMIT: ${{ env.VLLM_COMMIT }}
+          VLLM_ASCEND_VERSION: ${{ env.GHA_VLLM_ASCEND_VERSION || github.ref }}
+          VLLM_ASCEND_COMMIT: ${{ env.VLLM_ASCEND_COMMIT }}
+          CANN_VERSION: ${{ env.GHA_CANN_VERSION }}
+          TORCH_VERSION: ${{ env.GHA_TORCH_VERSION }}
+          TORCH_NPU_VERSION: ${{ env.GHA_TORCH_NPU_VERSION }}
         run: |
           model_base_name=$(basename ${{ matrix.model_name }})
           markdown_name="${model_base_name}"
-          echo "markdown_name=$markdown_name"
           echo "markdown_name=$markdown_name" >> $GITHUB_OUTPUT
-          mkdir -p ./accuracy
-
-          python ./scripts/run_accuracy.py \
-            --model "${{ matrix.model_name }}" \
-            --output "./accuracy/${markdown_name}.md" \
-            --vllm_ascend_version "${{ env.GHA_VLLM_ASCEND_VERSION || github.ref }}" \
-            --cann_version "${{ env.GHA_CANN_VERSION }}" \
-            --torch_npu_version "${{ env.GHA_TORCH_NPU_VERSION }}" \
-            --torch_version "${{ env.GHA_TORCH_VERSION }}" \
-            --vllm_version "${{ env.GHA_VLLM_VERSION }}" \
-            --vllm_commit "${{ env.VLLM_COMMIT }}" \
-            --vllm_ascend_commit "${{ env.VLLM_ASCEND_COMMIT }}" \
+          mkdir -p ./benchmarks/accuracy
+          pytest -sv ./tests/e2e/models/test_lm_eval_correctness.py \
+          --config ./tests/e2e/models/configs/${{ matrix.model_name }}.yaml
 
       - name: Generate step summary
         if: ${{ always() }}
@@ -284,19 +215,7 @@ jobs:
           SAFE_VLLM_ASCEND_VERSION="${GHA_VLLM_ASCEND_VERSION//\//-}"
           echo "SAFE_VLLM_ASCEND_VERSION=$SAFE_VLLM_ASCEND_VERSION" >> "$GITHUB_ENV"
 
-      - name: Check report first line for failure
-        id: check_report
-        run: |
-          REPORT_PATH="./benchmarks/accuracy/${{ steps.report.outputs.markdown_name }}.md"
-          echo "Scanning $REPORT_PATH for ❌ …"
-          if grep -q '❌' "$REPORT_PATH"; then
-            echo "contains_fail=true" >> $GITHUB_OUTPUT
-          else
-            echo "contains_fail=false" >> $GITHUB_OUTPUT
-          fi
-
       - name: Upload Report 
-        if: ${{ github.event_name == 'workflow_dispatch' && steps.check_report.outputs.contains_fail == 'false' }}
         uses: actions/upload-artifact@v4
         with:
           name: "report-${{ env.SAFE_VLLM_ASCEND_VERSION }}-${{ steps.report.outputs.markdown_name }}"
@@ -305,20 +224,24 @@ jobs:
           retention-days: 90
           overwrite: true
 
+    outputs:
+      model_name: ${{ steps.set_output.outputs.model_name }}
+      vllm_ascend_version: ${{ env.GHA_VLLM_ASCEND_VERSION }} 
+
   create_pr:
     runs-on: ubuntu-latest
     needs: accuracy_tests
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.vllm-ascend-version == 'latest' }}
     env:
       UPSTREAM_REPO: vllm-project/vllm-ascend
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: vllm-ascend-ci/vllm-ascend
           token: ${{ secrets.PAT_TOKEN }}
           ref: main
-
+      
       - name: Add upstream remote
         run: |
           git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git
@@ -335,10 +258,10 @@ jobs:
           TIMESTAMP=$(date +%Y%m%d%H%M%S)
           BRANCH_NAME="auto-pr/accuracy-report-${TIMESTAMP}"
           echo "BRANCH_NAME=${BRANCH_NAME}" >> $GITHUB_ENV
-          git checkout -B "${BRANCH_NAME}" upstream/${{ github.event.inputs.vllm-ascend-version }}
+          git checkout -B "${BRANCH_NAME}" upstream/main
 
       - name: Download only current run reports
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: ./docs/source/developer_guide/evaluation/accuracy_report
           pattern: report-*
@@ -350,7 +273,7 @@ jobs:
           find ./docs/source/developer_guide/evaluation/accuracy_report -maxdepth 1 -type f -name '*.md' ! -name 'index.md' -delete
           find ./docs/source/developer_guide/evaluation/accuracy_report -mindepth 2 -type f -name '*.md' -exec mv -f {} ./docs/source/developer_guide/evaluation/accuracy_report \;
           find ./docs/source/developer_guide/evaluation/accuracy_report -mindepth 1 -type d -empty -delete
-
+      
       - name: Update accuracy_report/index.md
         run: |
           REPORT_DIR="./docs/source/developer_guide/evaluation/accuracy_report"
@@ -376,7 +299,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
         run: |
           git add ./docs/source/developer_guide/evaluation/accuracy_report/*.md
-          git commit -s -m "[Doc] Update accuracy reports for ${{ github.event.inputs.vllm-ascend-version }}"
+          git commit -s -m "[Doc] Update accuracy reports for ${{ needs.accuracy_tests.outputs.vllm_ascend_version }}"
           git push -f origin "${{ env.BRANCH_NAME }}"
 
       - name: Create PR in upstream via API
@@ -388,18 +311,12 @@ jobs:
               owner: 'vllm-project',
               repo: 'vllm-ascend',
               head: `vllm-ascend-ci:${{ env.BRANCH_NAME }}`,
-              base: '${{ github.event.inputs.vllm-ascend-version }}',
-              title: `[Doc] Update accuracy reports for ${{ github.event.inputs.vllm-ascend-version }}`,
-              body: `The accuracy results running on NPU Altlas A2 have changed, updating reports for:
-            ${{ 
-              github.event.inputs.models == 'all' 
-                && 'All models (Qwen/Qwen3-30B-A3B, Qwen2.5-VL-7B-Instruct, Qwen3-8B-Base)' 
-                || github.event.inputs.models 
-            }}
+              base: 'main',
+              title: `[Doc] Update accuracy reports for ${{ needs.accuracy_tests.outputs.vllm_ascend_version }}`,
+              body: `The accuracy results running on NPU Altlas A2 have changed, updating reports for: All models (Qwen3-30B-A3B, Qwen2.5-VL-7B-Instruct, Qwen3-8B-Base, DeepSeek-V2-Lite)
             
-            - [Workflow run][1]
-            
-            [1]: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`
+              - [Workflow run][1]
+              
+              [1]: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}`
             });
             core.info(`Created PR #${pr.data.number}`);
- 

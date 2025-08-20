@@ -8,10 +8,12 @@ from vllm.config import (CacheConfig, KVTransferConfig, ModelConfig,
                          SchedulerConfig, SpeculativeConfig, VllmConfig)
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sampling_params import SamplingParams
+from vllm.v1.core.kv_cache_utils import (get_request_block_hasher,
+                                         init_none_hash)
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (FullAttentionSpec, KVCacheConfig,
                                         KVCacheGroupSpec)
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -36,7 +38,10 @@ def create_requests(
     mm_positions: Optional[list[PlaceholderRange]] = None,
     max_tokens: int = 16,
     stop_token_ids: Optional[list[int]] = None,
+    block_size: int = 3,
+    hash_fn=hash,
 ):
+    init_none_hash(hash_fn)
     prompt_logprobs = PROMPT_LOGPROBS
     sampling_params = SamplingParams(ignore_eos=False,
                                      max_tokens=max_tokens,
@@ -46,16 +51,16 @@ def create_requests(
     for i in range(num_requests):
         mm_position = None
         mm_inputs = None
-        request = Request(
-            request_id=f"{i}",
-            prompt_token_ids=[i] * num_tokens,
-            sampling_params=sampling_params,
-            multi_modal_inputs=mm_inputs,
-            multi_modal_placeholders=mm_position,
-            multi_modal_hashes=None,
-            eos_token_id=EOS_TOKEN_ID,
-            pooling_params=None,
-        )
+        request = Request(request_id=f"{i}",
+                          prompt_token_ids=[i] * num_tokens,
+                          sampling_params=sampling_params,
+                          multi_modal_kwargs=mm_inputs,
+                          multi_modal_placeholders=mm_position,
+                          multi_modal_hashes=None,
+                          eos_token_id=EOS_TOKEN_ID,
+                          pooling_params=None,
+                          block_hasher=get_request_block_hasher(
+                              block_size, hash_fn))
         requests.append(request)
     return requests
 
@@ -68,7 +73,6 @@ def make_output(scheduler):
             for i, req in enumerate(scheduler.running)
         },
         sampled_token_ids=[[1000]] * len(scheduler.running),
-        spec_token_ids=None,
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[])
@@ -296,7 +300,6 @@ class TestAscendScheduler(TestBase):
             },
             sampled_token_ids=[[EOS_TOKEN_ID], [10, 11]
                                ],  # First request hits EOS, second continues
-            spec_token_ids=None,
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[])
@@ -352,7 +355,6 @@ class TestAscendScheduler(TestBase):
             },
             sampled_token_ids=[[10, 42, 12],
                                [13, 14]],  # First request hits stop token
-            spec_token_ids=None,
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[])
@@ -407,7 +409,6 @@ class TestAscendScheduler(TestBase):
             },
             sampled_token_ids=[[10, 11, 12],
                                [13]],  # First request exceeds max_tokens
-            spec_token_ids=None,
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[])
@@ -451,7 +452,6 @@ class TestAscendScheduler(TestBase):
             req_ids=[requests[0].request_id],
             req_id_to_index={requests[0].request_id: 0},
             sampled_token_ids=[[EOS_TOKEN_ID, 10, 11]],
-            spec_token_ids=None,
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=[])
@@ -509,7 +509,6 @@ class TestAscendScheduler(TestBase):
                 req_ids=[requests[0].request_id],
                 req_id_to_index={requests[0].request_id: 0},
                 sampled_token_ids=[[0]],
-                spec_token_ids=None,
                 logprobs=None,
                 prompt_logprobs_dict={},
                 pooler_output=[])
@@ -526,7 +525,6 @@ class TestAscendScheduler(TestBase):
                 req_ids=[requests[1].request_id],
                 req_id_to_index={requests[1].request_id: 0},
                 sampled_token_ids=[[0]],
-                spec_token_ids=None,
                 logprobs=None,
                 prompt_logprobs_dict={},
                 pooler_output=[])
@@ -586,13 +584,14 @@ class TestAscendScheduler(TestBase):
                 req_ids=req_ids,
                 req_id_to_index=req_to_index,
                 sampled_token_ids=[[0] for _ in range(len(requests))],
-                spec_token_ids=spec_tokens,
                 logprobs=None,
                 prompt_logprobs_dict={},
                 pooler_output=[])
+            draft_token_ids = DraftTokenIds(req_ids, spec_tokens)
 
             engine_core_outputs = scheduler.update_from_output(
                 output, model_runner_output)
+            scheduler.update_draft_token_ids(draft_token_ids)
 
             for i in range(len(requests)):
                 running_req = scheduler.running[i]
@@ -633,7 +632,6 @@ class TestAscendScheduler(TestBase):
                 req_ids=req_ids,
                 req_id_to_index=req_to_index,
                 sampled_token_ids=output_tokens,
-                spec_token_ids=None,
                 logprobs=None,
                 prompt_logprobs_dict={},
                 pooler_output=[])
@@ -674,10 +672,6 @@ class TestAscendScheduler(TestBase):
         self.assertEqual(
             len(scheduler.kv_cache_manager.coordinator.single_type_managers[0].
                 num_cached_block), 0)
-        self.assertEqual(len(scheduler.kv_cache_manager.req_to_block_hashes),
-                         0)
-        self.assertEqual(len(scheduler.kv_cache_manager.req_to_block_hashes),
-                         0)
         num_free_blocks = (scheduler.kv_cache_manager.block_pool.
                            free_block_queue.num_free_blocks)
         self.assertEqual(

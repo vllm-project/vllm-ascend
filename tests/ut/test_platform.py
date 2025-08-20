@@ -26,6 +26,7 @@ class TestNPUPlatform(TestBase):
         self.mock_vllm_config.cache_config = MagicMock()
         self.mock_vllm_config.scheduler_config = MagicMock()
         self.mock_vllm_config.speculative_config = None
+        self.mock_vllm_config.compilation_config.pass_config.enable_sequence_parallelism = False
 
         self.mock_ascend_config = MagicMock()
         self.mock_ascend_config.torchair_graph_config.enabled = False
@@ -443,7 +444,7 @@ class TestNPUPlatform(TestBase):
         )
         self.assertEqual(
             result,
-            "vllm_ascend.attention.attention_v1_torchair.AscendAttentionTorchairBackend"
+            "vllm_ascend.torchair.torchair_attention.AscendAttentionTorchairBackend"
         )
 
     @patch('vllm_ascend.platform.get_ascend_config')
@@ -535,21 +536,17 @@ class TestNPUPlatform(TestBase):
         mock_config = MagicMock(spec=ModelConfig)
         self.assertTrue(self.platform.supports_v1(mock_config))
 
-    def test_get_piecewise_backend_cls_returns_correct_value(self):
+    def test_get_static_graph_wrapper_cls_returns_correct_value(self):
         self.assertEqual(
-            self.platform.get_piecewise_backend_cls(),
-            "vllm_ascend.compilation.piecewise_backend.NPUPiecewiseBackend",
+            self.platform.get_static_graph_wrapper_cls(),
+            "vllm_ascend.compilation.acl_graph.ACLGraphWrapper",
         )
 
     @patch("torch.distributed.is_hccl_available", return_value=True)
     @patch("torch_npu._C._distributed_c10d.ProcessGroupHCCL")
-    @patch("torch_npu._C._distributed_c10d.ProcessGroupHCCL.Options")
     @patch("torch.distributed.ProcessGroup")
-    def test_successful_initialization(self, mock_pg, mock_options_cls,
-                                       mock_pg_hccl, _):
+    def test_successful_initialization(self, mock_pg, mock_pg_hccl, _):
         mock_prefix = MagicMock(spec=PrefixStore)
-        mock_options = MagicMock(spec=ProcessGroup.Options)
-        mock_options_cls.return_value = mock_options
         mock_backend = MagicMock()
         mock_pg_hccl.return_value = mock_backend
         group_rank = 0
@@ -574,8 +571,7 @@ class TestNPUPlatform(TestBase):
             timeout=timedelta(seconds=30),
         )
 
-        mock_pg.assert_called_once_with(mock_prefix, group_rank, group_size,
-                                        unittest.mock.ANY)
+        mock_pg.assert_called_once_with(mock_prefix, group_rank, group_size)
         mock_pg_hccl.assert_called_once_with(mock_prefix, group_rank,
                                              group_size, unittest.mock.ANY)
         mock_backend._set_sequence_number_for_group.assert_called_once()

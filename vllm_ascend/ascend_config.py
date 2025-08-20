@@ -17,7 +17,7 @@ from typing import Optional
 
 from vllm.logger import logger
 
-TORCHAIR_MODEL_LIST = ["deepseek", "pangu"]
+TORCHAIR_MODEL_LIST = ["deepseek", "pangu", "kimi_k2", "qwen"]
 
 
 def _check_torchair_supported(model_type: str):
@@ -47,6 +47,9 @@ class AscendConfig:
         self.expert_map_path = additional_config.get("expert_map_path", None)
         self.chunked_prefill_for_mla = additional_config.get(
             "chunked_prefill_for_mla", False)
+        self.enable_shared_expert_dp = additional_config.get(
+            "enable_shared_expert_dp", False
+        ) and not self.torchair_graph_config.enabled and vllm_config.parallel_config.enable_expert_parallel
 
 
 class TorchairGraphConfig:
@@ -76,6 +79,31 @@ class TorchairGraphConfig:
             raise ValueError(
                 "graph_batch_sizes_init is only valid when graph_batch_sizes is empty"
             )
+        if not self.enabled:
+            if self.use_cached_graph:
+                raise RuntimeError(
+                    "use_cached_graph is valid only when Torchair graph mode is enabled"
+                )
+            if self.graph_batch_sizes:
+                raise RuntimeError(
+                    "graph_batch_sizes is valid only when Torchair graph mode is enabled"
+                )
+            if self.graph_batch_sizes_init:
+                raise RuntimeError(
+                    "graph_batch_sizes_init is valid only when Torchair graph mode is enabled"
+                )
+            if self.enable_multistream_mla:
+                raise RuntimeError(
+                    "enable_multistream_mla is valid only when Torchair graph mode is enabled"
+                )
+            if self.enable_multistream_moe:
+                raise RuntimeError(
+                    "enable_multistream_moe is valid only when Torchair graph mode is enabled"
+                )
+            if self.enable_kv_nz:
+                raise RuntimeError(
+                    "enable_kv_nz is valid only when Torchair graph mode is enabled"
+                )
 
 
 class AscendSchedulerConfig:
@@ -134,13 +162,17 @@ def check_ascend_config(vllm_config, enforce_eager):
     else:
         # torchair_graph case
         if ascend_config.torchair_graph_config.enabled:
-            # torchair_graph is supported for deepseek/pangu model only.
+            # torchair_graph is supported for deepseek/pangu/qwen model only.
             if vllm_config.model_config:
                 model_type = vllm_config.model_config.hf_config.model_type
                 if not _check_torchair_supported(model_type):
                     raise NotImplementedError(
                         "Torchair graph mode only works with following model types:"
                         f"{TORCHAIR_MODEL_LIST}.")
+            if ascend_config.enable_shared_expert_dp:
+                logger.warning(
+                    "enable_shared_expert_dp is not supported for torchair graph mode currently, "
+                    "it has been disabled automatically.")
         # aclgraph case
         else:
             # aclgraph doesn't work with deepseek model and only qwen model is well tested.

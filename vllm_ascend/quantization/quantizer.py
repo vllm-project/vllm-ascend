@@ -22,7 +22,10 @@ from typing import Any, Dict, List, Optional
 
 from vllm.logger import logger
 
-from .func_wrapper import wrapper_rmsnorm_forward_oot, wrapper_rmsnorm_init
+from .func_wrapper import (wrapper_rmsnorm_forward_oot, wrapper_rmsnorm_init,
+                           wrapper_vocab_parallel_embedding_init)
+from .w4a8_dynamic import (AscendW4A8DynamicFusedMoEMethod,
+                           AscendW4A8DynamicLinearMethod)
 from .w8a8 import (AscendC8KVCacheMethod, AscendW8A8FusedMoEMethod,
                    AscendW8A8LinearMethod)
 from .w8a8_dynamic import (AscendW8A8DynamicFusedMoEMethod,
@@ -46,14 +49,8 @@ class AscendQuantizer:
         if quantization_algorithm in CUSTOMIZED_QUANTIZER_TYPE:
             return
 
-        try:
-            module = importlib.import_module("mindie_turbo")
-            MindIETurboQuantizer = module.MindIETurboQuantizer
-            return MindIETurboQuantizer.get_quantizer(quant_config, prefix,
-                                                      packed_modules_mapping)
-        except ImportError:
-            return VLLMAscendQuantizer.get_quantizer(quant_config, prefix,
-                                                     packed_modules_mapping)
+        return VLLMAscendQuantizer.get_quantizer(quant_config, prefix,
+                                                 packed_modules_mapping)
 
     def build_linear_method(self):
         raise NotImplementedError
@@ -80,6 +77,9 @@ class VLLMAscendQuantizer:
                 VLLMAscendQuantizer.apply_patch(
                     "vllm.model_executor.layers.layernorm.RMSNorm",
                     "forward_oot", [wrapper_rmsnorm_forward_oot])
+                VLLMAscendQuantizer.apply_patch(
+                    "vllm.model_executor.layers.vocab_parallel_embedding.VocabParallelEmbedding",
+                    "__init__", [wrapper_vocab_parallel_embedding_init])
                 break
         VLLMAscendQuantizer.patched = True
         logger.info("Using the vLLM Ascend Quantizer version now!")
@@ -98,12 +98,15 @@ class VLLMAscendQuantizer:
         if target_function is not None:
             setattr(original_module, target_function, candidate)
 
-        for key, value in sys.modules.copy().items():
-            if (target_function is not None
-                    and hasattr(value, target_function)
-                    and id(getattr(value,
-                                   target_function)) == original_function_id):
-                setattr(value, target_function, candidate)
+        for _, value in sys.modules.copy().items():
+            if target_function is None:
+                continue
+            try:
+                attr = getattr(value, target_function, None)
+                if attr is not None and id(attr) == original_function_id:
+                    setattr(value, target_function, candidate)
+            except ImportError:
+                continue
 
     @staticmethod
     def parse_path(module_path, function_name, create_dummy):
@@ -263,6 +266,17 @@ class VLLMAscendQuantizer:
                                   f"{list(SUPPORT_ASCEND_QUANTIZER_TYPE.keys())}")
 
 
+class W4A8DYNAMICQuantizer(VLLMAscendQuantizer):
+
+    @staticmethod
+    def build_linear_method():
+        return AscendW4A8DynamicLinearMethod()
+
+    @staticmethod
+    def build_moe_method():
+        return AscendW4A8DynamicFusedMoEMethod()
+
+
 class W8A8Quantizer(VLLMAscendQuantizer):
 
     @staticmethod
@@ -290,6 +304,7 @@ class W8A8DYNAMICQuantizer(VLLMAscendQuantizer):
 
 
 SUPPORT_ASCEND_QUANTIZER_TYPE = {
+    "W4A8_DYNAMIC": W4A8DYNAMICQuantizer,
     "W8A8": W8A8Quantizer,
     "W8A8_DYNAMIC": W8A8DYNAMICQuantizer,
     "C8": W8A8Quantizer,
