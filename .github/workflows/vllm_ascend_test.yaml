@@ -130,9 +130,9 @@ jobs:
           verbose: true
 
   e2e:
-    needs: [changes]
+    needs: [lint, changes]
     # only trigger e2e test after lint passed and the change is e2e related with pull request.
-    if: ${{ github.event_name == 'pull_request' && needs.changes.outputs.e2e_tracker == 'true' }}
+    if: ${{ github.event_name == 'pull_request' && needs.lint.result == 'success' && needs.changes.outputs.e2e_tracker == 'true' }}
     strategy:
       max-parallel: 2
       matrix:
