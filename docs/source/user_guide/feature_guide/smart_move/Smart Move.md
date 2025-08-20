@@ -176,10 +176,10 @@ nohup python /sfs_turbo/tzq/ant_code/vllm/benchmarks/benchmark_serving.py \
 
 | DP16+TP1+**OTP1**                                            | DP16+TP1+**OTP4**                                            |
 | ------------------------------------------------------------ | ------------------------------------------------------------ |
-| ![img](https://intranetproxy.alipay.com/skylark/lark/0/2025/png/191656319/1754916336574-16a43c4f-7cf6-4837-828d-cbe30faff7fa.png) | ![img](https://intranetproxy.alipay.com/skylark/lark/0/2025/png/191656319/1754916453082-51556066-3a45-4745-b4d6-384d1367f6af.png) |
+| ![img](Smart Move.assets/1754916336574-16a43c4f-7cf6-4837-828d-cbe30faff7fa.png) | ![img](Smart Move.assets/1754916453082-51556066-3a45-4745-b4d6-384d1367f6af.png) |
 | 输出吞吐测试结果：**517.66 TPS**                             | 输出吞吐测试结果：**602.16 TPS**                             |
 | DP16+TP1+**OTP4+QKVTP4**                                     |                                                              |
-| ![img](https://intranetproxy.alipay.com/skylark/lark/0/2025/png/191656319/1755226994898-fcd49a90-6dd2-45c2-ae5c-5ce4a7bf2422.png) |                                                              |
+| ![img](Smart Move.assets/1755226994898-fcd49a90-6dd2-45c2-ae5c-5ce4a7bf2422.png) |                                                              |
 | 输出吞吐测试结果：**631.67 TPS**                             |                                                              |
 
 由上表所示，OTP4相比于基线的输出吞吐提升了**16%**。
@@ -218,9 +218,9 @@ o proj tp4
 
 | 并行策略         | graph size   | TTFT(ms)  | TPOT(ms) | QPS  | 截图                                                         |
 | ---------------- | ------------ | --------- | -------- | ---- | ------------------------------------------------------------ |
-| DP16+OTP4+QKVTP4 | [48, 24]     | 34349.30  | 169.21   | 0.97 | ![img](https://intranetproxy.alipay.com/skylark/lark/0/2025/png/191656319/1755237917889-5137f6a2-e173-4cdd-863a-6db5ec1e972f.png) |
-| DP16+TP1         | [48, 24]     | 122960.07 | 235.30   | 0.62 | ![img](https://intranetproxy.alipay.com/skylark/lark/0/2025/png/191656319/1755247053064-68d3ebe9-97eb-4df5-ac15-6b4a87d1903a.png) |
-| DP8+TP2          | [48, 24]     | 341356.79 | 90.90    | 0.98 | ![img](https://intranetproxy.alipay.com/skylark/lark/0/2025/png/191656319/1755495484398-19bddfe7-3766-4eb0-89e5-462d23a31ad0.png) |
+| DP16+OTP4+QKVTP4 | [48, 24]     | 34349.30  | 169.21   | 0.97 | ![img](Smart Move.assets/1755237917889-5137f6a2-e173-4cdd-863a-6db5ec1e972f.png) |
+| DP16+TP1         | [48, 24]     | 122960.07 | 235.30   | 0.62 | ![img](Smart Move.assets/1755247053064-68d3ebe9-97eb-4df5-ac15-6b4a87d1903a.png) |
+| DP8+TP2          | [48, 24]     | 341356.79 | 90.90    | 0.98 | ![img](Smart Move.assets/1755495484398-19bddfe7-3766-4eb0-89e5-462d23a31ad0.png) |
 | DP8+TP2          | [96, 48, 24] | 22551.13  | 152.37   | 1.10 | ![img](Smart Move.assets/1755507461993-5ff85447-7a04-4399-9d19-1209c5ffcdd9.png) |
 
 ## 特性二：权重prefetch
@@ -236,3 +236,4 @@ o proj tp4
 | ![image-20250820124239885](Smart Move.assets/image-20250820124239885.png) | ![image-20250820124249951](Smart Move.assets/image-20250820124249951.png) |
 
 tpot收益达到**5%**。
+
