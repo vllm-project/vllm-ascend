@@ -1271,7 +1271,7 @@ class AscendFusedMoE(FusedMoE):
     def forward(self,
                 hidden_states: torch.Tensor,
                 router_logits: torch.Tensor,
-                is_prefill: bool,
+                is_prefill: bool = False,
                 enable_force_load_balance: bool = False,
                 top_k: Optional[int] = None,
                 shared_experts: Optional[Any] = None,
