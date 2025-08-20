@@ -33,11 +33,7 @@ class AddRMSNormW8A8Quant(RMSNorm):
         has_weight: bool = True,
         dtype: Optional[torch.dtype] = None,
     ) -> None:
-        super().__init__(hidden_size=hidden_size,
-                         eps=eps,
-                         var_hidden_size=var_hidden_size,
-                         has_weight=has_weight,
-                         dtype=dtype)
+        super().__init__(hidden_size, eps, var_hidden_size, has_weight, dtype)
         self.layer = layer
 
     def forward(
@@ -63,12 +59,14 @@ class AddRMSNormW8A8Quant(RMSNorm):
 
 
 class AscendRMSNorm(RMSNorm):
+
     def forward_oot(
         self,
         x: torch.Tensor,
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         import torch_npu
+
         from vllm_ascend.utils import is_310p
         if residual is not None:
             if is_310p():
