@@ -65,10 +65,9 @@ class TestTorchairUtils(TestBase):
              "vllm_ascend.torchair.models.torchair_deepseek_v3:TorchairDeepseekV3ForCausalLM"
              ),
             ("Qwen2ForCausalLM",
-            "vllm_ascend.torchair.models.qwen2:CustomQwen2ForCausalLM"
-            ),
+             "vllm_ascend.torchair.models.qwen2:CustomQwen2ForCausalLM"),
             ("Qwen3ForCausalLM",
-            "vllm_ascend.torchair.models.qwen3_moe:CustomQwen3MoeForCausalLM")
+             "vllm_ascend.torchair.models.qwen3_moe:CustomQwen3MoeForCausalLM")
         ]
 
         for i, (expected_name,
