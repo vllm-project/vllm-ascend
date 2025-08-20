@@ -410,8 +410,8 @@ class AscendMLAMetadataBuilder:
         if self._num_prefills > 0:
             reqs_start = self._num_decodes  # prefill_start
             tokens_start = self._num_decode_tokens
-            max_query_len = query_lens[tokens_start:].max().item()
-            max_seq_lens = seq_lens[tokens_start:].max().item()
+            max_query_len = query_lens[reqs_start:].max().item()
+            max_seq_lens = seq_lens[reqs_start:].max().item()
             prefill_query_start_loc = query_start_loc[
                 reqs_start:] - query_start_loc[reqs_start]
 
@@ -458,9 +458,9 @@ class AscendMLAMetadataBuilder:
                     1).unsqueeze(2)
             prefill_metadata = AscendMLAPrefillMetadata(
                 attn_mask=self.runner.attn_mask,
-                query_lens=query_lens[tokens_start:],
+                query_lens=query_lens[reqs_start:],
                 seq_lens=seq_lens,
-                context_lens=seq_lens[tokens_start:],
+                context_lens=seq_lens[reqs_start:],
                 input_positions=prefill_input_positions,
                 block_table=block_table[reqs_start:, ...],
                 max_query_len=max_query_len,
@@ -764,16 +764,13 @@ class AscendMLAImpl(MLAAttentionImpl):
             k_nope, v = kv_nope\
                 .split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
             k_pe = k_pe.expand((*k_nope.shape[:-1], -1))
-            mask = torch.triu(
-                torch.ones(512, 512, device=q_nope.device, dtype=q_nope.dtype),
-                1)
             torch_npu.atb.npu_ring_mla(
                 q_nope=q_nope,
                 q_rope=q_pe,
                 k_nope=k_nope,
                 k_rope=k_pe,
                 value=v,
-                mask=mask,
+                mask=self.prefill_mask,
                 seqlen=seq_len,
                 head_num=self.num_heads,
                 kv_head_num=self.num_heads,
@@ -810,7 +807,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                                 num_tokens,
                                 dtype=torch.float32,
                                 device=q_nope.device)
-        mask = torch.triu(
+        self.prefill_mask = torch.triu(
             torch.ones(512, 512, device=q_nope.device, dtype=q_nope.dtype),
             1)  # 512: mask only support 512
         if attn_metadata.num_prefills > 1:
