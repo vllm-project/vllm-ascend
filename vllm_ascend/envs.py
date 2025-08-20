@@ -62,28 +62,10 @@ env_variables: Dict[str, Callable[[], Any]] = {
     # /usr/local/Ascend/ascend-toolkit/latest
     "ASCEND_HOME_PATH":
     lambda: os.getenv("ASCEND_HOME_PATH", None),
-    # The path for HCCN Tool, the tool will be called by disaggregated prefilling
-    # case.
-    "HCCN_PATH":
-    lambda: os.getenv("HCCN_PATH", "/usr/local/Ascend/driver/tools/hccn_tool"),
     # The path for HCCL library, it's used by pyhccl communicator backend. If
     # not set, the default value is libhccl.so。
     "HCCL_SO_PATH":
-    # The prefill device id for disaggregated prefilling case.
     lambda: os.environ.get("HCCL_SO_PATH", None),
-    "PROMPT_DEVICE_ID":
-    lambda: os.getenv("PROMPT_DEVICE_ID", None),
-    # The decode device id for disaggregated prefilling case.
-    "DECODE_DEVICE_ID":
-    lambda: os.getenv("DECODE_DEVICE_ID", None),
-    # The port number for llmdatadist communication. If not set, the default
-    # value is 26000.
-    "LLMDATADIST_COMM_PORT":
-    lambda: os.getenv("LLMDATADIST_COMM_PORT", "26000"),
-    # The wait time for llmdatadist sync cache. If not set, the default value is
-    # 5000ms.
-    "LLMDATADIST_SYNC_CACHE_WAIT_TIME":
-    lambda: os.getenv("LLMDATADIST_SYNC_CACHE_WAIT_TIME", "5000"),
     # The version of vllm is installed. This value is used for developers who
     # installed vllm from source locally. In this case, the version of vllm is
     # usually changed. For example, if the version of vllm is "0.9.0", but when
@@ -100,6 +82,7 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP":
     lambda: bool(int(os.getenv("VLLM_ENABLE_FUSED_EXPERTS_ALLGATHER_EP", '0'))
                  ),
+    # Whether to enable DBO feature for deepseek model.
     "VLLM_ASCEND_ENABLE_DBO":
     lambda: bool(int(os.getenv("VLLM_ASCEND_ENABLE_DBO", '0'))),
     # Whether to enable the model execute time observe profile. Disable it when
@@ -128,7 +111,6 @@ env_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION":
     lambda: bool(
         int(os.getenv("VLLM_ASCEND_ENABLE_TOPK_TOPP_OPTIMIZATION", '1'))),
-
     # `LLMDataDistCMgrConnector` required variable. `DISAGGREGATED_PREFILL_RANK_TABLE_PATH` is
     # used for llmdatadist to build the communication topology for kv cache transfer, it is
     # a required variable if `LLMDataDistCMgrConnector` is used as kv connector for disaggregated
