@@ -567,9 +567,6 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             q_a_proj=self.q_a_proj if self.q_lora_rank is not None else None,
             q_a_layernorm=self.q_a_layernorm if self.q_lora_rank is not None else None,
             q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
-            debug_layer_idx=self.debug_layer_idx,
-            first_k_dense_replace=self.first_k_dense_replace,
-            layers=self.layers,
             kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
             kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
@@ -586,9 +583,11 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         if kv_cache is None:
             kv_cache = self.mla_attn.kv_cache[forward_context.virtual_engine]
         num_tokens = hidden_states.shape[0]
+        need_gather_q_kv = False
         if self.enable_shared_expert_dp and self.debug_layer_idx > self.first_k_dense_replace and self.debug_layer_idx < self.layers:
             # Simulate all gather to calculate output shape
             num_tokens = num_tokens * self.tp_size
+            need_gather_q_kv = True
         if not self.enable_shared_expert_dp or self.debug_layer_idx < self.first_k_dense_replace:
             output_shape = hidden_states.shape
         else:
@@ -602,6 +601,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         output = self.mla_attn.impl.forward(hidden_states,
                                             kv_cache,
                                             forward_context.attn_metadata,
+                                            need_gather_q_kv,
                                             output)
         output = output.view(-1, output_shape[-1])
         return output
