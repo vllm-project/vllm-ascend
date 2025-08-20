@@ -184,6 +184,11 @@ class MockQuantMethod(nn.Module):
 
 
 class MockFusedMoEMethod(FusedMoEMethodBase):
+    # TODO(bnell): also pass quant_config?
+    moe = MagicMock()
+
+    def __init__(self):
+        super().__init__(self.moe)
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size_per_partition: int,

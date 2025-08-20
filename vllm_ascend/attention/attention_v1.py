@@ -20,14 +20,17 @@ from enum import Enum
 from typing import List, Optional, Tuple, Type
 
 import torch
+import torch.nn as nn
 import torch_npu
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionLayer, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
+from vllm.config import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.utils import direct_register_custom_op
+from vllm.utils import cdiv, direct_register_custom_op
 from vllm.v1.core.sched.output import SchedulerOutput
 
+from vllm_ascend.attention.utils import AscendCommonAttentionMetadata
 from vllm_ascend.ops.attention import vanilla_chunked_prefill
 from vllm_ascend.utils import (ACL_FORMAT_FRACTAL_NZ, aligned_16, is_310p,
                                nd_to_nz_2d, nd_to_nz_spec)
@@ -157,35 +160,49 @@ class AscendMetadata:
 
 class AscendAttentionMetadataBuilder:
 
-    def __init__(self, runner):
-        self.runner = runner
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ):
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.device = device
+        self.max_num_blocks_per_req = cdiv(self.model_config.max_model_len,
+                                           vllm_config.cache_config.block_size)
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
         return False
 
-    def build(self,
-              num_reqs,
-              num_actual_tokens,
-              max_query_len,
-              enable_dbo_across_dp: bool = False,
-              is_only_prefill: bool = False,
-              *args,
-              **kwargs):
+    def build(
+        self,
+        common_attn_metadata: AscendCommonAttentionMetadata,
+        model: nn.Module,
+    ):
+        num_reqs = common_attn_metadata.num_reqs
+        num_actual_tokens = common_attn_metadata.num_actual_tokens
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:
+                                                                       num_reqs
+                                                                       + 1]
 
-        block_table = self.runner.input_batch.block_table[0].get_device_tensor(
-        )
-        block_table[:num_reqs, :self.runner.max_num_blocks_per_req] = (
+        block_table = common_attn_metadata.block_table_tensor
+        block_table[:num_reqs, :self.max_num_blocks_per_req] = (
             block_table[:num_reqs])
 
-        query_lens = self.runner.query_lens
-        seq_lens = self.runner.seq_lens_cpu[:num_reqs]
-        slot_mapping = self.runner.slot_mapping_cpu[:num_actual_tokens].to(
-            self.runner.device, non_blocking=True)
-        attn_mask = self.runner.attn_mask
-        attn_state = self.runner.attn_state
-        query_start_loc_cpu = self.runner.query_start_loc_cpu[:num_reqs + 1]
-        query_start_loc = query_start_loc_cpu.to(self.runner.device,
+        query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
+        seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs]
+        slot_mapping = common_attn_metadata.slot_mapping_cpu[:
+                                                             num_actual_tokens].to(
+                                                                 self.device,
+                                                                 non_blocking=
+                                                                 True)
+        attn_mask = common_attn_metadata.attn_mask
+        attn_state = common_attn_metadata.attn_state
+        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu[:
+                                                                       num_reqs
+                                                                       + 1]
+        query_start_loc = query_start_loc_cpu.to(self.device,
                                                  non_blocking=True)
 
         if is_310p():
@@ -204,12 +221,12 @@ class AscendAttentionMetadataBuilder:
             query_start_loc=query_start_loc,
             query_lens=query_lens,
             seq_lens=seq_lens,
-            max_query_len=max_query_len,
+            max_query_len=common_attn_metadata.max_query_len,
             slot_mapping=slot_mapping,
             attn_mask=attn_mask,
             attn_state=attn_state,
-            enable_dbo_across_dp=enable_dbo_across_dp,
-            is_only_prefill=is_only_prefill)
+            enable_dbo_across_dp=common_attn_metadata.enable_dbo_across_dp,
+            is_only_prefill=common_attn_metadata.is_only_prefill)
         return attn_metadata
 
 
