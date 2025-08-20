@@ -543,9 +543,8 @@ class AscendMLAMetadataBuilder:
                                                device=input_positions.device)
                 input_positions = torch.cat(
                     [input_positions, position_padding])
-                actual_seq_lengths_q = query_start_loc[1:].tolist(
-                ) + self.runner.actual_seq_lengths_q[num_reqs:num_reqs +
-                                                     num_reqs_pad_size]
+                actual_seq_lengths_q = actual_seq_lengths_q + self.runner.actual_seq_lengths_q[
+                    num_reqs:num_reqs + num_reqs_pad_size]
             else:
                 seq_lens_list = seq_lens.tolist()
             # mtp torchair + PD scenario, last element of actual_seq_lengths_q must equal to batch_size(num_tokens)
@@ -959,7 +958,6 @@ class AscendMLAImpl(MLAAttentionImpl):
                     AscendAttentionState.SpecDecoding,
                     AscendAttentionState.ChunkedPrefill
             ]:
-                assert num_tokens % (1 + self.spec_token_num) == 0
                 input_layout = "TND"
                 # [bs * q_seq_len, num_heads_per_rank, dim]
                 q_nope = q_nope.view(num_tokens, self.num_heads, -1)
