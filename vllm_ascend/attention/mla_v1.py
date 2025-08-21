@@ -662,7 +662,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             torch.ones(512, 512, device=q_nope.device, dtype=q_nope.dtype),
             1)  # 512: mask only support 512
         if attn_metadata.num_prefills > 1:
-            mask = mask.unsqueeze(0).repeat(attn_metadata.num_prefills, 1,
+            self.prefill_mask = self.prefill_mask.unsqueeze(0).repeat(attn_metadata.num_prefills, 1,
                                             1)
         torch_npu.atb.npu_ring_mla(
             q_nope=q_nope,
@@ -670,7 +670,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             k_nope=k_nope,
             k_rope=k_pe,
             value=value,
-            mask=mask,
+            mask=self.prefill_mask,
             seqlen=torch.tensor(attn_metadata.prefill.query_lens,
                                 dtype=torch.int32),
             head_num=self.num_heads,
