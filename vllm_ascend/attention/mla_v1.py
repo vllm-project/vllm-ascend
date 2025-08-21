@@ -651,7 +651,7 @@ class AscendMLAImpl(MLAAttentionImpl):
     ) -> torch.Tensor:
         assert attn_metadata.prefill is not None
         assert len(kv_c_and_k_pe_cache) > 1
-        num_tokens = query.size(0)
+        num_tokens = q_nope.size(0)
         attn_output = torch.empty(num_tokens,
                                   self.num_heads,
                                   self.v_head_dim,
@@ -662,7 +662,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                                 dtype=torch.float32,
                                 device=q_nope.device)
         mask = torch.triu(
-            torch.ones(512, 512, device=query.device, dtype=query.dtype),
+            torch.ones(512, 512, device=q_nope.device, dtype=q_nope.dtype),
             1)  # 512: mask only support 512
         if attn_metadata.num_prefills > 1:
             mask = mask.unsqueeze(0).repeat(attn_metadata.num_prefills, 1,
