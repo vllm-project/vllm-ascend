@@ -53,6 +53,7 @@ class MtpProposer:
             dtype=torch.bool,
             device=self.runner.device
         )
+        self.torchair_graph_enabled = get_ascend_config().torchair_graph_config.enabled
 
     @staticmethod
     def prepare_inputs(
