@@ -1506,6 +1506,7 @@ class AscendFusedMoE(FusedMoE):
 
         return hidden_states
 
+
 class AscendSparseMoeBlock(nn.Module):
 
     def __init__(
