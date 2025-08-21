@@ -1,6 +1,5 @@
-import vllm_ascend.envs as envs_ascend
-
 from vllm import ModelRegistry
+import vllm_ascend.envs as envs_ascend
 
 
 def register_model():
@@ -13,7 +12,6 @@ def register_model():
         AscendQwen2_5_VLForConditionalGeneration  # noqa: F401
     from .qwen2_vl import AscendQwen2VLForConditionalGeneration  # noqa: F401
     from .qwen3 import CustomQwen3ForCausalLM  # noqa: F401
-    from .gemma3 import AscendGemma3ForCausalLM  # noqa: F401
 
     ModelRegistry.register_model(
         "DeepSeekMTPModel",

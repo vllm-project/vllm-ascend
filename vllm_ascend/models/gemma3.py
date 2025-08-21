@@ -4,9 +4,6 @@ from typing import Optional
 import torch
 from torch import nn
 from transformers import Gemma3TextConfig
-from vllm_ascend.ops.layernorm import AddRMSNormW8A8Quant, AscendRMSNorm
-from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
-
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -24,8 +21,12 @@ from vllm.model_executor.models.utils import (
     is_pp_missing_parameter, make_empty_intermediate_tensors_factory,
     make_layers, maybe_prefix)
 
+from vllm_ascend.ops.layernorm import AddRMSNormW8A8Quant, AscendRMSNorm
+from vllm_ascend.quantization.w8a8 import AscendW8A8LinearMethod
+
 
 class AscendGemma3DecoderLayer(Gemma3DecoderLayer):
+
     def __init__(
         self,
         config: Gemma3TextConfig,
@@ -80,6 +81,7 @@ class AscendGemma3DecoderLayer(Gemma3DecoderLayer):
 
 @support_torch_compile
 class AscendGemma3Model(Gemma3Model):
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
         cache_config = vllm_config.cache_config
@@ -96,7 +98,8 @@ class AscendGemma3Model(Gemma3Model):
             lambda prefix: AscendGemma3DecoderLayer(
                 self.config, cache_config, self.quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
-        self.norm = AscendRMSNorm(self.config.hidden_size, eps=self.config.rms_norm_eps)
+        self.norm = AscendRMSNorm(self.config.hidden_size,
+                                  eps=self.config.rms_norm_eps)
 
         # Normalize the embedding by sqrt(hidden_size)
         # The normalizer's data type should be downcasted to the model's
