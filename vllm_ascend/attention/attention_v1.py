@@ -398,13 +398,12 @@ class AscendAttentionBackendImpl(AttentionImpl):
                         attn_weights = torch.matmul(q, k.transpose(1, 2)) * self.scale
                         mask_seq = mask_seqs[:, :seq_len, :seq_len]
                         attn_weights = attn_weights + mask_seq
-                        combined_logits = attn_weights
-                        # sinks = self.sinks.reshape(-1, 1, 1).expand(-1, q.shape[-2], -1)
-                        # combined_logits = torch.cat([attn_weights, sinks], dim=-1)
-                        # combined_logits = combined_logits - combined_logits.max(dim=-1, keepdim=True).values
+
+                        sinks = self.sinks.reshape(-1, 1, 1).expand(-1, q.shape[-2], -1)
+                        combined_logits = torch.cat([attn_weights, sinks], dim=-1)
+                        combined_logits = combined_logits - combined_logits.max(dim=-1, keepdim=True).values
                         probs = F.softmax(combined_logits, dim=-1, dtype=combined_logits.dtype)
-                        # scores = probs[..., :-1]
-                        scores = probs
+                        scores = probs[..., :-1]
                         attn_weights = F.dropout(scores, p=0.0, training=False)
                         attn_output = torch.matmul(attn_weights, v).transpose(0, 1).contiguous()
                         output[start:end].copy_(attn_output)
