@@ -103,11 +103,11 @@ def test_all_gather_comm_impl(
         native_permuted_hidden,
         native_expert_tokens,
         _,
-    ) = native_impl._pre_process(hidden_states, topk_ids, topk_weights,
-                                 expert_map, num_experts)
+    ) = native_impl.permute(hidden_states, topk_ids, topk_weights, expert_map,
+                            num_experts)
     # Simulate MLP output
     native_mlp_output = torch.randn_like(native_permuted_hidden)
-    native_impl._post_process(native_mlp_output, native_hidden_states_out)
+    native_impl.unpermute(native_mlp_output, native_hidden_states_out)
 
     # --- Run AllGather Implementation ---
     all_gather_hidden_states_out = hidden_states.clone()
