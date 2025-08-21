@@ -84,6 +84,17 @@ Usually, each minor version of vLLM (such as 0.7) will correspond to a vLLM Asce
 | v0.7.3-dev | Maintained   | CI commitment for vLLM 0.7.3 version |
 | v0.7.1-dev | Unmaintained | Replaced by v0.7.3-dev               |
 
+### Feature branches
+
+| Branch     | Status       | RFC link                              | Merge plan | Mentor |
+|------------|--------------|---------------------------------------|------------|--------|
+
+- Branch: The feature branch should be created with a prefix `rfc/` followed by the feature name, such as `rfc/feature-name`.
+- Status: The status of the feature branch is `Maintained` until it is merged into the main branch or deleted.
+- RFC link: The feature branch should be created with a corresponding RFC issue. The creation of a feature branch requires an RFC and approval from at least two maintainers.
+- Merge plan: The final goal of a feature branch is to merge it into the main branch. If it exceeds 3 months, the mentor maintainer should evaluate whether to delete the branch.
+- Mentor: The mentor should be a vLLM Ascend maintainer who is responsible for the feature branch.
+
 ### Backward compatibility
 
 For main branch, vLLM Ascend should works with vLLM main branch and latest 1 or 2 release version. So to ensure the backward compatibility, we will do the following:
