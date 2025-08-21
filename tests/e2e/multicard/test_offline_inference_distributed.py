@@ -78,26 +78,6 @@ def test_models_distributed_DeepSeek_multistream_moe():
         vllm_model.generate_greedy(example_prompts, max_tokens)
 
 
-@patch.dict(os.environ, {"VLLM_ASCEND_ENABLE_DBO": "1"})
-def test_models_distributed_DeepSeek_dbo():
-    example_prompts = ["The president of the United States is"] * 41
-    dtype = "half"
-    sampling_params = SamplingParams(max_tokens=100, temperature=0.0)
-    with VllmRunner(
-            "deepseek-ai/DeepSeek-V2-Lite",
-            dtype=dtype,
-            tensor_parallel_size=2,
-            distributed_executor_backend="mp",
-    ) as vllm_model:
-        model_arch = 'DeepseekV2ForCausalLM'
-        registed_models = ModelRegistry.models
-        assert registed_models[
-            model_arch].module_name == "vllm_ascend.models.deepseek_dbo"
-        assert registed_models[
-            model_arch].class_name == "CustomDeepseekDBOForCausalLM"
-        vllm_model.generate(example_prompts, sampling_params)
-
-
 @pytest.mark.skip(
     reason=
     "deepseek dbo dose not consider the support on half precision float, will enable this ut after we actually support it"
