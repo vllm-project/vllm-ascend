@@ -471,9 +471,6 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         self.debug_layer_idx = int(self.prefix.split(".")[-2])
 
         ascend_config = get_ascend_config()
-        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
-        self.enable_multistream_mla = \
-            ascend_config.torchair_graph_config.enable_multistream_mla
         self.enable_shared_expert_dp = ascend_config.enable_shared_expert_dp
 
         if self.q_lora_rank is not None:
@@ -515,8 +512,7 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
         if (config.n_routed_experts is not None
                 and self.debug_layer_idx >= config.first_k_dense_replace
                 and self.debug_layer_idx % config.moe_layer_freq == 0
-                and (ascend_config.torchair_graph_config.enable_multistream_moe
-                     or self.enable_shared_expert_dp)):
+                and self.enable_shared_expert_dp):
             self.o_proj = CustomDeepseekV2RowParallelLinearReplaceAllreduce(
                 self.num_heads * self.v_head_dim,
                 self.hidden_size,
@@ -568,7 +564,12 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             qk_head_dim=self.qk_head_dim,
             v_head_dim=self.v_head_dim,
             rotary_emb=self.rotary_emb,
+            q_a_proj=self.q_a_proj if self.q_lora_rank is not None else None,
+            q_a_layernorm=self.q_a_layernorm if self.q_lora_rank is not None else None,
             q_proj=self.q_proj if self.q_lora_rank is None else self.q_b_proj,
+            debug_layer_idx=self.debug_layer_idx,
+            first_k_dense_replace=self.first_k_dense_replace,
+            layers=self.layers,
             kv_a_proj_with_mqa=self.kv_a_proj_with_mqa,
             kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
@@ -582,55 +583,25 @@ class CustomDeepseekV2MLAAttention(DeepseekV2MLAAttention):
             kv_cache: Optional[torch.Tensor] = None,
             attn_metadata: Optional[AttentionMetadata] = None) -> torch.Tensor:
         forward_context = get_forward_context()
-        enable_multistream_mla = (self.enable_multistream_mla
-                                  and attn_metadata is not None
-                                  and not forward_context.with_prefill
-                                  and attn_metadata.num_decodes > 0)
-        forward_kwargs = {"enable_multistream_mla": enable_multistream_mla}
-        if self.q_lora_rank is not None:
-            npu_prefetch(self.q_a_proj.weight,
-                         hidden_states,
-                         enabled=enable_multistream_mla)
-            ckq = self.q_a_proj(hidden_states)[0]
-            hidden_states_or_q_c = self.q_a_layernorm(ckq)
-            forward_kwargs['ckq'] = ckq
-        else:
-            hidden_states_or_q_c = hidden_states
-        if self.torchair_graph_enabled:
+        if kv_cache is None:
+            kv_cache = self.mla_attn.kv_cache[forward_context.virtual_engine]
+        if not self.enable_shared_expert_dp or self.debug_layer_idx < self.first_k_dense_replace:
             output_shape = hidden_states.shape
-            output = torch.empty(output_shape,
-                                 dtype=hidden_states_or_q_c.dtype,
-                                 device=hidden_states_or_q_c.device)
-            forward_kwargs['output'] = output
-            output = self.mla_attn.impl.forward(self.mla_attn,
-                                                hidden_states_or_q_c,
-                                                hidden_states, None, kv_cache,
-                                                attn_metadata,
-                                                **forward_kwargs)
-            output = output.view(-1, output_shape[-1])
-            return output
         else:
-            kv_no_split = self.kv_a_proj_with_mqa(hidden_states)[0]
-            if self.enable_shared_expert_dp and self.debug_layer_idx > self.first_k_dense_replace and self.debug_layer_idx < self.layers:
-                hidden_states_or_q_c = get_tp_group().all_gather(
-                    hidden_states_or_q_c, 0)
-                kv_no_split = get_tp_group().all_gather(kv_no_split, 0)
-
-            kv_c, k_pe = kv_no_split.split(
-                [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-            kv_c_normed = self.kv_a_layernorm(kv_c.contiguous())
-            if not self.enable_shared_expert_dp or self.debug_layer_idx < self.first_k_dense_replace:
-                output_shape = hidden_states.shape
-            else:
-                num_tokens = hidden_states_or_q_c.shape[0]
-                rows = num_tokens // self.tp_size
-                if num_tokens % self.tp_size:
-                    rows += 1
-                output_shape = (rows, hidden_states.shape[1])
-            return self.mla_attn(hidden_states_or_q_c,
-                                 kv_c_normed,
-                                 k_pe,
-                                 output_shape=output_shape)
+            num_tokens = hidden_states.shape[0]
+            rows = num_tokens // self.tp_size
+            if num_tokens % self.tp_size:
+                rows += 1
+            output_shape = (rows, hidden_states.shape[1])
+        output = torch.empty(output_shape,
+                             dtype=hidden_states.dtype,
+                             device=hidden_states.device)
+        output = self.mla_attn.impl.forward(hidden_states,
+                                            kv_cache,
+                                            attn_metadata,
+                                            output)
+        output = output.view(-1, output_shape[-1])
+        return output
 
 
 class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
