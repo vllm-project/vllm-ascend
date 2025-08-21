@@ -3,7 +3,12 @@ import torch_npu
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler, random_sample
 from vllm.v1.sample.sampler import Sampler
 
-from vllm_ascend.utils import is_310p
+from vllm_ascend.utils import is_310p, vllm_version_is
+
+if not vllm_version_is("0.10.1.1"):
+    from vllm.config import LogprobsMode
+else:
+    LogprobsMode = None
 
 
 class AscendSampler(Sampler):
@@ -60,6 +65,18 @@ class AscendTopKTopPSampler(TopKTopPSampler):
 
     def forward_native(self, logits, generators, k, p):
         """Override pytorch native implementation to torch_npu"""
+        logits = self.apply_top_k_top_p(logits, k, p)
+        logits_to_return = None
+        if self.logprobs_mode == LogprobsMode.PROCESSED_LOGITS:
+            logits_to_return = logits
+        elif self.logprobs_mode == LogprobsMode.PROCESSED_LOGPROBS:
+            logits_to_return = logits.log_softmax(dim=-1, dtype=torch.float32)
+
         logits = self._apply_top_k_top_p(logits, k, p)
         probs = logits.softmax(dim=-1, dtype=torch.float32)
-        return random_sample(probs, generators)
+        output = None
+        if vllm_version_is("0.10.1.1"):
+            output = random_sample(probs, generators)
+        else:
+            output = (random_sample(probs, generators), logits_to_return)
+        return output
