@@ -20,6 +20,7 @@ from vllm_ascend.attention.utils import (AscendCommonAttentionMetadata,
 from vllm_ascend.multistream.base import MSAttentionMetadataSplitConfig
 from vllm_ascend.multistream.context import get_multistream_comm_context
 from vllm_ascend.multistream.ms_split import model_input_split_v1_mla_attn
+from vllm_ascend.torchair.utils import (TorchairCommonAttentionMetadata, npu_stream_switch, npu_wait_tensor)
 from vllm_ascend.utils import npu_prefetch
 from vllm_ascend.worker.npu_input_batch import InputBatch
 
@@ -209,6 +210,7 @@ class AscendMLAMetadataBuilder:
         self.rope_dim = self.model_config.hf_text_config.qk_rope_head_dim
         self.cos_cache = None
         self.sin_cache = None
+        self.torchair_graph_enabled = ascend_config.torchair_graph_config.enabled
 
     def reorder_batch(self, input_batch: "InputBatch",
                       scheduler_output: "SchedulerOutput") -> bool:
