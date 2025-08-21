@@ -81,7 +81,7 @@ jobs:
         VLLM_USE_MODELSCOPE: True
     strategy:
       matrix:
-        vllm_version: [main]
+        vllm_version: [v0.10.1.1, main]
     steps:
       - name: Install packages
         run: |
@@ -137,7 +137,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-aarch64-a2-1]
-        vllm_version: [main]
+        vllm_version: [v0.10.1.1, main]
     name: singlecard e2e test
     runs-on: ${{ matrix.os }}
     container:
@@ -219,7 +219,7 @@ jobs:
       max-parallel: 2
       matrix:
         os: [linux-aarch64-a2-2]
-        vllm_version: [main]
+        vllm_version: [v0.10.1.1, main]
     name: multicard e2e test
     runs-on: ${{ matrix.os }}
     container:
