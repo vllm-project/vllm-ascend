@@ -15,6 +15,13 @@ class MSEventKey(Enum):
     MOE_SE_COMP_FINISH = 7
     MOE_GATE_FINISH = 8
 
+    # ------------- ae ---------
+    ATTN_SEND_FINISH = 10
+    FFN_SEND_FINISH = 9
+    FFN_RECV_FINISH = 11
+    FFN_COMP_FINISH = 12
+    
+
 
 @dataclass
 class MSAttentionMetadataSplitConfig:

@@ -53,6 +53,8 @@ class AscendConfig:
         
         self.enable_attn_export_split = additional_config.get(
             "enable_attn_export_split", False)
+        self.enable_ms_for_ae_split = additional_config.get(
+            "enable_ms_for_ae_split", False)
 
 
 class TorchairGraphConfig:

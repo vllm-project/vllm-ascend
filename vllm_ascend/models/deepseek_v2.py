@@ -76,6 +76,17 @@ from vllm_ascend.quantization.quant_config import AscendLinearMethod
 from vllm_ascend.quantization.w8a8_dynamic import AscendW8A8DynamicLinearMethod
 from vllm_ascend.utils import dispose_tensor, npu_prefetch
 
+from vllm_ascend.multistream.base import MSEventKey
+from vllm_ascend.multistream.context import (
+    advance_step_multistream_layer_context, get_multistream_comm_context,
+    get_multistream_layer_context, set_multistream_context)
+from vllm_ascend.multistream.layers import (MultiStreamPostTransformerLayer,
+                                            MultiStreamPreTransformerLayer)
+from vllm_ascend.multistream.metadata import (MultiStreamConfig,
+                                              MultiStreamStepMetadata,
+                                              make_multistream_metadata_ds)
+from vllm_ascend.multistream.ms_split import compute_split_seq_index
+
 
 class CustomDeepseekV2SiluAndMul(SiluAndMul):
 
@@ -643,7 +654,8 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         model_config: ModelConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        enable_attn_export_split: bool = False
+        enable_attn_export_split: bool = False,
+        enable_ms_for_ae_split: bool = False
     ) -> None:
         nn.Module.__init__(self)
         self.hidden_size = config.hidden_size
@@ -652,6 +664,7 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         max_position_embeddings = getattr(config, "max_position_embeddings",
                                           8192)
         self.enable_attn_export_split = enable_attn_export_split
+        self.enable_ms_for_ae_split = enable_ms_for_ae_split
         # DecoderLayers are created with `make_layers` which passes the prefix
         # with the layer's index.
         layer_idx = int(prefix.split(sep='.')[-1])
@@ -661,7 +674,52 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
         self.tp_rank = get_tp_group().rank_in_group
         ascend_config = get_ascend_config()
         rank = get_world_group().rank_in_group
-        if rank < self.tp_size:
+        if self.enable_attn_export_split:
+            if rank < self.tp_size:
+                # TODO: enable mla in vllm-ascend
+                if model_config.use_mla:
+                    attn_cls = CustomDeepseekV2MLAAttention
+                else:
+                    attn_cls = DeepseekV2Attention
+                self.self_attn = attn_cls(
+                    config=config,
+                    hidden_size=self.hidden_size,
+                    num_heads=config.num_attention_heads,
+                    qk_nope_head_dim=config.qk_nope_head_dim,
+                    qk_rope_head_dim=config.qk_rope_head_dim,
+                    v_head_dim=config.v_head_dim,
+                    q_lora_rank=config.q_lora_rank
+                    if hasattr(config, "q_lora_rank") else None,
+                    kv_lora_rank=config.kv_lora_rank,
+                    rope_theta=rope_theta,
+                    rope_scaling=rope_scaling,
+                    max_position_embeddings=max_position_embeddings,
+                    cache_config=cache_config,
+                    quant_config=quant_config,
+                    prefix=f"{prefix}.self_attn",
+                )
+                
+            else:
+                if (config.n_routed_experts is not None
+                        and layer_idx >= config.first_k_dense_replace
+                        and layer_idx % config.moe_layer_freq == 0):
+                    self.mlp = CustomDeepseekV2MoE(
+                        config=config,
+                        quant_config=quant_config,
+                        prefix=f"{prefix}.mlp",
+                    )
+                    self.mla_moe_communication = ascend_config.torchair_graph_config.enable_multistream_moe \
+                        and model_config.use_mla and self.tp_size > 1
+                else:
+                    self.mlp = CustomDeepseekV2MLP(
+                        hidden_size=config.hidden_size,
+                        intermediate_size=config.intermediate_size,
+                        hidden_act=config.hidden_act,
+                        quant_config=quant_config,
+                        prefix=f"{prefix}.mlp",
+                    )
+                    self.mla_moe_communication = False
+        else:
             # TODO: enable mla in vllm-ascend
             if model_config.use_mla:
                 attn_cls = CustomDeepseekV2MLAAttention
@@ -684,8 +742,6 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
             )
-            
-        else:
             if (config.n_routed_experts is not None
                     and layer_idx >= config.first_k_dense_replace
                     and layer_idx % config.moe_layer_freq == 0):
@@ -882,6 +938,198 @@ class CustomDeepseekV2DecoderLayer(DeepseekV2DecoderLayer):
                 residual = residual[:num_tokens]
 
         return hidden_states, residual
+    
+    # ----------------------------------------- ae-mulistream --------------------------------------------
+    def _forward_ms_layer(
+        self,
+        positions: List[torch.Tensor],
+        hidden_states: List[torch.Tensor],
+        residual: List[torch.Tensor],
+        attn_metadata: List[AttentionMetadata],
+        kv_cache: Optional[torch.Tensor] = None,
+        is_prefill: bool = False,
+    ) -> tuple[List[torch.Tensor], List[torch.Tensor]]:
+        layer_index, ms_metadata, _ = get_multistream_layer_context()
+        assert layer_index >= 0 and ms_metadata is not None
+        num_micro_batchs = ms_metadata.ms_config.num_micro_batches
+        # assert isinstance(self.mlp, CustomDeepseekDBOMoE)
+        assert len(positions) == num_micro_batchs
+        assert len(hidden_states) == num_micro_batchs
+        assert residual is not None
+        assert attn_metadata is not None
+        num_tokens = []
+        hidden_dims = []
+        shared_outputs = []
+        router_logits = []
+        chunk_hidden_states = []
+        rank = get_world_group().rank_in_group
+        # 创建流
+        # NPU0
+        compute_stream0 = torch.npu.Stream()  # NPU0计算流
+        comm_stream0 = torch.npu.Stream()     # NPU0通信流
+        # NPU1
+        compute_stream1 = torch.npu.Stream()  # NPU1计算流
+        comm_stream1 = torch.npu.Stream()     # NPU1通信流
+
+        # 创建同步事件
+        data_to_device1_ready = torch.npu.Event()
+        data_to_device0_ready = torch.npu.Event()
+        compute0_done = torch.npu.Event()
+        compute1_done = torch.npu.Event()
+
+        torch.npu.synchronize()
+
+        for i in range(num_micro_batchs):
+            # 如果是Attn就计算一次Attn，否则就不计算
+            if rank < self.tp_size:
+                # 阶段1: 在NPU0上计算
+                context = MultiStreamStepMetadata(
+                comm_stream=ms_metadata.communicate_stream,
+                before_comm_event=ms_metadata.ms_events[layer_index][i][
+                    MSEventKey.ATTN_COM_FINISH],
+                after_comm_event=ms_metadata.ms_events[layer_index][i][
+                    MSEventKey.ATTN_SEND_FINISH],
+            )
+                with set_multistream_context(context, i):
+                    forward_context = get_forward_context()
+                    forward_context.attn_metadata = attn_metadata[i]
+                    # input layernorm
+                    hidden_states[i], residual[
+                        i] = self._forward_ms_op_input_layernorm(
+                            hidden_states[i], residual[i])
+                    # attention
+                    hidden_states[i], residual[i] = self._forward_ms_op_attn(
+                        positions[i], hidden_states[i], residual[i], kv_cache,
+                        attn_metadata[i])
+                    # post_attn_layernorm
+                    hidden_states[i], residual[
+                    i] = self._forward_ms_op_post_attn_layernorm(
+                        hidden_states[i], residual[i])
+                    print(f"self.layer_idx is {self.layer_idx} ,attn 计算完成 hidden_states {i} shape is == {hidden_states[i].shape}")
+                context.before_comm_event.record()  
+                with torch.npu.stream(ms_metadata.communicate_stream):
+                    context.before_comm_event.wait()
+                    # send
+                    ae_group = get_ae_group()
+                    ae_group.send(hidden_states[i])
+                    ae_group.send(residual[i])
+                    print(f"self.layer_idx is {self.layer_idx} ,attn send 完成 hidden_states {i} shape is == {hidden_states[i].shape}")
+                    # 记录事件
+                    context.after_comm_event.record()
+
+                # wait last layer moe finishing communication
+                ms_metadata.try_wait_event(layer_index, i,
+                                        MSEventKey.FFN_SEND_FINISH)
+                # 阶段5: 在NPU0上处理结果 (与传输重叠)
+                # 等待数据传回NPU0
+                # recv
+                # 接收export发送的数据
+                hidden_states[i] = ae_group.recv(hidden_states[i].size(),dtype=hidden_states[i].dtype)
+                print(f"self.layer_idx is {self.layer_idx} ,接收export发送的数据 hidden_states {i} is == {hidden_states[i].shape}")
+            # export
+            else:
+                # 阶段3: 在NPU1上计算 (与NPU0计算重叠)
+                # 等待数据到达NPU1
+                context = MultiStreamStepMetadata(
+                comm_stream=ms_metadata.communicate_stream,
+                before_comm_event=ms_metadata.ms_events[layer_index][i][
+                    MSEventKey.ATTN_SEND_FINISH],
+                after_comm_event=ms_metadata.ms_events[layer_index][i][
+                    MSEventKey.FFN_RECV_FINISH],
+            )
+                ms_metadata.try_wait_event(layer_index, i,
+                                        MSEventKey.ATTN_SEND_FINISH)
+                with torch.npu.stream(ms_metadata.communicate_stream):
+                    context.before_comm_event.wait()
+                    ae_group = get_ae_group()
+                    # recv
+                    # 接收attn发送的数据
+                    hidden_states[i] = ae_group.recv(hidden_states[i].size(),dtype=hidden_states[i].dtype)
+                    residual[i] = ae_group.recv(residual[i].size(),dtype=residual[i].dtype)
+                    print(f"self.layer_idx is {self.layer_idx} ,接收attn发送的数据 hidden_states {i} is == {hidden_states[i].shape}")
+                    # 记录事件
+                    context.after_comm_event.record()
+
+                # 计算mlp
+                context = MultiStreamStepMetadata(
+                comm_stream=ms_metadata.communicate_stream,
+                before_comm_event=ms_metadata.ms_events[layer_index][i][
+                    MSEventKey.FFN_COMP_FINISH],
+                after_comm_event=ms_metadata.ms_events[layer_index][i][
+                    MSEventKey.FFN_SEND_FINISH],
+            )
+                
+                with set_multistream_context(context, i):
+                    forward_context = get_forward_context()
+                    forward_context.attn_metadata = attn_metadata[i]
+                    # 模拟不同计算
+                    if isinstance(self.mlp, CustomDeepseekV2MoE):
+                        hidden_states[i] = self.mlp(hidden_states[i],
+                                            attn_metadata[i],
+                                            )
+                    else:
+                        hidden_states[i] = self.mlp(hidden_states[i])
+                    print(f"self.layer_idx is {self.layer_idx} ,expert 计算完成 hidden_states {i} is == {hidden_states[i].shape}")
+
+                context.before_comm_event.record()  
+                # send
+                # dst_rank = src_rank
+                with torch.npu.stream(ms_metadata.communicate_stream):
+                    context.before_comm_event.wait()
+                    ae_group.send(hidden_states[i])
+                    print(f"self.layer_idx is {self.layer_idx} ,expert send 完成 hidden_states {i} is == {hidden_states[i].shape}")
+                    # 记录事件
+                    context.after_comm_event.record()
+        torch.npu.synchronize()
+        return hidden_states, residual
+    
+    # should split ops in Decoder Layer
+    def _forward_ms_op_input_layernorm(
+        self,
+        hidden_states: torch.Tensor,
+        residual: Optional[torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(
+                hidden_states, residual)
+        return hidden_states, residual
+
+    def _forward_ms_op_attn(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        kv_cache: Optional[torch.Tensor] = None,
+        attn_metadata: Optional[AttentionMetadata] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+            kv_cache=kv_cache,
+            attn_metadata=attn_metadata,
+        )
+        # if hidden_states.dtype == torch.float16:
+        #     # Fix FP16 overflow
+        #     # We scale both hidden_states and residual before
+        #     # rmsnorm, and rmsnorm result would not affect by scale.
+        #     hidden_states *= 1. / self.routed_scaling_factor
+        #     if self.layer_idx == 0:
+        #         # The residual is shared by all layers, we only scale it on
+        #         # first layer.
+        #         residual *= 1. / self.routed_scaling_factor
+        return hidden_states, residual
+
+    def _forward_ms_op_post_attn_layernorm(
+        self,
+        hidden_states: torch.Tensor,
+        residual: Optional[torch.Tensor],
+    ):
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual)
+        return hidden_states, residual
 
 
 class CustomDeepseekV2Model(nn.Module):
@@ -899,8 +1147,11 @@ class CustomDeepseekV2Model(nn.Module):
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.first_k_dense_replace = config.first_k_dense_replace
         self.enable_attn_export_split = vllm_config.additional_config.get(
             "enable_attn_export_split", False)
+        self.enable_ms_for_ae_split = vllm_config.additional_config.get(
+            "enable_ms_for_ae_split", False)
 
         if get_pp_group().is_first_rank:
             self.embed_tokens = VocabParallelEmbedding(
@@ -919,7 +1170,8 @@ class CustomDeepseekV2Model(nn.Module):
                 model_config=model_config,
                 cache_config=cache_config,
                 quant_config=quant_config,
-                enable_attn_export_split = self.enable_attn_export_split
+                enable_attn_export_split = self.enable_attn_export_split,
+                enable_ms_for_ae_split = self.enable_ms_for_ae_split,
             ),
             prefix=f"{prefix}.layers")
 
@@ -930,6 +1182,21 @@ class CustomDeepseekV2Model(nn.Module):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
+        
+        # ae multistream;
+        if self.enable_ms_for_ae_split:
+            self.use_mla = model_config.use_mla
+            self.multistream_config = MultiStreamConfig()
+            multistream_metadata = make_multistream_metadata_ds(
+                start_layer=self.start_layer + self.first_k_dense_replace,
+                end_layer=self.end_layer,
+                causal_lm=getattr(config, "causal_lm", True),
+                multistream_config=self.multistream_config,
+            )
+            self.ms_pre_layer = MultiStreamPreTransformerLayer(
+                multistream_metadata)
+            self.ms_post_layer = MultiStreamPostTransformerLayer(
+                multistream_metadata)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -956,16 +1223,28 @@ class CustomDeepseekV2Model(nn.Module):
 
         replace_allreduce = hidden_states.shape[0] % self.tp_size == 0
 
-        for i in range(self.start_layer, self.end_layer):
+        num_normal_layers = (self.first_k_dense_replace
+                            if self.enable_ms_for_ae_split and self.can_run_ms()
+                             else self.end_layer - self.start_layer)
+
+        moe_start_layer = self.start_layer + num_normal_layers
+        for i in range(self.start_layer, min(moe_start_layer, self.end_layer)):
             layer = self.layers[i]
             hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                residual,
+                positions, hidden_states, residual,
                 kv_caches[i -
                           self.start_layer] if kv_caches is not None else None,
-                attn_metadata,
-                replace_allreduce=replace_allreduce)
+                attn_metadata)
+
+        if moe_start_layer < self.end_layer:
+            # if we enable multistream/dbo, process sparse layers here
+            hidden_states, residual = self._forward_ms_layers(
+                positions=positions,
+                hidden_states=hidden_states,
+                residual=residual,
+                moe_start_layer=moe_start_layer,
+                kv_caches=kv_caches,
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -975,6 +1254,60 @@ class CustomDeepseekV2Model(nn.Module):
 
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
+    
+    def can_run_ms(self):
+        attn_metadata = get_forward_context().attn_metadata
+        # support mla attention and V1 engine at present
+        if not self.use_mla:
+            return False
+        # enable prefill overlap
+        if attn_metadata is None or attn_metadata.num_prefills == 0:
+            return False
+        else:
+            [token_index, seq_index
+             ] = compute_split_seq_index(attn_metadata.query_lens,
+                                         attn_metadata.attn_state,
+                                         attn_metadata.num_decode_tokens)
+            if token_index == 0 or seq_index == 0 or seq_index == len(
+                    attn_metadata.query_lens):
+                return False
+        # check whether the total tokens exceed the threshold
+        if self.multistream_config is None or attn_metadata.num_actual_tokens < self.multistream_config.min_total_tokens_to_split:
+            return False
+        return True
+
+    def _forward_ms_layers(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor,
+        moe_start_layer: int,
+        kv_caches: Optional[List[torch.Tensor]] = None,
+        is_prefill: bool = False,
+    ):
+
+        if moe_start_layer == self.end_layer:
+            return hidden_states, residual
+
+        attn_metadata, [positions, hidden_states,
+                        residual] = self.ms_pre_layer(
+                            [positions, hidden_states, residual], )
+        # the rest layers
+        for i in range(moe_start_layer, self.end_layer):
+            layer = self.layers[i]
+            hidden_states, residual = layer._forward_ms_layer(
+                positions=positions,
+                hidden_states=hidden_states,
+                residual=residual,
+                attn_metadata=attn_metadata,
+                kv_cache=kv_caches[i - self.start_layer]
+                if kv_caches is not None else None,
+                is_prefill=is_prefill)
+            advance_step_multistream_layer_context()
+
+        [hidden_states,
+         residual] = self.ms_post_layer([hidden_states, residual], )
+        return hidden_states, residual
 
 
 class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
@@ -991,6 +1324,8 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
+        self.enable_attn_export_split = vllm_config.additional_config.get(
+            "enable_attn_export_split", False)
         self.model = CustomDeepseekV2Model(vllm_config=vllm_config,
                                            prefix=maybe_prefix(
                                                prefix, "model"))
@@ -1042,7 +1377,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
             if spec_layer is not None:
                 continue  # skip spec decode layers for main model
 
-            if rank < tp_size and self.is_moe(name):
+            if rank < tp_size and self.is_moe(name) and self.enable_attn_export_split:
                 continue
 
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
@@ -1093,7 +1428,7 @@ class CustomDeepseekV2ForCausalLM(DeepseekV2ForCausalLM):
                     # load expert gate up down ,without share expert
                     break
                 else:
-                    if rank > tp_size - 1 and not self.is_moe(name) and not self.is_moe_other(name):
+                    if rank > tp_size - 1 and not self.is_moe(name) and not self.is_moe_other(name) and self.enable_attn_export_split:
                         continue
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
