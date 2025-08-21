@@ -50,6 +50,10 @@ def mock_dp_and_tp_group(mocker):
     return mock_group
 
 
+def mock_npu_format_cast(weight_data, format):
+    return weight_data
+
+
 @pytest.fixture
 def mock_dist_env(mocker: MockerFixture):
     # init dist env patch
@@ -310,12 +314,14 @@ class TestAscendUnquantizedFusedMoEMethod:
         layer.w13_weight.data = torch.randn(16, 32)
         layer.w2_weight.data = torch.randn(16, 32)
 
-        moe_method.process_weights_after_loading(layer)
+        with patch('torch_npu.npu_format_cast', mock_npu_format_cast), \
+                patch('vllm_ascend.utils.is_310p', return_value=False):
+            moe_method.process_weights_after_loading(layer)
 
-        assert isinstance(layer.w13_weight, torch.nn.Parameter)
-        assert isinstance(layer.w2_weight, torch.nn.Parameter)
-        assert not layer.w13_weight.requires_grad
-        assert not layer.w2_weight.requires_grad
+            assert isinstance(layer.w13_weight, torch.nn.Parameter)
+            assert isinstance(layer.w2_weight, torch.nn.Parameter)
+            assert not layer.w13_weight.requires_grad
+            assert not layer.w2_weight.requires_grad
 
     @pytest.mark.parametrize("others_param",
                              [[256, 4], [128, 1], [128, 1], [128, 4]])
