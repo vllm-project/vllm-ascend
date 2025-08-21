@@ -40,7 +40,7 @@ body:
   attributes:
     label: Any Other Things.
     description: >
-      Any other things you would like to mention.
+      Any other things you would like to mention, such as feature branch request.
   validations:
     required: false
 - type: markdown
