@@ -89,7 +89,7 @@ jobs:
           apt-get install -y python3-pip git vim wget net-tools gcc g++ cmake libnuma-dev curl gnupg2
 
       - name: Checkout vllm-project/vllm repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
         with:
           repository: vllm-project/vllm
           ref: ${{ matrix.vllm_version }}
@@ -102,7 +102,7 @@ jobs:
           python3 -m pip uninstall -y triton
 
       - name: Checkout vllm-project/vllm-ascend repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Install vllm-project/vllm-ascend
         run: |
